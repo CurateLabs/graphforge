@@ -1,0 +1,7 @@
+{
+  "contract_version": 1,
+  "comparison": "Canonical execute/find/selection RecordBatch equality before close and after reopen, plus exact UUID-set composition from pre-ontology rank/cluster outputs into the final advisory scope.",
+  "results": ["execute.scope", "find.text", "rank.degree.uuid-set", "cluster.components.uuid-set", "hypothesis.selection"],
+  "uuid_composition": {"rank_cluster_actor_sets_equal": true, "search_uuid_in_rank_actor_set": true},
+  "dynamic_fingerprints": "SHA-bound run evidence records generated graph UUIDs; fixed expected files never substitute guessed UUIDs for public UUID generation."
+}

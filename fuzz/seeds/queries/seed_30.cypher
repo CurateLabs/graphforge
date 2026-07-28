@@ -1,0 +1,1 @@
+RETURN exists((:Person)-[:KNOWS]->(:Person))

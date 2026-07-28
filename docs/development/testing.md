@@ -1,0 +1,347 @@
+# Testing Strategy & Infrastructure
+
+Reader-facing strategy for **v0.5.0 / release-prep** (ownership, layered gates,
+what counts as proof): [`../engineering/TESTING.md`](../engineering/TESTING.md).
+This page keeps command recipes, suite layout, and local tooling detail.
+
+## Overview
+
+GraphForge has two test suites that must both pass:
+
+| Suite | Location | What it tests |
+|-------|----------|---------------|
+| **Rust tests** (`cargo test`) | `crates/*/src/` | Each Rust crate in isolation and integration |
+| **Python tests** (`pytest`) | `tests/` | Python binding, end-to-end queries, TCK compliance |
+
+The testing principles are the same for both:
+
+1. **Spec-driven correctness** — openCypher semantics verified via TCK
+2. **Fast feedback loops** — unit tests run in milliseconds
+3. **Hermetic tests** — no shared state between tests
+4. **Deterministic behavior** — tests pass or fail consistently
+
+---
+
+## Rust Tests
+
+### Structure
+
+Each crate contains unit tests inline with the source and integration tests in `tests/`:
+
+```
+crates/gf-cypher/
+├── src/
+│   ├── lexer.rs        # #[cfg(test)] inline unit tests
+│   ├── parser.rs       # #[cfg(test)] inline unit tests
+│   └── lib.rs
+└── tests/
+    └── parse_corpus.rs # end-to-end parse tests against golden corpus
+```
+
+### Running
+
+```bash
+# All crates
+cargo test --workspace
+
+# One crate
+cargo test -p gf-cypher
+
+# With output
+cargo test --workspace -- --nocapture
+
+# Only doctests
+cargo test --doc --workspace
+```
+
+### v0.5.0 non-Cypher release conformance
+
+Part of the **v0.5.0 testing strategy**: the openCypher TCK proves `execute()` language
+semantics, but it does not cover construction, lifecycle, checkpoints, analyst verbs,
+search, or the knowledge/epistemic surfaces. The checked-in
+`tests/contracts/non-cypher-rust-surface.json` manifest classifies every public
+Rust receiver method, all 94 analyst-verb registry entries, and
+the supported find/index modes and policies. New public methods or registry values
+must be classified and linked to deterministic evidence before merge.
+
+Run the omission gate and bounded public-facade matrix with:
+
+```bash
+python3 scripts/ci/non-cypher-surface-gate.py
+python3 scripts/ci/test-non-cypher-surface-gate.py
+cargo test -p gf-api \
+  --test public_lifecycle_conformance \
+  --test m22_m18_public_surface \
+  --test m22_m19_public_surface
+```
+
+The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,
+`gf-api` unit contracts, and these persisted integration tests from one exact
+source SHA when assembling release-certification evidence. Its downloadable
+report records the inventory digest and test binary digests. Ordinary
+implementation and construction issues close on acceptance-criteria outcomes
+and the relevant PR/`main` checks for the changed surface; they do not require
+this manual SHA-bound dispatch (see `AGENTS.md` § Issue close). A green TCK run
+cannot substitute for the surface inventory itself.
+
+### Rust test example
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_scan_roundtrip() {
+        let op = GraphOp::NodeScan { var: VarId(0), ty: TypeId(1) };
+        let json = serde_json::to_string(&op).unwrap();
+        let back: GraphOp = serde_json::from_str(&json).unwrap();
+        assert_eq!(op, back);
+    }
+}
+```
+
+### Parser differential corpus
+
+The parser migration strategy requires differential testing between the Python LALR(1) parser and the LALRPOP Rust parser. The corpus lives in `tests/parser_corpus/` and includes:
+
+- Valid queries (from the TCK and real-world examples)
+- Invalid queries (error recovery cases)
+- Precedence edge cases
+- Unicode identifiers
+- Parameter syntax
+- Comments
+
+Differential tests run both parsers on the same input and assert AST parity:
+
+```bash
+cargo test -p gf-cypher -- differential
+```
+
+---
+
+## Python Tests
+
+### Test Categories
+
+#### 1. Unit Tests (`tests/unit/`)
+
+Test individual components in isolation.
+
+```
+tests/unit/
+├── parser/
+├── planner/
+├── executor/
+├── storage/
+├── algorithms/
+├── search/
+└── recipes/
+```
+
+Characteristics: no I/O, < 1 ms per test, ≥90% coverage target.
+
+#### 2. Integration Tests (`tests/integration/`)
+
+Test full query pipeline (parse → plan → execute), persistence, transactions,
+and the Python API surface.
+
+Characteristics: may use temporary databases, < 100 ms per test.
+
+#### 3. openCypher TCK Tests (`tests/tck/`)
+
+Official openCypher Technology Compatibility Kit. 3,885 scenarios; 100% passing
+on `main`. TCK is a hard merge gate for the `rust-core` branch too.
+
+```
+tests/tck/
+├── conftest.py
+├── coverage_matrix.json
+└── features/
+```
+
+#### 4. Property-Based Tests (`tests/property/`)
+
+Hypothesis-driven generative tests for value semantics, expression evaluation,
+and storage consistency invariants.
+
+#### 5. Performance Benchmarks (`tests/benchmarks/`)
+
+Real-dataset benchmarks tracked over time. Not part of the standard CI run.
+
+### Pytest Configuration
+
+```toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--tb=short", "-v"]
+
+markers = [
+    "unit: unit tests (fast, isolated)",
+    "integration: integration tests (may use I/O)",
+    "tck: openCypher TCK compliance tests",
+    "property: property-based tests",
+    "benchmark: performance benchmarks",
+    "slow: tests that take >1s",
+]
+```
+
+### Running Python Tests
+
+```bash
+# All tests
+make test
+
+# By category
+make test-unit
+make test-integration
+make test-tck
+
+# With coverage (Rust + Python + Node; ≥85% lines per surface)
+make coverage            # all surfaces + thresholds
+make coverage-rust       # cargo llvm-cov → build/coverage-rust/
+make coverage-python     # pytest-cov on gf-bindings-py/python/graphforge
+make coverage-node       # c8 on @graphforge/node lib/ (needs *.node)
+make coverage-report     # open Python HTML report
+make coverage-diff       # changed Python wrapper files only
+
+# Parallel (4× faster for TCK)
+pytest tests/ -n auto
+```
+
+### Core Fixtures (`tests/conftest.py`)
+
+```python
+@pytest.fixture
+def db():
+    """Fresh in-memory GraphForge instance."""
+    return GraphForge()
+
+@pytest.fixture
+def tmp_db(tmp_path):
+    """GraphForge instance backed by a temporary Parquet directory."""
+    return GraphForge(str(tmp_path / "graph"))
+```
+
+---
+
+## Quality Gates
+
+### Coverage Requirements
+
+Local `make coverage` instruments three surfaces independently (pytest does **not**
+cover Rust; Codecov CI is separate/out of scope for this gate):
+
+| Surface | Tool | Scope | Threshold |
+|---------|------|-------|-----------|
+| Rust | `cargo llvm-cov` | workspace crates via `cargo test --workspace` | ≥85% lines |
+| Python | `pytest-cov` | `crates/gf-bindings-py/python/graphforge` | ≥85% lines; ≥90% patch on changed wrapper files |
+| Node | `c8` | hand-written `@graphforge/node` `lib/**/*.mjs` | ≥85% lines |
+
+Override floors with `COVERAGE_FAIL_UNDER_RUST`, `COVERAGE_FAIL_UNDER_PYTHON`,
+and `COVERAGE_FAIL_UNDER_NODE`.
+
+### Required Checks (all PRs)
+
+1. `cargo clippy --workspace -- -D warnings` — zero warnings
+2. `cargo test --workspace` — all Rust tests pass
+3. `pytest -m unit` — all Python unit tests pass
+4. `pytest -m integration` — all Python integration tests pass
+5. `pytest -m tck` — all non-skipped TCK scenarios pass
+6. `make coverage` — coverage thresholds met
+7. `make lint` and `make type-check` — zero issues
+
+---
+
+## TCK Coverage Matrix
+
+Maintain `tests/tck/coverage_matrix.json`:
+
+```json
+{
+  "tck_version": "2024.2",
+  "features": {
+    "Match1_Nodes": {
+      "status": "supported",
+      "scenarios": {
+        "Match single node": "pass",
+        "Match node with label": "pass"
+      }
+    },
+    "Match3_VariableLength": {
+      "status": "supported"
+    }
+  }
+}
+```
+
+When the Rust core implements a feature, verify the corresponding TCK scenarios
+pass end-to-end before marking `"status": "supported"`.
+
+---
+
+## CI/CD
+
+GitHub Actions runs the full suite on every PR:
+
+```yaml
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo test --workspace
+
+  python:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install uv && uv sync --all-extras
+      - run: maturin develop --release
+      - run: make pre-push
+```
+
+---
+
+## Known Issues
+
+### pytest-xdist + pytest-cov deadlock on macOS / Python 3.13
+
+**Symptom:** `make pre-push` hangs at the end of the test run — progress reaches
+~100% then freezes. CPU drops to 0%. Only `kill` escapes it.
+
+**Root cause:** `pytest-cov` collects coverage data from xdist workers via IPC
+sockets. When workers close their sockets, a coverage collection thread in the
+main process blocks on `read()`, deadlocking with the main thread. Reproduced on
+macOS (Darwin 25.x) + Python 3.13 + pytest-cov 7.0.0 + pytest-xdist 3.x.
+
+**Solution (current `Makefile`):** Run coverage serially, skipping SNAP tests:
+
+```makefile
+coverage:
+    uv run pytest tests/unit tests/integration -m "not snap" \
+        --cov=src --cov-branch \
+        --cov-report=term-missing --cov-report=xml
+```
+
+The serial run is ~60 s slower than the parallel baseline but avoids the deadlock.
+If the upstream `pytest-cov` / `pytest-xdist` fix lands, re-evaluate.
+
+---
+
+## References
+
+- [pytest documentation](https://docs.pytest.org/)
+- [openCypher TCK](https://github.com/opencypher/openCypher/tree/master/tck)
+- [Hypothesis documentation](https://hypothesis.readthedocs.io/)
+- [cargo test documentation](https://doc.rust-lang.org/cargo/commands/cargo-test.html)

@@ -1,0 +1,1 @@
+RETURN reduce(acc = 0, x IN [1,2,3] | acc + x)

@@ -1,0 +1,1 @@
+{"people":4,"documents":3,"households":1,"estates":1,"advisory_warnings":[{"id":"PG-WARN-MISSING-RECORDED-ON","record":"County birth register 1912","constraint":"BirthRecord.recorded_on required","outcome":"preserved-in-advisory-mode"}]}

@@ -1,0 +1,160 @@
+{
+  "registry": {
+    "schema": "workflow-scenario-v1",
+    "id": "atomic-recovery",
+    "steps": [
+      "AR-01",
+      "AR-02",
+      "AR-03",
+      "AR-04",
+      "AR-05",
+      "AR-06",
+      "AR-07",
+      "AR-08",
+      "AR-09",
+      "AR-10",
+      "AR-11",
+      "AR-12"
+    ],
+    "generator_fingerprint": "sha256:a5b800c890be08e96322d650b36e3c3bc7e57b93f8f770b8b24a7ff0f21c8a26",
+    "ontology_profile": "deep-wide-constrained",
+    "evidence": "target/release-workflow-evidence/atomic-recovery.json"
+  },
+  "contract_version": 1,
+  "scenario_id": "atomic-recovery",
+  "title": "Recover atomic graph and knowledge cycles after interruption",
+  "version": 1,
+  "domain": "reliable-analytical-automation",
+  "owning_issue": 2473,
+  "implementation": "crates/gf-api/examples/atomic_recovery_workflow.rs",
+  "analytical_question": "Can one analytical step publish graph, provenance, assertions, evidence, and epistemic participants atomically such that interruption never exposes a mixed generation?",
+  "observable_outcome": "Every accepted failpoint and validation rejection recovers exactly one complete previous or new generation with idempotent retry and no orphans.",
+  "generator": {
+    "identity": "atomic-recovery-generator-v1",
+    "seed": 2473001,
+    "fixture_fingerprint": "sha256:a5b800c890be08e96322d650b36e3c3bc7e57b93f8f770b8b24a7ff0f21c8a26"
+  },
+  "ontology": {
+    "mode": "strict",
+    "path": "ontologies/strict-v1.yaml",
+    "phase_manifest": "ontologies/phase-manifest.json",
+    "constant_across_phases": true
+  },
+  "public_surfaces": [
+    "adopt_ontology",
+    "enable_capability",
+    "publish_composite_transaction",
+    "execute",
+    "find",
+    "rank",
+    "epistemic_snapshot",
+    "reopen"
+  ],
+  "algorithms": [
+    "find.text",
+    "rank.degree"
+  ],
+  "record_families": [
+    "provenance_event",
+    "assertion",
+    "assertion_graph_ref",
+    "evidence_link",
+    "reasoning",
+    "assertion_status",
+    "hypothesis_group",
+    "hypothesis_membership"
+  ],
+  "capabilities": [
+    "graph@1",
+    "provenance@1",
+    "knowledge@1",
+    "epistemic@1"
+  ],
+  "correction": {
+    "kind": "resume-or-compensate-without-duplicate",
+    "public_only": true,
+    "preserves_history": true,
+    "replay": "idempotent-or-structured-conflict"
+  },
+  "bindings": {
+    "rust": "authoritative-executable",
+    "python": "representative-executable",
+    "node": "not-applicable",
+    "node_rationale": "Parent suite distributes representative native binding coverage; this scenario selects Python for composite recovery reopen parity."
+  },
+  "steps": [
+    {
+      "id": "AR-01",
+      "implementation": "rust:seed-strict-s-graph"
+    },
+    {
+      "id": "AR-02",
+      "implementation": "rust:graph-m20-composite-success"
+    },
+    {
+      "id": "AR-03",
+      "implementation": "rust:graph-m20-m21-composite-success"
+    },
+    {
+      "id": "AR-04",
+      "implementation": "rust:reject-invalid-before-publish"
+    },
+    {
+      "id": "AR-05",
+      "implementation": "rust:failpoint-pre-current-recover-previous"
+    },
+    {
+      "id": "AR-06",
+      "implementation": "rust:failpoint-post-current-recover-new"
+    },
+    {
+      "id": "AR-07",
+      "implementation": "rust:no-mixed-or-orphan-state"
+    },
+    {
+      "id": "AR-08",
+      "implementation": "rust:idempotent-exact-retry"
+    },
+    {
+      "id": "AR-09",
+      "implementation": "rust:conflicting-reuse-structured-error"
+    },
+    {
+      "id": "AR-10",
+      "implementation": "rust:query-history-transaction-time"
+    },
+    {
+      "id": "AR-11",
+      "implementation": "rust:close-and-reopen"
+    },
+    {
+      "id": "AR-12",
+      "implementation": "rust-and-python:same-commit-parity"
+    }
+  ],
+  "coverage_signature": {
+    "load_mode": "bounded-composite-mutation-batches",
+    "mutation_cadence": "interrupt-at-publication-boundaries",
+    "graph_shape": "s-graph-topology-and-property",
+    "topology_transition": "composite-create-and-property-set",
+    "ontology_mode": "constant-strict",
+    "ontology_complexity": "deep-wide-constrained",
+    "runtime_catalog_drift": "none-after-baseline",
+    "property_characteristics": "typed-text-float-bool-int",
+    "operation_chain": "validate-composite-publish-interrupt-recover-query",
+    "result_cardinality": "small-bounded",
+    "streaming_cancellation": "deterministic-failpoint-process-control",
+    "state_transitions": "previous-or-new-complete-generation",
+    "correction_mechanism": "resume-or-compensate-idempotent",
+    "temporal_interpretation": "transaction-time-complete-generation",
+    "epistemic_pattern": "hypothesis-membership-with-atomic-graph",
+    "binding_lifecycle": "rust-authoritative-python-representative-reopen",
+    "unique_outcome": "all-participants-resolve-to-one-complete-generation",
+    "failure_mode": "mixed-generation-or-orphan-cross-reference"
+  },
+  "resources": {
+    "class": "small",
+    "timeout_seconds": 900
+  },
+  "local_command": "python3 tests/release_workflows/atomic-recovery/run.py --commit-sha $(git rev-parse HEAD)"
+}

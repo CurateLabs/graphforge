@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "required": ["text_find", "vector_find", "hybrid_find", "rank", "cluster", "paths", "similar", "reopen"],
+  "ordering": "stable topology or score order as declared by each public facade"
+}

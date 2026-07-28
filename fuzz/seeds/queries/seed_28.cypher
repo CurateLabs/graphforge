@@ -1,0 +1,1 @@
+RETURN true AND false OR NOT true XOR false

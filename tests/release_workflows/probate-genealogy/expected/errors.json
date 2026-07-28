@@ -1,0 +1,6 @@
+{
+  "structured_failures": [
+    {"step_id":"PG-01","code":"PG-WARN-MISSING-RECORDED-ON","class":"advisory_warning","message":"required recorded_on is absent; record retained because ontology mode is advisory"},
+    {"step_id":"PG-06","code":"UNSELECTED_NOT_FALSE","class":"invariant","message":"clearing selection does not append refuted status"}
+  ]
+}

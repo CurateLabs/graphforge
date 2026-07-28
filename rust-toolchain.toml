@@ -1,0 +1,7 @@
+# Pin the Rust toolchain so local builds and CI use the SAME compiler — a drift
+# between them (CI on a newer stable than a contributor's local) silently lets
+# clippy/test failures reach CI. Bump this channel and the `toolchain:` inputs in
+# .github/workflows/{test,bdd}.yml together.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]

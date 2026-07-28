@@ -1,0 +1,187 @@
+{
+  "schema": "graphforge-load-dataset-taxonomy/1",
+  "generator_version": "1.0.0",
+  "density": {
+    "formula": "live_edges / (live_nodes * (live_nodes - 1))",
+    "self_loops_excluded_from_denominator": true,
+    "directed": true,
+    "categories": {
+      "sparse": { "maximum": 0.08 },
+      "dense": { "minimum": 0.1 }
+    }
+  },
+  "size_classes": {
+    "XS": { "minimum_nodes": 16, "maximum_nodes": 31 },
+    "S": { "minimum_nodes": 64, "maximum_nodes": 127 },
+    "M": { "minimum_nodes": 256, "maximum_nodes": 511 },
+    "L": { "minimum_nodes": 1024, "maximum_nodes": 2047 },
+    "XL": { "minimum_nodes": 4096, "maximum_nodes": 8191 }
+  },
+  "resource_bounds": {
+    "XS": {
+      "case_timeout_seconds": 300,
+      "preflight_timeout_seconds": 3600,
+      "maximum_peak_rss_bytes": 4294967296,
+      "maximum_temporary_bytes": 1073741824,
+      "maximum_persisted_bytes": 1073741824
+    },
+    "S": {
+      "case_timeout_seconds": 600,
+      "preflight_timeout_seconds": 3600,
+      "maximum_peak_rss_bytes": 8589934592,
+      "maximum_temporary_bytes": 2147483648,
+      "maximum_persisted_bytes": 2147483648
+    },
+    "M": {
+      "case_timeout_seconds": 1200,
+      "preflight_timeout_seconds": 3600,
+      "maximum_peak_rss_bytes": 17179869184,
+      "maximum_temporary_bytes": 4294967296,
+      "maximum_persisted_bytes": 4294967296
+    },
+    "L": {
+      "case_timeout_seconds": 2400,
+      "preflight_timeout_seconds": 3600,
+      "maximum_peak_rss_bytes": 34359738368,
+      "maximum_temporary_bytes": 8589934592,
+      "maximum_persisted_bytes": 8589934592
+    },
+    "XL": {
+      "case_timeout_seconds": 3600,
+      "preflight_timeout_seconds": 3600,
+      "maximum_peak_rss_bytes": 68719476736,
+      "maximum_temporary_bytes": 17179869184,
+      "maximum_persisted_bytes": 17179869184
+    }
+  },
+  "datasets": [
+    {
+      "id": "xs-sparse-disconnected",
+      "size": "XS",
+      "nodes": 20,
+      "density": "sparse",
+      "topology": "disconnected",
+      "seed": 101
+    },
+    {
+      "id": "xs-sparse-path",
+      "size": "XS",
+      "nodes": 24,
+      "density": "sparse",
+      "topology": "path-heavy",
+      "seed": 102
+    },
+    {
+      "id": "xs-dense-clustered",
+      "size": "XS",
+      "nodes": 20,
+      "density": "dense",
+      "topology": "clustered",
+      "seed": 103
+    },
+    {
+      "id": "xs-dense-cyclic",
+      "size": "XS",
+      "nodes": 24,
+      "density": "dense",
+      "topology": "cyclic",
+      "seed": 104
+    },
+    {
+      "id": "s-sparse-hub",
+      "size": "S",
+      "nodes": 72,
+      "density": "sparse",
+      "topology": "hub-heavy",
+      "seed": 201
+    },
+    {
+      "id": "s-sparse-path",
+      "size": "S",
+      "nodes": 80,
+      "density": "sparse",
+      "topology": "path-heavy",
+      "seed": 202
+    },
+    {
+      "id": "s-dense-clustered",
+      "size": "S",
+      "nodes": 72,
+      "density": "dense",
+      "topology": "clustered",
+      "seed": 203
+    },
+    {
+      "id": "s-dense-cyclic",
+      "size": "S",
+      "nodes": 80,
+      "density": "dense",
+      "topology": "cyclic",
+      "seed": 204
+    },
+    {
+      "id": "m-sparse-disconnected",
+      "size": "M",
+      "nodes": 288,
+      "density": "sparse",
+      "topology": "disconnected",
+      "seed": 301
+    },
+    {
+      "id": "m-sparse-hub",
+      "size": "M",
+      "nodes": 320,
+      "density": "sparse",
+      "topology": "hub-heavy",
+      "seed": 302
+    },
+    {
+      "id": "m-dense-clustered",
+      "size": "M",
+      "nodes": 288,
+      "density": "dense",
+      "topology": "clustered",
+      "seed": 303
+    },
+    {
+      "id": "m-dense-cyclic",
+      "size": "M",
+      "nodes": 320,
+      "density": "dense",
+      "topology": "cyclic",
+      "seed": 304
+    },
+    {
+      "id": "l-sparse-clustered",
+      "size": "L",
+      "nodes": 1024,
+      "density": "sparse",
+      "topology": "clustered",
+      "seed": 401
+    },
+    {
+      "id": "l-dense-cyclic",
+      "size": "L",
+      "nodes": 1024,
+      "density": "dense",
+      "topology": "cyclic",
+      "seed": 402
+    },
+    {
+      "id": "xl-sparse-hub",
+      "size": "XL",
+      "nodes": 4096,
+      "density": "sparse",
+      "topology": "hub-heavy",
+      "seed": 501
+    },
+    {
+      "id": "xl-dense-clustered",
+      "size": "XL",
+      "nodes": 4096,
+      "density": "dense",
+      "topology": "clustered",
+      "seed": 502
+    }
+  ]
+}

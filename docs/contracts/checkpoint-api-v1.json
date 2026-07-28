@@ -1,0 +1,251 @@
+{
+  "contract": "graphforge-checkpoint-api/1",
+  "checkpoint_identity": {
+    "request_domain": "graphforge-checkpoint-create-request/1",
+    "delete_request_domain": "graphforge-checkpoint-delete-request/1",
+    "uuid_domain": "graphforge-checkpoint-uuid/1",
+    "uuid_projection": "gf_core::canonical::uuid_v8",
+    "length_encoding": "u32-big-endian",
+    "optional_presence": {"absent": 0, "present": 1}
+  },
+  "identity_golden_vector": {
+    "create_operation_uuid": "018f0f4e-7b8c-7000-8000-000000000001",
+    "delete_operation_uuid": "018f0f4e-7b8c-7000-8000-000000000002",
+    "actor_uuid": "018f0f4e-7b8c-7000-8000-0000000000aa",
+    "name": "Release 1.0",
+    "description": "release candidate",
+    "create_request_sha256": "01c7bf2f2c443d85d31ff80fef4a36484e31402213e8d145371867bdb2addbe8",
+    "checkpoint_uuid": "4084179c-38db-8b6b-9b6e-c0b0a855e002",
+    "delete_request_sha256": "9e6e15801f66ea4f7f58755c505fc1964e48ab87625459f388e2c23659135bb3"
+  },
+  "revert_identity": {
+    "request_domain": "graphforge-checkpoint-revert-request/1",
+    "request_fields": [
+      "operation_uuid",
+      "u32be(name_len)",
+      "normalized_name_utf8",
+      "checkpoint_uuid",
+      "source_generation_uuid",
+      "source_manifest_sha256",
+      "u32be(reason_len)",
+      "trimmed_reason_utf8",
+      "actor_presence",
+      "actor_uuid_if_present"
+    ],
+    "transaction_uuid_domain": "graphforge-checkpoint-revert-transaction/1",
+    "transaction_uuid_fields": ["operation_uuid"],
+    "restoration_uuid_domain": "graphforge-restoration-transition-uuid/1",
+    "restoration_uuid_fields": ["operation_uuid", "revert_request_sha256"],
+    "restored_generation_uuid_domain": "graphforge-checkpoint-restored-generation/1",
+    "restored_generation_uuid_fields": [
+      "transaction_uuid",
+      "checkpoint_uuid",
+      "source_generation_uuid",
+      "source_manifest_sha256",
+      "prior_current_generation_uuid",
+      "i64be(restored_at_micros)",
+      "revert_request_sha256"
+    ],
+    "uuid_projection": "gf_core::canonical::uuid_v8",
+    "length_encoding": "u32-big-endian",
+    "timestamp_encoding": "i64-two-complement-big-endian",
+    "optional_presence": {"absent": 0, "present": 1},
+    "replay_timestamp": "persist-once-in-durable-revert-journal-extension-before-staging; replay-never-resamples-clock",
+    "successful_return_visibility": "same-GraphForge-instance-observes-restored-generation"
+  },
+  "restoration_transition": {
+    "capability_id": "workspace",
+    "capability_version": 1,
+    "record_family_id": "restoration_transition",
+    "record_version": 1,
+    "encoding": "parquet",
+    "cardinality": "exactly-one-in-restored-generation"
+  },
+  "revert_identity_golden_vector": {
+    "operation_uuid": "018f0f4e-7b8c-7000-8000-000000000003",
+    "actor_uuid": "018f0f4e-7b8c-7000-8000-0000000000aa",
+    "name": "Release 1.0",
+    "checkpoint_uuid": "4084179c-38db-8b6b-9b6e-c0b0a855e002",
+    "source_generation_uuid": "018f0f4e-7b8c-7000-8000-0000000000b0",
+    "source_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "prior_current_generation_uuid": "018f0f4e-7b8c-7000-8000-0000000000d0",
+    "reason": "restore release candidate",
+    "restored_at_micros": 1720000000123456,
+    "revert_request_sha256": "dff3755629942d1189060b117cb70dc864428fcc3b28d5c2d22d3924c3690e93",
+    "transaction_uuid": "908d637b-d6e6-8508-919e-d4e708e037b2",
+    "restoration_uuid": "9e1f160c-badb-80c9-beaa-ae580910bf8a",
+    "restored_generation_uuid": "5dc02888-2064-8892-a0e1-2c00968ba0cc"
+  },
+  "registry_commit": {
+    "intent": "checkpoints/registry.txn.json",
+    "intent_max_bytes": 16384,
+    "checksum_exact_bytes": 65,
+    "outcome": "previous-or-new-valid-pair",
+    "recovery": "validate-current-or-complete-validated-staged-next"
+  },
+  "record_diff_adapter": {
+    "contract": "checkpoint-diff-adapter/1",
+    "identity_policy": "owner-declared-fields-only",
+    "physical_byte_fallback": false,
+    "unregistered_participant": "GF_SCHEMA_MISMATCH",
+    "current_endpoint_uuid_domain": "graphforge-current-checkpoint-endpoint/1"
+  },
+  "delete_replay": {
+    "record": "tombstone",
+    "window": "retained-last-4096",
+    "after_prune": "GF_CHECKPOINT_NOT_FOUND"
+  },
+  "limits": {
+    "active_checkpoints": 1024,
+    "description_utf8_bytes": 1024,
+    "diff_page_max": 10000,
+    "diff_page_default": 100,
+    "name_utf8_bytes": 128,
+    "registry_bytes": 8388608,
+    "tombstones": 4096
+  },
+  "operations": {
+    "checkpoint": {
+      "request": ["name", "description", "idempotency_key", "actor_uuid"],
+      "result_schema": "checkpoint_receipt@1"
+    },
+    "delete_checkpoint": {
+      "request": ["name", "idempotency_key", "actor_uuid"],
+      "result_schema": "checkpoint_receipt@1"
+    },
+    "diff_checkpoints": {
+      "request": [
+        "from",
+        "to",
+        "scope",
+        "detail",
+        "limit",
+        "after",
+        "cancellation"
+      ],
+      "result_schemas": [
+        "checkpoint_summary_diff@1",
+        "checkpoint_record_diff@1"
+      ]
+    },
+    "list_checkpoints": {
+      "request": ["limit", "after", "cancellation"],
+      "result_schema": "checkpoint@1"
+    },
+    "open_checkpoint": {
+      "request": ["name"],
+      "result": "CheckpointView"
+    },
+    "revert_to_checkpoint": {
+      "request": ["name", "reason", "idempotency_key", "actor_uuid"],
+      "result_schema": "checkpoint_receipt@1"
+    }
+  },
+  "schemas": {
+    "checkpoint@1": {
+      "sort": ["name", "checkpoint_uuid"],
+      "fields": [
+        ["checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["name", "Utf8", false],
+        ["description", "Utf8", true],
+        ["generation_uuid", "FixedSizeBinary(16)", false],
+        ["generation_manifest_sha256", "FixedSizeBinary(32)", false],
+        ["created_at", "Timestamp(Microsecond, UTC)", false],
+        ["created_by", "FixedSizeBinary(16)", true]
+      ]
+    },
+    "checkpoint_receipt@1": {
+      "sort": [],
+      "fields": [
+        ["operation", "Utf8", false],
+        ["operation_uuid", "FixedSizeBinary(16)", false],
+        ["checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["name", "Utf8", false],
+        ["source_generation_uuid", "FixedSizeBinary(16)", false],
+        ["result_generation_uuid", "FixedSizeBinary(16)", true],
+        ["registry_revision", "UInt64", false],
+        ["committed_at", "Timestamp(Microsecond, UTC)", false]
+      ]
+    },
+    "checkpoint_summary_diff@1": {
+      "sort": ["scope", "capability_id", "record_family_id"],
+      "fields": [
+        ["from_checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["to_checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["scope", "Utf8", false],
+        ["capability_id", "Utf8", false],
+        ["record_family_id", "Utf8", false],
+        ["change_kind", "Utf8(added|removed|modified|unchanged)", false],
+        ["from_row_count", "UInt64", true],
+        ["to_row_count", "UInt64", true],
+        ["from_schema_fingerprint", "FixedSizeBinary(32)", true],
+        ["to_schema_fingerprint", "FixedSizeBinary(32)", true],
+        ["from_content_sha256", "FixedSizeBinary(32)", true],
+        ["to_content_sha256", "FixedSizeBinary(32)", true]
+      ]
+    },
+    "checkpoint_record_diff@1": {
+      "sort": [
+        "scope",
+        "record_family_id",
+        "record_uuid",
+        "record_identity_fingerprint",
+        "change_kind"
+      ],
+      "fields": [
+        ["from_checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["to_checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["scope", "Utf8", false],
+        ["record_family_id", "Utf8", false],
+        ["record_uuid", "FixedSizeBinary(16)", true],
+        ["record_identity_fingerprint", "FixedSizeBinary(32)", false],
+        ["change_kind", "Utf8(added|removed|modified)", false],
+        ["from_record_fingerprint", "FixedSizeBinary(32)", true],
+        ["to_record_fingerprint", "FixedSizeBinary(32)", true]
+      ]
+    },
+    "restoration_transition@1": {
+      "sort": [],
+      "fields": [
+        ["restoration_uuid", "FixedSizeBinary(16)", false],
+        ["checkpoint_uuid", "FixedSizeBinary(16)", false],
+        ["source_generation_uuid", "FixedSizeBinary(16)", false],
+        ["source_manifest_sha256", "FixedSizeBinary(32)", false],
+        ["prior_current_generation_uuid", "FixedSizeBinary(16)", false],
+        ["restored_generation_uuid", "FixedSizeBinary(16)", false],
+        ["operation_uuid", "FixedSizeBinary(16)", false],
+        ["actor_uuid", "FixedSizeBinary(16)", true],
+        ["reason", "Utf8", false],
+        ["restored_at", "Timestamp(Microsecond, UTC)", false],
+        ["contract_version", "UInt32", false]
+      ]
+    }
+  },
+  "scopes": [
+    "summary",
+    "graph",
+    "ontology",
+    "configuration",
+    "capabilities",
+    "provenance",
+    "knowledge",
+    "epistemic",
+    "all"
+  ],
+  "errors": [
+    "GF_CHECKPOINT_EXISTS",
+    "GF_CHECKPOINT_NOT_FOUND",
+    "GF_CHECKPOINT_REGISTRY_CORRUPT",
+    "GF_READ_ONLY_VIEW",
+    "GF_VALIDATION",
+    "GF_IDEMPOTENCY_CONFLICT",
+    "GF_WRITER_BUSY",
+    "GF_RESOURCE_LIMIT",
+    "GF_CANCELLED",
+    "GF_PAGE_INVALID",
+    "GF_PAGE_SNAPSHOT_GONE",
+    "GF_PROJECT_CORRUPT",
+    "GF_TRANSACTION_FAILED",
+    "GF_IO"
+  ]
+}

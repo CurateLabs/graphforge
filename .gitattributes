@@ -1,0 +1,5 @@
+/.github/workflows/test.yml text eol=lf
+/crates/gf-bindings-node/package.json text eol=lf
+/crates/gf-bindings-node/tests/*.mjs text eol=lf
+/package.json text eol=lf
+/pnpm-lock.yaml text eol=lf

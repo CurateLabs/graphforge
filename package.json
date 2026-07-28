@@ -1,0 +1,32 @@
+{
+  "name": "graphforge-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "license": "BUSL-1.1",
+  "packageManager": "pnpm@10.26.2",
+  "scripts": {
+    "build": "pnpm -r --filter '!@graphforge/docs-site' build",
+    "test:bdd": "pnpm -r test:bdd",
+    "test:agent-skills": "pnpm --filter @graphforge/agent-skills test",
+    "smoke:agent-skills": "pnpm --filter @graphforge/agent-skills test:offline",
+    "test:node-native": "pnpm --filter @graphforge/node test",
+    "format:node": "pnpm --filter @graphforge/node format:check",
+    "format:agent-skills": "pnpm --filter @graphforge/agent-skills format:check",
+    "docs:dev": "pnpm --filter @graphforge/docs-site dev",
+    "docs:build": "pnpm --filter @graphforge/docs-site build",
+    "docs:check-links": "pnpm --filter @graphforge/docs-site check-links",
+    "docs:preview": "pnpm --filter @graphforge/docs-site preview"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "prettier": "3.9.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
+  }
+}

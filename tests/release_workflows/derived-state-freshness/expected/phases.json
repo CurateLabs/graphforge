@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "phases": ["seed", "baseline-derived-state", "topology-mutation", "adjacency-refresh", "indexed-text-mutation", "text-refresh", "property-correction", "vector-correction", "incompatible-vector-rejection", "reopen", "binding-parity"],
+  "evidence": {
+    "seed": ["ontology_constant"],
+    "baseline-derived-state": ["text", "text_results.baseline", "adjacency", "embeddings", "analysis", "hypothesis"],
+    "topology-mutation": ["adjacency.stale"],
+    "adjacency-refresh": ["cancellation_code", "prior_authority_preserved", "adjacency.current"],
+    "indexed-text-mutation": ["text.stale"],
+    "text-refresh": ["text.current", "text_results.refreshed"],
+    "property-correction": ["analysis.authoritative_vector_uuids", "transaction_time_view.exact_snapshot_equal"],
+    "vector-correction": ["embeddings.compatibility_ids", "embeddings.exact_replay"],
+    "incompatible-vector-rejection": ["embeddings.incompatible_code", "embeddings.prior_authority_preserved"],
+    "reopen": ["reopen_equal"],
+    "binding-parity": ["bindings.python", "bindings.node"]
+  }
+}

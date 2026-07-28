@@ -1,0 +1,32 @@
+# Codecov configuration for GraphForge.
+# See https://docs.codecov.com/docs/codecov-yaml for full configuration.
+#
+# Python-side coverage is INFORMATIONAL during the native-binding transition.
+# The canonical `graphforge` package is now the native Rust engine (maturin
+# wheel); the 0.4.x pure-Python shim under src/ was deleted (#862). The thin
+# python layer that remains (crates/gf-bindings-py/python/graphforge) is small,
+# and real coverage now lives in the Rust crates (wired up separately). Until
+# then the project/patch checks post status but never block a PR — mirroring
+# test.yml's "threshold suspended pending Rust binding" stance.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+  precision: 2
+  round: down
+  range: "70...95"
+
+comment: false
+
+ignore:
+  - "tests/**"
+  - "docs/**"
+  - "scripts/**"
+  - "examples/**"
+  - "benchmarks/**"
+  - "**/__init__.py"

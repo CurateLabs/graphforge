@@ -1,0 +1,339 @@
+{
+  "format": "graphforge-public-api",
+  "api_contract": "graphforge-m20-api/1",
+  "canonical_contract": "graphforge-canonical/1",
+  "surfaces": {
+    "rust_result": "gf_exec::ExecutionResult",
+    "python_result": "pyarrow.Table",
+    "node_result": "Promise<Buffer> (Arrow IPC stream)"
+  },
+  "page": {
+    "default_limit": 100,
+    "maximum_limit": 10000,
+    "token_metadata_key": "graphforge.next_page_token",
+    "snapshot_loss_error": "GF_PAGE_SNAPSHOT_GONE"
+  },
+  "methods": [
+    {
+      "rust": "project_capabilities",
+      "python": "project_capabilities",
+      "node": "projectCapabilities",
+      "kind": "read",
+      "output_schema": "project_capability@1",
+      "order": ["capability_id"]
+    },
+    {
+      "rust": "enable_capability",
+      "python": "enable_capability",
+      "node": "enableCapability",
+      "kind": "write",
+      "request": "EnableCapabilityRequest",
+      "output_schema": "project_capability@1",
+      "idempotency": "required operation_uuid; complete canonical request"
+    },
+    {
+      "rust": "provenance_event",
+      "python": "provenance_event",
+      "node": "provenanceEvent",
+      "kind": "get",
+      "key": "provenance_uuid",
+      "output_schema": "provenance_event@1"
+    },
+    {
+      "rust": "list_provenance_history",
+      "python": "list_provenance_history",
+      "node": "listProvenanceHistory",
+      "kind": "list",
+      "request": "ProvenanceHistoryRequest",
+      "output_schema": "provenance_history@1",
+      "order": ["recorded_at", "provenance_uuid", "role", "ordinal", "subject_uuid"]
+    },
+    {
+      "rust": "create_assertion",
+      "python": "create_assertion",
+      "node": "createAssertion",
+      "kind": "write",
+      "request": "CreateAssertionRequest",
+      "output_schema": "assertion@1",
+      "idempotency": "required operation_uuid and assertion_uuid; complete canonical request"
+    },
+    {
+      "rust": "assertion",
+      "python": "assertion",
+      "node": "assertion",
+      "kind": "get",
+      "key": "assertion_uuid",
+      "output_schema": "assertion@1"
+    },
+    {
+      "rust": "list_assertions",
+      "python": "list_assertions",
+      "node": "listAssertions",
+      "kind": "list",
+      "request": "ListAssertionsRequest",
+      "output_schema": "assertion@1",
+      "order": ["recorded_at", "assertion_uuid"]
+    },
+    {
+      "rust": "assertion_graph_refs",
+      "python": "assertion_graph_refs",
+      "node": "assertionGraphRefs",
+      "kind": "list",
+      "key": "assertion_uuid",
+      "output_schema": "assertion_graph_ref@1",
+      "order": ["role", "ordinal", "graph_kind", "graph_uuid"]
+    },
+    {
+      "rust": "assess_confidence",
+      "python": "assess_confidence",
+      "node": "assessConfidence",
+      "kind": "write",
+      "request": "AssessConfidenceRequest",
+      "output_schema": "confidence_assessment@1",
+      "idempotency": "required operation_uuid and confidence_uuid; complete canonical request"
+    },
+    {
+      "rust": "confidence_assessment",
+      "python": "confidence_assessment",
+      "node": "confidenceAssessment",
+      "kind": "get",
+      "key": "confidence_uuid",
+      "output_schema": "confidence_assessment@1"
+    },
+    {
+      "rust": "list_confidence_assessments",
+      "python": "list_confidence_assessments",
+      "node": "listConfidenceAssessments",
+      "kind": "list",
+      "request": "ListConfidenceAssessmentsRequest",
+      "output_schema": "confidence_assessment@1",
+      "order": ["recorded_at", "confidence_uuid"]
+    },
+    {
+      "rust": "confidence_inputs",
+      "python": "confidence_inputs",
+      "node": "confidenceInputs",
+      "kind": "list",
+      "key": "confidence_uuid",
+      "output_schema": "confidence_input@1",
+      "order": ["ordinal", "input_confidence_uuid"]
+    },
+    {
+      "rust": "attach_evidence",
+      "python": "attach_evidence",
+      "node": "attachEvidence",
+      "kind": "write",
+      "request": "AttachEvidenceRequest",
+      "output_schema": "evidence_link@1",
+      "idempotency": "required operation_uuid and evidence_uuid; complete canonical request"
+    },
+    {
+      "rust": "create_assertion_with_evidence",
+      "python": "create_assertion_with_evidence",
+      "node": "createAssertionWithEvidence",
+      "kind": "write",
+      "request": "CreateAssertionWithEvidenceRequest",
+      "output_schema": "assertion@1",
+      "idempotency": "assertion operation_uuid owns complete assertion and evidence bundle"
+    },
+    {
+      "rust": "evidence_link",
+      "python": "evidence_link",
+      "node": "evidenceLink",
+      "kind": "get",
+      "key": "evidence_uuid",
+      "output_schema": "evidence_link@1"
+    },
+    {
+      "rust": "list_evidence_links",
+      "python": "list_evidence_links",
+      "node": "listEvidenceLinks",
+      "kind": "list",
+      "request": "ListEvidenceLinksRequest",
+      "output_schema": "evidence_link@1",
+      "order": ["recorded_at", "evidence_uuid"]
+    },
+    {
+      "rust": "invoke_recorded",
+      "python": "invoke_recorded",
+      "node": "invokeRecorded",
+      "kind": "write_and_dispatch",
+      "request": "RecordedAlgorithmRequest",
+      "output": "RecordedAlgorithmResult",
+      "idempotency": "required operation_uuid and run_uuid; canonical descriptor"
+    },
+    {
+      "rust": "algorithm_run",
+      "python": "algorithm_run",
+      "node": "algorithmRun",
+      "kind": "get",
+      "key": "run_uuid",
+      "output_schema": "algorithm_run@1"
+    },
+    {
+      "rust": "list_algorithm_runs",
+      "python": "list_algorithm_runs",
+      "node": "listAlgorithmRuns",
+      "kind": "list",
+      "request": "ListAlgorithmRunsRequest",
+      "output_schema": "algorithm_run@1",
+      "order": ["started_at", "run_uuid"]
+    },
+    {
+      "rust": "algorithm_run_events",
+      "python": "algorithm_run_events",
+      "node": "algorithmRunEvents",
+      "kind": "list",
+      "key": "run_uuid",
+      "output_schema": "algorithm_run_event@1",
+      "order": ["recorded_at", "event_uuid"]
+    }
+  ],
+  "request_shapes": {
+    "WriteContext": ["operation_uuid", "actor_uuid?"],
+    "PageRequest": ["limit=100", "after?", "cancellation?"],
+    "EnableCapabilityRequest": ["context", "capability_id", "capability_version"],
+    "ProvenanceHistoryRequest": ["subject_uuid?", "operation_uuid?", "page"],
+    "CreateAssertionRequest": ["context", "assertion_uuid", "claim", "graph_refs[]"],
+    "AssertionGraphRefInput": ["graph_uuid", "graph_kind", "role", "ordinal"],
+    "ListAssertionsRequest": ["graph_uuid?", "page"],
+    "AssessConfidenceRequest": ["context", "confidence_uuid", "assertion_uuid", "policy"],
+    "ListConfidenceAssessmentsRequest": ["assertion_uuid?", "page"],
+    "AttachEvidenceRequest": ["context", "evidence_uuid", "assertion_uuid", "source_uuid", "source_kind", "role", "weight?"],
+    "CreateAssertionWithEvidenceRequest": ["assertion", "evidence[]"],
+    "EvidenceInput": ["evidence_uuid", "source_uuid", "source_kind", "role", "weight?"],
+    "ListEvidenceLinksRequest": ["assertion_uuid?", "source_uuid?", "page"],
+    "RecordedAlgorithmRequest": ["context", "run_uuid", "descriptor", "cancellation?"],
+    "ListAlgorithmRunsRequest": ["algorithm?", "page"]
+  },
+  "schemas": {
+    "project_capability@1": [
+      ["capability_id", "Utf8", false],
+      ["capability_version", "UInt32", false],
+      ["support", "Utf8", false],
+      ["schema_inventory_sha256", "FixedSizeBinary(32)", true],
+      ["generation_uuid", "FixedSizeBinary(16)", false]
+    ],
+    "provenance_event@1": [
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["operation_uuid", "FixedSizeBinary(16)", false],
+      ["event_kind", "Utf8", false],
+      ["actor_uuid", "FixedSizeBinary(16)", true],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "provenance_history@1": [
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["operation_uuid", "FixedSizeBinary(16)", false],
+      ["event_kind", "Utf8", false],
+      ["actor_uuid", "FixedSizeBinary(16)", true],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false],
+      ["lineage_uuid", "FixedSizeBinary(16)", false],
+      ["subject_uuid", "FixedSizeBinary(16)", false],
+      ["subject_kind", "Utf8", false],
+      ["role", "Utf8", false],
+      ["ordinal", "UInt32", false],
+      ["lineage_contract_version", "UInt32", false]
+    ],
+    "assertion@1": [
+      ["assertion_uuid", "FixedSizeBinary(16)", false],
+      ["claim", "Utf8", false],
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "assertion_graph_ref@1": [
+      ["assertion_uuid", "FixedSizeBinary(16)", false],
+      ["graph_uuid", "FixedSizeBinary(16)", false],
+      ["graph_kind", "Utf8", false],
+      ["role", "Utf8", false],
+      ["ordinal", "UInt32", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "confidence_assessment@1": [
+      ["confidence_uuid", "FixedSizeBinary(16)", false],
+      ["assertion_uuid", "FixedSizeBinary(16)", false],
+      ["policy", "Utf8", false],
+      ["policy_version", "UInt32", false],
+      ["value", "Float64", true],
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "confidence_input@1": [
+      ["confidence_uuid", "FixedSizeBinary(16)", false],
+      ["input_confidence_uuid", "FixedSizeBinary(16)", false],
+      ["input_value", "Float64", true],
+      ["ordinal", "UInt32", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "evidence_link@1": [
+      ["evidence_uuid", "FixedSizeBinary(16)", false],
+      ["assertion_uuid", "FixedSizeBinary(16)", false],
+      ["source_uuid", "FixedSizeBinary(16)", false],
+      ["source_kind", "Utf8", false],
+      ["role", "Utf8", false],
+      ["weight", "Float64", true],
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "algorithm_run@1": [
+      ["run_uuid", "FixedSizeBinary(16)", false],
+      ["algorithm", "Utf8", false],
+      ["algorithm_version", "UInt32", false],
+      ["descriptor_version", "UInt32", false],
+      ["descriptor", "Binary", false],
+      ["projection_fingerprint", "FixedSizeBinary(32)", false],
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["started_at", "Timestamp(Microsecond,UTC)", false],
+      ["contract_version", "UInt32", false]
+    ],
+    "algorithm_run_event@1": [
+      ["event_uuid", "FixedSizeBinary(16)", false],
+      ["run_uuid", "FixedSizeBinary(16)", false],
+      ["state", "Utf8", false],
+      ["result_fingerprint", "FixedSizeBinary(32)", true],
+      ["error_code", "Utf8", true],
+      ["recorded_at", "Timestamp(Microsecond,UTC)", false],
+      ["provenance_uuid", "FixedSizeBinary(16)", false],
+      ["contract_version", "UInt32", false]
+    ]
+  },
+  "composites": {
+    "graph_mutation": ["graph", "provenance_event", "lineage"],
+    "enable_capability": ["capability_manifest", "required_initial_participants"],
+    "create_assertion": ["assertion", "assertion_graph_refs", "provenance_event", "lineage"],
+    "create_assertion_with_evidence": ["assertion", "assertion_graph_refs", "evidence_links", "provenance_event", "lineage"],
+    "attach_evidence": ["evidence_link", "provenance_event", "lineage"],
+    "assess_confidence": ["confidence_assessment", "confidence_inputs", "provenance_event", "lineage"],
+    "run_start": ["algorithm_run", "started_event", "provenance_event", "lineage"],
+    "run_terminal": ["terminal_event", "result_fingerprint", "provenance_event", "lineage"]
+  },
+  "errors": {
+    "request": ["GF_VALIDATION", "GF_UNKNOWN_ARGUMENT", "GF_NOT_FOUND"],
+    "identity": ["GF_IDEMPOTENCY_CONFLICT", "GF_IDENTITY_CONFLICT", "GF_FINGERPRINT_COLLISION"],
+    "capability": ["GF_CAPABILITY_DISABLED", "GF_UNSUPPORTED_CAPABILITY_VERSION"],
+    "format": ["GF_UNSUPPORTED_PROJECT_FORMAT", "GF_PROJECT_UNINITIALIZED", "GF_PROJECT_CORRUPT", "GF_SCHEMA_MISMATCH"],
+    "transaction": ["GF_WRITER_BUSY", "GF_UNSUPPORTED_FILESYSTEM", "GF_TRANSACTION_FAILED"],
+    "control": ["GF_CANCELLED", "GF_RESOURCE_LIMIT"],
+    "pagination": ["GF_PAGE_INVALID", "GF_PAGE_SNAPSHOT_GONE"],
+    "run": ["GF_RESULT_NOT_RETAINED"],
+    "io": ["GF_IO"]
+  },
+  "removed": [
+    "ExecuteOptions.confidence",
+    "execute_with_options",
+    "python:execute.confidence",
+    "node:execute.confidence"
+  ],
+  "forbidden": [
+    "migrate",
+    "migrate_project",
+    "upgrade_project",
+    "import_v04",
+    "open_legacy",
+    "generation_zero"
+  ]
+}

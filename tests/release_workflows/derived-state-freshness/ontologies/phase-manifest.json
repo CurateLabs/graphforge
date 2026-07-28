@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "ontology": "strict-v1.yaml",
+  "mode": "strict",
+  "phases": ["seed", "baseline-derived-state", "topology-mutation", "adjacency-refresh", "indexed-text-mutation", "text-refresh", "property-correction", "vector-correction", "incompatible-vector-rejection", "reopen", "binding-parity"],
+  "sha256": "1a44c991285f9853ffe2e240679213d3eeacadeee9c18615a495d1ed5272c06f"
+}

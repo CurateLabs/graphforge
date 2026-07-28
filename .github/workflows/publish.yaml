@@ -1,0 +1,245 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  license-compliance:
+    name: License Compliance
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify release license policy
+        run: python3 scripts/license_policy.py check --report license-compliance-report.json
+
+      - name: Upload SHA-bound license report
+        uses: actions/upload-artifact@v7
+        with:
+          name: license-compliance-${{ github.sha }}
+          path: license-compliance-report.json
+
+  # Build the native abi3 wheel per OS. abi3-py310 → one wheel per OS covers
+  # CPython 3.10+; the binding's pyproject is the canonical `graphforge` dist.
+  build-wheels:
+    name: Build wheel on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: license-compliance
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build the native wheel (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          manylinux: auto # builds the Linux wheel in a manylinux container
+          sccache: "true"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  build-sdist:
+    name: Build sdist
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: license-compliance
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build sdist (maturin)
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC) — no API token needed
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-* # every wheel OS + the sdist
+          merge-multiple: true
+          path: dist
+
+      - uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Publish to PyPI
+        run: uv publish dist/*
+
+  # ---- Node binding (@graphforge/node) ----
+  # Cross-build the napi addon for every target, then publish to npm. This only
+  # runs on a release; the cross-compilation (esp. the Linux-arm `--use-napi-cross`
+  # path) and npm auth are validated at the first real release.
+  build-node:
+    name: Build addon (${{ matrix.settings.target }})
+    runs-on: ${{ matrix.settings.host }}
+    needs: license-compliance
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - { host: macos-latest, target: x86_64-apple-darwin }
+          - { host: macos-latest, target: aarch64-apple-darwin }
+          - { host: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
+          - { host: blacksmith-4vcpu-ubuntu-2404, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross", arm_cflags: "-D__ARM_ARCH=8" }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: ${{ matrix.settings.target }}
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Build the addon for ${{ matrix.settings.target }}
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.settings.arm_cflags || '' }}
+        run: pnpm --filter @graphforge/node exec napi build --platform --release --target ${{ matrix.settings.target }} ${{ matrix.settings.cross || '' }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          path: crates/gf-bindings-node/*.node
+
+  publish-node:
+    name: Publish to npm
+    needs: build-node
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: crates/gf-bindings-node
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Download all built addons
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bindings-*
+          merge-multiple: true
+          path: crates/gf-bindings-node/artifacts
+
+      - name: Assemble per-platform npm packages
+        # create-npm-dirs scaffolds npm/<platform>/, artifacts moves each built
+        # .node into the matching platform package.
+        run: |
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+          python3 ../../../scripts/ci/validate-napi-artifacts.py \
+            --npm-dir npm --manifest package.json
+
+      - name: Publish platform packages + main package
+        # prepublish publishes the npm/<platform> packages and wires the main
+        # package's optionalDependencies; `npm publish` then ships the main one.
+        run: |
+          pnpm exec napi prepublish -t npm --skip-gh-release
+          npm publish --access public --provenance
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---- NPX agent skills (@graphforge/agent-skills) ----
+  publish-agent-skills:
+    name: Publish agent-skills to npm
+    needs: license-compliance
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: packages/agent-skills
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Offline pack smoke before publish
+        run: pnpm --filter @graphforge/agent-skills test:offline
+        working-directory: .
+
+      - name: Publish @graphforge/agent-skills
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---- Rust crates (crates.io) ----
+  # Automation records the ordered plan. Real `cargo publish` stays
+  # maintainer-gated until name conflicts / path+version deps are resolved
+  # (see docs/development/publication-order.md).
+  crates-publish-plan:
+    name: Record crates.io publish plan
+    needs: license-compliance
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Emit ordered crate list and disposition
+        run: |
+          python3 scripts/ci/crate-publish-plan.py list | tee crates-io-publish-order.txt
+          set +e
+          python3 scripts/ci/crate-publish-plan.py check > crates-io-publish-check.txt 2>&1
+          status=$?
+          set -e
+          cat crates-io-publish-check.txt
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::crates.io publish blocked — see publication-order.md disposition and crates-io-publish-check.txt"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: crates-io-publish-plan-${{ github.sha }}
+          path: |
+            crates-io-publish-order.txt
+            crates-io-publish-check.txt

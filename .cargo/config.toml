@@ -1,0 +1,7 @@
+# Allow cdylib crates (pyo3 bindings) to build with plain `cargo build` on macOS.
+# maturin sets this flag automatically; we replicate it here for workspace builds.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

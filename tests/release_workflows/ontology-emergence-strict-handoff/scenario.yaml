@@ -1,0 +1,115 @@
+{
+  "registry": {
+    "schema": "workflow-scenario-v1",
+    "id": "ontology-emergence-strict-handoff",
+    "steps": ["OEH-01","OEH-02","OEH-03","OEH-04","OEH-05","OEH-06","OEH-07","OEH-08","OEH-09","OEH-10","OEH-11","OEH-12","OEH-13","OEH-14","OEH-15"],
+    "generator_fingerprint": "sha256:b782ec38d581a93eafc4bd847108e2267ff0d2f951992287d9397fe7ec2a0dde",
+    "ontology_profile": "moderate-inherited-constrained",
+    "evidence": "target/release-workflow-evidence/ontology-emergence-strict-handoff.json"
+  },
+  "contract_version": 1,
+  "scenario_id": "ontology-emergence-strict-handoff",
+  "title": "Mature exploratory findings into a separate strict target",
+  "version": 1,
+  "domain": "exploratory-research-and-governed-handoff",
+  "owning_issue": 2469,
+  "implementation": "crates/gf-api/examples/ontology_emergence_strict_handoff.rs",
+  "analytical_question": "Which observed infrastructure findings are sufficiently supported and mapped for governed handoff?",
+  "observable_outcome": "An analyst-approved subset remains traceable from an ontology-free source into a separate strict target without claiming inferred truth or in-place migration.",
+  "generator": {
+    "identity": "ontology-emergence-strict-handoff-v1",
+    "seed": 2469,
+    "fixture_fingerprint": "sha256:b782ec38d581a93eafc4bd847108e2267ff0d2f951992287d9397fe7ec2a0dde"
+  },
+  "state_projects": [
+    {"id": "exploratory-source", "project": "source", "ontology_mode": "exploratory", "persistence": "authoritative"},
+    {"id": "advisory-live-session", "project": "source", "ontology_mode": "advisory", "persistence": "session-scoped-only"},
+    {"id": "strict-governed-target", "project": "target", "ontology_mode": "strict", "persistence": "authoritative"}
+  ],
+  "public_surfaces": [
+    "publish_bulk_nodes", "publish_bulk_edges", "add_node", "add_edge", "execute",
+    "runtime_catalog", "index_search", "find", "rank", "cluster", "analyze",
+    "load_ontology", "adopt_ontology", "enable_capability", "create_assertion",
+    "attach_evidence", "record_hypothesis_membership", "record_hypothesis_selection",
+    "reopen"
+  ],
+  "load_path_classification": {
+    "rust_bulk": "supported-publish_bulk_nodes-publish_bulk_edges",
+    "python_bulk": "supported-publish_bulk_nodes-publish_bulk_edges",
+    "node_bulk": "supported-publishBulkNodes-publishBulkEdges",
+    "rust_incremental": "supported-add_node-add_edge",
+    "python_incremental": "supported-add_node-add_edge",
+    "node_incremental": "supported-addNode-addEdge",
+    "query_create": "supported-query-surface-not-classified-as-import",
+    "legacy_add_nodes_add_edges": "placeholder-not-used-by-this-scenario",
+    "dataset_registry": "out-of-scope-issue-880"
+  },
+  "algorithms": ["find.text", "rank.degree", "cluster.components", "analyze.is_dag"],
+  "correction": {
+    "kind": "failed-bulk-and-strict-handoff-before-publication",
+    "public_only": true,
+    "preserves_history": true
+  },
+  "hypothesis": {
+    "ambiguity": true,
+    "selection": true,
+    "selection_change": false,
+    "selection_clear": false,
+    "inapplicability_rationale": "This scenario records analyst approval for handoff; selection change and clearing are owned by other workflow scenarios."
+  },
+  "temporal": {
+    "transaction_time": true,
+    "valid_time": false,
+    "inapplicability_rationale": "The synthetic observations have no defensible domain validity interval; committed generation order is authoritative."
+  },
+  "bindings": {
+    "rust": "authoritative-executable",
+    "python": "representative-executable",
+    "node": "representative-executable"
+  },
+  "expected": {
+    "phases": ["01-empty", "02-bulk", "03-enriched", "04-advisory", "05-source-reopened", "06-strict-target", "07-rejected", "08-reopened"],
+    "arrow_contract": "expected/arrow-fingerprints.json",
+    "errors": "expected/errors.json",
+    "evidence_schema": "expected/evidence-schema.json"
+  },
+  "steps": [
+    {"id": "OEH-01", "implementation": "rust:create-exploratory-source"},
+    {"id": "OEH-02", "implementation": "rust-python-node:publish-bulk-construction"},
+    {"id": "OEH-03", "implementation": "rust:incremental-enrichment"},
+    {"id": "OEH-04", "implementation": "rust:catalog-reopen"},
+    {"id": "OEH-05", "implementation": "rust:query-search-algorithms"},
+    {"id": "OEH-06", "implementation": "rust:analyst-approved-load-ontology"},
+    {"id": "OEH-07", "implementation": "rust:advisory-known-unknown"},
+    {"id": "OEH-08", "implementation": "rust:source-reopen-exploratory"},
+    {"id": "OEH-09", "implementation": "rust:create-separate-strict-target"},
+    {"id": "OEH-10", "implementation": "rust:explicit-source-target-map"},
+    {"id": "OEH-11", "implementation": "rust:strict-conforming-load"},
+    {"id": "OEH-12", "implementation": "rust-python-node:curated-outcome-parity"},
+    {"id": "OEH-13", "implementation": "rust-python-node:invalid-handoff"},
+    {"id": "OEH-14", "implementation": "rust:pre-publication-fingerprints"},
+    {"id": "OEH-15", "implementation": "rust-python-node:same-sha-reopen"}
+  ],
+  "coverage_signature": {
+    "load_mode": "atomic-arrow-bulk-then-incremental",
+    "mutation_cadence": "empty-bulk-enrich-formalize-curate-reject-reopen",
+    "graph_shape": "disconnected-sparse-to-connected-mixed-density",
+    "topology_transition": "xs-to-s-to-m-source-plus-bounded-target-subset",
+    "ontology_mode": "exploratory-live-advisory-separate-strict",
+    "ontology_complexity": "moderate-inherited-constrained",
+    "runtime_catalog_drift": "persisted-growth-before-and-after-live-advisory-load",
+    "property_characteristics": "mixed-utf8-int64-float64-bool-text-nullability",
+    "operation_chain": "bulk-incremental-query-find-rank-cluster-is_dag-curate-map-strict-load",
+    "result_cardinality": "phase-bounded-xs-s-m",
+    "streaming_cancellation": "not-applicable-bounded-release-fixture",
+    "state_transitions": "three-explicit-project-state-tuples",
+    "correction_mechanism": "atomic-rejection-with-authoritative-prior-generations",
+    "temporal_interpretation": "transaction-time-generation-comparison",
+    "epistemic_pattern": "observations-to-evidence-backed-findings-to-approved-conclusions",
+    "binding_lifecycle": "same-sha-rust-python-node-source-target-reopen",
+    "unique_outcome": "traceable-curated-handoff-without-automatic-ontology-truth",
+    "failure_mode": "bulk-or-unmapped-strict-input-must-not-partially-publish"
+  },
+  "resources": {"class": "medium", "timeout_seconds": 1200},
+  "local_command": "python3 tests/release_workflows/ontology-emergence-strict-handoff/run.py --commit-sha $(git rev-parse HEAD)"
+}

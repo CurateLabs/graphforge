@@ -1,0 +1,6 @@
+{
+  "structured_failures": [
+    {"step_id": "AR-04", "code": "GF_ONTOLOGY", "class": "ontology", "publication": "none"},
+    {"step_id": "AR-09", "code": "GF_IDEMPOTENCY_CONFLICT", "class": "conflict", "publication": "none"}
+  ]
+}

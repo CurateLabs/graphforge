@@ -1,0 +1,6 @@
+---
+source: crates/gf-rel/tests/logical_plan_golden.rs
+---
+Projection: Int64(1) AS one [one:Int64]
+  Unwind: alias=var_0 [var_0:Int64;N]
+    EmptyRelation: rows=1 []

@@ -1,0 +1,13 @@
+{
+  "contract_version": 1,
+  "identity": "sna-intelligence-generator-v1",
+  "seed": 2465,
+  "determinism": "All content, operation UUIDs, assertion UUIDs, and epistemic event UUIDs are fixed by this manifest. Graph UUIDs are public-API generated once and must remain byte-identical through checkpoint and reopen.",
+  "batches": [
+    {"id": "community-alpha", "actors": ["Ada", "Ben", "Cy"], "relations": [["Ada", "COMMUNICATED", "Ben"], ["Ben", "COMMUNICATED", "Cy"]]},
+    {"id": "community-beta-and-event", "actors": ["Dana", "Eli"], "events": ["E-17"], "relations": [["Dana", "COMMUNICATED", "Eli"], ["Cy", "ATTENDED", "E-17"], ["Dana", "ATTENDED", "E-17"]]},
+    {"id": "mistaken-bridge", "relations": [["Cy", "DIRECTS", "Dana"]]},
+    {"id": "correction", "preserve_source_relations": [["Cy", "DIRECTS", "Dana"]], "compensating_relations": [["Cy", "ASSOCIATED_WITH", "Dana"]]}
+  ],
+  "fixed_uuid_seeds": {"actor": 250, "assertions": [10, 11, 12, 13], "reasoning": [20, 21, 22, 23], "hypothesis_group": 30, "membership_events": [31, 32, 33, 43], "supersession": 41, "selection": 44}
+}

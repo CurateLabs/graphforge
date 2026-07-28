@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "contract": "canonical-json-from-arrow-values/1",
+  "schemas": {
+    "baseline": ["node_uuid:FixedSizeBinary(16)", "external_id:Utf8", "name:Utf8", "risk_score:Float64", "summary:Utf8", "score:Float64", "matched_on:Utf8"],
+    "refreshed": ["node_uuid:FixedSizeBinary(16)", "external_id:Utf8", "name:Utf8", "risk_score:Float64", "summary:Utf8", "score:Float64", "matched_on:Utf8"]
+  },
+  "results": {
+    "baseline": [{"name": "Person 00", "matched_on": "text"}],
+    "refreshed": [{"name": "Person 11", "matched_on": "text"}]
+  },
+  "result_sha256": "bdcad55e116b0ed04c1437c031e28e4e0645483a97784e55d2a0adf0727ed778"
+}

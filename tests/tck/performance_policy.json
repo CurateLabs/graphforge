@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "baseline_required": true,
+  "fixture_profile": "pooled-isolated-serial-v1",
+  "tck_concurrency": 1,
+  "per_scenario_multiplier": 2.0,
+  "per_scenario_min_delta_ms": 250.0,
+  "aggregate_multiplier": 1.25,
+  "aggregate_min_delta_ms": 15000.0,
+  "absolute_slow_ms": 1300.0,
+  "max_warning_annotations": 25
+}

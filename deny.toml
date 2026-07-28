@@ -1,0 +1,52 @@
+# GraphForge dependency policy. Focused on third-party license allowlisting for
+# published Rust surfaces. Run: `cargo deny check licenses`
+#
+# Advisories / bans / sources stay available but are not CI-gated here yet.
+
+[graph]
+all-features = true
+
+[output]
+feature-depth = 1
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Permissive SPDX identifiers observed in the current lockfile. Dual-licensed
+# crates may also list LGPL/MPL alternatives; cargo-deny accepts an expression
+# when any fully-allowed alternative satisfies it, so those alternatives are
+# intentionally omitted from this allowlist.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "BUSL-1.1",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "zlib-acknowledgement",
+]
+
+[licenses.private]
+ignore = false
+
+[advisories]
+yanked = "warn"
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

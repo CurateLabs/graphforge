@@ -1,0 +1,1 @@
+MATCH (n) WHERE n.x IN [1, 2, 3] AND n.y STARTS WITH 'a' RETURN n

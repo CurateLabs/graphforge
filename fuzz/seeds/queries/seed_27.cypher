@@ -1,0 +1,1 @@
+WITH 1 AS a, 2 AS b RETURN a + b, a - b, a * b, a % b

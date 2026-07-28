@@ -1,0 +1,22 @@
+/* Custom styles for GraphForge documentation */
+
+/* Code blocks */
+.highlight {
+  border-radius: 4px;
+}
+
+/* Admonitions */
+.admonition {
+  border-radius: 4px;
+}
+
+/* Tables */
+table {
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/* Improve code font rendering */
+code {
+  font-family: 'Roboto Mono', 'Courier New', monospace;
+}

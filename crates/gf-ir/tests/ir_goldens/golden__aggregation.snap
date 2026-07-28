@@ -1,0 +1,38 @@
+---
+source: crates/gf-ir/tests/golden.rs
+---
+{
+  "ir_version": {
+    "major": 0,
+    "minor": 3,
+    "patch": 0
+  },
+  "dialect": "openCypher",
+  "ontology_version": "v1:b1beadfb8bdd6dcbae7c4dbe879ad203f53e7568e219f8f26ec3c60a489e1d33",
+  "ontology_mode": "advisory",
+  "feature_flags": [],
+  "ops": [
+    {
+      "NodeScan": {
+        "var": 0,
+        "ty": 0
+      }
+    },
+    {
+      "Aggregate": {
+        "group_by": [],
+        "aggs": [
+          {
+            "func": "Count",
+            "arg": null,
+            "alias": "total",
+            "out_var": 1
+          }
+        ]
+      }
+    }
+  ],
+  "exprs": {
+    "nodes": []
+  }
+}

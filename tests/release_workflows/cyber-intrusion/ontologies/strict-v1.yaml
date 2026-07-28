@@ -1,0 +1,72 @@
+ontology_id: cyber-investigation
+version: "1.0.0"
+entity_types:
+  - {name: Thing, abstract: true}
+  - {name: Asset, abstract: true, parent: Thing}
+  - {name: ComputeAsset, abstract: true, parent: Asset}
+  - {name: Host, abstract: false, parent: ComputeAsset}
+  - {name: Principal, abstract: true, parent: Thing}
+  - {name: Identity, abstract: false, parent: Principal}
+  - {name: Event, abstract: true, parent: Thing}
+  - {name: Process, abstract: false, parent: Event}
+  - {name: Alert, abstract: false, parent: Event}
+  - {name: Vulnerability, abstract: false, parent: Thing}
+  - {name: Indicator, abstract: false, parent: Thing}
+  - {name: Investigation, abstract: false, parent: Thing}
+relation_types:
+  - name: AUTHENTICATED_TO
+    src: Identity
+    dst: Host
+    semantic: {functional: false, inverse_functional: false, acyclic: true}
+  - name: SPAWNED
+    src: Process
+    dst: Process
+    semantic: {transitive: true, acyclic: true}
+  - name: EXECUTED_ON
+    src: Process
+    dst: Host
+    semantic: {functional: true}
+  - name: TRIGGERED_ON
+    src: Alert
+    dst: Host
+    semantic: {functional: true}
+  - name: OBSERVED_IN
+    src: Indicator
+    dst: Alert
+    semantic: {inverse_functional: false}
+  - name: AFFECTS
+    src: Vulnerability
+    dst: Host
+    semantic: {acyclic: true}
+  - name: COMMUNICATED_WITH
+    src: Host
+    dst: Host
+    semantic: {symmetric: true}
+  - name: INVESTIGATES
+    src: Investigation
+    dst: Alert
+    semantic: {reflexive: false}
+properties:
+  - {owner: Thing, name: name, type: utf8, nullable: false}
+  - {owner: Host, name: hostname, type: utf8, nullable: false}
+  - {owner: Host, name: criticality, type: int64, nullable: false}
+  - {owner: Host, name: exposed, type: bool, nullable: false, default_json: "false"}
+  - {owner: Host, name: risk, type: float64, nullable: true}
+  - {owner: Identity, name: account, type: utf8, nullable: false}
+  - {owner: Process, name: command, type: utf8, nullable: false}
+  - {owner: Process, name: started_at, type: date_time, nullable: true}
+  - {owner: Process, name: runtime, type: duration, nullable: true}
+  - {owner: Alert, name: summary, type: utf8, nullable: false}
+  - {owner: Alert, name: severity, type: int64, nullable: false}
+  - {owner: Alert, name: tags, type: list, nullable: true, multivalued: true}
+  - {owner: Vulnerability, name: cve, type: utf8, nullable: false}
+  - {owner: Vulnerability, name: cvss, type: float64, nullable: true}
+  - {owner: Indicator, name: value, type: utf8, nullable: false}
+  - {owner: Indicator, name: attributes, type: map, nullable: true}
+  - {owner: Investigation, name: case_id, type: utf8, nullable: false}
+  - {owner: COMMUNICATED_WITH, name: bytes, type: int64, nullable: true}
+constraints:
+  - {owner: Host, kind: required_property, expr_json: '{"property":"hostname"}'}
+  - {owner: Host, kind: unique_property, expr_json: '{"property":"hostname"}'}
+  - {owner: Alert, kind: range_check, expr_json: '{"property":"severity","min":0,"max":10}'}
+  - {owner: Indicator, kind: custom_expr, expr_json: '{"expression":"length(value) > 0"}'}

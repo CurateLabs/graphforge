@@ -1,0 +1,46 @@
+[package]
+name = "gf-storage"
+description = "GraphForge StorageProvider trait and Parquet backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Enables the existing cookie-protected subprocess failpoints for higher-level
+# workspace tests. Production consumers do not enable this feature.
+test-failpoints = []
+
+[dependencies]
+gf-core = { path = "../gf-core" }
+gf-ir = { path = "../gf-ir" }
+gf-ontology = { path = "../gf-ontology" }
+arrow = { workspace = true }
+async-trait = "0.1"
+atomicwrites = "0.4.4"
+datafusion = { workspace = true }
+datafusion-catalog = "53"
+fs4 = "0.13"
+parquet = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = "3"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+unicode-normalization = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+named-lock = "0.4.1"
+
+[dev-dependencies]
+wait-timeout = "0.2"
+
+[lints]
+workspace = true

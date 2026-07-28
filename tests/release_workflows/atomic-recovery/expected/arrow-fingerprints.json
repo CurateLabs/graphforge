@@ -1,0 +1,8 @@
+{
+  "contract": "canonical-json-from-arrow-values/1",
+  "schemas": {
+    "current_findings": ["name:Utf8", "claim_key:Utf8", "severity:Int64"],
+    "composite_receipt": ["generation_uuid:FixedSizeBinary(16)", "operation_uuid:FixedSizeBinary(16)", "committed:Boolean"],
+    "epistemic_snapshot": ["assertion_uuid:FixedSizeBinary(16)", "claim:Utf8", "current_status:Utf8"]
+  }
+}

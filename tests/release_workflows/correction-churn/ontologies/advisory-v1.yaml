@@ -1,0 +1,18 @@
+ontology_id: correction_churn
+version: "1.0.0"
+entity_types:
+  - {name: Record, abstract: true}
+  - {name: Organization, parent: Record}
+  - {name: Document, parent: Record}
+relation_types:
+  - {name: SUPPLIES, src: Organization, dst: Organization, semantic: {}}
+  - {name: MENTIONS, src: Document, dst: Organization, semantic: {}}
+properties:
+  - {owner: Record, name: name, type: utf8, nullable: false}
+  - {owner: Organization, name: risk_score, type: float64, nullable: true}
+  - {owner: Organization, name: external_id, type: utf8, nullable: true}
+  - {owner: Document, name: body, type: utf8, nullable: false}
+constraints:
+  - {owner: Record, kind: required_property, expr_json: '{"property":"name"}'}
+  - {owner: Organization, kind: range_check, expr_json: '{"property":"risk_score","min":0,"max":1}'}
+migrations: []

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "required": [
+    "schema_version",
+    "scenario_id",
+    "commit_sha",
+    "graph_m20_committed",
+    "graph_m20_m21_committed",
+    "validation_rejection",
+    "pre_current_recoveries",
+    "post_current_recoveries",
+    "orphan_free",
+    "idempotency",
+    "transaction_time_view",
+    "reopen_equal"
+  ],
+  "fixed": {
+    "schema_version": 1,
+    "scenario_id": "atomic-recovery",
+    "graph_m20_committed": true,
+    "graph_m20_m21_committed": true,
+    "orphan_free": true,
+    "reopen_equal": true
+  }
+}

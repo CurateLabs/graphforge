@@ -1,0 +1,576 @@
+{
+  "schema": "workflow-registry-v1",
+  "taxonomy": "ontology-complexity-v1",
+  "evidence_schema": "evidence-envelope-v1",
+  "scenarios": [
+    {
+      "id": "sna-intelligence",
+      "title": "Investigate influence and competing explanations in a social network",
+      "version": "1",
+      "domain": "investigative-social-network-analysis",
+      "owning_issue": 2465,
+      "bundle": "tests/release_workflows/sna-intelligence",
+      "implementation": "crates/gf-api/examples/sna_intelligence_workflow.rs",
+      "evidence": "target/release-workflow-evidence/sna-intelligence.json",
+      "generator": {
+        "path": "tests/release_workflows/sna-intelligence/generator.yaml",
+        "seed": 2465,
+        "sha256": "28c54f5773e1e6444d5811cbd16d418cb38822c4f9a8e722fea9a726ba4902e1"
+      },
+      "public_surfaces": [
+        "execute",
+        "find",
+        "rank",
+        "cluster",
+        "paths",
+        "analyze",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank.degree",
+        "cluster.components",
+        "paths.bfs",
+        "analyze.is_dag"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "reasoning",
+        "hypothesis_membership",
+        "hypothesis_selection"
+      ],
+      "axes": {
+        "correction": "compensating-edge-and-supersession",
+        "temporal": "transaction-time",
+        "epistemic": "unresolved-then-selected",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "two-batches|components-join-neutralize|query-find-rank-cluster-path-analyze|compensate-supersede|unresolved-selected|reopen",
+      "ontology_profile": "small-partial",
+      "command": [
+        "python3",
+        "tests/release_workflows/sna-intelligence/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "probate-genealogy",
+      "title": "Ambiguous probate and genealogy relationships",
+      "version": "1.0.0",
+      "domain": "probate-research",
+      "owning_issue": 2466,
+      "bundle": "tests/release_workflows/probate-genealogy",
+      "implementation": "crates/gf-api/examples/probate_genealogy_workflow.rs",
+      "evidence": "target/release-workflow-evidence/probate-genealogy.json",
+      "generator": {
+        "path": "tests/release_workflows/probate-genealogy/generator.yaml",
+        "seed": 2466001,
+        "sha256": "5f9ec37b3542be05b0453ead475f3256d9cb6b3cab87ab68d82fb6f6c49ad4a2"
+      },
+      "public_surfaces": [
+        "execute",
+        "find",
+        "rank",
+        "paths",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank.degree",
+        "paths.bfs"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "reasoning",
+        "hypothesis_membership",
+        "hypothesis_selection",
+        "validity"
+      ],
+      "axes": {
+        "correction": "assertion-supersession",
+        "temporal": "transaction-and-valid-time",
+        "epistemic": "select-change-clear",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "document-load|stable-kinship|search-degree-bfs-hypothesis|supersession|select-change-clear|valid-time-reopen",
+      "ontology_profile": "moderate-single-inheritance",
+      "command": [
+        "python3",
+        "tests/release_workflows/probate-genealogy/run.py",
+        "--evidence-dir",
+        "{evidence_dir}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "cyber-intrusion",
+      "title": "Competing cyber intrusion hypotheses",
+      "version": "1.0.0",
+      "domain": "cybersecurity-investigation",
+      "owning_issue": 2467,
+      "bundle": "tests/release_workflows/cyber-intrusion",
+      "implementation": "crates/gf-api/examples/cyber_intrusion_workflow.rs",
+      "evidence": "target/release-workflow-evidence/cyber-intrusion.json",
+      "generator": {
+        "path": "tests/release_workflows/cyber-intrusion/generator.yaml",
+        "seed": 2467001,
+        "sha256": "0252c3110a5042e6202cd233793501fb59d1d35a9171c80dbe09f0a0490f7630"
+      },
+      "public_surfaces": [
+        "execute",
+        "find",
+        "rank",
+        "cluster",
+        "paths",
+        "similar",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.hybrid",
+        "rank",
+        "cluster",
+        "paths",
+        "similar"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "confidence",
+        "reasoning",
+        "hypothesis_membership"
+      ],
+      "axes": {
+        "correction": "checkpoint-revert",
+        "temporal": "transaction-history",
+        "epistemic": "unresolved-alternatives",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "heterogeneous-enrichment|false-edge-revert|hybrid-path-similar-rank-cluster|checkpoint-revert|unresolved|cancel-stale-reopen",
+      "ontology_profile": "deep-wide-constrained",
+      "command": [
+        "python3",
+        "tests/release_workflows/cyber-intrusion/run.py",
+        "--evidence-dir",
+        "{evidence_dir}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "finance-fraud",
+      "title": "Financial-network investigation with corrected analytical errors",
+      "version": "1.0.0",
+      "domain": "finance-fraud-analysis",
+      "owning_issue": 2468,
+      "bundle": "tests/release_workflows/finance-fraud",
+      "implementation": "crates/gf-api/examples/finance_fraud_workflow.rs",
+      "evidence": "target/release-workflow-evidence/finance-fraud.json",
+      "steps": [
+        "FF-01",
+        "FF-02",
+        "FF-03",
+        "FF-04",
+        "FF-05",
+        "FF-06",
+        "FF-07",
+        "FF-08",
+        "FF-09",
+        "FF-10",
+        "FF-11",
+        "FF-12"
+      ],
+      "generator": {
+        "path": "tests/release_workflows/finance-fraud/generator.yaml",
+        "seed": 2468001,
+        "sha256": "c0363100a9f9fe5f6b4ad4007acf3794a3f2714d9f1d66b632f90b939c76da83"
+      },
+      "public_surfaces": [
+        "adopt_ontology",
+        "add_node",
+        "add_edge",
+        "execute",
+        "index_search",
+        "find",
+        "rank",
+        "cluster",
+        "paths",
+        "similar",
+        "invoke_recorded",
+        "checkpoint",
+        "open_checkpoint",
+        "revert_to_checkpoint",
+        "create_assertion",
+        "attach_evidence",
+        "assess_confidence",
+        "record_reasoning",
+        "create_hypothesis_group",
+        "record_hypothesis_membership",
+        "record_hypothesis_selection",
+        "list_algorithm_runs",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank",
+        "cluster",
+        "paths",
+        "similar"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "confidence",
+        "reasoning",
+        "hypothesis_membership",
+        "hypothesis_selection"
+      ],
+      "axes": {
+        "correction": "three-checkpoint-revert-corrections",
+        "temporal": "transaction-generation-history",
+        "epistemic": "legit-vs-fraud-selection-change-clear",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "tx-heavy-batch-load|three-correction-generations|cyclic-counterparty-network|entity-tx-scope-checkpoint-reverts|legit-vs-fraud-select-change-clear|same-sha-python-reopen",
+      "ontology_profile": "moderate-single-inheritance",
+      "command": [
+        "python3",
+        "tests/release_workflows/finance-fraud/run.py",
+        "--evidence-dir",
+        "{evidence_dir}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900,
+      "release_risk_rationale": "Unique finance correction stack: entity-merge, transaction-association, and analytical-scope checkpoint reverts with a legitimate-vs-fraud working selection that is changed then cleared without adjudication."
+    },
+    {
+      "id": "correction-churn",
+      "title": "Preserve history through repeated graph and ontology corrections",
+      "version": "1",
+      "domain": "long-running-data-curation",
+      "owning_issue": 2471,
+      "bundle": "tests/release_workflows/correction-churn",
+      "implementation": "crates/gf-api/examples/correction_churn_workflow.rs",
+      "evidence": "target/release-workflow-evidence/correction-churn.json",
+      "generator": {
+        "path": "tests/release_workflows/correction-churn/generator.yaml",
+        "seed": 2471001,
+        "sha256": "cad42f0e28a754e4b2190366944cafa4f6327de19614e80975b74928a9fcfbf6"
+      },
+      "public_surfaces": [
+        "execute",
+        "rank",
+        "checkpoint",
+        "open_checkpoint",
+        "reopen"
+      ],
+      "m18_m19": [
+        "rank.degree"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "reasoning",
+        "status",
+        "supersession",
+        "hypothesis_membership"
+      ],
+      "axes": {
+        "correction": "three-compensating-generations",
+        "temporal": "pinned-generations",
+        "epistemic": "membership-removal",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "incremental-curation|merge-detach|mutate-rank-record-reconstruct|multi-compensation|membership-remove|conflict-reopen",
+      "ontology_profile": "moderate-inherited-constrained",
+      "command": [
+        "python3",
+        "tests/release_workflows/correction-churn/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "knowledge-evolution",
+      "title": "Evolve knowledge and competing hypotheses over a stable graph",
+      "version": "1",
+      "domain": "hypothesis-driven-evidence-review",
+      "owning_issue": 2472,
+      "bundle": "tests/release_workflows/knowledge-evolution",
+      "implementation": "crates/gf-api/examples/knowledge_evolution_workflow.rs",
+      "evidence": "target/release-workflow-evidence/knowledge-evolution.json",
+      "generator": {
+        "path": "tests/release_workflows/knowledge-evolution/generator.yaml",
+        "seed": 2472001,
+        "sha256": "91a976e00d111972332db4429d5a7685873da909c8cb76f5b98fca05d5ae9cfb"
+      },
+      "public_surfaces": [
+        "execute",
+        "find",
+        "rank",
+        "paths",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank.degree",
+        "paths.bfs"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "confidence",
+        "reasoning",
+        "status",
+        "validity",
+        "hypothesis_selection"
+      ],
+      "axes": {
+        "correction": "append-only-amendment",
+        "temporal": "transaction-and-valid-cutoffs",
+        "epistemic": "select-change-clear",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "stable-load|no-topology-change|find-rank-path-knowledge|append-only-amend|select-change-clear|neutral-invariance-reopen",
+      "ontology_profile": "small-shallow-stable",
+      "command": [
+        "python3",
+        "tests/release_workflows/knowledge-evolution/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    },
+    {
+      "id": "derived-state-freshness",
+      "title": "Preserve derived-state freshness across mutation and reanalysis",
+      "version": "1",
+      "domain": "continuously-curated-analytical-projects",
+      "owning_issue": 2470,
+      "bundle": "tests/release_workflows/derived-state-freshness",
+      "implementation": "crates/gf-api/examples/derived_state_freshness_workflow.rs",
+      "evidence": "target/release-workflow-evidence/derived-state-freshness.json",
+      "steps": [
+        "DSF-01",
+        "DSF-02",
+        "DSF-03",
+        "DSF-04",
+        "DSF-05",
+        "DSF-06",
+        "DSF-07",
+        "DSF-08",
+        "DSF-09",
+        "DSF-10",
+        "DSF-11"
+      ],
+      "generator": {
+        "path": "tests/release_workflows/derived-state-freshness/generator.yaml",
+        "seed": 2470001,
+        "sha256": "515c23171e235124e0426393b59de08d4f4b3c8104b213a5cfe60ecb9678a4e3"
+      },
+      "public_surfaces": [
+        "execute",
+        "find",
+        "rank",
+        "index_search",
+        "inspect_text_index",
+        "index_adjacency",
+        "inspect_adjacency",
+        "rebuild_adjacency",
+        "publish_caller_embeddings",
+        "inspect_embedding_space_freshness",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "find.vector",
+        "rank.degree"
+      ],
+      "m20_m21": [
+        "assertion",
+        "reasoning",
+        "hypothesis_membership"
+      ],
+      "axes": {
+        "correction": "property-and-vector-replacement",
+        "temporal": "committed-source-generations",
+        "epistemic": "stable-hypothesis-invariance",
+        "binding": "rust-python-node-reopen"
+      },
+      "coverage_signature": "stable-load|separate-derived-source-mutations|inspect-refresh-find-similar-rank|property-vector-compensation|freshness-not-epistemic|cancel-reopen",
+      "ontology_profile": "moderate-inherited-constrained",
+      "command": [
+        "python3",
+        "tests/release_workflows/derived-state-freshness/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "medium",
+      "timeout_seconds": 1200
+    },
+    {
+      "id": "ontology-emergence-strict-handoff",
+      "title": "Mature exploratory findings into a separate strict target",
+      "version": "1",
+      "domain": "exploratory-research-and-governed-handoff",
+      "owning_issue": 2469,
+      "bundle": "tests/release_workflows/ontology-emergence-strict-handoff",
+      "implementation": "crates/gf-api/examples/ontology_emergence_strict_handoff.rs",
+      "evidence": "target/release-workflow-evidence/ontology-emergence-strict-handoff.json",
+      "steps": [
+        "OEH-01",
+        "OEH-02",
+        "OEH-03",
+        "OEH-04",
+        "OEH-05",
+        "OEH-06",
+        "OEH-07",
+        "OEH-08",
+        "OEH-09",
+        "OEH-10",
+        "OEH-11",
+        "OEH-12",
+        "OEH-13",
+        "OEH-14",
+        "OEH-15"
+      ],
+      "generator": {
+        "path": "tests/release_workflows/ontology-emergence-strict-handoff/generator.yaml",
+        "seed": 2469,
+        "sha256": "b782ec38d581a93eafc4bd847108e2267ff0d2f951992287d9397fe7ec2a0dde"
+      },
+      "public_surfaces": [
+        "publish_bulk_nodes",
+        "publish_bulk_edges",
+        "add_node",
+        "add_edge",
+        "execute",
+        "runtime_catalog",
+        "index_search",
+        "find",
+        "rank",
+        "cluster",
+        "analyze",
+        "load_ontology",
+        "adopt_ontology",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank.degree",
+        "cluster.components",
+        "analyze.is_dag"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "reasoning",
+        "hypothesis_membership",
+        "hypothesis_selection"
+      ],
+      "axes": {
+        "correction": "atomic-rejection-before-publication",
+        "temporal": "transaction-time-generation-comparison",
+        "epistemic": "observations-to-approved-conclusions",
+        "binding": "rust-python-node-source-target-reopen"
+      },
+      "coverage_signature": "atomic-bulk-then-incremental|exploratory-advisory-session-separate-strict|xs-s-m-curated-handoff|catalog-drift-with-unknowns|traceable-mapping|reject-before-mutation-reopen",
+      "ontology_profile": "moderate-inherited-constrained",
+      "command": [
+        "python3",
+        "tests/release_workflows/ontology-emergence-strict-handoff/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "medium",
+      "timeout_seconds": 1200,
+      "release_risk_rationale": "Unique three-state handoff risk: session-scoped advisory formalization plus curated mapping into a separate strict project, not covered by single-project ontology or freshness scenarios."
+    },
+    {
+      "id": "atomic-recovery",
+      "title": "Recover atomic graph and knowledge cycles after interruption",
+      "version": "1",
+      "domain": "reliable-analytical-automation",
+      "owning_issue": 2473,
+      "bundle": "tests/release_workflows/atomic-recovery",
+      "implementation": "crates/gf-api/examples/atomic_recovery_workflow.rs",
+      "evidence": "target/release-workflow-evidence/atomic-recovery.json",
+      "steps": [
+        "AR-01",
+        "AR-02",
+        "AR-03",
+        "AR-04",
+        "AR-05",
+        "AR-06",
+        "AR-07",
+        "AR-08",
+        "AR-09",
+        "AR-10",
+        "AR-11",
+        "AR-12"
+      ],
+      "generator": {
+        "path": "tests/release_workflows/atomic-recovery/generator.yaml",
+        "seed": 2473001,
+        "sha256": "a5b800c890be08e96322d650b36e3c3bc7e57b93f8f770b8b24a7ff0f21c8a26"
+      },
+      "public_surfaces": [
+        "adopt_ontology",
+        "enable_capability",
+        "publish_composite_transaction",
+        "execute",
+        "find",
+        "rank",
+        "epistemic_snapshot",
+        "reopen"
+      ],
+      "m18_m19": [
+        "find.text",
+        "rank.degree"
+      ],
+      "m20_m21": [
+        "assertion",
+        "evidence_link",
+        "reasoning",
+        "assertion_status",
+        "hypothesis_membership"
+      ],
+      "axes": {
+        "correction": "resume-or-compensate-idempotent",
+        "temporal": "transaction-time-complete-generation",
+        "epistemic": "hypothesis-membership-with-atomic-graph",
+        "binding": "rust-python-reopen"
+      },
+      "coverage_signature": "bounded-composite-batches|s-graph-topology-property|validate-publish-interrupt-recover|resume-idempotent-compensate|one-complete-generation|failpoint-reopen",
+      "ontology_profile": "deep-wide-constrained",
+      "command": [
+        "python3",
+        "tests/release_workflows/atomic-recovery/run.py",
+        "--commit-sha",
+        "{sha}",
+        "--output",
+        "{evidence}"
+      ],
+      "resource": "small",
+      "timeout_seconds": 900
+    }
+  ]
+}

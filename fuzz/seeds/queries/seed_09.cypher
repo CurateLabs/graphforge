@@ -1,0 +1,1 @@
+MATCH (n) RETURN n.name AS name, n.age AS age SKIP 5 LIMIT 5

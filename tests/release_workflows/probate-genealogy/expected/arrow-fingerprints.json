@@ -1,0 +1,9 @@
+{
+  "contract": "canonical-json-from-arrow-values/1",
+  "schemas": {
+    "person_query": ["name:Utf8", "birth_year:Int64"],
+    "find": ["node_uuid:FixedSizeBinary(16)", "recorded_on:Utf8", "title:Utf8", "verified:Boolean", "score:Float64", "matched_on:Utf8"],
+    "hypothesis_selection": ["selection_event_uuid:FixedSizeBinary(16)", "operation_uuid:FixedSizeBinary(16)", "group_uuid:FixedSizeBinary(16)", "selected_assertion_uuid:FixedSizeBinary(16)", "reasoning_uuid:FixedSizeBinary(16)", "provenance_uuid:FixedSizeBinary(16)", "recorded_at:Timestamp(Microsecond, Some(\"UTC\"))", "contract_version:UInt32"]
+  },
+  "normalized_final_fingerprint": "114c139ef14b543f7f1403915f066df2bc75cdc1f67b84f9ea7aea66a6c67f88"
+}

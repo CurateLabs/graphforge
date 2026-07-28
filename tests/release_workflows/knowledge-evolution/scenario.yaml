@@ -1,0 +1,40 @@
+{
+  "registry": {"schema":"workflow-scenario-v1","id":"knowledge-evolution","steps":["KE-01","KE-02","KE-03","KE-04","KE-05","KE-06","KE-07","KE-08","KE-09","KE-10","KE-11","KE-12"],"generator_fingerprint":"sha256:91a976e00d111972332db4429d5a7685873da909c8cb76f5b98fca05d5ae9cfb","ontology_profile":"small-shallow-stable","evidence":"target/release-workflow-evidence/knowledge-evolution.json"},
+  "contract_version": 1,
+  "scenario_id": "knowledge-evolution",
+  "title": "Evolve knowledge and competing hypotheses over a stable graph",
+  "version": 1,
+  "domain": "hypothesis-driven-evidence-review",
+  "owning_issue": 2472,
+  "implementation": "crates/gf-api/examples/knowledge_evolution_workflow.rs",
+  "analytical_question": "Can evidence and interpretations evolve without changing neutral graph execution or implicitly adjudicating truth?",
+  "observable_outcome": "Two unresolved alternatives remain neutral until explicit select, change, and clear events; only explicit belief projections reflect those interpretations.",
+  "generator": {"identity":"knowledge-evolution-generator-v1","seed":2472001,"fixture_fingerprint":"sha256:91a976e00d111972332db4429d5a7685873da909c8cb76f5b98fca05d5ae9cfb"},
+  "public_surfaces": ["adopt_ontology","add_node","add_edge","execute","index_search","find","rank","paths","enable_capability","create_assertion_with_evidence","assess_confidence","record_reasoning","record_assertion_status","record_assertion_validity","create_hypothesis_group","record_hypothesis_membership","record_hypothesis_selection","epistemic_snapshot","apply_valid_time","resolve_belief_projection","reopen"],
+  "algorithms": ["find.text","rank.degree","paths.bfs"],
+  "correction": {"kind":"append-only-reasoning-status-validity-and-selection-events","graph_mutation":false,"autonomous_adjudication":false},
+  "bindings": {"rust":"authoritative-executable","python":"representative-executable","node":"not-applicable","node_rationale":"Parent suite distributes representative native binding coverage; this scenario selects Python for temporal and selection replay."},
+  "steps": [
+    {"id":"KE-01","implementation":"rust:stable-strict-seed"},{"id":"KE-02","implementation":"rust:neutral-baseline"},
+    {"id":"KE-03","implementation":"rust:assertions-evidence"},{"id":"KE-04","implementation":"rust:confidence-no-selection"},
+    {"id":"KE-05","implementation":"rust:reasoning-status-valid-time"},{"id":"KE-06","implementation":"rust:hypothesis-membership"},
+    {"id":"KE-07","implementation":"rust:select-first"},{"id":"KE-08","implementation":"rust:change-selection"},
+    {"id":"KE-09","implementation":"rust:clear-selection"},{"id":"KE-10","implementation":"rust:neutral-invariance"},
+    {"id":"KE-11","implementation":"rust:explicit-projections-cutoffs"},{"id":"KE-12","implementation":"rust-and-python:reopen"}
+  ],
+  "coverage_signature": {
+    "load_mode":"one-stable-graph-load","mutation_cadence":"m20-m21-append-only",
+    "graph_shape":"fixed-xs-sparse","topology_transition":"none",
+    "ontology_mode":"strict","ontology_complexity":"small-shallow-stable",
+    "runtime_catalog_drift":"none-after-baseline","property_characteristics":"stable-utf8-text",
+    "operation_chain":"baseline-find-rank-paths-knowledge-cutoffs-explicit-belief",
+    "result_cardinality":"small-bounded","streaming_cancellation":"not-applicable-bounded-scenario",
+    "state_transitions":"unresolved-select-change-clear","correction_mechanism":"append-only-amendment-and-events",
+    "temporal_interpretation":"transaction-and-valid-time-cutoffs","epistemic_pattern":"confidence-without-selection-then-explicit-working-view",
+    "binding_lifecycle":"rust-authoritative-python-representative-reopen",
+    "unique_outcome":"knowledge-evolves-while-neutral-graph-results-remain-identical",
+    "failure_mode":"confidence-or-knowledge-must-not-leak-into-neutral-execution"
+  },
+  "resources": {"class":"small","timeout_seconds":900},
+  "local_command":"python3 tests/release_workflows/knowledge-evolution/run.py --commit-sha $(git rev-parse HEAD)"
+}

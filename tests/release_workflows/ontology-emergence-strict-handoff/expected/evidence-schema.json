@@ -1,0 +1,23 @@
+{
+  "required": [
+    "contract_version",
+    "scenario_id",
+    "commit_sha",
+    "seed",
+    "outcome",
+    "phases",
+    "ontology_states",
+    "load_path_classification",
+    "analyst_approval",
+    "catalog",
+    "handoff",
+    "failures",
+    "reopen_equal"
+  ],
+  "fixed": {
+    "contract_version": 1,
+    "scenario_id": "ontology-emergence-strict-handoff",
+    "seed": 2469,
+    "reopen_equal": true
+  }
+}

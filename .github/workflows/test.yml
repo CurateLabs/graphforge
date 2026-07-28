@@ -1,0 +1,714 @@
+name: Test Suite
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Classify Changes
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      gherkin: ${{ steps.filter.outputs.gherkin }}
+      bindings: ${{ steps.filter.outputs.bindings }}
+      agent_skills: ${{ steps.filter.outputs.agent_skills }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: filter
+        shell: bash
+        run: |
+          scripts/ci/classify-changes.sh \
+            "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  policy:
+    name: Repository Policy
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Test changed-path classifier
+        run: scripts/ci/test-classify-changes.sh
+
+      - name: Test aggregate merge gate
+        run: scripts/ci/test-require-gates.sh
+
+      - name: Test M20 contract ledger
+        run: python3 scripts/ci/test-m20-contract-gate.py
+
+      - name: Test M21 contract ledger
+        run: python3 scripts/ci/test-m21-contract-gate.py
+
+      - name: Test checkpoint recovery ledger
+        run: python3 scripts/ci/test-checkpoint-recovery-gate.py
+
+      - name: Test concurrency and recovery ledger
+        run: python3 scripts/ci/test-concurrency-recovery-gate.py
+
+      - name: Test concurrency short matrix gate
+        run: |
+          python3 scripts/ci/concurrency-short-gate.py validate
+          python3 scripts/ci/test-concurrency-short-gate.py
+
+      - name: Test concurrency stress gate config
+        run: |
+          python3 scripts/ci/concurrency-stress-gate.py validate
+          python3 scripts/ci/test-concurrency-stress-gate.py
+
+      - name: Test Rust non-Cypher surface inventory
+        run: python3 scripts/ci/test-non-cypher-surface-gate.py
+
+      - name: Test Python and Node non-Cypher parity policy
+        run: python3 scripts/ci/check-binding-parity-policy.py
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install pinned napi CLI
+        run: pnpm install --frozen-lockfile --filter @graphforge/node...
+
+      - name: Test binding release-candidate evidence validator
+        run: python3 scripts/ci/test-binding-release-candidate.py
+
+      - name: Test standardized release load matrix
+        run: |
+          python3 scripts/ci/test-release-load-matrix.py
+          python3 scripts/ci/test-release-load-executor.py
+
+      - name: Test final M22 non-Cypher surface gate
+        run: python3 scripts/ci/test-m22-non-cypher-surface-gate.py
+
+      - name: Test clean-environment verification harness
+        run: python3 scripts/ci/test-clean-env-verify.py
+
+      - name: Enforce domain dependency directions
+        run: |
+          scripts/ci/check-domain-dependencies.py
+          scripts/ci/test-domain-dependencies.py
+
+      - name: Test crates.io publish plan helper
+        run: python3 scripts/ci/test-crate-publish-plan.py
+
+      - name: Validate GitHub Actions workflows
+        run: scripts/check-workflows.sh
+
+      - name: Verify license policy
+        run: python3 scripts/license_policy.py check --report license-compliance-report.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-deny and cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-about@0.9.1
+
+      - name: Check third-party Rust license allowlist
+        run: cargo deny check licenses
+
+      - name: Fetch crate sources for offline notice generation
+        run: cargo fetch --locked
+
+      - name: Verify generated third-party notices
+        run: python3 scripts/generate_third_party_notices.py --check
+
+      - name: Upload license compliance evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: license-compliance-${{ github.sha }}
+          path: |
+            license-compliance-report.json
+            legal/THIRD_PARTY_NOTICES.md
+
+  python-quality:
+    name: Python Quality
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint Python
+        run: uv run ruff check .
+
+      - name: Type-check Python binding
+        run: >-
+          uv run mypy crates/gf-bindings-py/python/graphforge
+          --strict-optional --show-error-codes
+
+      - name: Scan Python binding
+        run: uv run bandit -c pyproject.toml -r crates/gf-bindings-py/python
+
+  gherkin-lint:
+    name: Gherkin Syntax
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.gherkin == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Validate Gherkin syntax
+        shell: bash
+        run: |
+          node tests/features/node/node_modules/@cucumber/cucumber/bin/cucumber.js \
+            "tests/features/api/**/*.feature" \
+            "tests/features/tck/features/**/*.feature" \
+            --dry-run --no-strict > /tmp/gherkin-lint.log 2>&1 || EC=$?
+          EC=${EC:-0}
+          cat /tmp/gherkin-lint.log
+          if grep -iE "^Parse error|^SyntaxError|^Error: Parse" /tmp/gherkin-lint.log; then
+            echo "Gherkin parse errors found"
+            exit 1
+          fi
+          if [[ "$EC" -ne 0 && "$EC" -ne 2 ]]; then
+            echo "cucumber-js exited with unexpected code $EC"
+            exit "$EC"
+          fi
+
+  agent-skills:
+    name: Agent Skills
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.agent_skills == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test package and offline artifact
+        run: |
+          pnpm test:agent-skills
+          pnpm format:agent-skills
+          pnpm smoke:agent-skills
+
+  rust-lint:
+    name: Rust Quality
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: clippy, rustfmt
+
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  rust-test:
+    name: Rust Tests
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      BDD_TIMING_DIR: target/bdd-timings
+      BDD_RUNNER_LABEL: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run workspace tests once
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Upload Rust BDD timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bdd-rust-timings
+          path: target/bdd-timings/
+          if-no-files-found: warn
+          retention-days: 14
+
+  python-binding:
+    name: Python Binding
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.bindings == 'true'
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
+
+      - name: Cache Cargo build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: >-
+            ${{ runner.os }}-python-binding-v1-${{
+            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
+            'crates/**/*.rs', 'crates/gf-bindings-py/pyproject.toml') }}
+
+      - name: Build same-SHA wheel
+        shell: bash
+        run: >-
+          uvx maturin build
+          --manifest-path crates/gf-bindings-py/Cargo.toml
+          --profile dev
+          --out dist
+
+      - name: Prove isolated native package
+        shell: bash
+        run: |
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          uv venv /tmp/gf-native --python 3.13
+          uv pip install --python /tmp/gf-native/bin/python "${wheels[0]}"
+          /tmp/gf-native/bin/python - <<'PY'
+          import importlib.util
+
+          assert importlib.util.find_spec("networkx") is None
+          assert importlib.util.find_spec("igraph") is None
+          PY
+          for test_file in crates/gf-bindings-py/tests/*.py; do
+            /tmp/gf-native/bin/python "$test_file"
+          done
+          GRAPHFORGE_PYTHON_PARITY_REPORT=dist/python-non-cypher-classification.json \
+            /tmp/gf-native/bin/python \
+            crates/gf-bindings-py/tests/non_cypher_release.py \
+            --classification-only
+
+      - name: Install test dependencies and wheel
+        shell: bash
+        run: |
+          uv sync --all-extras
+          uv pip install dist/*.whl
+
+      - name: Run Python unit, integration, and BDD tests
+        shell: bash
+        run: |
+          mkdir -p ~/.graphforge/datasets
+          curl -L -o ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
+            https://snap.stanford.edu/data/facebook_combined.txt.gz
+          uv run --no-sync pytest tests/unit tests/integration tests/features \
+            -n auto --tb=short
+
+      - name: Run audited downstream consumers
+        env:
+          GRAPHFORGE_WHEEL_SHA: ${{ github.sha }}
+        run: >-
+          uv run --isolated --no-project --with dist/*.whl
+          python scripts/ci/run-native-consumers.py
+
+      - name: Execute the agent-grounding notebook twice
+        env:
+          GRAPHFORGE_WHEEL_SHA: ${{ github.sha }}
+        run: >-
+          uv run --isolated --no-project
+          --with dist/*.whl
+          --with nbclient==0.11.0
+          --with ipykernel==7.3.0
+          python scripts/ci/run-native-notebook.py
+
+      - name: Record and upload wheel provenance
+        shell: bash
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > dist/artifact-sha
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          python3 scripts/ci/write-binding-parity-evidence.py \
+            --language python \
+            --artifact "${wheels[0]}" \
+            --classification dist/python-non-cypher-classification.json \
+            --package-manifest crates/gf-bindings-py/pyproject.toml \
+            --case check_surface_projection \
+            --case check_native_artifact_and_no_fallback \
+            --case check_lifecycle_checkpoint_errors_and_reopen \
+            --case check_m20_m21_native_projection \
+            --output dist/python-binding-parity-evidence.json
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-wheel-linux-x64
+          path: |
+            dist/*.whl
+            dist/artifact-sha
+            dist/python-non-cypher-classification.json
+            dist/python-binding-parity-evidence.json
+
+  node-binding:
+    name: Node Binding
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.bindings == 'true'
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
+
+      - name: Cache Cargo build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: >-
+            ${{ runner.os }}-node-binding-v2-${{
+            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
+            'crates/**/*.rs', 'package.json', 'pnpm-lock.yaml') }}
+
+      - name: Install workspace dependencies
+        run: pnpm install
+
+      - name: Build same-SHA addon
+        # Pull requests need a behaviorally correct native addon, not release
+        # code generation. Cross-platform release builds remain in publish.yaml.
+        run: pnpm --filter @graphforge/node exec napi build --platform
+
+      - name: Run Node acceptance tests
+        shell: bash
+        run: |
+          pnpm --filter @graphforge/node test:smoke
+          pnpm --filter @graphforge/node test
+          pnpm --filter @graphforge/node format:check
+
+      - name: Run Node BDD suite
+        working-directory: tests/features/node
+        shell: bash
+        run: |
+          node node_modules/@cucumber/cucumber/bin/cucumber.js \
+            "../api/**/*.feature" \
+            --require-module ts-node/register \
+            --require "step_definitions/**/*.ts" \
+            --tags "not @skip-node" \
+            --format progress
+
+      - name: Record and upload addon parity evidence
+        shell: bash
+        run: |
+          addons=(crates/gf-bindings-node/*.node)
+          test "${#addons[@]}" -eq 1
+          python3 scripts/ci/write-binding-parity-evidence.py \
+            --language node \
+            --artifact "${addons[0]}" \
+            --classification crates/gf-bindings-node/tests/non-cypher-parity-policy.json \
+            --package-manifest crates/gf-bindings-node/package.json \
+            --case "the Node classification is total, frozen, and backed by non-skipped native tests" \
+            --case "the native Node facade preserves deterministic IPC through persistence and reopen" \
+            --case "a future project format fails structurally without mutating the project" \
+            --output crates/gf-bindings-node/node-binding-parity-evidence.json
+
+      - name: Upload addon parity evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-addon-linux-x64
+          path: |
+            crates/gf-bindings-node/*.node
+            crates/gf-bindings-node/tests/non-cypher-parity-policy.json
+            crates/gf-bindings-node/node-binding-parity-evidence.json
+
+  concurrency-matrix:
+    name: Concurrency Matrix
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.bindings == 'true'
+    timeout-minutes: 25
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: >-
+            ${{ runner.os }}-concurrency-matrix-v1-${{
+            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
+            'crates/**/*.rs', 'pnpm-lock.yaml') }}
+
+      - name: Build Python wheel and Node addon
+        shell: bash
+        run: |
+          uvx maturin build \
+            --manifest-path crates/gf-bindings-py/Cargo.toml \
+            --profile dev \
+            --out dist
+          uv venv /tmp/gf-concurrency --python 3.13
+          uv pip install --python /tmp/gf-concurrency/bin/python dist/*.whl
+          pnpm install --frozen-lockfile
+          pnpm --filter @graphforge/node exec napi build --platform
+
+      - name: Run required short concurrency matrix
+        shell: bash
+        run: >-
+          /tmp/gf-concurrency/bin/python
+          scripts/ci/concurrency-short-gate.py run
+          --output "${{ runner.temp }}/concurrency-short-evidence"
+
+      - name: Upload short concurrency evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: concurrency-short-${{ github.sha }}
+          path: ${{ runner.temp }}/concurrency-short-evidence/
+          if-no-files-found: warn
+
+  # #[cfg(windows)] project-root lock unit tests in gf-storage do not run on
+  # Linux rust-test. Host them here — not on Binding RC python-windows (#2700).
+  windows-gf-storage-locks:
+    name: Windows gf-storage Locks
+    runs-on: blacksmith-4vcpu-windows-2025
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: >-
+            ${{ runner.os }}-gf-storage-locks-v1-${{
+            hashFiles('Cargo.lock', 'crates/gf-storage/**') }}
+
+      - name: Run Windows project-root lock unit tests
+        shell: bash
+        run: >-
+          cargo test -p gf-storage project_generation::tests:: --lib
+          --no-fail-fast
+
+  ci-gate:
+    name: CI Gate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: always()
+    needs:
+      - changes
+      - policy
+      - python-quality
+      - gherkin-lint
+      - agent-skills
+      - rust-lint
+      - rust-test
+      - python-binding
+      - node-binding
+      - concurrency-matrix
+      - windows-gf-storage-locks
+    steps:
+      - name: Checkout gate implementation
+        uses: actions/checkout@v6
+
+      - name: Require every applicable gate
+        run: >-
+          scripts/ci/require-gates.sh
+          "${{ needs.changes.result }}"
+          "${{ needs.policy.result }}"
+          "${{ needs.python-quality.result }}"
+          "${{ needs.gherkin-lint.result }}"
+          "${{ needs.agent-skills.result }}"
+          "${{ needs.rust-lint.result }}"
+          "${{ needs.rust-test.result }}"
+          "${{ needs.python-binding.result }}"
+          "${{ needs.node-binding.result }}"
+          "${{ needs.concurrency-matrix.result }}"
+          "${{ needs.windows-gf-storage-locks.result }}"

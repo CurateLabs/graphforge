@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "contract": "graphforge-checkpoint-recovery/1",
+  "issue": 2481,
+  "command_groups": {
+    "rust-storage": "cargo test -p gf-storage --lib project_checkpoints::tests --no-fail-fast",
+    "rust-api": "cargo test -p gf-api --lib checkpoints::tests --no-fail-fast",
+    "python": "python crates/gf-bindings-py/tests/checkpoints.py",
+    "node": "node --test crates/gf-bindings-node/tests/checkpoints.test.mjs",
+    "cli": "cargo test -p gf-cli --no-fail-fast"
+  },
+  "cases": [
+    {
+      "id": "checkpoint-registry-lifecycle",
+      "layer": "rust-storage",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "Create, list, delete, exact replay, conflict handling, UUID identity, canonical ordering, and restart are deterministic.",
+      "expected_columns": ["checkpoint_uuid", "name", "source_generation_uuid", "operation"],
+      "expected_errors": ["GF_IDEMPOTENCY_CONFLICT", "GF_CHECKPOINT_EXISTS", "GF_VALIDATION", "GF_CHECKPOINT_REGISTRY_CORRUPT"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "create_list_delete_and_replays_are_deterministic"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "identity_is_stable_across_independent_projects"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "conflicts_names_and_corruption_fail_closed"}
+      ]
+    },
+    {
+      "id": "checkpoint-pin-lease-cleanup",
+      "layer": "rust-storage",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "Active and deleted pins plus open leases control cleanup across restart without leaking lock, staging, trash, or cache state.",
+      "expected_columns": [],
+      "expected_errors": ["GF_CHECKPOINT_NOT_FOUND", "GF_VALIDATION", "GF_WRITER_BUSY"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "opened_checkpoint_generation_remains_pinned_after_delete"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "checkpoint_pin_and_open_lease_control_recovery_cleanup"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "checkpoint_pin_survives_process_restart"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "checkpoint_cleanup_removes_all_transient_resources"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "exact_input_bounds_and_writer_lock_are_enforced"}
+      ]
+    },
+    {
+      "id": "complete-workspace-shapes",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "m20", "m21"],
+      "criterion": "Revert restores real domain records for every supported workspace shape rather than proving capability toggles alone.",
+      "expected_columns": ["operation"],
+      "expected_errors": [],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "revert_accepts_graph_m20_and_full_m21_checkpoint_shapes_after_reopen"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"}
+      ]
+    },
+    {
+      "id": "pinned-view-current-advance",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "criterion": "An open read-only view remains pinned while current advances and after its named reference is deleted.",
+      "expected_columns": [],
+      "expected_errors": ["GF_READ_ONLY_VIEW", "GF_CHECKPOINT_NOT_FOUND"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"}
+      ]
+    },
+    {
+      "id": "diff-pagination-cancellation-bounds",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "criterion": "Summary and logical-record diffs are canonically ordered, page-bound, selector-safe, and cancellable.",
+      "expected_columns": ["scope", "change", "record_uuid"],
+      "expected_errors": ["GF_CANCELLED", "GF_PAGE_SNAPSHOT_GONE", "GF_VALIDATION"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "list_and_summary_diff_are_arrow_ordered_and_page_bound"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "record_diff_uses_registered_logical_adapters"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "record_diff_pagination_cancellation_and_bounds"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/checkpoints.test.mjs", "symbol": "checkpoint pagination and diff cancellation use the shared adapter"}
+      ]
+    },
+    {
+      "id": "revert-publication-failpoints",
+      "layer": "rust-storage",
+      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "criterion": "Validation, fsync, CURRENT replacement, and root-sync interruptions expose exactly the previous or new complete authority.",
+      "expected_columns": ["result_generation_uuid"],
+      "expected_errors": ["GF_VALIDATION"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "revert_publication_failpoint_matrix"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "revert_validation_failure_preserves_prior_current"}
+      ]
+    },
+    {
+      "id": "registry-publication-failpoints",
+      "layer": "rust-storage",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "Registry create/delete interruption recovers exactly the previous or next checksummed revision and cleans temporary state.",
+      "expected_columns": [],
+      "expected_errors": ["GF_CHECKPOINT_REGISTRY_CORRUPT"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "registry_failpoints_recover_exact_previous_or_next_revision"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "seeded_create_and_delete_failpoints_recover_exact_previous_or_next_revision"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "recovery_rejects_missing_or_tampered_staged_pair"}
+      ]
+    },
+    {
+      "id": "corrupt-future-dangling-rejection",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "m20", "m21"],
+      "criterion": "Invalid digest, missing generation, corrupt participant, future schema, invalid ontology/config, and dangling M20/M21 references fail closed without moving current.",
+      "expected_columns": [],
+      "expected_errors": ["GF_CHECKPOINT_REGISTRY_CORRUPT", "GF_PROJECT_CORRUPT", "GF_VALIDATION"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "revert_source_validation_rejects_cross_domain_dangling_assertion"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "checkpoint_revert_corruption_matrix_fails_closed"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "checksummed_but_impossible_registry_identities_fail_closed"}
+      ]
+    },
+    {
+      "id": "revert-identity-and-visibility",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "Canonical revert UUIDs match the frozen vector and the new authority is visible on the same persistent or in-memory facade.",
+      "expected_columns": ["operation", "result_generation_uuid", "restoration_uuid"],
+      "expected_errors": [],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_checkpoints.rs", "symbol": "revert_identity_matches_frozen_golden_vector"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "revert_is_visible_on_the_same_graphforge_instance"},
+        {"kind": "rust", "path": "crates/gf-api/src/checkpoints.rs", "symbol": "in_memory_revert_preserves_its_backing_project_owner"}
+      ]
+    },
+    {
+      "id": "python-same-sha-surface",
+      "layer": "python",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "The produced Python extension exposes canonical Arrow receipts, UUID identity, ordering, read-only views, diff, revert, and delete from the checked SHA.",
+      "expected_columns": ["checkpoint_uuid", "source_generation_uuid", "operation", "result_generation_uuid"],
+      "expected_errors": [],
+      "tests": [
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/checkpoints.py", "symbol": "main"}
+      ]
+    },
+    {
+      "id": "node-same-sha-surface",
+      "layer": "node",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "The produced Node addon exposes canonical Arrow receipts, UUID identity, selector behavior, ordering, cancellation, read-only views, revert, and delete from the checked SHA.",
+      "expected_columns": ["operation", "result_generation_uuid"],
+      "expected_errors": ["GF_READ_ONLY_VIEW", "GF_CHECKPOINT_NOT_FOUND", "GF_CANCELLED"],
+      "tests": [
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/checkpoints.test.mjs", "symbol": "checkpoint surfaces delegate to Rust and views stay read-only"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/checkpoints.test.mjs", "symbol": "checkpoint pagination and diff cancellation use the shared adapter"}
+      ]
+    },
+    {
+      "id": "cli-same-sha-surface",
+      "layer": "cli",
+      "workspace_shapes": ["graph-only"],
+      "criterion": "The CLI enforces idempotency, disambiguates a checkpoint literally named current, emits Arrow IPC, and returns stable error codes from the checked SHA.",
+      "expected_columns": ["operation", "checkpoint_uuid", "source_generation_uuid"],
+      "expected_errors": ["GF_CHECKPOINT_NOT_FOUND"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-cli/tests/checkpoints.rs", "symbol": "checkpoint_cli_emits_arrow_and_stable_errors"},
+        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "revert_requires_reason_and_idempotency_key"},
+        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "create_and_delete_require_idempotency_keys"},
+        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "diff_disambiguates_current_from_a_checkpoint_named_current"}
+      ]
+    },
+    {
+      "id": "same-sha-artifact-evidence",
+      "layer": "rust-api",
+      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "criterion": "One PR-head SHA binds the Rust tests, produced Python wheel, Node addon/package, and CLI binary to successful exact manifest commands.",
+      "expected_columns": [],
+      "expected_errors": [],
+      "expected_artifacts": ["rust-test-sha", "python-wheel-sha", "node-package-sha", "cli-binary-sha", "checkpoint-recovery-report"],
+      "tests": [
+        {"kind": "workflow-job", "path": ".github/workflows/checkpoint-recovery-gate.yml", "symbol": "checkpoint-evidence"}
+      ]
+    }
+  ]
+}

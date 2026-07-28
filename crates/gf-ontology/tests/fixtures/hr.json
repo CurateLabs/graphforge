@@ -1,0 +1,38 @@
+{
+  "ontology_id": "hr",
+  "version": "v1",
+  "entity_types": [
+    {"name": "Person", "abstract": false},
+    {"name": "Employee", "abstract": false, "parent": "Person"},
+    {"name": "Manager", "abstract": false, "parent": "Employee"},
+    {"name": "Department", "abstract": false},
+    {"name": "Project", "abstract": false}
+  ],
+  "relation_types": [
+    {"name": "WORKS_IN", "src": "Employee", "dst": "Department", "semantic": {"transitive": false, "symmetric": false, "reflexive": false, "functional": false, "inverse_functional": false, "acyclic": false}},
+    {"name": "MANAGES", "src": "Manager", "dst": "Department", "semantic": {"transitive": true, "symmetric": false, "reflexive": false, "functional": false, "inverse_functional": false, "acyclic": false}},
+    {"name": "REPORTS_TO", "src": "Employee", "dst": "Manager", "semantic": {"transitive": false, "symmetric": false, "reflexive": false, "functional": false, "inverse_functional": false, "acyclic": false}},
+    {"name": "ASSIGNED_TO", "src": "Employee", "dst": "Project", "semantic": {"transitive": false, "symmetric": false, "reflexive": false, "functional": false, "inverse_functional": false, "acyclic": false}},
+    {"name": "IS_FRIEND_OF", "src": "Person", "dst": "Person", "semantic": {"transitive": false, "symmetric": true, "reflexive": false, "functional": false, "inverse_functional": false, "acyclic": false}}
+  ],
+  "properties": [
+    {"owner": "Person", "name": "name", "type": "utf8", "nullable": false, "multivalued": false},
+    {"owner": "Person", "name": "email", "type": "utf8", "nullable": true, "multivalued": false},
+    {"owner": "Person", "name": "age", "type": "int64", "nullable": true, "multivalued": false},
+    {"owner": "Employee", "name": "employee_id", "type": "utf8", "nullable": false, "multivalued": false},
+    {"owner": "Employee", "name": "hire_date", "type": "date_time", "nullable": false, "multivalued": false},
+    {"owner": "Manager", "name": "title", "type": "utf8", "nullable": true, "multivalued": false},
+    {"owner": "Department", "name": "dept_name", "type": "utf8", "nullable": false, "multivalued": false},
+    {"owner": "Department", "name": "budget", "type": "float64", "nullable": true, "multivalued": false},
+    {"owner": "Project", "name": "project_name", "type": "utf8", "nullable": false, "multivalued": false},
+    {"owner": "Project", "name": "deadline", "type": "date_time", "nullable": true, "multivalued": false},
+    {"owner": "Project", "name": "active", "type": "bool", "nullable": false, "multivalued": false}
+  ],
+  "constraints": [
+    {"owner": "Employee", "kind": "unique_property", "expr_json": "{\"property\":\"employee_id\"}"},
+    {"owner": "Department", "kind": "required_property", "expr_json": "{\"property\":\"dept_name\"}"}
+  ],
+  "migrations": [
+    {"from_version": "v1", "to_version": "v2", "transform_kind": "rename_type:Person→Human"}
+  ]
+}

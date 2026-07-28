@@ -1,0 +1,25 @@
+{
+  "contract_version": 1,
+  "required_phase_fields": [
+    "phase_id",
+    "project",
+    "ontology_mode",
+    "generation_uuid",
+    "node_count",
+    "edge_count",
+    "density",
+    "runtime_catalog",
+    "ontology_version",
+    "ontology_fingerprint",
+    "known_unknown_ratio",
+    "warnings",
+    "arrow_fingerprints",
+    "structured_failures"
+  ],
+  "authoritative_comparisons": [
+    "source-before-malformed-batch == source-after-malformed-batch",
+    "target-before-invalid-handoff == target-after-invalid-handoff",
+    "source-before-close == source-after-reopen",
+    "target-before-close == target-after-reopen"
+  ]
+}

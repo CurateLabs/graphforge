@@ -1,0 +1,153 @@
+name: Rust Non-Cypher Surface Gate
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: rust-non-cypher-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  surface:
+    name: SHA-bound Rust non-Cypher evidence
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    env:
+      EVIDENCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.EVIDENCE_SHA }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-non-cypher-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
+
+      - name: Validate exhaustive inventory
+        env:
+          GITHUB_SHA: ${{ env.EVIDENCE_SHA }}
+        run: |
+          mkdir -p non-cypher-evidence
+          python3 scripts/ci/non-cypher-surface-gate.py \
+            --report non-cypher-evidence/inventory-report.json
+          python3 scripts/ci/test-non-cypher-surface-gate.py
+
+      - name: Execute public Rust surface matrix
+        run: |
+          started_at=$(date +%s)
+          cargo test -p gf-api --lib --no-fail-fast
+          cargo test -p gf-api \
+            --test knowledge_isolation \
+            --test public_lifecycle_conformance \
+            --test m22_m18_public_surface \
+            --test m22_m19_public_surface \
+            --test m22_provider_public_surface \
+            --test provider_session \
+            --test public_facade_remaining_conformance \
+            --no-fail-fast
+          finished_at=$(date +%s)
+          echo "$((finished_at - started_at))" > non-cypher-evidence/suite-duration-seconds
+
+      - name: Produce exact SHA-bound report
+        run: |
+          mkdir -p non-cypher-evidence
+          cp tests/contracts/non-cypher-rust-surface.json non-cypher-evidence/
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          inventory = root / "tests/contracts/non-cypher-rust-surface.json"
+          manifest = json.loads(inventory.read_text())
+          duration = int(
+              (root / "non-cypher-evidence/suite-duration-seconds").read_text().strip()
+          )
+          test_names = [
+              "knowledge_isolation",
+              "public_lifecycle_conformance",
+              "m22_m18_public_surface",
+              "m22_m19_public_surface",
+              "m22_provider_public_surface",
+              "provider_session",
+              "public_facade_remaining_conformance",
+          ]
+          binaries = {}
+          for name in test_names:
+              matches = [
+                  path for path in (root / "target/debug/deps").glob(f"{name}-*")
+                  if path.is_file() and "." not in path.name
+              ]
+              if len(matches) != 1:
+                  raise SystemExit(f"expected one test binary for {name}, found {matches}")
+              binaries[name] = hashlib.sha256(matches[0].read_bytes()).hexdigest()
+          evidence = []
+          for group_name, group in manifest["method_evidence_groups"].items():
+              test_ids = [ref["symbol"] for ref in group["test_refs"]]
+              for identity in group["ids"]:
+                  evidence.append({
+                      "kind": "public_method",
+                      "identity": identity,
+                      "evidence_group": group_name,
+                      "test_ids": test_ids,
+                      "outcome": "passed",
+                      "duration_seconds": duration,
+                      "duration_scope": "complete_required_suite",
+                      "error_code": None,
+                  })
+          m18 = manifest["m18_registry"]["release-tested"]
+          for identity in m18["ids"]:
+              evidence.append({
+                  "kind": "m18_registry",
+                  "identity": identity,
+                  "test_ids": [ref["symbol"] for ref in m18["test_refs"]],
+                  "outcome": "passed",
+                  "duration_seconds": duration,
+                  "duration_scope": "complete_required_suite",
+                  "error_code": None,
+              })
+          for group_name, group in manifest["m19_evidence_groups"].items():
+              test_ids = [ref["symbol"] for ref in group["test_refs"]]
+              for identity in group["ids"]:
+                  evidence.append({
+                      "kind": "m19_contracts",
+                      "identity": identity,
+                      "evidence_group": group_name,
+                      "test_ids": test_ids,
+                      "outcome": "passed",
+                      "duration_seconds": duration,
+                      "duration_scope": "complete_required_suite",
+                      "error_code": None,
+                  })
+          report = {
+              "schema": "graphforge-rust-non-cypher-evidence/1",
+              "source_sha": os.environ["EVIDENCE_SHA"],
+              "status": "passed",
+              "suite_duration_seconds": duration,
+              "inventory_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
+              "test_binary_sha256": binaries,
+              "evidence": evidence,
+              "commands": [
+                  "cargo test -p gf-api --lib --no-fail-fast",
+                  "cargo test -p gf-api --test knowledge_isolation --test public_lifecycle_conformance --test public_facade_remaining_conformance --test m22_m18_public_surface --test m22_m19_public_surface --test m22_provider_public_surface --test provider_session --no-fail-fast",
+              ],
+          }
+          Path("non-cypher-evidence/report.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
+          path: non-cypher-evidence/
+          if-no-files-found: error

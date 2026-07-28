@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "generator": "graphforge.synthetic-cyber-intrusion",
+  "version": "1.0.0",
+  "seed": 2467001,
+  "entities": {"hosts": 4, "identities": 2, "processes": 3, "alerts": 3, "vulnerabilities": 2, "indicators": 3},
+  "graph": {"directed": true, "expected_nodes": 17, "false_phase_nodes": 18, "initial_edges": 18, "false_edges": 1, "corrected_edges": 18},
+  "privacy": "deterministic synthetic data only"
+}

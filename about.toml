@@ -1,0 +1,28 @@
+# cargo-about configuration for third-party notices shipped with binary
+# redistributions (wheels, native Node addons, CLI). Regenerate with:
+#   make third-party-notices
+
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "BUSL-1.1",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "zlib-acknowledgement",
+]
+
+private = { ignore = true }
+
+# Binary redistributions do not ship test-only crates (for example cucumber).
+ignore-dev-dependencies = true

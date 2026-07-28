@@ -1,0 +1,8 @@
+{
+  "generator_version": 1,
+  "seed": 2472001,
+  "synthetic_only": true,
+  "fixed_uuid_namespace": "018f0f4e-7b8c-7000-8000-00000004xxxx",
+  "nodes": ["Observation Alpha", "Observation Beta", "Source Record"],
+  "phases": ["stable-baseline", "unresolved-alternatives", "selection-first", "selection-change", "selection-clear", "reopen"]
+}

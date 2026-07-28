@@ -1,0 +1,20 @@
+ontology_id: synthetic-emergent-infrastructure
+version: "1.0.0-analyst-approved"
+entity_types:
+  - name: Host
+    abstract: false
+  - name: Address
+    abstract: false
+  - name: Service
+    abstract: false
+properties:
+  - {owner: Host, name: name, type: utf8, nullable: false}
+  - {owner: Host, name: risk_score, type: float64, nullable: true}
+  - {owner: Address, name: value, type: utf8, nullable: false}
+  - {owner: Service, name: name, type: utf8, nullable: false}
+  - {owner: Service, name: port, type: int64, nullable: false}
+relation_types:
+  - {name: RESOLVES_TO, src: Host, dst: Address, semantic: {}}
+  - {name: EXPOSES, src: Host, dst: Service, semantic: {}}
+constraints: []
+migrations: []

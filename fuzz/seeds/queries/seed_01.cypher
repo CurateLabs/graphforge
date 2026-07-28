@@ -1,0 +1,1 @@
+MATCH (a)-[r:KNOWS]->(b) WHERE a.age > 30 RETURN a, b ORDER BY a.name DESC LIMIT 10

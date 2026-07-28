@@ -1,0 +1,6 @@
+# cargo-fuzz build + run artifacts. Seed inputs live in `seeds/` (committed);
+# `corpus/` is the writable, libfuzzer-grown corpus (ephemeral, never committed).
+/target
+/corpus
+/artifacts
+/coverage

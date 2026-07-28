@@ -1,0 +1,18 @@
+[package]
+name = "gf-provenance"
+description = "GraphForge lineage and confidence models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+gf-core = { path = "../gf-core" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

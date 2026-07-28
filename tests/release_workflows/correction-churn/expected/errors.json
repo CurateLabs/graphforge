@@ -1,0 +1,6 @@
+{
+  "structured_failures": [
+    {"step_id":"CC-04","code":"GF_VALIDATION_ERROR","class":"validation","publication":"none"},
+    {"step_id":"CC-09","code":"GF_IDEMPOTENCY_CONFLICT","class":"conflict","publication":"none"}
+  ]
+}

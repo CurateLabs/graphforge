@@ -1,0 +1,94 @@
+---
+source: crates/gf-ir/tests/golden.rs
+---
+{
+  "ir_version": {
+    "major": 0,
+    "minor": 3,
+    "patch": 0
+  },
+  "dialect": "openCypher",
+  "ontology_version": "v1:b1beadfb8bdd6dcbae7c4dbe879ad203f53e7568e219f8f26ec3c60a489e1d33",
+  "ontology_mode": "advisory",
+  "feature_flags": [],
+  "ops": [
+    {
+      "NodeScan": {
+        "var": 0,
+        "ty": 0
+      }
+    },
+    {
+      "Expand": {
+        "src": 0,
+        "edge": 1,
+        "dst": 2,
+        "rel_ty": 4,
+        "dir": "Out",
+        "min_hops": 1,
+        "max_hops": 2
+      }
+    },
+    {
+      "NodeScan": {
+        "var": 2,
+        "ty": 0
+      }
+    },
+    {
+      "Project": {
+        "items": [
+          {
+            "expr": 1,
+            "alias": "hops",
+            "out_var": null
+          },
+          {
+            "expr": 2,
+            "alias": "rels",
+            "out_var": null
+          },
+          {
+            "expr": 5,
+            "alias": "ns",
+            "out_var": null
+          }
+        ],
+        "distinct": false
+      }
+    }
+  ],
+  "exprs": {
+    "nodes": [
+      {
+        "VarRef": 1
+      },
+      {
+        "FunctionCall": {
+          "name": "length",
+          "args": [
+            0
+          ]
+        }
+      },
+      {
+        "VarRef": 1
+      },
+      {
+        "VarRef": 0
+      },
+      {
+        "VarRef": 1
+      },
+      {
+        "FunctionCall": {
+          "name": "_path_nodes",
+          "args": [
+            3,
+            4
+          ]
+        }
+      }
+    ]
+  }
+}

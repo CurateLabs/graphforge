@@ -1,0 +1,1 @@
+{"schema_version":1,"required":["search","cluster","paths","rank","similar","recorded_run","strict_reopen"],"ordering":"stable public facade order"}

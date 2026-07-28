@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "unknown_label": "GF_PLAN",
+  "invalid_property": "GF_VALIDATION",
+  "stale_search": "structured error; never silent",
+  "cancelled": "GF_CANCELLED"
+}

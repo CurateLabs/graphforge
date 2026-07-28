@@ -1,0 +1,51 @@
+ontology_id: probate_genealogy
+version: "1.0.0"
+entity_types:
+  - name: RecordSubject
+    abstract: true
+  - name: Person
+    parent: RecordSubject
+  - name: Document
+    abstract: true
+  - name: BirthRecord
+    parent: Document
+  - name: Will
+    parent: Document
+  - name: Household
+  - name: Estate
+  - name: Beneficiary
+relation_types:
+  - name: PARENT_OF
+    src: Person
+    dst: Person
+    semantic: {acyclic: true}
+  - name: MEMBER_OF
+    src: Person
+    dst: Household
+    semantic: {}
+  - name: MENTIONS
+    src: BirthRecord
+    dst: Person
+    semantic: {}
+  - name: BENEFICIARY_OF
+    src: Person
+    dst: Estate
+    semantic: {inverse_functional: true, functional: true}
+properties:
+  - {owner: Person, name: name, type: utf8, nullable: false}
+  - {owner: Person, name: birth_year, type: int64, nullable: true}
+  - {owner: Person, name: aliases, type: list, nullable: true, multivalued: true}
+  - {owner: BirthRecord, name: title, type: utf8, nullable: false}
+  - {owner: BirthRecord, name: recorded_on, type: date_time, nullable: false}
+  - {owner: BirthRecord, name: verified, type: bool, nullable: true, default_json: "false"}
+  - {owner: Will, name: title, type: utf8, nullable: false}
+  - {owner: Estate, name: name, type: utf8, nullable: false}
+  - {owner: Estate, name: value, type: float64, nullable: true}
+  - {owner: Estate, name: filing_metadata, type: map, nullable: true}
+  - {owner: Beneficiary, name: share, type: float64, nullable: true}
+constraints:
+  - {owner: Person, kind: required_property, expr_json: '{"property":"name"}'}
+  - {owner: Person, kind: unique_property, expr_json: '{"property":"name"}'}
+  - {owner: Beneficiary, kind: range_check, expr_json: '{"property":"share","min":0,"max":1}'}
+  - {owner: Estate, kind: custom_expr, expr_json: '{"expression":"value >= 0"}'}
+migrations: []

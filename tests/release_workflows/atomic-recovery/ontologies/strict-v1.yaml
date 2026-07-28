@@ -1,0 +1,73 @@
+ontology_id: atomic_recovery
+version: "1.0.0"
+entity_types:
+  - {name: Thing, abstract: true}
+  - {name: Actor, abstract: true, parent: Thing}
+  - {name: Person, abstract: false, parent: Actor}
+  - {name: Organization, abstract: false, parent: Actor}
+  - {name: Artifact, abstract: true, parent: Thing}
+  - {name: Document, abstract: false, parent: Artifact}
+  - {name: Signal, abstract: true, parent: Thing}
+  - {name: Observation, abstract: false, parent: Signal}
+  - {name: Finding, abstract: false, parent: Signal}
+  - {name: Case, abstract: false, parent: Thing}
+  - {name: Location, abstract: false, parent: Thing}
+relation_types:
+  - name: MEMBER_OF
+    src: Person
+    dst: Organization
+    semantic: {acyclic: true}
+  - name: AUTHORED
+    src: Person
+    dst: Document
+    semantic: {functional: false}
+  - name: REFERENCES
+    src: Document
+    dst: Thing
+    semantic: {}
+  - name: OBSERVED
+    src: Observation
+    dst: Thing
+    semantic: {}
+  - name: SUPPORTS
+    src: Finding
+    dst: Observation
+    semantic: {acyclic: true}
+  - name: LOCATED_AT
+    src: Actor
+    dst: Location
+    semantic: {functional: true}
+  - name: INVESTIGATES
+    src: Case
+    dst: Finding
+    semantic: {}
+  - name: RELATED_TO
+    src: Thing
+    dst: Thing
+    semantic: {symmetric: true}
+properties:
+  - {owner: Thing, name: name, type: utf8, nullable: false}
+  - {owner: Person, name: role, type: utf8, nullable: true}
+  - {owner: Person, name: risk_score, type: float64, nullable: true}
+  - {owner: Organization, name: sector, type: utf8, nullable: true}
+  - {owner: Document, name: body, type: utf8, nullable: false}
+  - {owner: Document, name: classified, type: bool, nullable: false, default_json: "false"}
+  - {owner: Observation, name: summary, type: utf8, nullable: false}
+  - {owner: Observation, name: confidence, type: float64, nullable: true}
+  - {owner: Finding, name: claim_key, type: utf8, nullable: false}
+  - {owner: Finding, name: severity, type: int64, nullable: false}
+  - {owner: Case, name: case_id, type: utf8, nullable: false}
+  - {owner: Location, name: region, type: utf8, nullable: false}
+  - {owner: RELATED_TO, name: weight, type: float64, nullable: true}
+  - {owner: SUPPORTS, name: weight, type: float64, nullable: true}
+constraints:
+  - {owner: Thing, kind: required_property, expr_json: '{"property":"name"}'}
+  - {owner: Document, kind: required_property, expr_json: '{"property":"body"}'}
+  - {owner: Observation, kind: required_property, expr_json: '{"property":"summary"}'}
+  - {owner: Finding, kind: required_property, expr_json: '{"property":"claim_key"}'}
+  - {owner: Finding, kind: unique_property, expr_json: '{"property":"claim_key"}'}
+  - {owner: Finding, kind: range_check, expr_json: '{"property":"severity","min":0,"max":10}'}
+  - {owner: Person, kind: range_check, expr_json: '{"property":"risk_score","min":0,"max":1}'}
+  - {owner: Case, kind: unique_property, expr_json: '{"property":"case_id"}'}
+  - {owner: Location, kind: required_property, expr_json: '{"property":"region"}'}
+migrations: []

@@ -1,0 +1,15 @@
+ontology_id: knowledge_evolution
+version: "1.0.0"
+entity_types:
+  - {name: Record, abstract: true}
+  - {name: Observation, parent: Record}
+  - {name: Document, parent: Record}
+relation_types:
+  - {name: SUPPORTED_BY, src: Observation, dst: Document, semantic: {}}
+properties:
+  - {owner: Record, name: name, type: utf8, nullable: false}
+  - {owner: Observation, name: summary, type: utf8, nullable: false}
+  - {owner: Document, name: body, type: utf8, nullable: false}
+constraints:
+  - {owner: Record, kind: required_property, expr_json: '{"property":"name"}'}
+migrations: []

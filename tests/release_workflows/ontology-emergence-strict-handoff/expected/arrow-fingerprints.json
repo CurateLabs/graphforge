@@ -1,0 +1,19 @@
+{
+  "contract_version": 1,
+  "comparison": "Canonical execute/find/rank/cluster RecordBatch equality before close and after reopen for source and target, plus curated source UUID mapping into the strict target.",
+  "required_tables": [
+    "phase_metrics",
+    "observed_vocabulary",
+    "source_scope",
+    "source_search",
+    "source_rank",
+    "source_clusters",
+    "source_analysis",
+    "curated_mapping",
+    "strict_target_scope",
+    "source_target_comparison"
+  ],
+  "dynamic_fingerprints": "SHA-bound run evidence records generated graph UUIDs; fixed expected files never substitute guessed UUIDs for public UUID generation.",
+  "fingerprint_algorithm": "sha256-canonical-arrow-ipc",
+  "ordering": "explicit-per-table"
+}

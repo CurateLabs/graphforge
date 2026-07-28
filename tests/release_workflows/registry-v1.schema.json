@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "workflow-registry-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "taxonomy", "evidence_schema", "scenarios"],
+  "properties": {
+    "schema": {"const": "workflow-registry-v1"},
+    "taxonomy": {"const": "ontology-complexity-v1"},
+    "evidence_schema": {"const": "evidence-envelope-v1"},
+    "scenarios": {"type": "array", "items": {"$ref": "#/$defs/scenario"}}
+  },
+  "$defs": {
+    "safePath": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_./-]+$"},
+    "scenario": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "version", "domain", "owning_issue", "bundle", "implementation", "evidence", "generator", "public_surfaces", "m18_m19", "m20_m21", "axes", "coverage_signature", "ontology_profile", "command", "resource", "timeout_seconds"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"}, "title": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "domain": {"type": "string", "minLength": 1}, "owning_issue": {"type": "integer", "minimum": 1},
+        "bundle": {"$ref": "#/$defs/safePath"}, "implementation": {"$ref": "#/$defs/safePath"}, "evidence": {"$ref": "#/$defs/safePath"},
+        "steps": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z]+-[0-9]+$"}},
+        "generator": {"type": "object", "required": ["path", "seed", "sha256"], "properties": {"path": {"$ref": "#/$defs/safePath"}, "seed": {"type": "integer"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "public_surfaces": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "m18_m19": {"type": "array", "items": {"type": "string"}}, "m20_m21": {"type": "array", "items": {"type": "string"}},
+        "axes": {"type": "object", "required": ["correction", "temporal", "epistemic", "binding"]}, "coverage_signature": {"type": "string", "minLength": 1}, "release_risk_rationale": {"type": "string", "minLength": 1}, "ontology_profile": {"type": "string"},
+        "command": {"type": "array", "minItems": 2, "items": {"type": "string"}}, "resource": {"enum": ["small", "medium", "large"]}, "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400}
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+ontology_id: synthetic-governed-infrastructure
+version: "1.0.0"
+entity_types:
+  - {name: GovernedObject, abstract: true}
+  - {name: GovernedAsset, parent: GovernedObject, abstract: true}
+  - {name: ComputeAsset, parent: GovernedAsset, abstract: true}
+  - {name: NetworkAsset, parent: GovernedAsset, abstract: true}
+  - {name: HostAsset, parent: ComputeAsset, abstract: false}
+  - {name: RouterAsset, parent: NetworkAsset, abstract: false}
+  - {name: NetworkIdentity, parent: GovernedObject, abstract: false}
+  - {name: ObservedService, parent: GovernedObject, abstract: false}
+  - {name: ApprovalRecord, parent: GovernedObject, abstract: false}
+  - {name: EvidenceBundle, parent: GovernedObject, abstract: false}
+  - {name: FindingNote, parent: GovernedObject, abstract: false}
+  - {name: PolicyControl, parent: GovernedObject, abstract: false}
+relation_types:
+  - {name: HAS_IDENTITY, src: HostAsset, dst: NetworkIdentity, semantic: {functional: false}}
+  - {name: EXPOSES_APPROVED, src: HostAsset, dst: ObservedService, semantic: {functional: false}}
+  - {name: APPROVED_BY, src: GovernedObject, dst: ApprovalRecord, semantic: {functional: false}}
+  - {name: SUPPORTED_BY, src: GovernedObject, dst: EvidenceBundle, semantic: {}}
+  - {name: DOCUMENTED_BY, src: GovernedObject, dst: FindingNote, semantic: {}}
+  - {name: CONSTRAINED_BY, src: HostAsset, dst: PolicyControl, semantic: {acyclic: true}}
+  - {name: ROUTES_TO, src: RouterAsset, dst: HostAsset, semantic: {acyclic: true}}
+  - {name: SHARES_IDENTITY, src: NetworkIdentity, dst: NetworkIdentity, semantic: {symmetric: true}}
+properties:
+  - {owner: GovernedObject, name: source_graph_uuid, type: utf8, nullable: false}
+  - {owner: GovernedObject, name: approval_record_uuid, type: utf8, nullable: false}
+  - {owner: GovernedAsset, name: name, type: utf8, nullable: false}
+  - {owner: HostAsset, name: risk_score, type: float64, nullable: true}
+  - {owner: HostAsset, name: environment, type: utf8, nullable: false}
+  - {owner: RouterAsset, name: asn, type: int64, nullable: true}
+  - {owner: NetworkIdentity, name: value, type: utf8, nullable: false}
+  - {owner: NetworkIdentity, name: family, type: utf8, nullable: false}
+  - {owner: ObservedService, name: name, type: utf8, nullable: false}
+  - {owner: ObservedService, name: port, type: int64, nullable: false}
+  - {owner: ObservedService, name: protocol, type: utf8, nullable: false}
+  - {owner: ApprovalRecord, name: analyst_id, type: utf8, nullable: false}
+  - {owner: ApprovalRecord, name: decision, type: utf8, nullable: false}
+  - {owner: EvidenceBundle, name: summary, type: utf8, nullable: false}
+  - {owner: FindingNote, name: body, type: utf8, nullable: false}
+  - {owner: PolicyControl, name: control_id, type: utf8, nullable: false}
+  - {owner: HAS_IDENTITY, name: confidence, type: float64, nullable: true}
+constraints:
+  - {owner: HostAsset, kind: required_property, expr_json: '{"property":"name"}'}
+  - {owner: HostAsset, kind: range_check, expr_json: '{"property":"risk_score","min":0,"max":1}'}
+  - {owner: NetworkIdentity, kind: required_property, expr_json: '{"property":"value"}'}
+  - {owner: NetworkIdentity, kind: unique_property, expr_json: '{"property":"value"}'}
+  - {owner: ObservedService, kind: range_check, expr_json: '{"property":"port","min":1,"max":65535}'}
+  - {owner: ApprovalRecord, kind: required_property, expr_json: '{"property":"analyst_id"}'}
+migrations: []

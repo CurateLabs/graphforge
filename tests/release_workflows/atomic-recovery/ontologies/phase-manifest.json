@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "ontology_constant": true,
+  "phases": {
+    "seed": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"},
+    "graph_m20": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"},
+    "graph_m20_m21": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"},
+    "rejected": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict", "publication": "none"},
+    "recovered_previous": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"},
+    "recovered_new": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"},
+    "final": {"ontology": "ontologies/strict-v1.yaml", "mode": "strict"}
+  }
+}

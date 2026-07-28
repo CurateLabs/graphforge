@@ -1,0 +1,16 @@
+[package]
+name = "gf-io"
+description = "GraphForge CSV/JSON/Parquet/IPC sinks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+gf-core = { path = "../gf-core" }
+gf-storage = { path = "../gf-storage" }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

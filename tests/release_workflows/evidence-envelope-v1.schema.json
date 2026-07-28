@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "evidence-envelope-v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "commit_sha", "selected_scenarios", "environment", "bounded_command", "outcome", "sanitized_failure", "children"],
+  "properties": {
+    "schema": {"const": "evidence-envelope-v1"},
+    "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "selected_scenarios": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "environment": {"type": "object", "additionalProperties": false, "required": ["platform", "python"], "properties": {"platform": {"type": "string"}, "python": {"type": "string"}}},
+    "bounded_command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "outcome": {"enum": ["passed", "failed"]},
+    "sanitized_failure": {"type": ["string", "null"], "maxLength": 2000},
+    "children": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["scenario_id", "path", "sha256", "outcome", "duration_ms"], "properties": {"scenario_id": {"type": "string"}, "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "outcome": {"enum": ["passed", "failed"]}, "duration_ms": {"type": "integer", "minimum": 0}}}}
+  }
+}

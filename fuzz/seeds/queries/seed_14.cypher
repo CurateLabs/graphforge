@@ -1,0 +1,1 @@
+MATCH (n) SET n += {a: 1, b: 2} RETURN n

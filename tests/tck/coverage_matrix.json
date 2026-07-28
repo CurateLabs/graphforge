@@ -1,0 +1,9 @@
+{
+  "_meta": {
+    "corpus": "openCypher TCK tag 2024.3 (vendored, #874)",
+    "scenarios_total": 3897,
+    "scenarios_passing": 3855,
+    "model": "advisory-whole-corpus",
+    "note": "Advisory whole-corpus model (matches the v0.4.0 run-up). crates/gf-api/tests/bdd runs EVERY scenario (no @skip-rust filter) via cucumber `run()`, which does not exit on failures — individual unsupported scenarios failing does NOT break CI. The gate is PER-SCENARIO (set-based, not just a count, so a regression cannot be masked by an unrelated xpass): the committed baseline `tests/tck/passing_baseline.txt` lists the scenarios that pass (key `<feature-name>:<line>:<scenario-name>`). The run FAILS if ANY baseline scenario stops passing (regression), and emits a `TCK XPASS` warning listing scenarios that newly pass. This `scenarios_passing` is informational (= baseline line count); `scenarios_total` is cucumber's expanded count of the whole corpus. Lock in xpass with `BLESS_TCK_BASELINE=1 cargo test -p gf-api --test bdd`. NOTE: `@skip-rust` tags are now vestigial for the Rust run (it runs all); `@skip-node` still gates the Node binding's BDD run."
+  }
+}

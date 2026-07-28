@@ -1,0 +1,33 @@
+{
+  "contract_version": 1,
+  "states": [
+    {
+      "id": "exploratory-source",
+      "project_directory": "source",
+      "ontology_file": null,
+      "effective_mode": "exploratory",
+      "authority": "persisted RuntimeCatalog and graph generation"
+    },
+    {
+      "id": "advisory-live-session",
+      "project_directory": "source",
+      "ontology_file": "ontologies/emergent-advisory-v1.yaml",
+      "effective_mode": "advisory",
+      "authority": "live session only; analyst-authored file is input, not persisted project truth"
+    },
+    {
+      "id": "strict-governed-target",
+      "project_directory": "target",
+      "ontology_file": "ontologies/strict-target-v1.yaml",
+      "effective_mode": "strict",
+      "authority": "separately adopted committed ontology and project configuration"
+    }
+  ],
+  "forbidden_shortcuts": [
+    "copying source project files into target",
+    "editing generation or manifest internals",
+    "representing load_ontology as persistent adoption",
+    "automatic ontology inference or truth claims",
+    "pre-v1 migration"
+  ]
+}

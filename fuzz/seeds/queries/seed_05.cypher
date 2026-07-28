@@ -1,0 +1,1 @@
+MERGE (n:User {id: $id}) ON CREATE SET n.created = true ON MATCH SET n.seen = n.seen + 1 RETURN n

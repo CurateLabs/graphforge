@@ -1,0 +1,55 @@
+{
+  "contract_version": 1,
+  "identity": "ontology-emergence-strict-handoff-v1",
+  "seed": 2469,
+  "synthetic_only": true,
+  "analyst_approval": {
+    "actor": "synthetic-analyst-01",
+    "decision": "approve partial infrastructure vocabulary for advisory analysis",
+    "automatic_truth": false,
+    "approval_record_uuid": "018f0f4e-7b8c-7000-8000-00000000a001"
+  },
+  "phases": [
+    {"id": "01-empty", "nodes": 0, "edges": 0, "ontology": "none", "mode": "exploratory"},
+    {"id": "02-bulk", "nodes": 12, "edges": 6, "ontology": "none", "mode": "exploratory"},
+    {"id": "03-enriched", "nodes": 18, "edges": 22, "ontology": "none", "mode": "exploratory"},
+    {"id": "04-advisory", "nodes": 19, "edges": 22, "ontology": "emergent-advisory-v1", "mode": "advisory-session"},
+    {"id": "05-source-reopened", "nodes": 19, "edges": 22, "ontology": "none", "mode": "exploratory"},
+    {"id": "06-strict-target", "nodes": 6, "edges": 4, "ontology": "strict-target-v1", "mode": "strict"},
+    {"id": "07-rejected", "nodes": 6, "edges": 4, "ontology": "strict-target-v1", "mode": "strict"},
+    {"id": "08-reopened", "nodes": 6, "edges": 4, "ontology": "strict-target-v1", "mode": "strict"}
+  ],
+  "bulk_nodes": [
+    {"label": "Host", "name": "edge-gw-01", "risk_score": 0.4},
+    {"label": "Host", "name": "edge-gw-02", "risk_score": 0.55},
+    {"label": "Host", "name": "lab-host-01", "risk_score": 0.2},
+    {"label": "Host", "name": "lab-host-02", "risk_score": 0.25},
+    {"label": "Address", "value": "10.0.0.10"},
+    {"label": "Address", "value": "10.0.0.11"},
+    {"label": "Address", "value": "10.0.1.20"},
+    {"label": "Address", "value": "10.0.1.21"},
+    {"label": "Service", "name": "ssh", "port": 22},
+    {"label": "Service", "name": "https", "port": 443},
+    {"label": "Observation", "name": "scan-batch-a", "confidence": 0.7},
+    {"label": "Observation", "name": "scan-batch-b", "confidence": 0.65}
+  ],
+  "bulk_edges": [
+    {"src": 0, "dst": 4, "rel": "RESOLVES_TO"},
+    {"src": 1, "dst": 5, "rel": "RESOLVES_TO"},
+    {"src": 2, "dst": 6, "rel": "RESOLVES_TO"},
+    {"src": 0, "dst": 8, "rel": "EXPOSES"},
+    {"src": 1, "dst": 9, "rel": "EXPOSES"},
+    {"src": 10, "dst": 0, "rel": "OBSERVED_ON"}
+  ],
+  "source_labels": ["Host", "Address", "Service", "Observation", "AnalystNote"],
+  "source_relations": ["RESOLVES_TO", "EXPOSES", "OBSERVED_ON", "CORRELATES_WITH", "MENTIONS"],
+  "curated_mapping": {
+    "Host": "HostAsset",
+    "Address": "NetworkIdentity",
+    "Service": "ObservedService",
+    "source_uuid_property": "source_graph_uuid",
+    "approval_property": "approval_record_uuid"
+  },
+  "malformed_inputs": ["missing-edge-endpoint", "undeclared_property"],
+  "strict_invalid_inputs": ["unmapped_label", "undeclared_property"]
+}

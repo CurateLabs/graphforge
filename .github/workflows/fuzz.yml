@@ -1,0 +1,89 @@
+name: Daily Fuzz
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-fuzz
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz (daily)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    # cargo-fuzz needs nightly + a sanitizer runtime, so the targets live in a
+    # standalone crate outside the pinned-stable workspace. See fuzz/README.md.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+          # Pin glibc: the prebuilt cargo-fuzz binary is musl-static, whose libc
+          # is incompatible with the dynamically linked ASan runtime.
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Mount fuzz build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-daily-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1
+          path: fuzz/target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Lint + format check (fuzz crate)
+        working-directory: fuzz
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Prepare corpus directories
+        working-directory: fuzz
+        run: mkdir -p corpus/fuzz_parse corpus/fuzz_bind corpus/fuzz_ontology corpus/fuzz_exec
+
+      - name: Fuzz parser (60s)
+        working-directory: fuzz
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu fuzz_parse corpus/fuzz_parse seeds/queries -- -max_total_time=60 -rss_limit_mb=4096
+
+      - name: Fuzz binder (60s)
+        working-directory: fuzz
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu fuzz_bind corpus/fuzz_bind seeds/queries -- -max_total_time=60 -rss_limit_mb=4096
+
+      - name: Fuzz ontology loader (60s)
+        working-directory: fuzz
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu fuzz_ontology corpus/fuzz_ontology seeds/ontology -- -max_total_time=60 -rss_limit_mb=4096
+
+      - name: Fuzz exec (60s)
+        working-directory: fuzz
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu fuzz_exec corpus/fuzz_exec seeds/queries -- -max_total_time=60 -rss_limit_mb=4096
+
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

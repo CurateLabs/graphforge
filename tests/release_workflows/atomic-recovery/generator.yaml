@@ -1,0 +1,62 @@
+{
+  "identity": "atomic-recovery-generator-v1",
+  "version": 1,
+  "seed": 2473001,
+  "fixed_uuid_namespace": "018f0f4e-7b8c-7000-8000-000000050000",
+  "graph": {
+    "profile": "S",
+    "nodes": 8,
+    "edges": 10,
+    "mutations_per_cycle": {
+      "topology": 2,
+      "property": 2
+    }
+  },
+  "ontology": {
+    "mode": "strict",
+    "complexity_class": "deep-wide-constrained",
+    "path": "ontologies/strict-v1.yaml"
+  },
+  "failpoints": {
+    "pre_current": [
+      "project.after_writer_lock",
+      "project.after_journal_preparing",
+      "project.after_participant_write",
+      "project.after_composite_validation",
+      "project.before_current_replace"
+    ],
+    "post_current": [
+      "project.after_current_replace",
+      "project.after_root_fsync",
+      "project.after_journal_published"
+    ]
+  },
+  "cycles": [
+    {
+      "id": "graph-m20",
+      "participants": [
+        "provenance",
+        "assertion",
+        "evidence",
+        "assertion_status"
+      ]
+    },
+    {
+      "id": "graph-m20-m21",
+      "participants": [
+        "provenance",
+        "assertion",
+        "evidence",
+        "assertion_status",
+        "reasoning",
+        "hypothesis_group",
+        "hypothesis_membership"
+      ]
+    }
+  ],
+  "correction": {
+    "kind": "resume-or-compensate-without-duplicate",
+    "idempotent_retry": true,
+    "conflicting_reuse": "GF_IDEMPOTENCY_CONFLICT"
+  }
+}

@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "gate": "M20",
+  "command_groups": {
+    "rust": [
+      "cargo test -p gf-storage --no-fail-fast",
+      "cargo test -p gf-provenance --no-fail-fast",
+      "cargo test -p gf-knowledge --no-fail-fast",
+      "cargo test -p gf-api --lib --no-fail-fast",
+      "cargo test -p gf-api --test knowledge_isolation --no-fail-fast"
+    ],
+    "python": [
+      "uvx maturin build --manifest-path crates/gf-bindings-py/Cargo.toml --profile dev --out dist/m20",
+      "uv venv /tmp/gf-m20-python --python 3.13",
+      "uv pip install --python /tmp/gf-m20-python/bin/python dist/m20/*.whl pyarrow",
+      "/tmp/gf-m20-python/bin/python crates/gf-bindings-py/tests/smoke.py",
+      "/tmp/gf-m20-python/bin/python -c \"import runpy; m=runpy.run_path('crates/gf-bindings-py/tests/test_invocation_descriptor.py'); m['test_rank_descriptor_golden_and_dispatch']()\""
+    ],
+    "node": [
+      "pnpm install --frozen-lockfile",
+      "pnpm --filter @graphforge/node exec napi build --platform",
+      "pnpm --filter @graphforge/node test:smoke",
+      "pnpm --filter @graphforge/node test"
+    ]
+  },
+  "cases": [
+    {
+      "id": "graph-only-no-knowledge",
+      "criterion": "A graph-only project exposes only graph capability and resolves without opening knowledge participants.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "initial_project_reports_mandatory_graph_and_workspace_capabilities"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_generation.rs", "symbol": "resolution_does_not_open_unrequested_participant_tables"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_construction"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/smoke.test.mjs", "symbol": "project capabilities"}
+      ]
+    },
+    {
+      "id": "knowledge-enabled-empty",
+      "criterion": "Enabling knowledge publishes a complete empty capability atomically and survives reopen.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "enabled_capability_is_selected_after_persistent_reopen"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertions"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/smoke.test.mjs", "symbol": "project capabilities"}
+      ]
+    },
+    {
+      "id": "knowledge-populated",
+      "criterion": "Assertions, confidence, evidence, provenance, and run lifecycle records publish as immutable Arrow tables.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_with_evidence_is_one_atomic_idempotent_generation"},
+        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"},
+        {"kind": "rust", "path": "crates/gf-api/src/algorithm_runs.rs", "symbol": "recorded_dispatch_commits_start_and_completed_before_return"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_algorithm_runs"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/assertions.test.mjs", "symbol": "assertions are atomic, idempotent, exact, and Arrow-only"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/confidence.test.mjs", "symbol": "confidence assessments are atomic, idempotent, and Arrow-only"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/evidence.test.mjs", "symbol": "assertion and evidence publish atomically through the Node surface"}
+      ]
+    },
+    {
+      "id": "corrupt-knowledge",
+      "criterion": "Corrupt knowledge bytes fail closed only when requested and cannot contaminate graph, M18, or M19 reads.",
+      "command_groups": ["rust"],
+      "surfaces": ["rust"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "corrupt_knowledge_bytes_do_not_block_graph_only_reopen_or_recovery"},
+        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"}
+      ]
+    },
+    {
+      "id": "future-knowledge",
+      "criterion": "Future knowledge capability versions are reported without opening their participants.",
+      "command_groups": ["rust"],
+      "surfaces": ["rust"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "future_capability_is_reported_without_opening_participants"},
+        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"}
+      ]
+    },
+    {
+      "id": "persistent-reopen",
+      "criterion": "Normal completion and recovery reopen exactly the selected committed generation.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/lib.rs", "symbol": "persistent_open_resolves_and_reuses_one_committed_generation"},
+        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_publication_is_atomic_idempotent_and_reopenable"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_lifecycle"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/smoke.test.mjs", "symbol": "lifecycle"}
+      ]
+    },
+    {
+      "id": "publication-failpoints",
+      "criterion": "Every publication and recovery failpoint terminates in a subprocess without exposing a partial generation.",
+      "command_groups": ["rust"],
+      "surfaces": ["rust"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "injected_operation_errors_report_exact_commit_state"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "container_creation_failpoints_resume_only_exact_current_format"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "gc_crash_points_preserve_current_and_recover_idempotently"}
+      ]
+    },
+    {
+      "id": "idempotent-and-conflicting-uuid",
+      "criterion": "Identical UUID replay is idempotent and changed content under the same UUID fails before publication.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_publication.rs", "symbol": "identical_published_transaction_is_idempotent"},
+        {"kind": "rust", "path": "crates/gf-storage/src/project_publication.rs", "symbol": "changed_content_under_same_transaction_conflicts"},
+        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "invalid_graph_reference_and_conflicting_replay_publish_nothing"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_algorithm_runs"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/algorithm-runs.test.mjs", "symbol": "recorded rank exposes the same result and durable lifecycle"}
+      ]
+    },
+    {
+      "id": "unsupported-pre-v1-rust",
+      "criterion": "Rust rejects unsupported pre-v1 roots with GF_UNSUPPORTED_PROJECT_FORMAT before mutation; no migration is attempted.",
+      "command_groups": ["rust"],
+      "surfaces": ["rust"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-storage/src/project_generation.rs", "symbol": "rejects_pre_v1_root_without_mutation"},
+        {"kind": "rust", "path": "crates/gf-api/src/lib.rs", "symbol": "persistent_open_rejects_pre_v1_without_mutation"}
+      ]
+    },
+    {
+      "id": "unsupported-pre-v1-python",
+      "criterion": "Python rejects unsupported pre-v1 roots with GF_UNSUPPORTED_PROJECT_FORMAT before mutation; no migration is attempted.",
+      "command_groups": ["python"],
+      "surfaces": ["python"],
+      "tests": [
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_exception_hierarchy"}
+      ]
+    },
+    {
+      "id": "unsupported-pre-v1-node",
+      "criterion": "Node rejects unsupported pre-v1 roots with GF_UNSUPPORTED_PROJECT_FORMAT before mutation; no migration is attempted.",
+      "command_groups": ["node"],
+      "surfaces": ["node"],
+      "tests": [
+        {"kind": "node-call", "path": "crates/gf-bindings-node/tests/core.test.mjs", "symbol": "checkPreV1ProjectError"}
+      ]
+    },
+    {
+      "id": "m18-exhaustive-isolation",
+      "criterion": "Every canonical M18 registry entry is classified exactly once and executable handlers return identical Arrow results without knowledge.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node", "rank", "cluster", "paths", "analyze", "similar"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
+        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_degree_rank"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/invocation-descriptor.test.mjs", "symbol": "rank descriptor matches the frozen cross-language vector and dispatches"}
+      ]
+    },
+    {
+      "id": "m19-find-knowledge-states",
+      "criterion": "Public find returns identical Arrow rows for absent, populated, corrupt, and future knowledge states without opening knowledge.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node", "find"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"},
+        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_find"},
+        {"kind": "node-call", "path": "crates/gf-bindings-node/tests/core.test.mjs", "symbol": "checkFind"}
+      ]
+    },
+    {
+      "id": "descriptor-direct-arrow-equivalence",
+      "criterion": "Direct and neutral-descriptor dispatch return the same Arrow schema and values.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "prepared_rank_dispatch_is_arrow_equivalent_and_detects_projection_change"},
+        {"kind": "python", "path": "crates/gf-bindings-py/tests/test_invocation_descriptor.py", "symbol": "test_rank_descriptor_golden_and_dispatch"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/invocation-descriptor.test.mjs", "symbol": "rank descriptor matches the frozen cross-language vector and dispatches"}
+      ]
+    },
+    {
+      "id": "canonical-arrow-fingerprint",
+      "criterion": "Canonical Arrow result fingerprints ignore batch and dictionary layout while rejecting semantic drift.",
+      "command_groups": ["rust"],
+      "surfaces": ["rust", "arrow"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_ignores_batches_and_dictionary_layout"},
+        {"kind": "rust", "path": "crates/gf-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_filters_metadata_by_the_closed_registry"}
+      ]
+    },
+    {
+      "id": "cross-binding-contract",
+      "criterion": "Rust, Python, and Node expose the same frozen descriptor, UUID, Arrow, error, and lifecycle contract from one SHA.",
+      "command_groups": ["rust", "python", "node"],
+      "surfaces": ["rust", "python", "node"],
+      "tests": [
+        {"kind": "rust", "path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "empty_graph_rank_vector_is_frozen_for_all_bindings"},
+        {"kind": "python", "path": "crates/gf-bindings-py/tests/test_invocation_descriptor.py", "symbol": "test_rank_descriptor_golden_and_dispatch"},
+        {"kind": "node", "path": "crates/gf-bindings-node/tests/invocation-descriptor.test.mjs", "symbol": "rank descriptor matches the frozen cross-language vector and dispatches"}
+      ]
+    }
+  ]
+}

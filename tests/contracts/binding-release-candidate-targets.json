@@ -1,0 +1,37 @@
+{
+  "schema": "graphforge-binding-rc-targets/1",
+  "targets": {
+    "node-aarch64-apple-darwin": {
+      "execution_mode": "native",
+      "language": "node"
+    },
+    "node-aarch64-unknown-linux-gnu": {
+      "execution_mode": "package-validation",
+      "language": "node"
+    },
+    "node-x86_64-apple-darwin": {
+      "execution_mode": "native",
+      "language": "node"
+    },
+    "node-x86_64-pc-windows-msvc": {
+      "execution_mode": "native",
+      "language": "node"
+    },
+    "node-x86_64-unknown-linux-gnu": {
+      "execution_mode": "native",
+      "language": "node"
+    },
+    "python-macos": {
+      "execution_mode": "native",
+      "language": "python"
+    },
+    "python-ubuntu": {
+      "execution_mode": "native",
+      "language": "python"
+    },
+    "python-windows": {
+      "execution_mode": "native",
+      "language": "python"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "contract":"canonical-json-from-arrow-values/1",
+  "schemas": {
+    "current_organizations":["name:Utf8","risk_score:Float64"],
+    "algorithm_runs":["run_uuid:FixedSizeBinary(16)","operation_uuid:FixedSizeBinary(16)","verb:Utf8","algorithm:Utf8"],
+    "epistemic_snapshot":["assertion_uuid:FixedSizeBinary(16)","claim:Utf8","current_status:Utf8"]
+  }
+}

@@ -1,0 +1,126 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gf-core",
+  "crates/gf-ast",
+  "crates/gf-cypher",
+  "crates/gf-ir",
+  "crates/gf-rel",
+  "crates/gf-exec",
+  "crates/gf-search",
+  "crates/gf-storage",
+  "crates/gf-io",
+  "crates/gf-provenance",
+  "crates/gf-knowledge",
+  "crates/gf-ontology",
+  "crates/gf-plan",
+  "crates/gf-api",
+  "crates/gf-bindings-py",
+  "crates/gf-bindings-node",
+  "crates/gf-cli",
+]
+
+[workspace.package]
+version = "0.5.0-dev"
+edition = "2024"
+license = "BUSL-1.1"
+license-file = "LICENSE"
+repository = "https://github.com/CurateLabs/graphforge-legecy"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
+sha2 = "0.10"
+unicode-normalization = "0.1"
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
+
+# Identifiers
+uuid = { version = "1", features = ["v5", "v7", "serde"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Arrow / DataFusion (verify release train compatibility at first use)
+arrow = { version = "58", features = ["prettyprint"] }
+arrow-data = "58"
+datafusion = "53"
+datafusion-datasource = "53"
+parquet = "58"
+tantivy = { version = "=0.26.1", default-features = false, features = ["mmap", "lz4-compression"] }
+
+# Parser / lexer
+lalrpop-util = "0.23"
+logos = "0.16"
+
+# Python binding. NOTE: the `extension-module` feature is scoped to the
+# `gf-bindings-py` crate (not enabled here), because it suppresses libpython
+# linkage for ALL crates that share this workspace dep — which would break
+# `cargo test`/embedded-Python use elsewhere.
+pyo3 = { version = "0.28" }
+
+# Node binding
+napi = { version = "3", features = ["napi9", "async"] }
+napi-derive = "3"
+napi-build = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Testing
+insta = "1"
+cucumber = "0.21"
+
+# --------------------------------------------------------------
+# Workspace-wide lint policy
+# --------------------------------------------------------------
+# Groups use priority = -1 so individual allow/deny overrides win.
+# Crates opt in with `lints.workspace = true` in their Cargo.toml.
+# --------------------------------------------------------------
+
+[workspace.lints.rust]
+# API hygiene
+missing_docs = "warn"
+
+# Naming / style (priority = -1 so individual lints can override the group)
+nonstandard_style = { level = "deny", priority = -1 }
+
+# Catch future Rust breakage early
+future_incompatible = { level = "deny", priority = -1 }
+
+# Silently ignoring a #[must_use] return is almost always a bug
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# Raise all built-in clippy lints; individual overrides below take priority.
+all     = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# --- allow overrides (false-positive-prone or premature for this codebase) ---
+# Common in Rust library naming (e.g. GraphForgeError in graphforge crate)
+module_name_repetitions = "allow"
+# Doc-comment requirements are enforced by missing_docs above; these are redundant
+# and trigger on every pub Result / panic in early stubs
+missing_errors_doc  = "allow"
+missing_panics_doc  = "allow"
+# Product name "GraphForge" doesn't need backticks in prose doc comments
+doc_markdown        = "allow"
+
+# --- Build profiles ---------------------------------------------------------
+# `target/` grows fast: the dependency tree (DataFusion/Arrow) is large and each
+# test binary statically links it. Full debug info made those binaries ~230 MB
+# each; `line-tables-only` keeps file:line in panics/backtraces but drops the
+# heavy type info, shrinking them several-fold (and speeding up linking). For a
+# full debugger session with variable inspection, build with `RUSTFLAGS="-C
+# debuginfo=2"` or temporarily set `debug = true` here.
+#
+# Reclaiming space (cargo never GCs stale per-commit artifacts): run
+# `scripts/clean-builds.sh` — see its header.
+[profile.dev]
+debug = "line-tables-only"

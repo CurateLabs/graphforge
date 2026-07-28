@@ -1,0 +1,339 @@
+# Release-certification only for #742 publication readiness.
+# Not a close gate for child implementation/construction issues (AGENTS.md).
+name: M22 Non-Cypher Surface Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact current main SHA for publication certification (#742)
+        required: true
+        type: string
+      rust_run_id:
+        description: Successful same-SHA Rust surface run ID (workflow input only)
+        required: true
+        type: string
+      binding_rc_run_id:
+        description: Successful same-SHA Binding RC run ID (workflow input only)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: m22-non-cypher-${{ inputs.commit_sha }}
+  cancel-in-progress: true
+
+jobs:
+  validate_source:
+    name: Validate current main and component evidence
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      evidence_sha: ${{ steps.source.outputs.evidence_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Require current main commit
+        id: source
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin \
+            +refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          test "$REQUESTED_SHA" = "$main_sha"
+          printf 'evidence_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+      - name: Resolve immutable successful component artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ steps.source.outputs.evidence_sha }}
+          RUST_RUN_ID: ${{ inputs.rust_run_id }}
+          BINDING_RUN_ID: ${{ inputs.binding_rc_run_id }}
+        run: |
+          [[ "$RUST_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BINDING_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          mkdir -p component-validation
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > component-validation/rust-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID/artifacts?per_page=100" > component-validation/rust-artifacts.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > component-validation/binding-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID/artifacts?per_page=100" > component-validation/binding-artifacts.json
+          python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
+            --rust-run component-validation/rust-run.json \
+            --rust-artifacts component-validation/rust-artifacts.json \
+            --binding-run component-validation/binding-run.json \
+            --binding-artifacts component-validation/binding-artifacts.json \
+            --expected-sha "$EXPECTED_SHA" \
+            --output component-validation/report.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m22-component-validation-${{ steps.source.outputs.evidence_sha }}
+          path: component-validation/report.json
+          if-no-files-found: error
+
+  validation_failure:
+    name: Preserve rejected source validation evidence
+    if: always() && needs.validate_source.result == 'failure'
+    needs: validate_source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Write bounded validation failure
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha }}
+        run: |
+          mkdir -p validation-failure
+          python3 - <<'PY'
+          import json, os, re
+          requested = os.environ["REQUESTED_SHA"]
+          identity = requested if re.fullmatch(r"[0-9a-f]{40}", requested) else "invalid-sha"
+          report = {
+              "schema": "graphforge-m22-non-cypher-surface-gate/1",
+              "source_sha": identity,
+              "status": "failed",
+              "sanitized_failure": "current-main or component-run validation failed",
+          }
+          open("validation-failure/report.json", "w", encoding="utf-8").write(
+              json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+          )
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: M22-Non-Cypher-Validation-Failed-${{ github.run_id }}
+          path: validation-failure/report.json
+          if-no-files-found: error
+
+  load:
+    name: Execute 144-case host-native load matrix
+    needs: validate_source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 240
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate_source.outputs.evidence_sha }}
+      - name: Verify immutable checkout
+        shell: bash
+        run: |
+          [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      # Keep maturin + cargo + napi on one sticky volume so dense L/XL case
+      # workspaces are not competing with a second root-disk Cargo tree (#2765).
+      - name: Mount Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          # v2: discard volumes that may retain root-owned maturin leftovers.
+          key: ${{ github.repository }}-m22-load-${{ hashFiles('Cargo.lock') }}-target-v2
+          path: target
+      - name: Install workspace dependencies
+        run: pnpm install
+      - name: Build one exact-SHA Python wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          manylinux: auto
+          sccache: "true"
+      # manylinux maturin writes into CARGO_TARGET_DIR as root; host cargo then
+      # cannot open .cargo-build-lock (EACCES) without reclaiming ownership.
+      - name: Reclaim sticky-disk ownership after maturin
+        shell: bash
+        run: |
+          test -n "$CARGO_TARGET_DIR"
+          test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
+          sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"
+          # Prove the host runner can create Cargo's release lock before builds.
+          mkdir -p "$CARGO_TARGET_DIR/release"
+          touch "$CARGO_TARGET_DIR/release/.cargo-build-lock"
+          rm -f "$CARGO_TARGET_DIR/release/.cargo-build-lock"
+      - name: Prepare Rust compiler wrapper for native load contracts
+        shell: bash
+        run: |
+          python3 scripts/ci/prepare-rustc-wrapper.py \
+            --platform m22-load-linux --contract m22-native-load-contracts
+      - name: Prepare native load artifacts
+        shell: bash
+        run: |
+          test -n "$CARGO_TARGET_DIR"
+          test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
+          mkdir -p "$CARGO_TARGET_DIR"
+          cargo build --release -p gf-api --example release_load_probe
+          if compgen -G 'crates/gf-bindings-node/*.node' > /dev/null; then
+            echo "unexpected Node addon existed before the exact-SHA build" >&2
+            exit 1
+          fi
+          pnpm --filter @graphforge/node exec napi build --platform --release \
+            --target x86_64-unknown-linux-gnu
+          addons=(crates/gf-bindings-node/*.node)
+          wheels=(dist/*.whl)
+          test "${#addons[@]}" -eq 1
+          test "${#wheels[@]}" -eq 1
+      - name: Reclaim root-disk headroom before the matrix
+        shell: bash
+        run: |
+          # Drop incremental leftovers only; keep release artifacts for probes
+          # and language preflight rebuilds on the sticky volume.
+          rm -rf "$CARGO_TARGET_DIR"/incremental \
+            "$CARGO_TARGET_DIR"/release/incremental \
+            "$CARGO_TARGET_DIR"/*/incremental
+          df -h "$GITHUB_WORKSPACE" "$CARGO_TARGET_DIR" "$RUNNER_TEMP" || true
+          du -sh "$CARGO_TARGET_DIR" dist crates/gf-bindings-node/*.node 2>/dev/null || true
+      - name: Execute fail-closed release load matrix
+        shell: bash
+        env:
+          GF_LOAD_WORK: ${{ runner.temp }}/graphforge-m22-load-work
+          GF_LOAD_OUTPUT: ${{ runner.temp }}/graphforge-m22-load-evidence/report.json
+          TMPDIR: ${{ runner.temp }}/graphforge-m22-load-tmp
+        run: |
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          test ! -e "$GF_LOAD_WORK"
+          mkdir -p "$TMPDIR"
+          export TMP="$TMPDIR" TEMP="$TMPDIR"
+          uv run --isolated --no-project --with "${wheels[0]}" \
+            python scripts/ci/release-load-matrix.py run \
+              --sha "$EVIDENCE_SHA" --work "$GF_LOAD_WORK" --output "$GF_LOAD_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: M22-Load-Matrix-${{ needs.validate_source.outputs.evidence_sha }}
+          path: ${{ runner.temp }}/graphforge-m22-load-evidence/report.json
+          if-no-files-found: error
+
+  aggregate:
+    name: Aggregate final M22 non-Cypher evidence
+    if: always() && needs.validate_source.result == 'success'
+    needs: [validate_source, load]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate_source.outputs.evidence_sha }}
+      - name: Revalidate current main and component artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
+          RUST_RUN_ID: ${{ inputs.rust_run_id }}
+          BINDING_RUN_ID: ${{ inputs.binding_rc_run_id }}
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECTED_SHA"
+          mkdir -p evidence/component-validation-final
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > evidence/component-validation-final/rust-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID/artifacts?per_page=100" > evidence/component-validation-final/rust-artifacts.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > evidence/component-validation-final/binding-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID/artifacts?per_page=100" > evidence/component-validation-final/binding-artifacts.json
+          python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
+            --rust-run evidence/component-validation-final/rust-run.json \
+            --rust-artifacts evidence/component-validation-final/rust-artifacts.json \
+            --binding-run evidence/component-validation-final/binding-run.json \
+            --binding-artifacts evidence/component-validation-final/binding-artifacts.json \
+            --expected-sha "$EXPECTED_SHA" \
+            --output evidence/component-validation-final/report.json
+      - uses: actions/download-artifact@v8
+        with:
+          name: m22-component-validation-${{ needs.validate_source.outputs.evidence_sha }}
+          path: evidence/component-validation
+      - uses: actions/download-artifact@v8
+        with:
+          name: Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}
+          path: evidence/rust
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.rust_run_id }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
+          path: evidence/binding
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.binding_rc_run_id }}
+      - uses: actions/download-artifact@v8
+        if: needs.load.result == 'success'
+        with:
+          name: M22-Load-Matrix-${{ needs.validate_source.outputs.evidence_sha }}
+          path: evidence/load
+      - name: Validate and aggregate every required component
+        if: needs.load.result == 'success'
+        run: >-
+          python3 scripts/ci/m22-non-cypher-surface-gate.py aggregate
+          --rust-report evidence/rust/report.json
+          --binding-report evidence/binding/report.json
+          --load-report evidence/load/report.json
+          --run-validation evidence/component-validation-final/report.json
+          --expected-sha "${{ needs.validate_source.outputs.evidence_sha }}"
+          --load-run-id "${{ github.run_id }}"
+          --output final-evidence/report.json
+      - name: Record a bounded failed load gate
+        if: needs.load.result != 'success'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
+          LOAD_RESULT: ${{ needs.load.result }}
+        run: |
+          mkdir -p final-evidence
+          python3 - <<'PY'
+          import json, os
+          report = {
+              "schema": "graphforge-m22-non-cypher-surface-gate/1",
+              "source_sha": os.environ["SOURCE_SHA"],
+              "status": "failed",
+              "sanitized_failure": "load job did not succeed: " + os.environ["LOAD_RESULT"],
+          }
+          open("final-evidence/report.json", "w", encoding="utf-8").write(
+              json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+          )
+          PY
+      - name: Ensure failed validation remains downloadable
+        if: always()
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
+        run: |
+          if test -f final-evidence/report.json; then
+            exit 0
+          fi
+          mkdir -p final-evidence
+          python3 - <<'PY'
+          import json, os
+          report = {
+              "schema": "graphforge-m22-non-cypher-surface-gate/1",
+              "source_sha": os.environ["SOURCE_SHA"],
+              "status": "failed",
+              "sanitized_failure": "component retrieval or final validation did not succeed",
+          }
+          open("final-evidence/report.json", "w", encoding="utf-8").write(
+              json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
+          )
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: M22-Non-Cypher-Surface-Gate-${{ needs.validate_source.outputs.evidence_sha }}
+          path: |
+            final-evidence/report.json
+            evidence/rust/report.json
+            evidence/binding/report.json
+            evidence/load/report.json
+            evidence/component-validation-final/report.json
+          if-no-files-found: error

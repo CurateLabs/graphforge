@@ -1,0 +1,5 @@
+{
+  "schema_version":1,
+  "required":["schema_version","scenario_id","commit_sha","graph_fingerprint","ontology_fingerprint","neutral","knowledge","cutoffs","reopen_equal"],
+  "fixed":{"schema_version":1,"scenario_id":"knowledge-evolution","reopen_equal":true}
+}

@@ -1,0 +1,59 @@
+{
+  "name": "@graphforge/agent-skills",
+  "version": "0.5.0-dev.0",
+  "description": "Agent skill package shell for GraphForge",
+  "license": "BUSL-1.1",
+  "homepage": "https://curatelabs.github.io/graphforge-legecy/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CurateLabs/graphforge-legecy.git",
+    "directory": "packages/agent-skills"
+  },
+  "bugs": {
+    "url": "https://github.com/CurateLabs/graphforge-legecy/issues"
+  },
+  "type": "module",
+  "bin": {
+    "graphforge-agent-skills": "bin/graphforge-agent-skills.js"
+  },
+  "files": [
+    "adapter/",
+    "bin/",
+    "schemas/",
+    "skills/",
+    "workflows/",
+    "compatibility.json",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./adapter/index.js",
+    "./workflows": "./workflows/index.js",
+    "./schemas": "./schemas/validator.js",
+    "./schemas/input-envelope-v1.json": "./schemas/input-envelope-v1.json",
+    "./schemas/output-envelope-v1.json": "./schemas/output-envelope-v1.json",
+    "./schemas/skill-manifest-v1.json": "./schemas/skill-manifest-v1.json",
+    "./compatibility.json": "./compatibility.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "graphforgeCompatibility": {
+    "schemaVersion": 1,
+    "release": "0.5.0",
+    "range": ">=0.5.0 <0.6.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:offline": "node tests/offline-pack-smoke.mjs",
+    "test:rc-native": "node scripts/run-native-rc-e2e.mjs",
+    "example:analyst": "node examples/analyst-agent.mjs",
+    "example:developer": "node examples/developer-agent.mjs",
+    "pack:local": "npm pack --ignore-scripts",
+    "format:check": "prettier --check package.json compatibility.json README.md adapter bin tests schemas skills workflows rc examples scripts"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

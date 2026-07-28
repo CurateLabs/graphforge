@@ -1,0 +1,257 @@
+{
+  "format": "graphforge-canonical-golden-v1",
+  "canonical_contract_version": 1,
+  "vectors": [
+    {
+      "id": "uuid-text-case",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "018f47d2-a1b2-7c3d-8e4f-001122334455",
+        "018F47D2-A1B2-7C3D-8E4F-001122334455"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "node_uuid", "nullable": false, "type": {"fixed_size_binary": 16}}],
+          "batches": [[["018f47d2-a1b2-7c3d-8e4f-001122334455"]]]
+        },
+        {
+          "kind": "table",
+          "fields": [{"name": "node_uuid", "nullable": false, "type": {"fixed_size_binary": 16}}],
+          "batches": [[["018F47D2-A1B2-7C3D-8E4F-001122334455"]]]
+        }
+      ],
+      "canonical_payload_hex": "474654310000000000000027474653310000000100000000000000096e6f64655f757569640032000000100000000000000000000000000000000101018f47d2a1b27c3d8e4f001122334455",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000004c474654310000000000000027474653310000000100000000000000096e6f64655f757569640032000000100000000000000000000000000000000101018f47d2a1b27c3d8e4f001122334455",
+      "sha256": "3cc432a310818554c11f6eb272fead2c549bcd108ab059453a641ab379c7bbb9",
+      "uuid_v8": "3cc432a3-1081-8554-811f-6eb272fead2c"
+    },
+    {
+      "id": "dictionary-and-chunk-independence",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "plain Utf8 in one batch",
+        "dictionary Utf8 with reversed dictionary slots in two batches"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "label", "nullable": true, "type": "utf8"}],
+          "batches": [[["alpha"], ["beta"]]]
+        },
+        {
+          "kind": "table",
+          "fields": [{"name": "label", "nullable": true, "type": {"dictionary": {"index": "int8", "value": "utf8"}}}],
+          "dictionaries": {"label": ["beta", "alpha"]},
+          "batches": [[[1]], [[0]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f474653310000000100000000000000056c6162656c013000000000000000000000000000000002010000000000000005616c70686101000000000000000462657461",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000004e47465431000000000000001f474653310000000100000000000000056c6162656c013000000000000000000000000000000002010000000000000005616c70686101000000000000000462657461",
+      "sha256": "8971b73c1e21129c5cf380a83c15d56920990f82adad65065f3b4c9e09af6a9e"
+    },
+    {
+      "id": "negative-zero-and-nan",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "[-0.0, NaN payload 0x7ff0000000000001]",
+        "[+0.0, NaN payload 0xfff8123412341234]"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "score", "nullable": false, "type": "float64"}],
+          "batches": [[["bits:8000000000000000"], ["bits:7ff0000000000001"]]]
+        },
+        {
+          "kind": "table",
+          "fields": [{"name": "score", "nullable": false, "type": "float64"}],
+          "batches": [[["bits:0000000000000000"]], [["bits:fff8123412341234"]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f4746533100000001000000000000000573636f7265002200000000000000000000000000000002010000000000000000017ff8000000000000",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000004547465431000000000000001f4746533100000001000000000000000573636f7265002200000000000000000000000000000002010000000000000000017ff8000000000000",
+      "sha256": "d162e69fcf6aa419192e1fe5364607c670bca8c878fe5b513ecc86028fa2b505"
+    },
+    {
+      "id": "unordered-map",
+      "domain": "graphforge/assertion",
+      "canonical_version": 1,
+      "logical_variants": [
+        "insertion order b=2,a=1",
+        "insertion order a=1,b=2"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "attrs", "nullable": false, "type": {"map": {"key": "utf8", "value": "int64", "value_nullable": true}}}],
+          "batches": [[[[["b", 2], ["a", 1]]]]]
+        },
+        {
+          "kind": "table",
+          "fields": [{"name": "attrs", "nullable": false, "type": {"map": {"key": "utf8", "value": "int64", "value_nullable": true}}}],
+          "batches": [[[[["a", 1], ["b", 2]]]]]
+        }
+      ],
+      "canonical_payload_hex": "474654310000000000000043474653310000000100000000000000056174747273006300000000000000036b6579003000000000000000000000000576616c7565011300000000000000000000000000000000000000010100000000000000020100000000000000016101000000000000000101000000000000000162010000000000000002",
+      "fingerprint_preimage_hex": "474646500100146772617068666f7267652f617373657274696f6e000000010000000000000086474654310000000000000043474653310000000100000000000000056174747273006300000000000000036b6579003000000000000000000000000576616c7565011300000000000000000000000000000000000000010100000000000000020100000000000000016101000000000000000101000000000000000162010000000000000002",
+      "sha256": "e3fa3a720ddc4d67f5d12514c148692543e4a8af3361e25cd35fcdd893961265",
+      "uuid_v8": "e3fa3a72-0ddc-8d67-b5d1-2514c1486925"
+    },
+    {
+      "id": "contract-metadata-only",
+      "domain": "graphforge/schema",
+      "canonical_version": 1,
+      "logical_variants": [
+        "included graphforge.contract.unit=m with excluded producer/build metadata"
+      ],
+      "source_cases": [
+        {
+          "kind": "schema",
+          "fields": [
+            {
+              "name": "distance",
+              "nullable": false,
+              "type": "int32",
+              "metadata": {
+                "graphforge.contract.unit": "m",
+                "producer-build": "abc"
+              }
+            }
+          ],
+          "metadata": {"generated-at": "ignored"}
+        }
+      ],
+      "canonical_payload_hex": "4746533100000001000000000000000864697374616e636500120000000100000000000000186772617068666f7267652e636f6e74726163742e756e697400000000000000016d00000000",
+      "fingerprint_preimage_hex": "474646500100116772617068666f7267652f736368656d6100000001000000000000004b4746533100000001000000000000000864697374616e636500120000000100000000000000186772617068666f7267652e636f6e74726163742e756e697400000000000000016d00000000",
+      "sha256": "e3cfbdf0d4d79364efa384de57a3d6f7255e45c6edff9a0a116436c19e2570d5"
+    },
+    {
+      "id": "ordered-rows-ab",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "rows a,b"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "value", "nullable": false, "type": "utf8"}],
+          "batches": [[["a"], ["b"]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f4746533100000001000000000000000576616c75650030000000000000000000000000000000020100000000000000016101000000000000000162",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000004747465431000000000000001f4746533100000001000000000000000576616c75650030000000000000000000000000000000020100000000000000016101000000000000000162",
+      "sha256": "d09722eb88164d15155dcc9a9aecfc341428fe1572f3375e132749f45ca854eb"
+    },
+    {
+      "id": "ordered-rows-ba",
+      "domain": "graphforge/arrow-result",
+      "canonical_version": 1,
+      "logical_variants": [
+        "rows b,a"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "value", "nullable": false, "type": "utf8"}],
+          "batches": [[["b"], ["a"]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f4746533100000001000000000000000576616c75650030000000000000000000000000000000020100000000000000016201000000000000000161",
+      "fingerprint_preimage_hex": "474646500100176772617068666f7267652f6172726f772d726573756c7400000001000000000000004747465431000000000000001f4746533100000001000000000000000576616c75650030000000000000000000000000000000020100000000000000016201000000000000000161",
+      "sha256": "531606314d45d9a43d29cbb49412bf06140cbc30d153dec8fa362461954ffad1"
+    },
+    {
+      "id": "unicode-precomposed",
+      "domain": "graphforge/assertion",
+      "canonical_version": 1,
+      "logical_variants": [
+        "U+00E9"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "value", "nullable": false, "type": "utf8"}],
+          "batches": [[["é"]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f4746533100000001000000000000000576616c7565003000000000000000000000000000000001010000000000000002c3a9",
+      "fingerprint_preimage_hex": "474646500100146772617068666f7267652f617373657274696f6e00000001000000000000003e47465431000000000000001f4746533100000001000000000000000576616c7565003000000000000000000000000000000001010000000000000002c3a9",
+      "sha256": "d881548739e24fc7ba148f2f1c8d59ebe66f98d311768ed73315257b2135bd6a"
+    },
+    {
+      "id": "unicode-decomposed",
+      "domain": "graphforge/assertion",
+      "canonical_version": 1,
+      "logical_variants": [
+        "U+0065 U+0301"
+      ],
+      "source_cases": [
+        {
+          "kind": "table",
+          "fields": [{"name": "value", "nullable": false, "type": "utf8"}],
+          "batches": [[["é"]]]
+        }
+      ],
+      "canonical_payload_hex": "47465431000000000000001f4746533100000001000000000000000576616c756500300000000000000000000000000000000101000000000000000365cc81",
+      "fingerprint_preimage_hex": "474646500100146772617068666f7267652f617373657274696f6e00000001000000000000003f47465431000000000000001f4746533100000001000000000000000576616c756500300000000000000000000000000000000101000000000000000365cc81",
+      "sha256": "3a75ec3201efbdcf09d974292d88346739ca804230846cfc205f6fb486fb1005"
+    }
+  ],
+  "negative_vectors": [
+    {
+      "id": "invalid-utf8",
+      "error": "GF_CANONICAL_UTF8",
+      "source": {"type": "utf8", "bytes_hex": "c328"}
+    },
+    {
+      "id": "sub-microsecond-timestamp",
+      "error": "GF_CANONICAL_TEMPORAL",
+      "source": {"type": "timestamp_nanosecond", "value": 1, "timezone": "UTC"}
+    },
+    {
+      "id": "duplicate-canonical-map-key",
+      "error": "GF_CANONICAL_MAP_KEY",
+      "source": {"type": "map<utf8,int64>", "entries": [["a", 1], ["a", 2]]}
+    },
+    {
+      "id": "unknown-extension",
+      "error": "GF_CANONICAL_ARROW_TYPE",
+      "source": {"type": "extension", "name": "vendor.unknown", "version": 1, "storage": "int64"}
+    },
+    {
+      "id": "union-type",
+      "error": "GF_CANONICAL_ARROW_TYPE",
+      "source": {"type": "dense_union"}
+    },
+    {
+      "id": "run-end-encoded-type",
+      "error": "GF_CANONICAL_ARROW_TYPE",
+      "source": {"type": "run_end_encoded"}
+    },
+    {
+      "id": "view-type",
+      "error": "GF_CANONICAL_ARROW_TYPE",
+      "source": {"type": "utf8_view"}
+    },
+    {
+      "id": "null-in-non-nullable-field",
+      "error": "GF_CANONICAL_NULLABILITY",
+      "source": {"field": {"name": "x", "nullable": false, "type": "int64"}, "value": null}
+    },
+    {
+      "id": "payload-limit-plus-one",
+      "error": "GF_CANONICAL_LIMIT",
+      "source": {"simulated_payload_byte_length": 2147483649}
+    },
+    {
+      "id": "nesting-depth-33",
+      "error": "GF_CANONICAL_LIMIT",
+      "source": {"type": "list", "nested_depth": 33}
+    }
+  ]
+}

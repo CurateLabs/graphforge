@@ -1,0 +1,65 @@
+{
+  "apis": [
+    "bootstrapProject",
+    "buildKnowledge",
+    "exploreGraph",
+    "retrieveAnalyze",
+    "resolveBeliefSubject",
+    "narrateBeliefRecords",
+    "openProject"
+  ],
+  "belief": {
+    "competing_member_count": 2,
+    "selected_assertion_uuid": null,
+    "subject_kind": "hypothesis_question",
+    "superseded_present": true
+  },
+  "bootstrap": {
+    "created": true,
+    "marker_uuid": "018f0f4e-7b8c-7000-8000-000000000021",
+    "ontology_mode": "exploratory"
+  },
+  "competing": {
+    "competing_assertion_uuid": "018f0f4e-7b8c-7000-8000-000000000015",
+    "group_uuid": "018f0f4e-7b8c-7000-8000-000000000017",
+    "question_key": "agent-skills.rc.cause.v1",
+    "replacement_assertion_uuid": "018f0f4e-7b8c-7000-8000-000000000016"
+  },
+  "explore": {
+    "mode": "neighborhood",
+    "result_limit": 16,
+    "summary_count": 1,
+    "truncated": false
+  },
+  "find": {
+    "empty": false,
+    "summary_count": 1,
+    "surface": "find",
+    "truncated": false
+  },
+  "knowledge": {
+    "assertion_uuid": "018f0f4e-7b8c-7000-8000-000000000003",
+    "edge_uuids": ["018f0f4e-7b8c-7000-8000-000000000031"],
+    "node_uuids": [
+      "018f0f4e-7b8c-7000-8000-000000000022",
+      "018f0f4e-7b8c-7000-8000-000000000023"
+    ],
+    "status_count": 1
+  },
+  "narration": {
+    "assertion_count": 3,
+    "contract_version": 1,
+    "has_projection_descriptors": true
+  },
+  "rank": {
+    "empty": false,
+    "summary_count": 2,
+    "surface": "rank",
+    "truncated": false
+  },
+  "reopen": {
+    "marker_matches": true,
+    "marker_uuid": "018f0f4e-7b8c-7000-8000-000000000021"
+  },
+  "scenario": "analyst-agent"
+}

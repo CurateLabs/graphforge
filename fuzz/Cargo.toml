@@ -1,0 +1,57 @@
+# Fuzz harness for GraphForge (#602, #603).
+#
+# This is a STANDALONE crate (its own `[workspace]` table) so it stays out of
+# the root workspace: `cargo {check,clippy,test} --workspace` on the pinned
+# stable 1.96 toolchain never tries to build the libfuzzer targets (which
+# require nightly + a sanitizer runtime). Build/run it explicitly with
+# `cargo +nightly fuzz run <target>`. The path-dependency crates below still
+# resolve their `workspace = true` inheritance against the root workspace,
+# because workspace membership is decided by directory ancestry, not by who
+# depends on them.
+[package]
+name = "graphforge-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "BUSL-1.1"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gf-cypher = { path = "../crates/gf-cypher" }
+gf-ontology = { path = "../crates/gf-ontology" }
+gf-api = { path = "../crates/gf-api" }
+
+[[bin]]
+name = "fuzz_parse"
+path = "fuzz_targets/fuzz_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bind"
+path = "fuzz_targets/fuzz_bind.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ontology"
+path = "fuzz_targets/fuzz_ontology.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_exec"
+path = "fuzz_targets/fuzz_exec.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone workspace: keep these targets out of the root workspace's
+# stable-toolchain builds.
+[workspace]

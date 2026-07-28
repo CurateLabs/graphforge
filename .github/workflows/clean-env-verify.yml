@@ -1,0 +1,109 @@
+name: Clean Environment Verify
+
+# Post-publication only. Proves #742 section 7 / #2795 lanes against public registries.
+# Do not treat missing packages as success.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published release version to verify (for example 0.5.0)
+        required: true
+        type: string
+        default: "0.5.0"
+      lanes:
+        description: Comma-separated lanes, or 'all'
+        required: true
+        type: string
+        default: "all"
+      release_record_path:
+        description: Optional repo-relative path to graphforge-release-record-v1 JSON
+        required: false
+        type: string
+        default: ""
+      crate:
+        description: crates.io crate for cargo smoke (default gf-api)
+        required: false
+        type: string
+        default: "gf-api"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clean-env-verify-${{ inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Clean-env lanes (${{ inputs.version }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Harness unit tests
+        run: python3 scripts/ci/test-clean-env-verify.py
+
+      - name: Preflight public registries
+        id: preflight
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/clean-env-verify.py preflight \
+            --version "${{ inputs.version }}" \
+            --crate "${{ inputs.crate }}" \
+            --output clean-env-preflight.json
+
+      - name: Run clean-environment lanes
+        env:
+          VERSION: ${{ inputs.version }}
+          LANES: ${{ inputs.lanes }}
+          RECORD: ${{ inputs.release_record_path }}
+          CRATE: ${{ inputs.crate }}
+        run: |
+          set -euo pipefail
+          args=(--version "$VERSION" --crate "$CRATE" --output clean-env-evidence.json --work "$RUNNER_TEMP/gf-clean-env")
+          if [[ -n "$RECORD" ]]; then
+            args+=(--release-record "$RECORD")
+          fi
+          if [[ "$LANES" == "all" ]]; then
+            if [[ -z "$RECORD" ]]; then
+              # checksums requires a release record; run every other lane when absent
+              for lane in pip npm skills cargo reopen urls; do
+                args+=(--lane "$lane")
+              done
+            else
+              args+=(--all)
+            fi
+          else
+            IFS=',' read -r -a selected <<< "$LANES"
+            for lane in "${selected[@]}"; do
+              lane="${lane#"${lane%%[![:space:]]*}"}"
+              lane="${lane%"${lane##*[![:space:]]}"}"
+              [[ -n "$lane" ]] || continue
+              args+=(--lane "$lane")
+            done
+          fi
+          python3 scripts/ci/clean-env-verify.py run "${args[@]}"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: clean-env-evidence-${{ inputs.version }}-${{ github.run_id }}
+          path: |
+            clean-env-preflight.json
+            clean-env-evidence.json
+          if-no-files-found: warn

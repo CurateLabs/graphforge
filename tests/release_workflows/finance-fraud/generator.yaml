@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "generator": "graphforge.synthetic-finance-fraud",
+  "version": "1.0.0",
+  "seed": 2468001,
+  "batches": ["parties-and-accounts", "transactions-1", "transactions-2", "devices-and-merchants"],
+  "entities": {"parties": 4, "accounts": 5, "transactions": 8, "devices": 1, "merchants": 1},
+  "privacy": "deterministic synthetic data only"
+}

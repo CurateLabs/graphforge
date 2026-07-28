@@ -1,0 +1,1 @@
+MATCH (café)-[:ЗНАЕТ]->(東京) RETURN café.naïve, 東京.人口

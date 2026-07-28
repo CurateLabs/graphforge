@@ -1,0 +1,8 @@
+{
+  "generator_version": 1,
+  "seed": 2471001,
+  "synthetic_only": true,
+  "fixed_uuid_namespace": "018f0f4e-7b8c-7000-8000-000000030000",
+  "entities": ["Aster Labs", "Aster Laboratory", "Boreal Supply", "Cedar Review"],
+  "phases": ["seed", "entity-compensation", "ontology-data-correction", "knowledge-amendment", "epistemic-correction", "reopen"]
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "structured_failures": [
+    {"step_id": "DSF-04", "code": "GF_CANCELLED", "publication": "none", "prior_authority": "unchanged"},
+    {"step_id": "DSF-08", "code": "GF_VALIDATION", "publication": "none", "prior_authority": "unchanged"}
+  ]
+}

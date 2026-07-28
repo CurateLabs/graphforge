@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "contract": "graphforge-bulk-construction-conformance/1",
+  "issue": 2552,
+  "parent_issue": 2519,
+  "max_runtime_seconds": 1800,
+  "required_surfaces": ["rust", "python", "node"],
+  "coverage": [
+    "empty",
+    "single-row",
+    "multi-row",
+    "mixed-property",
+    "identity",
+    "endpoint",
+    "malformed-input",
+    "atomicity",
+    "retry-conflict",
+    "receipt",
+    "reopen"
+  ],
+  "cases": [
+    {
+      "id": "rust-bulk-construction-lib",
+      "surface": "rust",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "gf-api",
+        "--lib",
+        "bulk_construction::",
+        "--",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "rust-release-load-bulk",
+      "surface": "rust",
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "gf-api",
+        "--test",
+        "release_load_construction",
+        "--",
+        "--nocapture"
+      ]
+    },
+    {
+      "id": "python-bulk-acceptance",
+      "surface": "python",
+      "argv": ["python", "crates/gf-bindings-py/tests/bulk_construction.py"]
+    },
+    {
+      "id": "node-bulk-acceptance",
+      "surface": "node",
+      "argv": [
+        "pnpm",
+        "--filter",
+        "@graphforge/node",
+        "exec",
+        "node",
+        "--test",
+        "tests/bulk_construction.test.mjs"
+      ]
+    },
+    {
+      "id": "cross-binding-bulk-parity",
+      "surface": "python",
+      "argv": ["python", "scripts/ci/bulk-construction-parity.py"]
+    }
+  ]
+}

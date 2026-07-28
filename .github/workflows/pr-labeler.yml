@@ -1,0 +1,160 @@
+name: PR Auto-Labeling
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label-pr:
+    name: Auto-Label PR
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed_files
+        run: |
+          # Get list of changed files
+          BASE_SHA=${{ github.event.pull_request.base.sha }}
+          HEAD_SHA=${{ github.event.pull_request.head.sha }}
+
+          # Get changed files and categorize
+          FILES=$(git diff --name-only $BASE_SHA..$HEAD_SHA)
+
+          echo "Changed files:"
+          echo "$FILES"
+          echo ""
+
+          # Initialize flags
+          HAS_SRC=0
+          HAS_TESTS=0
+          HAS_DOCS=0
+          HAS_CI=0
+          HAS_SCRIPTS=0
+          HAS_PARSER=0
+          HAS_PLANNER=0
+          HAS_EXECUTOR=0
+
+          # Check file patterns
+          while IFS= read -r file; do
+            case "$file" in
+              crates/gf-cypher/*)
+                HAS_PARSER=1
+                HAS_SRC=1
+                ;;
+              crates/gf-plan/*|crates/gf-rel/*)
+                HAS_PLANNER=1
+                HAS_SRC=1
+                ;;
+              crates/gf-exec/*)
+                HAS_EXECUTOR=1
+                HAS_SRC=1
+                ;;
+              crates/*)
+                HAS_SRC=1
+                ;;
+              tests/*)
+                HAS_TESTS=1
+                ;;
+              docs/**|docs-site/**|*.md)
+                HAS_DOCS=1
+                ;;
+              .github/*)
+                HAS_CI=1
+                ;;
+              scripts/*)
+                HAS_SCRIPTS=1
+                ;;
+            esac
+          done <<< "$FILES"
+
+          # Output results
+          echo "has_src=$HAS_SRC" >> $GITHUB_OUTPUT
+          echo "has_tests=$HAS_TESTS" >> $GITHUB_OUTPUT
+          echo "has_docs=$HAS_DOCS" >> $GITHUB_OUTPUT
+          echo "has_ci=$HAS_CI" >> $GITHUB_OUTPUT
+          echo "has_scripts=$HAS_SCRIPTS" >> $GITHUB_OUTPUT
+          echo "has_parser=$HAS_PARSER" >> $GITHUB_OUTPUT
+          echo "has_planner=$HAS_PLANNER" >> $GITHUB_OUTPUT
+          echo "has_executor=$HAS_EXECUTOR" >> $GITHUB_OUTPUT
+
+      - name: Determine labels
+        id: labels
+        run: |
+          LABELS=""
+
+          # Core component labels
+          if [ "${{ steps.changed_files.outputs.has_parser }}" = "1" ]; then
+            LABELS="$LABELS parser"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_planner }}" = "1" ]; then
+            LABELS="$LABELS planner"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_executor }}" = "1" ]; then
+            LABELS="$LABELS executor"
+          fi
+
+          # General category labels
+          if [ "${{ steps.changed_files.outputs.has_src }}" = "1" ]; then
+            LABELS="$LABELS core"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_tests }}" = "1" ]; then
+            LABELS="$LABELS testing"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_docs }}" = "1" ]; then
+            LABELS="$LABELS documentation"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_ci }}" = "1" ]; then
+            LABELS="$LABELS ci-cd"
+          fi
+          if [ "${{ steps.changed_files.outputs.has_scripts }}" = "1" ]; then
+            LABELS="$LABELS tooling"
+          fi
+
+          # Special case: docs-only changes
+          if [ "${{ steps.changed_files.outputs.has_docs }}" = "1" ] && \
+             [ "${{ steps.changed_files.outputs.has_src }}" = "0" ] && \
+             [ "${{ steps.changed_files.outputs.has_tests }}" = "0" ]; then
+            LABELS="$LABELS release:none"
+          fi
+
+          # Special case: CI-only changes
+          if [ "${{ steps.changed_files.outputs.has_ci }}" = "1" ] && \
+             [ "${{ steps.changed_files.outputs.has_src }}" = "0" ] && \
+             [ "${{ steps.changed_files.outputs.has_tests }}" = "0" ] && \
+             [ "${{ steps.changed_files.outputs.has_docs }}" = "0" ]; then
+            LABELS="$LABELS release:none"
+          fi
+
+          # Remove leading space
+          LABELS=$(echo "$LABELS" | xargs)
+
+          echo "labels=$LABELS" >> $GITHUB_OUTPUT
+          echo "Labels to add: $LABELS"
+
+      - name: Add labels to PR
+        if: steps.labels.outputs.labels != ''
+        run: |
+          LABELS="${{ steps.labels.outputs.labels }}"
+
+          # Convert space-separated to comma-separated
+          LABELS_COMMA=$(echo "$LABELS" | tr ' ' ',')
+
+          echo "Adding labels: $LABELS_COMMA"
+
+          gh pr edit ${{ github.event.pull_request.number }} \
+            --add-label "$LABELS_COMMA" \
+            --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

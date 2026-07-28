@@ -1,0 +1,35 @@
+[build-system]
+requires = ["maturin>=1.9.3,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "graphforge"
+description = "GraphForge — an embedded, openCypher-compatible graph engine (native Rust core)"
+version = "0.5.0.dev0"
+requires-python = ">=3.10"
+license = "BUSL-1.1"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+# `execute()` returns a pyarrow.Table via the Arrow C Data Interface.
+dependencies = ["pyarrow>=14"]
+
+[project.urls]
+Homepage = "https://curatelabs.github.io/graphforge-legecy/"
+Documentation = "https://curatelabs.github.io/graphforge-legecy/"
+Repository = "https://github.com/CurateLabs/graphforge-legecy"
+Issues = "https://github.com/CurateLabs/graphforge-legecy/issues"
+
+# `execute_polars()` is a thin convenience wrapper; Polars is optional.
+[project.optional-dependencies]
+polars = ["polars>=0.20"]
+
+[tool.maturin]
+# The native extension is nested under the `graphforge` package.
+module-name = "graphforge._graphforge_rs"
+# Mixed layout: the pure-Python `graphforge/` package (which re-exports the
+# native module and carries thin helpers like `recipes`) lives under `python/`.
+python-source = "python"
+# Use the release profile for maturin builds
+profile = "release"
+# Only build the Python extension module, not the whole workspace.
+# abi3-py310 → one stable-ABI wheel per OS covers the whole py3.10–3.14 matrix.
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]

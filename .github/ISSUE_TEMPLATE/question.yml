@@ -1,0 +1,95 @@
+name: ❓ Question / Discussion
+description: Ask a question or start a discussion
+title: "[Question]: "
+labels: ["question"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have a question about GraphForge? Ask away! Consider using [GitHub Discussions](https://github.com/CurateLabs/graphforge-legecy/discussions) for open-ended discussions.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+      description: What would you like to know?
+      placeholder: How do I...? What's the best way to...? Why does...?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Question Category
+      description: What is your question about?
+      options:
+        - Getting Started / Installation
+        - Cypher Query Syntax
+        - Python API Usage
+        - Performance / Optimization
+        - Data Modeling
+        - Testing / TCK Compliance
+        - Deployment / Production Use
+        - Contributing to GraphForge
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide any relevant background or what you've tried so far
+      placeholder: |
+        I'm trying to...
+        I've looked at...
+        I've tried...
+    validations:
+      required: false
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code Example (if applicable)
+      description: Share code that's relevant to your question
+      render: python
+      placeholder: |
+        from graphforge import GraphForge
+
+        db = GraphForge()
+        # Your code here
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: GraphForge Version
+      description: What version are you using?
+      placeholder: "0.1.1"
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Related Documentation / Links
+      description: Any documentation you've already consulted?
+      placeholder: |
+        - I read the docs at...
+        - Similar question at...
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission Checklist
+      description: Please confirm
+      options:
+        - label: I have searched existing issues and discussions for similar questions
+          required: true
+        - label: I have consulted the documentation (README, API reference, Cypher guide)
+          required: true

@@ -1,0 +1,6 @@
+{
+  "contract_version": 1,
+  "required": ["contract_version","scenario_id","commit_sha","seed","outcome","ordered_scope","stable_node_uuids","correction","hypotheses","history","ontology","reopen_equal"],
+  "commit_sha_pattern": "^[0-9a-f]{40}$",
+  "fixed": {"scenario_id":"sna-intelligence","seed":2465,"reopen_equal":true}
+}

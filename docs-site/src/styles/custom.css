@@ -1,0 +1,36 @@
+/* GraphForge Starlight tweaks (ported lightly from MkDocs extra.css) */
+
+:root {
+  --sl-font-system-mono: 'Roboto Mono', 'Courier New', ui-monospace, monospace;
+}
+
+starlight-file-tree,
+.expressive-code {
+  border-radius: 4px;
+}
+
+table {
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+/*
+ * Starlight sets content images to `display: block`, which stacks homepage
+ * shields.io badge links as full-width rows. Keep badge images inline and
+ * wrap onto additional lines when the row is too long (mobile included).
+ */
+.sl-markdown-content a:has(> img[src*='shields.io']) {
+  display: inline-block;
+  margin-inline-end: 0.4rem;
+  margin-block-end: 0.35rem;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.sl-markdown-content a > img[src*='shields.io'] {
+  display: inline-block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+}

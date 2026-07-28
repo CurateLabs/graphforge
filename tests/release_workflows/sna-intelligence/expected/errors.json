@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "expected_structured_failures": [],
+  "semantic_negative_assertions": [
+    {"id":"confidence-does-not-select","expected":"hypothesis_selection has zero rows before explicit selection"},
+    {"id":"advisory-does-not-reject-unknown","expected":"UnclassifiedEvent, ATTENDED, DIRECTS, and ASSOCIATED_WITH remain catalog-visible"}
+  ]
+}

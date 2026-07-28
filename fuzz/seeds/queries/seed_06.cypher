@@ -1,0 +1,1 @@
+MATCH p = (a)-[*1..3]->(b) RETURN nodes(p), relationships(p), length(p)

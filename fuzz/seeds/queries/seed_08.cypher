@@ -1,0 +1,1 @@
+WITH [1, 2.0, 'three', true, null] AS mixed RETURN mixed

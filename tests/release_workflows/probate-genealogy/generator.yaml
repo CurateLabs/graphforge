@@ -1,0 +1,11 @@
+{
+  "generator_version": 1,
+  "seed": 2466001,
+  "synthetic_only": true,
+  "people": ["Ada North", "Bea North", "Cora Vale", "Drew Vale"],
+  "documents": ["County birth register 1912", "Estate will 1978", "Late parish register 1911"],
+  "households": ["North household"],
+  "estates": ["Ada North estate"],
+  "fixed_uuid_namespace": "018f0f4e-7b8c-7000-8000-00000001xxxx",
+  "phases": ["initial-records", "competing-hypotheses", "late-evidence", "correction", "reopen"]
+}

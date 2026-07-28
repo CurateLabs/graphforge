@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "fixed": {"schema_version": 1, "scenario_id": "derived-state-freshness"},
+  "canonical_required": ["schema_version", "scenario_id", "commit_sha", "barrier_test", "generator_sha256", "ontology_sha256", "transitions", "rust", "bindings"],
+  "observation_required": ["schema_version", "scenario_id", "commit_sha", "rust", "python", "node", "wheel_sha256"]
+}

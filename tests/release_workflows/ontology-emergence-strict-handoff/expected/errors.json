@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "load_path_classification": {
+    "rust_bulk": "supported-publish_bulk_nodes-publish_bulk_edges",
+    "python_bulk": "supported-publish_bulk_nodes-publish_bulk_edges",
+    "node_bulk": "supported-publishBulkNodes-publishBulkEdges",
+    "legacy_add_nodes_add_edges": "placeholder-not-used-by-this-scenario"
+  },
+  "required": {
+    "malformed_batch": {"code_prefix": "GF_", "partial_mutation": false},
+    "missing_endpoint": {"code_prefix": "GF_", "partial_mutation": false},
+    "unmapped_label": {"code_prefix": "GF_", "partial_mutation": false},
+    "undeclared_property": {"code_prefix": "GF_", "partial_mutation": false}
+  }
+}

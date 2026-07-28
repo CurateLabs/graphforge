@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Set or check the GraphForge release version across publish surfaces.
+
+Surfaces:
+- Cargo workspace ``[workspace.package].version``
+- Python ``crates/gf-bindings-py/pyproject.toml`` (PEP 440)
+- Node ``crates/gf-bindings-node/package.json``
+- NPX skills ``packages/agent-skills/package.json``
+- ``license-policy.json`` ``release_version`` (metadata only; does not regenerate LICENSE)
+
+Usage:
+    python3 scripts/set_release_version.py --check
+    python3 scripts/set_release_version.py 0.5.0 --dry-run
+    python3 scripts/set_release_version.py 0.5.0
+    python3 scripts/set_release_version.py 0.5.0-dev
+
+Dev forms:
+- Cargo / Node / skills: ``0.5.0-dev`` (Cargo) and ``0.5.0-dev.0`` (npm)
+- Python PEP 440: ``0.5.0.dev0``
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+CARGO_TOML = ROOT / "Cargo.toml"
+PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
+NODE_PACKAGE = ROOT / "crates" / "gf-bindings-node" / "package.json"
+SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
+LICENSE_POLICY = ROOT / "license-policy.json"
+
+
+def parse_base(version: str) -> tuple[str, bool]:
+    """Return (MAJOR.MINOR.PATCH, is_dev)."""
+    raw = version.strip()
+    if not raw:
+        raise ValueError("version must be non-empty")
+    dev = False
+    if raw.endswith("-dev") or raw.endswith(".dev0") or re.search(r"-dev\.\d+$", raw):
+        dev = True
+        raw = re.sub(r"(-dev(\.\d+)?)|(\.dev0)$", "", raw)
+    if not re.fullmatch(r"\d+\.\d+\.\d+", raw):
+        raise ValueError(f"unsupported version '{version}' (expected X.Y.Z or X.Y.Z-dev)")
+    return raw, dev
+
+
+def cargo_version(base: str, *, dev: bool) -> str:
+    return f"{base}-dev" if dev else base
+
+
+def python_version(base: str, *, dev: bool) -> str:
+    return f"{base}.dev0" if dev else base
+
+
+def npm_version(base: str, *, dev: bool) -> str:
+    return f"{base}-dev.0" if dev else base
+
+
+def read_current() -> dict[str, str]:
+    cargo = re.search(
+        r'(?m)^version\s*=\s*"([^"]+)"',
+        CARGO_TOML.read_text(encoding="utf-8"),
+    )
+    py = re.search(
+        r'(?m)^version\s*=\s*"([^"]+)"',
+        PYPROJECT.read_text(encoding="utf-8"),
+    )
+    node = json.loads(NODE_PACKAGE.read_text(encoding="utf-8"))["version"]
+    skills = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))["version"]
+    policy = json.loads(LICENSE_POLICY.read_text(encoding="utf-8"))["release_version"]
+    if not cargo or not py:
+        raise ValueError("could not read Cargo or Python version")
+    return {
+        "cargo": cargo.group(1),
+        "python": py.group(1),
+        "node": node,
+        "skills": skills,
+        "license_policy": policy,
+    }
+
+
+def expected_for(base: str, *, dev: bool) -> dict[str, str]:
+    return {
+        "cargo": cargo_version(base, dev=dev),
+        "python": python_version(base, dev=dev),
+        "node": npm_version(base, dev=dev),
+        "skills": npm_version(base, dev=dev),
+        "license_policy": cargo_version(base, dev=dev),
+    }
+
+
+def check_aligned() -> list[str]:
+    """Return drift errors if surfaces disagree on base/dev."""
+    current = read_current()
+    errors: list[str] = []
+    try:
+        base, dev = parse_base(current["cargo"])
+    except ValueError as exc:
+        return [f"cargo version unusable: {exc}"]
+    expected = expected_for(base, dev=dev)
+    for key, want in expected.items():
+        got = current[key]
+        if got != want:
+            errors.append(f"{key}: got {got!r}, expected {want!r} for cargo base {base} dev={dev}")
+    return errors
+
+
+def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
+    expected = expected_for(base, dev=dev)
+    if dry_run:
+        return expected
+
+    cargo_text = CARGO_TOML.read_text(encoding="utf-8")
+    cargo_text, n = re.subn(
+        r'(?m)^(version\s*=\s*")[^"]+(")',
+        rf"\g<1>{expected['cargo']}\2",
+        cargo_text,
+        count=1,
+    )
+    if n != 1:
+        raise ValueError("failed to update Cargo.toml workspace version")
+    CARGO_TOML.write_text(cargo_text, encoding="utf-8")
+
+    py_text = PYPROJECT.read_text(encoding="utf-8")
+    py_text, n = re.subn(
+        r'(?m)^(version\s*=\s*")[^"]+(")',
+        rf"\g<1>{expected['python']}\2",
+        py_text,
+        count=1,
+    )
+    if n != 1:
+        raise ValueError("failed to update Python pyproject version")
+    PYPROJECT.write_text(py_text, encoding="utf-8")
+
+    for path, key in ((NODE_PACKAGE, "node"), (SKILLS_PACKAGE, "skills")):
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["version"] = expected[key]
+        path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    policy = json.loads(LICENSE_POLICY.read_text(encoding="utf-8"))
+    policy["release_version"] = expected["license_policy"]
+    LICENSE_POLICY.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+    return expected
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "version",
+        nargs="?",
+        help="Target version (e.g. 0.5.0 or 0.5.0-dev)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify Cargo/Python/Node/skills/license-policy versions are aligned",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the mapping without writing files",
+    )
+    args = parser.parse_args(argv)
+
+    if args.check:
+        current = read_current()
+        print("current:")
+        for key, value in current.items():
+            print(f"  {key}: {value}")
+        errors = check_aligned()
+        if errors:
+            for error in errors:
+                print(f"set-release-version: {error}", file=sys.stderr)
+            return 1
+        print("set-release-version: aligned")
+        return 0
+
+    if not args.version:
+        parser.error("version is required unless --check")
+
+    try:
+        base, dev = parse_base(args.version)
+        mapping = apply_version(base, dev=dev, dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"set-release-version: {exc}", file=sys.stderr)
+        return 1
+
+    action = "would set" if args.dry_run else "set"
+    print(f"{action}:")
+    for key, value in mapping.items():
+        print(f"  {key}: {value}")
+    if not args.dry_run:
+        print()
+        print("Next: review git diff; regenerate LICENSE if release_version/date change via")
+        print(
+            "  python3 scripts/license_policy.py generate --release-version ... --release-date ..."
+        )
+        print("Do not push registry tags from this script.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

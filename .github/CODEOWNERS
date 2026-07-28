@@ -1,0 +1,35 @@
+# GraphForge Code Owners
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+* @DecisionNerd
+
+# Rust core crates (parser, IR, lowering, execution, storage)
+/crates/ @DecisionNerd
+
+# Python binding — the canonical `graphforge` package
+/crates/gf-bindings-py/ @DecisionNerd
+
+# Tests
+/tests/ @DecisionNerd
+
+# TCK compliance tests (require extra scrutiny)
+/tests/tck/ @DecisionNerd
+
+# Documentation
+/docs/ @DecisionNerd
+/README.md @DecisionNerd
+/CONTRIBUTING.md @DecisionNerd
+
+# CI/CD and infrastructure
+/.github/ @DecisionNerd
+/.github/workflows/ @DecisionNerd
+/pyproject.toml @DecisionNerd
+/.pre-commit-config.yaml @DecisionNerd
+
+# Dependencies and packaging
+/pyproject.toml @DecisionNerd
+/uv.lock @DecisionNerd
+
+# Examples (can have lower review threshold)
+/examples/ @DecisionNerd

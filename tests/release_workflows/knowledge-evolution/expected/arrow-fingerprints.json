@@ -1,0 +1,8 @@
+{
+  "contract":"canonical-json-from-arrow-values/1",
+  "schemas":{
+    "neutral_rank":["node_uuid:FixedSizeBinary(16)","score:Float64"],
+    "epistemic_snapshot":["assertion_uuid:FixedSizeBinary(16)","claim:Utf8","current_status:Utf8"],
+    "belief_projection":["node_uuid:FixedSizeBinary(16)"]
+  }
+}

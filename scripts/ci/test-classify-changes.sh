@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+classifier=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/classify-changes.sh
+workflow=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/.github/workflows/test.yml
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT
+
+git -C "$fixture" init -q
+git -C "$fixture" config user.name "GraphForge CI"
+git -C "$fixture" config user.email "ci@graphforge.invalid"
+
+mkdir -p "$fixture/crates/gf-exec/src"
+printf 'baseline\n' >"$fixture/crates/gf-exec/src/lib.rs"
+printf '[workspace.package]\nlicense = "MIT"\n' >"$fixture/Cargo.toml"
+git -C "$fixture" add .
+git -C "$fixture" commit -qm baseline
+base=$(git -C "$fixture" rev-parse HEAD)
+
+assert_classification() {
+  local expected=$1
+  local path=$2
+  local message=$3
+
+  mkdir -p "$fixture/$(dirname "$path")"
+  printf '%s\n' "$message" >>"$fixture/$path"
+  git -C "$fixture" add "$path"
+  git -C "$fixture" commit -qm "change $path"
+
+  actual=$(
+    cd "$fixture"
+    "$classifier" "$base" HEAD
+  )
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'unexpected classification for %s\nexpected:\n%s\nactual:\n%s\n' \
+      "$path" "$expected" "$actual" >&2
+    exit 1
+  fi
+
+  git -C "$fixture" reset --hard -q "$base"
+}
+
+none=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false'
+rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false'
+python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skills=false'
+gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false'
+binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false'
+binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false'
+binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false'
+binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true'
+agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true'
+all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true'
+
+assert_classification "$rust_only" crates/gf-exec/src/kernel.rs core-rust
+assert_classification "$binding_rust" crates/gf-api/src/lib.rs public-api-rust
+assert_classification "$binding_python" crates/gf-bindings-py/tests/smoke.py python-binding
+assert_classification "$binding_only" crates/gf-bindings-node/tests/analyze.test.mjs node-binding
+assert_classification "$gherkin_rust" tests/features/tck/features/query.feature gherkin
+assert_classification "$binding_python" tests/unit/kernel_test.py python-test
+assert_classification "$python_only" scripts/some_tool.py python-only
+assert_classification "$binding_python" examples/basic_usage.py python-binding-example
+assert_classification "$binding_python" scripts/build_feature_graph.py python-binding-script
+assert_classification "$binding_agent_skills" package.json node-manifest
+assert_classification "$agent_skills_only" packages/agent-skills/package.json agent-skills
+assert_classification "$agent_skills_only" \
+  packages/agent-skills/bin/graphforge-agent-skills.js agent-skills-nested
+assert_classification "$all" ".github/workflows/test.yml" workflow
+assert_classification "$all" scripts/ci/require-gates.sh aggregate-gate
+assert_classification "$all" scripts/ci/concurrency-short-gate.py concurrency-short-gate
+assert_classification "$all" tests/contracts/concurrency-short-matrix.json concurrency-short-matrix
+assert_classification "$none" "docs/a file with spaces.md" docs-only
+
+# Packaging-only Cargo metadata must not compile the workspace.
+perl -0pi -e 's/license = "MIT"/license = "BUSL-1.1"/' "$fixture/Cargo.toml"
+git -C "$fixture" add Cargo.toml
+git -C "$fixture" commit -qm "change license metadata"
+metadata_actual=$(
+  cd "$fixture"
+  "$classifier" "$base" HEAD
+)
+[[ "$metadata_actual" == "$none" ]] || {
+  printf 'license-only manifest edit must be metadata-only, got:\n%s\n' \
+    "$metadata_actual" >&2
+  exit 1
+}
+git -C "$fixture" reset --hard -q "$base"
+
+# Behavioral Cargo manifest changes remain fail-safe.
+printf 'datafusion = "50"\n' >>"$fixture/Cargo.toml"
+git -C "$fixture" add Cargo.toml
+git -C "$fixture" commit -qm "change dependency"
+manifest_actual=$(
+  cd "$fixture"
+  "$classifier" "$base" HEAD
+)
+[[ "$manifest_actual" == "$binding_rust" ]] || {
+  printf 'dependency manifest edit must run Rust and bindings, got:\n%s\n' \
+    "$manifest_actual" >&2
+  exit 1
+}
+git -C "$fixture" reset --hard -q "$base"
+
+missing=$(
+  cd "$fixture"
+  "$classifier" deadbeef HEAD
+)
+[[ "$missing" == "$all" ]] || {
+  printf 'missing base must fail safe, got:\n%s\n' "$missing" >&2
+  exit 1
+}
+
+# A push receives `github.event.before`, so a docs-only merge remains scoped.
+printf 'docs\n' >"$fixture/docs.md"
+git -C "$fixture" add docs.md
+git -C "$fixture" commit -qm "docs-only push"
+push=$(
+  cd "$fixture"
+  "$classifier" "$base" HEAD
+)
+[[ "$push" == "$none" ]] || {
+  printf 'docs-only push classification must remain scoped, got:\n%s\n' "$push" >&2
+  exit 1
+}
+git -C "$fixture" reset --hard -q "$base"
+
+# The workflow must select the PR base when present and the push `before` SHA
+# otherwise. An absent or unusable base still fails closed in the classifier.
+grep -Fq '"${{ github.event.pull_request.base.sha || github.event.before }}"' "$workflow"
+empty=$(
+  cd "$fixture"
+  "$classifier" "" HEAD
+)
+[[ "$empty" == "$all" ]] || {
+  printf 'empty base must fail safe, got:\n%s\n' "$empty" >&2
+  exit 1
+}
+
+echo "changed-path classifier tests passed"

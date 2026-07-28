@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "package": "@graphforge/agent-skills",
+  "package_version": "0.5.0-dev.0",
+  "graphforge_release": "0.5.0",
+  "graphforge_version_range": ">=0.5.0 <0.6.0",
+  "security_contract": {
+    "subprocess": "unsupported",
+    "project_symlinks": "rejected",
+    "max_value_depth": 16,
+    "max_value_entries": 4096,
+    "max_value_string_length": 4096
+  }
+}

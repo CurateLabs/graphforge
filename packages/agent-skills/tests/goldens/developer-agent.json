@@ -1,0 +1,27 @@
+{
+  "apis": [
+    "bootstrapProject",
+    "openProject",
+    "tableToJson",
+    "stableJson",
+    "requestSubprocess"
+  ],
+  "arrow_json": {
+    "encoded": "{\"marker_uuid\":\"018f0f4e-7b8c-7000-8000-000000000021\",\"row_count\":1}\n",
+    "row_count": 1
+  },
+  "bootstrap": {
+    "created": true,
+    "marker_uuid": "018f0f4e-7b8c-7000-8000-000000000021"
+  },
+  "errors": {
+    "designed_only": "GF_AGENT_CAPABILITY_UNSUPPORTED",
+    "missing_capability": "GF_AGENT_CAPABILITY_MISSING",
+    "subprocess": "GF_AGENT_SUBPROCESS_UNSUPPORTED"
+  },
+  "reopen": {
+    "marker_matches": true,
+    "marker_uuid": "018f0f4e-7b8c-7000-8000-000000000021"
+  },
+  "scenario": "developer-agent"
+}

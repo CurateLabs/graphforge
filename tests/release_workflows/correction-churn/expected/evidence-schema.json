@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "required": ["schema_version","scenario_id","commit_sha","correction_cycles","prior_views","current","history","idempotency","reopen_equal"],
+  "fixed": {"schema_version":1,"scenario_id":"correction-churn","correction_cycles":3,"reopen_equal":true}
+}

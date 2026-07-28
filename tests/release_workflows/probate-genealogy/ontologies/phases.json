@@ -1,0 +1,7 @@
+{
+  "initial-records": {"ontology": "advisory-v1.yaml", "mode": "advisory", "expected_warning_ids": ["PG-WARN-MISSING-RECORDED-ON"]},
+  "competing-hypotheses": {"ontology": "advisory-v1.yaml", "mode": "advisory"},
+  "late-evidence": {"ontology": "advisory-v1.yaml", "mode": "advisory"},
+  "correction": {"ontology": "advisory-v1.yaml", "mode": "advisory"},
+  "reopen": {"ontology": "advisory-v1.yaml", "mode": "advisory"}
+}

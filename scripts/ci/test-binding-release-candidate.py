@@ -1,0 +1,849 @@
+#!/usr/bin/env python3
+"""Deterministic negative tests for the binding RC evidence validator."""
+
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+VALIDATOR = ROOT / "scripts/ci/validate-binding-release-candidate.py"
+CONTRACT = ROOT / "tests/contracts/binding-release-candidate-targets.json"
+RC_WORKFLOW = ROOT / ".github/workflows/binding-release-candidate.yml"
+README = ROOT / "README.md"
+PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish.yaml"
+ARTIFACT_VALIDATOR = ROOT / "scripts/ci/validate-napi-artifacts.py"
+WRAPPER_PREPARER = ROOT / "scripts/ci/prepare-rustc-wrapper.py"
+STRICT_ADD_NODE = ROOT / "crates/gf-bindings-py/tests/strict_add_node.py"
+SHA = "a" * 40
+ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir npm"
+
+
+def load_validator():
+    spec = importlib.util.spec_from_file_location("binding_rc_validator", VALIDATOR)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_artifact_validator():
+    spec = importlib.util.spec_from_file_location("napi_artifact_validator", ARTIFACT_VALIDATOR)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def report(target: str, settings: dict[str, str]) -> dict[str, object]:
+    mode = settings["execution_mode"]
+    return {
+        "schema": "graphforge-binding-rc-target/1",
+        "source_sha": SHA,
+        "language": settings["language"],
+        "target": target,
+        "package_version": "0.5.0.dev0",
+        "artifact": {"name": "artifact", "sha256": "b" * 64},
+        "classification": {
+            "name": "policy.json",
+            "sha256": "c" * 64,
+            "schema": 1
+            if settings["language"] == "node"
+            else "graphforge-python-non-cypher-parity/1",
+        },
+        "execution": {
+            "mode": mode,
+            "rationale": "incompatible GitHub-hosted runner architecture"
+            if mode == "package-validation"
+            else None,
+        },
+        "fallback_execution": False,
+        "cases": [{"identity": "native contract", "outcome": "passed", "sanitized_error": None}],
+        "sanitized_parity_diff": [],
+    }
+
+
+def rejected(module, reports, contract, message: str) -> None:
+    try:
+        module.validate(reports, contract, SHA)
+    except ValueError as error:
+        assert message in str(error), error
+    else:
+        raise AssertionError(f"validator accepted invalid evidence: {message}")
+
+
+def node_matrix_entries(workflow: Path, text: str) -> list[str]:
+    if workflow == RC_WORKFLOW:
+        return re.findall(r"(?ms)^          - os:.*?(?=^          - os:|^    steps:)", text)
+    return [line.strip() for line in text.splitlines() if line.startswith("          - { host:")]
+
+
+def next_step_environment(base: dict[str, str], github_env: Path) -> dict[str, str]:
+    """Apply simple GitHub environment-file assignments to a later step."""
+    result = base.copy()
+    for assignment in github_env.read_text().splitlines():
+        name, value = assignment.split("=", 1)
+        result[name] = value
+    return result
+
+
+def required_section(text: str, start: str, end: str) -> str:
+    """Return a required policy section or reject a missing delimiter."""
+    _, start_found, remainder = text.partition(start)
+    assert start_found, f"missing workflow marker: {start}"
+    section, end_found, _ = remainder.partition(end)
+    assert end_found, f"missing workflow marker: {end}"
+    return section
+
+
+def assert_active_lines(section: str, *expected: str) -> None:
+    """Require exact, non-commented workflow lines."""
+    active = {
+        line.strip()
+        for line in section.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    for line in expected:
+        assert line in active, f"missing active workflow line: {line}"
+
+
+def validate_python_evidence_policy(workflow_text: str) -> None:
+    """Reject drift from the cross-platform, read-only-wheel evidence contract."""
+    prepare_step = "Prepare writable Python RC evidence directory"
+    native_step = "Clean-install and execute native contract"
+    write_step = "Write target evidence"
+    upload_step = "uses: actions/upload-artifact@v7"
+    assert workflow_text.count(prepare_step) == 1
+    python_job = required_section(workflow_text, "  python:\n", "  node:\n")
+    assert (
+        python_job.count("PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence")
+        == 3
+    )
+    _, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@v1")
+    assert maturin_found, "missing maturin build marker"
+    assert (
+        post_maturin.index(prepare_step)
+        < post_maturin.index(native_step)
+        < post_maturin.index(write_step)
+        < post_maturin.index(upload_step)
+    )
+    prepare = required_section(post_maturin, prepare_step, f"- name: {native_step}")
+    assert_active_lines(
+        prepare,
+        "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
+        'if ! mkdir -p "$PYTHON_RC_EVIDENCE_DIR" || \\',
+        '! touch "$PYTHON_RC_EVIDENCE_DIR/.graphforge-write-probe" || \\',
+        '! rm "$PYTHON_RC_EVIDENCE_DIR/.graphforge-write-probe"; then',
+        "printf 'python_rc_evidence_state=unwritable "
+        "target=runner-temp/graphforge-python-rc-evidence\\n' >&2",
+        "exit 1",
+        "printf 'python_rc_evidence_state=ready "
+        "target=runner-temp/graphforge-python-rc-evidence\\n'",
+    )
+    assert prepare.count("python_rc_evidence_state=unwritable") == 1
+    assert prepare.count("python_rc_evidence_state=ready") == 1
+    assert "target=runner-temp/graphforge-python-rc-evidence" in prepare
+    assert "printf 'python_rc_evidence_state=ready target=runner-temp/" in prepare
+    assert "printf 'python_rc_evidence_state=unwritable target=runner-temp/" in prepare
+    native = required_section(post_maturin, f"- name: {native_step}", f"- name: {write_step}")
+    report = '"$PYTHON_RC_EVIDENCE_DIR/python-classification.json"'
+    assert_active_lines(
+        native,
+        "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
+        f"GRAPHFORGE_PYTHON_PARITY_REPORT={report} \\",
+        'uv run --isolated --no-project --with "${wheels[0]}" \\',
+        "python crates/gf-bindings-py/tests/non_cypher_release.py \\",
+        "--classification-only",
+    )
+    assert "GRAPHFORGE_PYTHON_PARITY_REPORT=dist/" not in native
+    write = required_section(post_maturin, f"- name: {write_step}", upload_step)
+    assert_active_lines(
+        write,
+        "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
+        "python3 scripts/ci/write-binding-parity-evidence.py \\",
+        f"--classification {report} \\",
+        '--output "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json"',
+    )
+    assert "--classification dist/" not in write
+    assert '--output "dist/' not in write
+    _, upload_found, upload = post_maturin.partition(upload_step)
+    assert upload_found, "missing Python artifact upload marker"
+    assert_active_lines(
+        upload,
+        "path: ${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
+    )
+    for forbidden in ("chmod", "chown", "continue-on-error", "|| true", "retry"):
+        assert forbidden not in post_maturin.lower()
+    assert not re.search(r"(?mi)^\s*if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$", post_maturin)
+
+
+def rejected_python_evidence_policy(workflow_text: str) -> None:
+    try:
+        validate_python_evidence_policy(workflow_text)
+    except (AssertionError, ValueError):
+        return
+    raise AssertionError("workflow policy accepted Python RC evidence path drift")
+
+
+def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
+    """Keep the Windows cold-start allowance narrow and the RC gate fail-closed."""
+    node_job = required_section(workflow_text, "  node:\n", "  aggregate:\n")
+    windows_entries = [
+        entry
+        for entry in node_matrix_entries(RC_WORKFLOW, workflow_text)
+        if "target: x86_64-pc-windows-msvc" in entry
+    ]
+    assert len(windows_entries) == 1
+    windows_entry = windows_entries[0]
+    assert windows_entry.count("timeout_minutes: 90") == 1
+    assert all(
+        "timeout_minutes:" not in entry
+        for entry in node_matrix_entries(RC_WORKFLOW, workflow_text)
+        if entry != windows_entry
+    )
+    assert_active_lines(node_job, "timeout-minutes: ${{ matrix.timeout_minutes || 60 }}")
+
+    cache_name = "Restore Windows Node Cargo build state"
+    assert node_job.count(cache_name) == 1
+    cache = required_section(
+        node_job, f"- name: {cache_name}", "- name: Install workspace dependencies"
+    )
+    assert_active_lines(
+        cache,
+        "if: matrix.target == 'x86_64-pc-windows-msvc'",
+        "uses: actions/cache@v5",
+        "~/.cargo/registry",
+        "~/.cargo/git/db",
+        "target",
+        "key: ${{ runner.os }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0-"
+        "${{ hashFiles('Cargo.lock') }}",
+    )
+    assert all(
+        forbidden not in cache
+        for forbidden in ("inputs.commit_sha", "EVIDENCE_SHA", "github.sha", "restore-keys")
+    )
+    assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(cache_name)
+    assert node_job.index(cache_name) < node_job.index("Build declared publish target")
+
+    assert_active_lines(
+        node_job,
+        "pnpm --filter @graphforge/node exec napi build --platform --release",
+        "pnpm --filter @graphforge/node test:smoke",
+        "tests/non-cypher-release-parity.test.mjs \\",
+        "tests/async-errors.test.mjs",
+        "cmp built-addon.sha256 tested-addon.sha256",
+    )
+    for forbidden in ("continue-on-error", "retry", "sleep", "--debug", "|| true"):
+        assert forbidden not in node_job.lower()
+    false_condition = r"(?mi)^\s*if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*(?:#.*)?$"
+    assert not re.search(false_condition, node_job)
+
+    _, aggregate_found, aggregate = workflow_text.partition("  aggregate:\n")
+    assert aggregate_found, "missing aggregate job"
+    aggregate_head, steps_found, _ = aggregate.partition("    steps:\n")
+    assert steps_found, "missing aggregate steps"
+    assert_active_lines(
+        aggregate_head,
+        "if: always() && needs.validate_source.result == 'success'",
+        "needs: [validate_source, python, node]",
+    )
+    assert_active_lines(
+        aggregate,
+        "python3 scripts/ci/validate-binding-release-candidate.py",
+    )
+    assert "continue-on-error" not in aggregate.lower()
+    assert "|| true" not in aggregate.lower()
+    assert not re.search(false_condition, aggregate)
+
+
+def rejected_windows_node_cold_start_policy(workflow_text: str, mutation: str = "") -> None:
+    try:
+        validate_windows_node_cold_start_policy(workflow_text)
+    except (AssertionError, StopIteration, ValueError):
+        return
+    raise AssertionError(f"workflow policy accepted Windows Node cold-start drift: {mutation}")
+
+
+def validate_post_merge_source_policy(workflow_text: str) -> None:
+    """Reject branch-head/stale evidence before any platform matrix starts."""
+    assert_active_lines(
+        workflow_text,
+        "group: binding-rc-${{ inputs.commit_sha }}",
+        "cancel-in-progress: true",
+    )
+    validate_job = required_section(workflow_text, "  validate_source:\n", "  python:\n")
+    assert_active_lines(
+        validate_job,
+        "ref: main",
+        "fetch-depth: 1",
+        "REQUESTED_SHA: ${{ inputs.commit_sha }}",
+        "+refs/heads/main:refs/remotes/origin/main",
+        'main_sha="$(git rev-parse refs/remotes/origin/main)"',
+        'test "$REQUESTED_SHA" = "$main_sha"',
+        "evidence_sha: ${{ steps.source.outputs.evidence_sha }}",
+    )
+    for job_name, next_job in (("python", "node"), ("node", "aggregate")):
+        job = required_section(workflow_text, f"  {job_name}:\n", f"  {next_job}:\n")
+        assert_active_lines(
+            job,
+            "needs: validate_source",
+            "EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}",
+            "ref: ${{ needs.validate_source.outputs.evidence_sha }}",
+        )
+        assert "ref: ${{ inputs.commit_sha }}" not in job
+
+
+def rejected_post_merge_source_policy(workflow_text: str, mutation: str) -> None:
+    try:
+        validate_post_merge_source_policy(workflow_text)
+    except (AssertionError, ValueError):
+        return
+    raise AssertionError(f"workflow accepted non-main RC source drift: {mutation}")
+
+
+def main() -> None:
+    rc_workflow_text = RC_WORKFLOW.read_text()
+    readme_text = README.read_text()
+    workflows_readme_text = (ROOT / ".github/workflows/README.md").read_text()
+    assert "`Binding Release Candidate` is post-merge, `main`-only evidence" in readme_text
+    assert (
+        "rejects branch heads and stale commits before any platform matrix build starts"
+        in " ".join(readme_text.split())
+    )
+    assert "proves user-facing use of the installed wheel" in workflows_readme_text
+    assert "Windows gf-storage Locks" in workflows_readme_text
+    assert "second MSVC" in workflows_readme_text
+    # Binding RC must not re-host the Rust lock suite; Test Suite does (#2700).
+    binding_rc_readme = required_section(
+        workflows_readme_text,
+        "### `binding-release-candidate.yml`",
+        "### `Concurrency Matrix` job in `test.yml`",
+    )
+    assert "project_generation::tests::" not in binding_rc_readme
+    assert "Windows gf-storage Locks" in binding_rc_readme
+    assert "Test Suite" in binding_rc_readme
+    validate_post_merge_source_policy(rc_workflow_text)
+    for original, invalid in (
+        ("cancel-in-progress: true", "cancel-in-progress: false"),
+        ('test "$REQUESTED_SHA" = "$main_sha"', "true"),
+        (
+            "needs: validate_source",
+            "needs: []",
+        ),
+        (
+            "ref: ${{ needs.validate_source.outputs.evidence_sha }}",
+            "ref: ${{ inputs.commit_sha }}",
+        ),
+    ):
+        rejected_post_merge_source_policy(rc_workflow_text.replace(original, invalid, 1), original)
+    validate_python_evidence_policy(rc_workflow_text)
+    validate_windows_node_cold_start_policy(rc_workflow_text)
+    windows_entry = next(
+        entry
+        for entry in node_matrix_entries(RC_WORKFLOW, rc_workflow_text)
+        if "target: x86_64-pc-windows-msvc" in entry
+    )
+    rejected_windows_node_cold_start_policy(
+        rc_workflow_text.replace(windows_entry, windows_entry + windows_entry, 1),
+        "duplicate Windows matrix entry",
+    )
+    for original, invalid in (
+        ("timeout_minutes: 90", "timeout_minutes: 60"),
+        (
+            "${{ runner.os }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}",
+            "${{ github.sha }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0",
+        ),
+        ("${{ runner.os }}-cargo-", "cargo-"),
+        ("x86_64-pc-windows-msvc-release", "windows-release"),
+        ("-release-rust-", "-rust-"),
+        ("rust-1.96.0-", "rust-unpinned-"),
+        ("${{ hashFiles('Cargo.lock') }}", "no-lockfile"),
+        (
+            "if: matrix.target == 'x86_64-pc-windows-msvc'",
+            "if: matrix.execution_mode == 'native'",
+        ),
+        ("~/.cargo/registry", "~/.cargo/registry-disabled"),
+        ("~/.cargo/git/db", "~/.cargo/git-disabled"),
+        ("            target\n", "            target-disabled\n"),
+        ("--platform --release", "--platform --debug"),
+        ("pnpm --filter @graphforge/node test:smoke", "sleep 1"),
+        ("pnpm --filter @graphforge/node test:smoke", "retry native-smoke"),
+        (
+            "- name: Build declared publish target\n        shell: bash",
+            "- name: Build declared publish target\n"
+            "        if: false # disabled\n        shell: bash",
+        ),
+        ("tests/non-cypher-release-parity.test.mjs", "tests/skipped-parity.test.mjs"),
+        ("cmp built-addon.sha256 tested-addon.sha256", "true"),
+        ("if: always()", "if: false"),
+        ("if: always()", "if: false # disabled"),
+        ("needs: [validate_source, python, node]", "needs: [python, node]"),
+        (
+            "- name: Validate and aggregate\n        run: >-",
+            "- name: Validate and aggregate\n        continue-on-error: true\n        run: >-",
+        ),
+        (
+            "- name: Validate and aggregate\n        run: >-",
+            "- name: Validate and aggregate\n        if: false # disabled\n        run: >-",
+        ),
+        (
+            "python3 scripts/ci/validate-binding-release-candidate.py",
+            "python3 scripts/ci/validate-binding-release-candidate.py || true",
+        ),
+    ):
+        rejected_windows_node_cold_start_policy(
+            rc_workflow_text.replace(original, invalid, 1), original
+        )
+    for original, invalid in (
+        (
+            "Prepare writable Python RC evidence directory",
+            "Clean-install and execute native contract",
+        ),
+        ("$PYTHON_RC_EVIDENCE_DIR/python-classification.json", "dist/python-classification.json"),
+        (
+            "${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
+            "dist/python-target.json",
+        ),
+        ("python_rc_evidence_state=ready", "python_rc_evidence_state=ready; retry"),
+        (
+            'mkdir -p "$PYTHON_RC_EVIDENCE_DIR"',
+            'chmod 777 dist; mkdir -p "$PYTHON_RC_EVIDENCE_DIR"',
+        ),
+    ):
+        rejected_python_evidence_policy(rc_workflow_text.replace(original, invalid, 1))
+    for disabled in ("if: false", "if: ${{ false }}"):
+        invalid = rc_workflow_text.replace(
+            "      - name: Prepare writable Python RC evidence directory",
+            f"      - name: Prepare writable Python RC evidence directory\n        {disabled}",
+            1,
+        )
+        rejected_python_evidence_policy(invalid)
+    prepare_marker = "Prepare writable Python RC evidence directory"
+    native_marker = "Clean-install and execute native contract"
+    write_marker = "Write target evidence"
+    upload_marker = "uses: actions/upload-artifact@v7"
+    for marker, active_line in (
+        (
+            prepare_marker,
+            "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
+        ),
+        (prepare_marker, 'if ! mkdir -p "$PYTHON_RC_EVIDENCE_DIR" || \\'),
+        (prepare_marker, '! touch "$PYTHON_RC_EVIDENCE_DIR/.graphforge-write-probe" || \\'),
+        (prepare_marker, '! rm "$PYTHON_RC_EVIDENCE_DIR/.graphforge-write-probe"; then'),
+        (
+            prepare_marker,
+            "printf 'python_rc_evidence_state=unwritable "
+            "target=runner-temp/graphforge-python-rc-evidence\\n' >&2",
+        ),
+        (prepare_marker, "exit 1"),
+        (
+            prepare_marker,
+            "printf 'python_rc_evidence_state=ready "
+            "target=runner-temp/graphforge-python-rc-evidence\\n'",
+        ),
+        (native_marker, "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence"),
+        (
+            native_marker,
+            "GRAPHFORGE_PYTHON_PARITY_REPORT="
+            '"$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \\',
+        ),
+        (native_marker, 'uv run --isolated --no-project --with "${wheels[0]}" \\'),
+        (native_marker, "python crates/gf-bindings-py/tests/non_cypher_release.py \\"),
+        (native_marker, "--classification-only"),
+        (write_marker, "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence"),
+        (write_marker, "python3 scripts/ci/write-binding-parity-evidence.py \\"),
+        (write_marker, '--classification "$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \\'),
+        (write_marker, '--output "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json"'),
+        (
+            upload_marker,
+            "path: ${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
+        ),
+    ):
+        prefix, marker_found, remainder = rc_workflow_text.partition(marker)
+        assert marker_found
+        assert active_line in remainder
+        invalid = prefix + marker_found + remainder.replace(active_line, f"# {active_line}", 1)
+        rejected_python_evidence_policy(invalid)
+    prefix, marker_found, remainder = rc_workflow_text.partition(prepare_marker)
+    assert marker_found and "exit 1" in remainder
+    rejected_python_evidence_policy(
+        prefix + marker_found + remainder.replace("exit 1", "exit 1 || true", 1)
+    )
+    for marker in (
+        "  python:\n",
+        "  node:\n",
+        "uses: PyO3/maturin-action@v1",
+        "Prepare writable Python RC evidence directory",
+        "Clean-install and execute native contract",
+        "Write target evidence",
+        "uses: actions/upload-artifact@v7",
+    ):
+        rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
+    wrapper_step = "Prepare Rust compiler wrapper for native contracts"
+    target_step = "Prepare writable Cargo target for native contracts"
+    native_step = "Clean-install and execute native contract"
+    assert rc_workflow_text.count(wrapper_step) == 1
+    assert rc_workflow_text.count(target_step) == 1
+    assert rc_workflow_text.count(native_step) == 1
+    assert (
+        rc_workflow_text.index(wrapper_step)
+        < rc_workflow_text.index(target_step)
+        < rc_workflow_text.index(native_step)
+    )
+    post_maturin_python = rc_workflow_text.split("uses: PyO3/maturin-action@v1", 1)[1].split(
+        "  node:", 1
+    )[0]
+    assert 'cargo_target_dir="$RUNNER_TEMP/graphforge-python-native-target"' in post_maturin_python
+    assert "printf 'CARGO_TARGET_DIR=%s\\n'" in post_maturin_python
+    assert "cargo_target_state=unwritable" in post_maturin_python
+    assert "cargo_target_state=ready" in post_maturin_python
+    assert "chmod" not in post_maturin_python
+    assert "chown" not in post_maturin_python
+    assert "continue-on-error" not in post_maturin_python
+    assert "|| true" not in post_maturin_python
+    assert "retry" not in post_maturin_python.lower()
+    assert "if: false" not in post_maturin_python
+    strict_add_node_text = STRICT_ADD_NODE.read_text()
+    cargo_invocation = strict_add_node_text.split('"cargo",', 1)[1].split("check=True,", 1)[0]
+    assert "env=" not in cargo_invocation
+    assert "target: python-ubuntu" in rc_workflow_text
+    assert "target: python-macos" in rc_workflow_text
+    assert "target: python-windows" in rc_workflow_text
+    # python-windows proves installed-wheel use for users, not a second MSVC
+    # gf-storage release cargo-test on the Binding RC critical path (#2699).
+    # The #[cfg(windows)] lock suite lives in Test Suite (#2700).
+    python_job = rc_workflow_text.split("  python:", 1)[1].split("  node:", 1)[0]
+    assert "Prove Windows project-root lock contract" not in python_job
+    assert "cargo test --release -p gf-storage" not in python_job
+    assert "project_generation::tests::" not in python_job
+    assert "Clean-install and execute native contract" in python_job
+    assert "uses: PyO3/maturin-action@v1" in python_job
+    test_workflow_text = (ROOT / ".github/workflows/test.yml").read_text()
+    windows_locks_job = required_section(
+        test_workflow_text,
+        "  windows-gf-storage-locks:\n",
+        "  ci-gate:\n",
+    )
+    assert_active_lines(
+        windows_locks_job,
+        "runs-on: blacksmith-4vcpu-windows-2025",
+        "needs: changes",
+        "if: needs.changes.outputs.rust == 'true'",
+        "cargo test -p gf-storage project_generation::tests:: --lib",
+        "--no-fail-fast",
+    )
+    _, ci_gate_found, ci_gate = test_workflow_text.partition("  ci-gate:\n")
+    assert ci_gate_found, "missing workflow marker:   ci-gate:"
+    assert_active_lines(
+        ci_gate,
+        "- windows-gf-storage-locks",
+        '"${{ needs.windows-gf-storage-locks.result }}"',
+    )
+    assert "macos-latest" not in rc_workflow_text
+    assert "macos-15-intel" not in rc_workflow_text
+    assert "windows-latest" not in rc_workflow_text
+    assert rc_workflow_text.count("os: blacksmith-6vcpu-macos-15") == 3
+    assert rc_workflow_text.count("os: blacksmith-4vcpu-windows-2025") == 2
+    assert "architecture: ${{ matrix.node_arch }}" in rc_workflow_text
+    assert 'test "$(node -p \'process.arch\')" = "$EXPECTED_NODE_ARCH"' in rc_workflow_text
+    assert "scripts/ci/prepare-rustc-wrapper.py" in rc_workflow_text
+    package_validation_step = rc_workflow_text.split("- name: Validate cross-built package", 1)[
+        1
+    ].split("- name: Write target evidence", 1)[0]
+    validator_from_workspace = 'python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py"'
+    assert "working-directory: crates/gf-bindings-node" in package_validation_step
+    assert package_validation_step.count(validator_from_workspace) == 1
+    assert "../../../scripts/ci/validate-napi-artifacts.py" not in package_validation_step
+    assert (ROOT / "scripts/ci/validate-napi-artifacts.py").samefile(ARTIFACT_VALIDATOR)
+
+    publish_workflow_text = PUBLISH_WORKFLOW.read_text()
+    publish_wheel_job = publish_workflow_text.split("  build-wheels:", 1)[1].split(
+        "  build-sdist:", 1
+    )[0]
+    post_maturin = publish_wheel_job.split("uses: PyO3/maturin-action@v1", 1)[1]
+    assert "cargo " not in post_maturin.lower()
+    assert "tests/*.py" not in post_maturin
+    assert "native contract" not in post_maturin.lower()
+    assert "uses: actions/upload-artifact@v7" in post_maturin
+
+    with tempfile.TemporaryDirectory() as directory:
+        temp = Path(directory)
+        github_env = temp / "github-env"
+        stale_env = os.environ.copy()
+        stale_env.update(
+            {
+                "GITHUB_ENV": str(github_env),
+                "RUSTC_WRAPPER": "unavailable-graphforge-sccache",
+            }
+        )
+        stale = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER_PREPARER),
+                "--platform",
+                "python-ubuntu",
+                "--contract",
+                "python-native-contracts",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=stale_env,
+        )
+        assert stale.returncode == 0, stale.stderr[-1000:]
+        assert github_env.read_text() == "RUSTC_WRAPPER=\n"
+        assert "state=cleared" in stale.stdout
+        assert "PATH" not in stale.stdout
+
+        cargo = shutil.which("cargo")
+        assert cargo is not None, "cargo is required for wrapper contract validation"
+        crate = temp / "wrapper-contract"
+        (crate / "src").mkdir(parents=True)
+        (crate / "Cargo.toml").write_text(
+            '[package]\nname = "wrapper-contract"\nversion = "0.0.0"\nedition = "2021"\n',
+            encoding="utf-8",
+        )
+        (crate / "src/lib.rs").write_text("pub fn contract() {}\n", encoding="utf-8")
+        stale_cargo = subprocess.run(
+            [cargo, "check", "--offline", "--quiet"],
+            cwd=crate,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=next_step_environment(stale_env, github_env),
+        )
+        assert stale_cargo.returncode == 0, (stale_cargo.stdout + stale_cargo.stderr)[-1000:]
+
+        hostile_wrapper = "secret\nvalue-" + ("x" * 200)
+        hostile_env = os.environ.copy()
+        hostile_env.update({"GITHUB_ENV": str(github_env), "RUSTC_WRAPPER": hostile_wrapper})
+        hostile = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER_PREPARER),
+                "--platform",
+                "python-ubuntu\nsecret-platform",
+                "--contract",
+                "native\nsecret-contract",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=hostile_env,
+        )
+        assert hostile.returncode == 0, hostile.stderr[-1000:]
+        assert len(hostile.stdout.strip()) < 220
+        assert hostile.stdout.count("\n") == 1
+        assert "secret\n" not in hostile.stdout
+        assert "x" * 65 not in hostile.stdout
+
+        wrapper = temp / "sccache"
+        wrapper_log = temp / "wrapper-invocations"
+        wrapper.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" invoked >> "{wrapper_log}"\nexec "$@"\n',
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        github_env.write_text("", encoding="utf-8")
+        available_env = os.environ.copy()
+        available_env.update({"GITHUB_ENV": str(github_env), "RUSTC_WRAPPER": str(wrapper)})
+        available = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER_PREPARER),
+                "--platform",
+                "python-macos",
+                "--contract",
+                "python-native-contracts",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=available_env,
+        )
+        assert available.returncode == 0, available.stderr[-1000:]
+        assert github_env.read_text() == ""
+        assert "command=sccache state=available" in available.stdout
+        assert str(temp) not in available.stdout
+        available_cargo = subprocess.run(
+            [
+                cargo,
+                "check",
+                "--offline",
+                "--quiet",
+                "--target-dir",
+                str(temp / "available-target"),
+            ],
+            cwd=crate,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=next_step_environment(available_env, github_env),
+        )
+        assert available_cargo.returncode == 0, (available_cargo.stdout + available_cargo.stderr)[
+            -1000:
+        ]
+        assert wrapper_log.read_text().splitlines()
+
+    for workflow in (RC_WORKFLOW, PUBLISH_WORKFLOW):
+        workflow_text = workflow.read_text()
+        assert "run build --" not in workflow_text, (
+            f"{workflow.name} forwards napi options to Cargo after `--`"
+        )
+        assert "exec napi build --platform --release" in workflow_text, (
+            f"{workflow.name} must invoke napi directly so cross options stay with napi"
+        )
+        entries = node_matrix_entries(workflow, workflow_text)
+        arm_entry = next(entry for entry in entries if "target: aarch64-unknown-linux-gnu" in entry)
+        assert arm_entry.count("arm_cflags:") == 1
+        assert arm_entry.count("-D__ARM_ARCH=8") == 1
+        assert all(
+            "arm_cflags:" not in entry and "-D__ARM_ARCH=8" not in entry
+            for entry in entries
+            if entry != arm_entry
+        ), f"{workflow.name} leaks ARMv8 flags to a non-ARM matrix entry"
+        assert workflow_text.count("CFLAGS_aarch64_unknown_linux_gnu:") == 1, (
+            f"{workflow.name} must pass the ARM flag through target-scoped cc-rs CFLAGS"
+        )
+        assert "arm_cflags || ''" in workflow_text, (
+            f"{workflow.name} must source target-scoped CFLAGS from its matrix entry"
+        )
+        assert workflow_text.count(ARTIFACT_COMMAND) == 1, (
+            f"{workflow.name} must use the shared explicit napi artifact command"
+        )
+        assert "napi artifacts --dir" not in workflow_text, (
+            f"{workflow.name} uses the unsupported napi artifacts --dir option"
+        )
+
+    pnpm = shutil.which("pnpm")
+    assert pnpm is not None, "pnpm is required for napi CLI contract validation"
+    help_result = subprocess.run(
+        [pnpm, "--filter", "@graphforge/node", "exec", "napi", "artifacts", "--help"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    help_text = help_result.stdout + help_result.stderr
+    help_diagnostic = help_text.strip()[-4000:]
+    assert help_result.returncode == 0, f"napi CLI help failed: {help_diagnostic}"
+    assert "--output-dir" in help_text, (
+        f"pinned napi CLI no longer accepts --output-dir: {help_diagnostic}"
+    )
+    assert "--npm-dir" in help_text, (
+        f"pinned napi CLI no longer accepts --npm-dir: {help_diagnostic}"
+    )
+
+    artifact_validator = load_artifact_validator()
+    with tempfile.TemporaryDirectory() as directory:
+        npm_dir = Path(directory)
+        manifest = npm_dir / "package.json"
+        manifest.write_text(
+            json.dumps({"napi": {"targets": ["aarch64-unknown-linux-gnu"]}}),
+            encoding="utf-8",
+        )
+        undeclared = subprocess.run(
+            [
+                sys.executable,
+                str(ARTIFACT_VALIDATOR),
+                "--npm-dir",
+                str(npm_dir),
+                "--manifest",
+                str(manifest),
+                "--target",
+                "x86_64-unknown-linux-gnu",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        undeclared_output = (undeclared.stdout + undeclared.stderr).strip()
+        undeclared_diagnostic = undeclared_output[-4000:]
+        assert undeclared.returncode != 0, undeclared_diagnostic
+        assert "requested targets are not declared" in undeclared_output, undeclared_diagnostic
+
+        expected_dir = npm_dir / "linux-arm64-gnu"
+        expected_dir.mkdir()
+        addon = expected_dir / "graphforge.linux-arm64-gnu.node"
+        addon.touch()
+        artifact_validator.validate(npm_dir, ["aarch64-unknown-linux-gnu"])
+
+        duplicate = expected_dir / "duplicate.node"
+        duplicate.touch()
+        try:
+            artifact_validator.validate(npm_dir, ["aarch64-unknown-linux-gnu"])
+        except ValueError as error:
+            assert "exactly one addon" in str(error)
+        else:
+            raise AssertionError("artifact validator accepted duplicate addons")
+        duplicate.unlink()
+
+        addon.unlink()
+        try:
+            artifact_validator.validate(npm_dir, ["aarch64-unknown-linux-gnu"])
+        except ValueError as error:
+            assert "exactly one addon" in str(error)
+        else:
+            raise AssertionError("artifact validator accepted a missing addon")
+
+        addon.touch()
+        wrong_dir = npm_dir / "linux-x64-gnu"
+        wrong_dir.mkdir()
+        addon.replace(wrong_dir / addon.name)
+        try:
+            artifact_validator.validate(npm_dir, ["aarch64-unknown-linux-gnu"])
+        except ValueError as error:
+            assert "wrong target package" in str(error)
+        else:
+            raise AssertionError("artifact validator accepted an addon in the wrong package")
+
+    module = load_validator()
+    contract = json.loads(CONTRACT.read_text())
+    reports = [report(target, settings) for target, settings in contract["targets"].items()]
+    aggregate = module.validate(reports, contract, SHA)
+    assert aggregate["status"] == "passed"
+    assert len(aggregate["targets"]) == len(contract["targets"])
+
+    rejected(module, reports[:-1], contract, "target report mismatch")
+
+    invalid = copy.deepcopy(reports)
+    invalid[0]["source_sha"] = "d" * 40
+    rejected(module, invalid, contract, "source SHA drift")
+
+    invalid = copy.deepcopy(reports)
+    same_language = next(
+        index
+        for index, value in enumerate(invalid[1:], 1)
+        if value["language"] == invalid[0]["language"]
+    )
+    invalid[same_language]["package_version"] = "0.5.1.dev0"
+    rejected(module, invalid, contract, "mixed package versions")
+
+    invalid = copy.deepcopy(reports)
+    invalid.append(copy.deepcopy(reports[0]))
+    rejected(module, invalid, contract, "duplicate target reports")
+
+    invalid = copy.deepcopy(reports)
+    invalid[0]["sanitized_parity_diff"] = ["result mismatch"]
+    rejected(module, invalid, contract, "parity differences are non-empty")
+
+    invalid = copy.deepcopy(reports)
+    invalid[0]["classification"]["sha256"] = "not-a-digest"
+    rejected(module, invalid, contract, "missing classification SHA-256")
+
+    invalid = copy.deepcopy(reports)
+    invalid[0]["classification"]["schema"] = "unsupported/99"
+    rejected(module, invalid, contract, "unsupported classification schema")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,62 @@
+You may make production use of the Licensed Work as follows:
+
+1. Non-Commercial Use
+
+You may make production use of the Licensed Work as a student for personal
+education or non-commercial research; as an accredited academic institution
+for teaching, academic research, or non-commercial internal operations; or as
+an active non-commercial open-source project whose complete source code is
+publicly available under an OSI-approved license.
+
+2. Commercial Internal Use
+
+You may make production use of the Licensed Work for your organization's
+internal purposes, provided that each distinct application using the Licensed
+Work remains under both of the following limits:
+
+(a) 500,000 aggregate live node and edge records; and
+
+(b) three concurrently running GraphForge instances.
+
+Your organization includes all entities under common control. Contractors
+operating the Licensed Work solely on your organization's behalf are included
+as part of your organization's use.
+
+The limits apply collectively to all GraphForge projects and instances used
+for the same application. You may operate separate installations for distinct
+applications, but you may not divide, shard, or distribute one application
+across multiple projects, installations, accounts, regions, or affiliates to
+avoid either limit.
+
+For purposes of the record limit, count the live node and edge rows in the
+current committed generation of each GraphForge project used by the
+application. Historical generations and knowledge, provenance, confidence,
+evidence, and epistemic records are excluded.
+
+A "running GraphForge instance" is an operating-system process or isolated
+serverless invocation in which the Licensed Work is loaded and which has
+opened a GraphForge project containing at least one live node. A container,
+pod, virtual machine, or host is not counted separately from the processes or
+serverless invocations running within it.
+
+3. Prohibited Commercial Offerings
+
+You may not use the Licensed Work in a commercial offering that:
+
+(a) allows third parties to access GraphForge functionality by directly or
+indirectly creating, supplying, managing, querying, searching, analyzing,
+traversing, or retrieving graphs or graph-derived analytical results; or
+
+(b) embeds or includes the Licensed Work in a closed-source product sold or
+licensed to third parties.
+
+Hosting or using the Licensed Work for your organization's internal purposes
+is not a prohibited commercial offering.
+
+A product does not become a prohibited commercial offering merely because
+the Licensed Work is used as an internal implementation component, provided
+that third parties are not offered graph database, graph management, graph
+query, graph search, or graph analytics functionality.
+
+Any use outside this Additional Use Grant requires a separate commercial
+license from Curate Labs Inc.

@@ -1,0 +1,375 @@
+//! GraphForge command-line interface.
+#![forbid(unsafe_code)]
+
+use std::io::{self, Write};
+use std::path::PathBuf;
+
+use arrow::ipc::writer::StreamWriter;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use gf_api::{
+    CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
+    DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
+    ListCheckpointsRequest, OperationId, PageRequest, PageToken, RevertCheckpointRequest,
+};
+use uuid::Uuid;
+
+/// GraphForge command-line interface.
+#[derive(Parser)]
+#[command(name = "gf", version, about = "GraphForge CLI")]
+struct Cli {
+    /// Print version info and exit.
+    #[arg(long)]
+    info: bool,
+
+    /// Persistent GraphForge project directory.
+    #[arg(long, global = true)]
+    project: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Manage immutable named workspace checkpoints.
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CheckpointCommand {
+    /// Create a checkpoint of the current complete workspace.
+    Create(CreateArgs),
+    /// List active checkpoints in canonical order.
+    List(PageArgs),
+    /// Execute one read-only Cypher query against a checkpoint.
+    Open(OpenArgs),
+    /// Delete an active checkpoint reference.
+    Delete(DeleteArgs),
+    /// Diff two checkpoint/current endpoints.
+    Diff(DiffArgs),
+    /// Restore the complete workspace from a checkpoint.
+    Revert(RevertArgs),
+}
+
+#[derive(Args)]
+struct CreateArgs {
+    name: String,
+    #[arg(long)]
+    description: Option<String>,
+    #[arg(long)]
+    idempotency_key: String,
+    #[arg(long)]
+    actor_uuid: Option<String>,
+}
+
+#[derive(Args)]
+struct PageArgs {
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+    #[arg(long)]
+    after: Option<String>,
+}
+
+#[derive(Args)]
+struct OpenArgs {
+    name: String,
+    /// Read-only Cypher after `--`.
+    #[arg(last = true, required = true, num_args = 1..)]
+    query: Vec<String>,
+}
+
+#[derive(Args)]
+struct DeleteArgs {
+    name: String,
+    #[arg(long)]
+    idempotency_key: String,
+    #[arg(long)]
+    actor_uuid: Option<String>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScopeArg {
+    Summary,
+    Graph,
+    Ontology,
+    Configuration,
+    Capabilities,
+    Provenance,
+    Knowledge,
+    Epistemic,
+    All,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum DetailArg {
+    Summary,
+    Records,
+}
+
+#[derive(Args)]
+struct DiffArgs {
+    /// Named checkpoint used as the earlier endpoint.
+    #[arg(long, conflicts_with = "from_current")]
+    from: Option<String>,
+    /// Use the current generation as the earlier endpoint.
+    #[arg(long, conflicts_with = "from")]
+    from_current: bool,
+    /// Named checkpoint used as the later endpoint.
+    #[arg(long, conflicts_with = "to_current")]
+    to: Option<String>,
+    /// Use the current generation as the later endpoint.
+    #[arg(long, conflicts_with = "to")]
+    to_current: bool,
+    #[arg(long, value_enum)]
+    scope: ScopeArg,
+    #[arg(long, value_enum)]
+    detail: DetailArg,
+    #[command(flatten)]
+    page: PageArgs,
+}
+
+#[derive(Args)]
+struct RevertArgs {
+    name: String,
+    /// Required bounded audit reason.
+    #[arg(long)]
+    reason: String,
+    /// Required canonical UUID used for idempotent replay.
+    #[arg(long)]
+    idempotency_key: String,
+    #[arg(long)]
+    actor_uuid: Option<String>,
+}
+
+fn canonical_uuid(value: &str) -> Result<Uuid, gf_api::GfError> {
+    let parsed = Uuid::parse_str(value)
+        .map_err(|_| gf_api::GfError::Validation("expected canonical UUID".into()))?;
+    if parsed.hyphenated().to_string() != value {
+        return Err(gf_api::GfError::Validation(
+            "expected canonical lowercase hyphenated UUID".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn actor(value: Option<&str>) -> Result<Option<Uuid>, gf_api::GfError> {
+    value.map(canonical_uuid).transpose()
+}
+
+fn page(args: &PageArgs) -> Result<PageRequest, gf_api::GfError> {
+    Ok(PageRequest {
+        limit: args.limit,
+        after: args.after.as_deref().map(PageToken::parse).transpose()?,
+        cancellation: None,
+    })
+}
+
+fn selector(
+    value: Option<String>,
+    current: bool,
+    endpoint: &str,
+) -> Result<CheckpointSelector, gf_api::GfError> {
+    match (value, current) {
+        (Some(name), false) => Ok(CheckpointSelector::Named(name)),
+        (None, true) => Ok(CheckpointSelector::Current),
+        _ => Err(gf_api::GfError::Validation(format!(
+            "exactly one of --{endpoint} or --{endpoint}-current is required"
+        ))),
+    }
+}
+
+fn write_result(result: &ExecutionResult) -> Result<(), gf_api::GfError> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    {
+        let mut writer = StreamWriter::try_new(&mut output, result.schema.as_ref())
+            .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+        for batch in &result.batches {
+            writer
+                .write(batch)
+                .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+        }
+        writer
+            .finish()
+            .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    }
+    output
+        .flush()
+        .map_err(|error| gf_api::GfError::Execution(error.to_string()))
+}
+
+fn run(cli: Cli) -> Result<(), gf_api::GfError> {
+    if cli.info {
+        println!("graphforge {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let Some(command) = cli.command else {
+        println!("GraphForge — use --help for options");
+        return Ok(());
+    };
+    let path = cli.project.ok_or_else(|| {
+        gf_api::GfError::Validation("--project is required for checkpoint commands".into())
+    })?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| gf_api::GfError::Validation("--project must be valid UTF-8".into()))?;
+    let mut graph = GraphForge::new(Some(path))?;
+    let result = match command {
+        Command::Checkpoint { command } => match command {
+            CheckpointCommand::Create(args) => graph.checkpoint(CheckpointRequest {
+                name: args.name,
+                description: args.description,
+                idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
+                actor_uuid: actor(args.actor_uuid.as_deref())?,
+            })?,
+            CheckpointCommand::List(args) => {
+                graph.list_checkpoints(ListCheckpointsRequest { page: page(&args)? })?
+            }
+            CheckpointCommand::Open(args) => {
+                let view = graph.open_checkpoint(&args.name)?;
+                view.execute(&args.query.join(" "))?
+            }
+            CheckpointCommand::Delete(args) => {
+                graph.delete_checkpoint(DeleteCheckpointRequest {
+                    name: args.name,
+                    idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
+                    actor_uuid: actor(args.actor_uuid.as_deref())?,
+                })?
+            }
+            CheckpointCommand::Diff(args) => graph.diff_checkpoints(DiffCheckpointsRequest {
+                from: selector(args.from, args.from_current, "from")?,
+                to: selector(args.to, args.to_current, "to")?,
+                scope: match args.scope {
+                    ScopeArg::Summary => CheckpointDiffScope::Summary,
+                    ScopeArg::Graph => CheckpointDiffScope::Graph,
+                    ScopeArg::Ontology => CheckpointDiffScope::Ontology,
+                    ScopeArg::Configuration => CheckpointDiffScope::Configuration,
+                    ScopeArg::Capabilities => CheckpointDiffScope::Capabilities,
+                    ScopeArg::Provenance => CheckpointDiffScope::Provenance,
+                    ScopeArg::Knowledge => CheckpointDiffScope::Knowledge,
+                    ScopeArg::Epistemic => CheckpointDiffScope::Epistemic,
+                    ScopeArg::All => CheckpointDiffScope::All,
+                },
+                detail: match args.detail {
+                    DetailArg::Summary => CheckpointDiffDetail::Summary,
+                    DetailArg::Records => CheckpointDiffDetail::Records,
+                },
+                page: page(&args.page)?,
+            })?,
+            CheckpointCommand::Revert(args) => {
+                graph.revert_to_checkpoint(RevertCheckpointRequest {
+                    name: args.name,
+                    reason: args.reason,
+                    idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
+                    actor_uuid: actor(args.actor_uuid.as_deref())?,
+                })?
+            }
+        },
+    };
+    write_result(&result)
+}
+
+fn main() {
+    let cli = Cli::parse();
+    if let Err(error) = run(cli) {
+        eprintln!("{}: {error}", error.code());
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revert_requires_reason_and_idempotency_key() {
+        let missing_reason = Cli::try_parse_from([
+            "gf",
+            "--project",
+            "/tmp/project",
+            "checkpoint",
+            "revert",
+            "before-change",
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000001",
+        ]);
+        assert!(missing_reason.is_err());
+
+        let missing_key = Cli::try_parse_from([
+            "gf",
+            "--project",
+            "/tmp/project",
+            "checkpoint",
+            "revert",
+            "before-change",
+            "--reason",
+            "undo invalid import",
+        ]);
+        assert!(missing_key.is_err());
+    }
+
+    #[test]
+    fn create_and_delete_require_idempotency_keys() {
+        for command in ["create", "delete"] {
+            assert!(
+                Cli::try_parse_from([
+                    "gf",
+                    "--project",
+                    "/tmp/project",
+                    "checkpoint",
+                    command,
+                    "before-change",
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn diff_disambiguates_current_from_a_checkpoint_named_current() {
+        assert!(matches!(
+            selector(Some("current".into()), false, "from").unwrap(),
+            CheckpointSelector::Named(name) if name == "current"
+        ));
+        assert!(matches!(
+            selector(None, true, "to").unwrap(),
+            CheckpointSelector::Current
+        ));
+    }
+
+    #[test]
+    fn canonical_uuid_rejects_noncanonical_text() {
+        assert!(canonical_uuid("not-an-id").is_err());
+        assert!(canonical_uuid("00000000-0000-0000-0000-00000000000A").is_err());
+        assert!(canonical_uuid("00000000-0000-0000-0000-000000000001").is_ok());
+    }
+
+    #[test]
+    fn open_accepts_only_a_name_and_trailing_read_command() {
+        let cli = Cli::try_parse_from([
+            "gf",
+            "--project",
+            "/tmp/project",
+            "checkpoint",
+            "open",
+            "before-change",
+            "--",
+            "MATCH",
+            "(n)",
+            "RETURN",
+            "n",
+        ])
+        .expect("valid checkpoint read command");
+        let Some(Command::Checkpoint {
+            command: CheckpointCommand::Open(args),
+        }) = cli.command
+        else {
+            panic!("expected checkpoint open command");
+        };
+        assert_eq!(args.name, "before-change");
+        assert_eq!(args.query.join(" "), "MATCH (n) RETURN n");
+    }
+}

@@ -1,0 +1,1 @@
+{"mode":"advisory","declared_entity_types":["Actor"],"declared_relation_types":["COMMUNICATED"],"unknown_entity_types":["UnclassifiedEvent"],"unknown_relation_types":["ATTENDED","DIRECTS"],"runtime_catalog_property_entries_grew":true,"hidden_rejections":0}

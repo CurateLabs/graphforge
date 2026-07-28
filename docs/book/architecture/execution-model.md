@@ -1,0 +1,342 @@
+# Execution Model
+
+**Status:** v0.5.0 — Rust core shipped**
+**Last Updated:** 2026-07-27
+
+> **Implementation status legend** (used across architecture docs): **Shipped** = implemented and
+> tested on `main`; **Partially built** = some paths real, others stubbed; **Designed** = specified,
+> not yet a complete public capability. For v0.5.0: the Cypher pipeline (including CREATE,
+> variable-length traversal, OPTIONAL MATCH, and UNWIND), the analyst verbs
+> (`rank`/`cluster`/`paths`/`analyze`/`similar`/`find`), and knowledge-layer provenance /
+> confidence / epistemic records (knowledge-layer + epistemic) are **Shipped**. Per-algorithm catalog detail lives in
+> [Algorithm Verbs](algorithms.md).
+---
+
+## Overview
+
+GraphForge uses **DataFusion as the primary execution backbone**. DataFusion provides the
+logical/physical planning pipeline, optimizer, table providers, and Arrow-native batch
+execution. GraphForge extends it with custom physical plan nodes for operations that require
+graph-native semantics.
+
+The v0.5.0 unified API exposes seven entry points — `execute`, `rank`, `cluster`, `paths`,
+`analyze`, `similar`, and `find` — all producing Arrow Tables. `execute` travels the full
+Cypher compiler pipeline (`gf-cypher → gf-ir → gf-rel → gf-exec`); the analyst verbs bypass the
+parser and planner but converge on the same DataFusion execution layer. All seven entry points
+are **Shipped** (see the per-algorithm status in [Algorithm Verbs](algorithms.md)). Their
+graph-native execution is a **graph-layer** capability under
+[ADR 0005](../../adr/0005-layered-architecture.md). A workbench or knowledge workflow may prepare
+their inputs and consume their results, but the graph layer never depends upward on either layer.
+Polars is used as a **storage-layer companion** for IO and sinks (CSV, JSON, Parquet, IPC).
+It is not the semantic owner of query execution.
+
+---
+
+## Why DataFusion
+
+DataFusion exposes the extension points GraphForge needs:
+
+- Custom `LogicalPlan` nodes — graph operators slot in alongside relational operators
+- Custom `ExecutionPlan` nodes — variable-length path expansion and provenance-aware joins as physical operators
+- Custom `TableProvider` — Parquet as a pluggable scan source
+- Custom optimizer rules — predicate pushdown and label-constraint hoisting
+- Custom `QueryPlanner` — GraphForge IR is lowered to DataFusion's logical plan rather than parsed SQL
+
+DataFusion's Arrow-native execution means results already arrive as `RecordBatch` streams —
+no additional conversion is needed before returning through the thin Python or Node bindings
+(or the native Rust facade).
+
+---
+
+## Execution Pipeline
+
+```text
+GraphPlan (Graph IR)
+      ↓
+┌────────────────────────────┐
+│  gf-rel: relational lower  │
+│  Simple ops → LogicalPlan  │
+│  Graph ops → custom nodes  │
+└────────────────────────────┘
+      ↓
+┌────────────────────────────┐
+│  DataFusion Analyzer       │
+│  DataFusion Optimizer      │
+│  (predicate pushdown, etc) │
+└────────────────────────────┘
+      ↓
+┌────────────────────────────┐
+│  DataFusion Physical Plan  │
+│  gf custom PhysicalNodes   │
+└────────────────────────────┘
+      ↓
+  SendableRecordBatchStream   ← Arrow columnar batches
+      ↓
+  gf-bindings-py / gf-bindings-node / Rust API
+```
+
+---
+
+## Custom Graph Execution Nodes
+
+GraphForge registers custom `ExecutionPlan` implementations with DataFusion for operators
+that cannot be faithfully expressed as relational algebra:
+
+| Node | Description |
+| -------------------- | -------------------------------------------------------------------------- |
+| `VarLenExpand` | Iterative or recursive expansion for `*min..max` path patterns |
+| `OptionalMatch` | Left-join semantics with Cypher null-shaping (distinct from SQL LEFT JOIN) |
+| `PathUnique` | Path isomorphism/homomorphism enforcement |
+| `ProvenanceSemijoin` | Semijoin with confidence propagation |
+| `OntologyInfer` | Transitive/symmetric closure materialization |
+| `GraphMerge` | MERGE upsert with write-path locking |
+
+All other operators (scan, filter, project, aggregate, sort, limit) run through standard
+DataFusion physical nodes.
+
+---
+
+## Adjacency-Backed Execution
+
+Traversal is fundamentally adjacency-oriented. GraphForge maintains a derived, rebuildable
+**adjacency index** (CSR, surrogate-keyed) under `indexes/adjacency/`
+([ADR 0004](../../adr/0004-adjacency-index.md), [storage.md](storage.md) §Derived Indexes). Both
+execution paths consume it through a single `AdjacencyProvider` abstraction:
+
+- **Cypher traversal path** — `ExpandExec` / `VarLenExpandExec` ask the provider for a
+  node's neighbors instead of rebuilding adjacency from a full edge scan per query.
+- **Analyst-verb path** — `export_adjacency` is a thin adapter from the same provider to the
+  `AdjacencyGraph` consumed by the `AlgorithmBackend` trait.
+
+| Node | Description |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VarLenExpandExec` | Iterative BFS over the `AdjacencyProvider` for `*min..max` patterns (replaces the per-query in-memory adjacency build) |
+| `ExpandExec` | Adjacency-backed single-hop expansion: chosen at lowering time when the provider reports a `hit` for a typed relation (any direction; undirected wraps in `DISTINCT`, mirroring the join path's union+distinct). Exploratory single-hop and uncovered patterns keep the DataFusion join chain. |
+
+**Selection is a planner choice, not an IR change.** The Graph IR is unchanged: variable-length
+traversal is still encoded on `Expand { …, min_hops, max_hops }`. A lowering rule selects an
+adjacency-backed physical node when the provider covers the relation type + direction, and falls
+back to the DataFusion hash-join path otherwise. Both paths produce identical results; only
+speed differs.
+
+The index is **optional and never authoritative**: a stale or missing index
+falls back to scan-and-build with identical output. The pinned v0.5
+project-generation UUID and graph source fingerprint detect staleness; the
+committed Parquet graph participant is always the source of truth.
+
+`explain` annotates each traversal node with `adjacency=hit | miss | building`, so plan
+inspection shows whether the accelerator was used (`ExecutionSession::explain_physical`
+renders the physical plan without executing it). One `PersistentAdjacencyProvider` lives per
+session (= per query) with an interior per-`(relation, direction)` cache, so multi-expand
+queries load each CSR once; lifting the provider to the long-lived facade for cross-query
+caching is a planned follow-on.
+
+---
+
+## Analyst Verbs
+
+`rank()`, `cluster()`, `paths()`, `analyze()`, `similar()`, and `find()` bypass the Cypher
+parser and planner entirely. They accept structured arguments, build their own DataFusion
+sub-plans, and return Arrow Tables through the same result contract as `execute()`.
+
+| Method | Bypasses | Uses | Returns |
+| ----------------------------- | --------------- | ----------------------------------------------------------- | -------------------------------------------- |
+| `rank(label, by=…)` | Parser, planner | Adjacency export → algorithm dispatch → DataFusion project | node properties + `score: Float64` |
+| `cluster(label, by=…)` | Parser, planner | Adjacency export → community algorithm → DataFusion project | node properties + `community_id: Int64` |
+| `paths(source, target, by=…)` | Parser, planner | Adjacency export → path algorithm → DataFusion project | `source_uuid`, `target_uuid`, `cost`, `path` |
+| `analyze(label, by=…)` | Parser, planner | Adjacency export → structural analysis → DataFusion project | varies by algorithm |
+| `similar(label, by=…)` | Parser, planner | Adjacency export → similarity → DataFusion project | `node1_id`, `node2_id`, `similarity` |
+| `find(query, vector=…)` | Parser, planner | FTS / vector index → RRF fusion → DataFusion project | node properties + `score` + `matched_on` |
+
+Key design facts:
+
+- **No separate result type.** All analyst verbs return Arrow Tables exactly as `execute()` does.
+- **`write_property` is opt-in mutation.** Only `rank()` and `cluster()` support it; all other analyst verbs are read-only.
+- **`find()` indexes text lazily.** A missing/stale default text index is built once from observed string properties. Vector search selects a complete, compatible embedding-space generation; it never fabricates missing vectors. Substantially stale vector spaces refresh successfully first or fail unless explicitly forced under the [embedding publication contract](embedding-v1.md#source-fingerprint-and-freshness).
+- **All paths converge at DataFusion.** Adjacency export and scoring stages produce Arrow data that DataFusion projects and returns as `RecordBatch` streams.
+
+### Embedding publication and search
+
+Embedding production, publication, retrieval, and optional reranking are four
+separate stages:
+
+```text
+analyst-verb/local/callback/remote/caller batch
+        │ produces complete UUID + vector Arrow data
+        ▼
+private generation ── validate against committed source snapshot
+        │ data + manifest, then atomic active-generation swap
+        ▼
+compatible visible space ── exact vector / text / rrf@1 retrieval
+        │ optional explicit bounded reranker
+        ▼
+canonical Arrow search result
+```
+
+Publication never mutates graph properties or an algorithm result. Retrieval checks
+durable compatibility and freshness before candidate work. One private build
+per space and one coalesced newest pending request prevent refresh storms;
+project-wide producer concurrency is bounded. Cancellation or failure exposes
+neither partial generations nor partial result rows. Proactive refresh runs
+only while a process is open; reopen reconstructs freshness from durable graph
+and space metadata. Provider work is explicit and optional, and reranking
+cannot silently change canonical `rrf@1` behavior.
+
+### Reproducible algorithm execution
+
+> **Status: implemented across the v0.5.0 algorithm, knowledge, and epistemic layers.**
+
+Algorithm dispatch produces two logically separate values:
+
+1. a canonical Arrow result owned by the selected algorithm contract; and
+2. a neutral invocation descriptor containing the algorithm and contract version, resolved
+   projection fingerprint, normalized selectors and options, deterministic controls, and
+   resource limits.
+
+The descriptor contains no evidence, assertion, reasoning, or belief state. It is sufficient
+to identify what the graph layer actually computed. The knowledge layer persists it with a durable
+`algorithm_run_uuid` and lineage links. The epistemic layer resolves a point-in-time belief state to an
+immutable UUID projection before the invocation, then attach assertions and reasoning to the
+run after it completes.
+
+```text
+Epistemic belief query (optional)
+        │ resolves UUID projection / explicit parameter mapping
+        ▼
+algorithm graph algorithm ──► canonical Arrow result
+        │
+        └── neutral invocation descriptor
+                    │
+                    ▼
+           knowledge-layer provenance run record
+                    │
+                    ▼
+      epistemic assertions / evidence / reasoning
+```
+
+The same resolved graph input produces the same algorithm result whether or not knowledge/epistemic
+capabilities are present. Consequently:
+
+- graph algorithms do not query knowledge tables;
+- `algorithm_run_uuid` is knowledge/provenance identity, not graph topology identity;
+- confidence, provenance, assertion status, and valid time are not conditionally appended to
+  algorithm result schemas; and
+- bitemporal and competing-hypothesis selectors are resolved above the algorithm API rather
+  than added to algorithm options.
+
+Resolution pins one committed generation, reconstructs the mandatory transaction-time
+snapshot, resolves status/supersession/hypothesis ambiguity, and only then applies an optional
+half-open valid-time filter. The resulting graph-only projection is fingerprinted before analyst verbs
+dispatch. The neutral knowledge-layer run is durable before the epistemic layer attachment is attempted, so an
+attachment failure never rolls back a successful algorithm run.
+
+See [Algorithm Verbs](algorithms.md#invocation-and-knowledge-layer-boundary) for the normative
+algorithm boundary and [ADR 0006](../../adr/0006-epistemic-model.md) for preservation and
+bitemporal semantics.
+
+Full algorithm catalog: [Algorithm Verbs](algorithms.md).
+
+---
+
+## Arrow Result Contract
+
+All results are returned as **Arrow RecordBatch streams**. The schema for query results
+carries GraphForge metadata:
+
+```rust
+fn result_schema(fields: Vec<Field>, query_id: &str, ontology_ver: &str) -> Schema {
+    let mut meta = HashMap::new();
+    meta.insert("graphforge.ir_version".into(), "1.0.0".into());
+    meta.insert("graphforge.ontology_version".into(), ontology_ver.into());
+    meta.insert("graphforge.query_id".into(), query_id.into());
+    meta.insert("graphforge.result_kind".into(), "query_result".into());
+    Schema::new_with_metadata(fields, meta)
+}
+```
+
+Topology node schema (the shipped layout — see `crates/gf-storage/src/schemas.rs`):
+
+```rust
+// topology/nodes.parquet — identity + labels only (the GRAPH LAYER hot path)
+let node_schema = Schema::new(vec![
+    Field::new("node_uuid",  DataType::FixedSizeBinary(16), false), // UUIDv7 — canonical identity
+    Field::new("node_id",    DataType::UInt64,  false),             // local surrogate — join key
+    Field::new("type_id",    DataType::UInt32,  false),             // immutable primary label
+    Field::new("type_ids",   DataType::List(Arc::new(Field::new(
+        "item", DataType::UInt32, false
+    ))), false),                                                   // complete label set
+    Field::new("created_at", DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), false),
+    Field::new("updated_at", DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())), false),
+]);
+```
+
+> **Layer note (ADR 0005).** The topology node row holds _only_ identity and type. Property values
+> live in `properties/ENTITY_TYPE.parquet` (graph layer, warm path). **Confidence, provenance, and
+> valid-time are knowledge-layer concerns** ([ADR 0005](../../adr/0005-layered-architecture.md)) — they
+> are recorded in the knowledge layer and attached to graph objects by `node_uuid`/`edge_uuid`, not
+> as columns on topology tables. Bitemporal valid-time lives on epistemic _assertions_
+> ([ADR 0006](../../adr/0006-epistemic-model.md)), not on raw nodes. (Earlier drafts of this doc showed
+> `props_json`/`confidence`/`provenance_id`/`valid_*_ts` on the node row; that pre-refactor schema
+> has been superseded by the topology/properties split and the layer boundary.)
+
+The shipped typed edge schema contains neither engine-owned `confidence` nor
+`provenance_uuid`. A domain property named `confidence` remains an ordinary
+graph property with no special execution semantics. Provenance and knowledge
+records use the independent `gf-provenance`/`gf-knowledge` ledgers owned by
+[ADR 0012](../../adr/0012-m20-domain-ownership.md); no historical project is
+imported or converted.
+
+---
+
+## Memory Model
+
+Arrow is used as the internal execution currency:
+
+- **Columnar RecordBatch** — the unit of data flowing between operators
+- **C Data Interface** — zero-copy in-process sharing across Rust and Python
+- **C Stream Interface** — batch readers for streaming results
+- **Arrow IPC** — serialized stream for cross-process use (Node today; future UniFFI consumers)
+
+Swift and Kotlin bindings are deferred to v0.5.1; when they ship, they will consume Arrow IPC
+bytes over UniFFI without becoming semantic owners.
+
+---
+
+## Provenance and confidence
+
+Graph execution emits a neutral mutation/inference receipt containing operation
+semantics and affected UUIDs. It does not construct domain rows or open
+knowledge tables. `gf-api` converts the receipt into `gf-provenance` events and
+lineage, validates any `gf-knowledge` confidence/assertion references, and
+publishes all participants through one generic `gf-storage` generation.
+
+Confidence is immutable knowledge metadata. It is not a Cypher,
+traversal, rank, cluster, paths, analyze, similar, or find option and never
+changes their graph-native schemas or results. epistemic selected-belief projection
+is completed before neutral algorithm dispatch; algorithm executors remain
+knowledge-independent.
+
+Schema registries, version compatibility, same-transaction reference
+validation, and forbidden dependency directions are normative in
+[ADR 0012](../../adr/0012-m20-domain-ownership.md).
+
+---
+
+## Error Handling
+
+| Layer | Tool | Approach |
+| --------------- | -------------------------- | ----------------------------------------------------------------------------------------------- |
+| Public Rust API | `thiserror` | Typed error enums: `ParseError`, `BindError`, `OntologyError`, `StorageError`, `ExecutionError` |
+| Rust internals | `anyhow` | Contextual error accumulation |
+| Python binding | `pyo3` exception mapping | Thin projection: each Rust error category → distinct Python exception class |
+| Node binding | `napi-rs` error conversion | Thin projection: `Error` with `code`, `message`, and structured `details` |
+
+---
+
+## References
+
+- [Architecture Overview](overview.md) — workspace layout and unified API
+- [Algorithm Verbs](algorithms.md) — full algorithm catalog
+- [AST & Planning](ast-and-planning.md) — compiler pipeline and Graph IR
+- [Storage](storage.md) — StorageProvider trait, Parquet provider
+- [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — DataFusion and Arrow choice rationale

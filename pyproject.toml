@@ -1,0 +1,301 @@
+[project]
+# Deps-only workspace root (package = false). The canonical `graphforge`
+# distribution is the native maturin wheel at crates/gf-bindings-py; this root
+# project is never built or published, so it carries a distinct name.
+name = "graphforge-workspace"
+version = "0.4.0"
+description = "GraphForge dev workspace (deps + tooling); the package ships from crates/gf-bindings-py"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BUSL-1.1"
+authors = [{ name = "David Spencer" }]
+keywords = ["graph", "opencypher", "pydantic", "analysis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+  "pydantic>=2.6",
+  "lark>=1.1",
+  "msgpack>=1.0",
+  "pyyaml>=6.0.3",
+  "python-dateutil>=2.8.2",
+  "isodate>=0.6.1",
+  "defusedxml>=0.7.1",
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=2.0"]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=4.0",
+    "pytest-xdist>=3.0",
+    "pytest-split>=0.9.0",
+    "pytest-timeout>=2.0",
+    "pytest-mock>=3.0",
+    "pytest-bdd>=7.0",
+    "hypothesis>=6.0",
+    "ruff==0.16.0",
+    "pyarrow>=15.0",
+]
+
+[project.urls]
+Homepage = "https://curatelabs.github.io/graphforge-legecy/"
+Repository = "https://github.com/CurateLabs/graphforge-legecy"
+Issues = "https://github.com/CurateLabs/graphforge-legecy/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+# The canonical `graphforge` package is the native maturin wheel
+# (crates/gf-bindings-py), installed in CI via `maturin build` + `uv pip install`.
+# This root project is deps-only (a non-package workspace root). The 0.4.x
+# pure-Python stub at src/graphforge was deleted in the shim-retirement PR
+# (#862); its dev-tooling consumers are ported natively under #860.
+package = false
+
+# Security: enforce minimum safe versions for transitive dependencies
+# pytest CVE-2024-0567, Mako path traversal, requests tmpfile
+# Note: Pygments 2.20.0 fixes a Lua-lexer ReDoS (not relevant to graphforge)
+# but breaks pymdownx title=None handling — constraint dropped until pymdownx fixes this
+constraint-dependencies = [
+    "pytest>=9.0.3",
+    "mako>=1.3.11",
+    "requests>=2.33.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["crates/gf-bindings-py/python", "tests"]
+# ruff 0.16 formats Python fences in Markdown by default; keep format scope on
+# Python/notebook sources so docs prose and intentional example style stay stable.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+# Enable extended rule sets beyond defaults
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RET", # flake8-return
+    "ARG", # flake8-unused-arguments
+    "PTH", # flake8-use-pathlib
+    "ERA", # eradicate (commented-out code)
+    "PL",  # Pylint
+    "PERF", # Perflint (performance)
+    "RUF", # Ruff-specific rules
+]
+
+ignore = [
+    "PLR0913", # Too many arguments to function call
+    "PLR2004", # Magic value used in comparison
+    "SIM108",  # Use ternary operator instead of if-else
+    "RET504",  # Unnecessary variable assignment before return
+    "ARG002",  # Unused method argument (common in abstract methods)
+    "ERA001",  # Commented-out code (often useful for documentation)
+    "RET505",  # Unnecessary else after return (sometimes clearer)
+    "PLR0911", # Too many return statements (complex logic)
+    "PLR0912", # Too many branches (complex logic)
+    "PLR0915", # Too many statements (complex logic)
+    "PLC0415", # Import should be at top-level (lazy imports ok)
+    "SIM102",  # Use single if statement (nested sometimes clearer)
+    "SIM103",  # Return condition directly (sometimes clearer as if/else)
+    "SIM110",  # Use any() instead of for loop (sometimes clearer as loop)
+    "PERF401", # Use list.extend (sometimes clearer as loop)
+    "B905",    # zip() without strict parameter (not needed for our use cases)
+]
+
+# Allow autofix for all enabled rules
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ARG001",  # Unused function argument (fixtures)
+    "PLR2004", # Magic value in comparison (test values)
+    "S101",    # Use of assert (needed for pytest)
+    "PTH123",  # Use Path.open() (open() is fine in tests)
+    "RUF043",  # Regex pattern metacharacters (test match patterns)
+    "PLW0603", # Global statement (ok in test configuration)
+    "E501",    # Line too long (test assertions can be long)
+    "E741",    # Ambiguous variable names (single-letter ok in tests)
+    "SIM105",  # Use contextlib.suppress (try/except-pass is clearer)
+    "PERF203", # Try-except in loop (acceptable for test collection)
+    "N806",    # G is idiomatic for graph objects
+    "RUF015",  # list()[0] vs next(iter()) — tests prefer readability
+]
+"examples/**/*.py" = [
+    "E501",    # Line too long (examples can be verbose)
+    "N806",    # Variable name conventions (G for graph is common)
+    "F841",    # Unused variable (examples show patterns)
+]
+"examples/**/*.ipynb" = [
+    "E501",    # Line too long (notebooks contain long strings/queries)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["graphforge"]
+force-sort-within-sections = true
+
+[tool.ruff.lint.pylint]
+max-args = 8
+max-branches = 15
+max-returns = 8
+max-statements = 60
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+    "--timeout=60",
+]
+
+norecursedirs = [
+    ".git",
+    ".venv",
+    "dist",
+    "build",
+    "*.egg",
+]
+
+markers = [
+    "unit: Unit tests (fast, isolated)",
+    "integration: Integration tests (slower, may use I/O)",
+    "tck: openCypher TCK compliance tests",
+    "property: Property-based tests",
+    "slow: Tests that take >1s",
+    "snap: SNAP dataset tests (requires network, may download large files, skipped in CI)",
+    "explain: forge.explain() BDD scenarios",
+    "index: forge.index() BDD scenarios",
+    "perf: Real-dataset performance and correctness QA (requires network, opt-in via make test-perf)",
+    "perf_large: Perf tests that download datasets ≥ 100 MB (opt-in only)",
+    "perf_slow: Perf tests that are too slow for default CI (e.g. two-hop full expansion on S/M tiers); opt-in via pytest -m perf_slow",
+    "parity: Parser parity tests comparing Python Lark parser with Rust recursive-descent parser",
+]
+
+[tool.coverage.run]
+# Measure the thin Python wrapper only (Rust lives in `_graphforge_rs`).
+# Path source keeps collection tied to the maturin `python-source` tree.
+source = ["crates/gf-bindings-py/python/graphforge"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # Gradually enable this
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+
+# Start with loose settings and tighten over time
+disallow_any_generics = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+check_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "lark.*",
+    "msgpack.*",
+    "zstandard.*",
+]
+ignore_missing_imports = true
+
+[tool.bandit]
+# Security scanning configuration
+exclude_dirs = [
+    "tests/",
+    ".venv/",
+    "build/",
+    "dist/",
+]
+skips = [
+    "B101",  # assert_used (needed for tests and internal validation)
+]
+
+[tool.bandit.assert_used]
+# Allow asserts in specific contexts
+skips = ["**/tests/**", "**/*_test.py", "**/conftest.py"]
+
+[dependency-groups]
+dev = [
+    "pytest-bdd>=8.1.0",
+    "mypy>=1.8.0",
+    "types-PyYAML>=6.0",
+    "types-python-dateutil>=2.8",
+    "bandit[toml]>=1.7.0",
+    "pre-commit>=3.6.0",
+    "types-defusedxml>=0.7.0.20250822",
+    "interrogate>=1.7.0",
+    "ruff==0.16.0",
+    "networkx>=3.4.2",
+    "pandas>=2.3.3",
+    "python-igraph>=1.0.0",
+    "pytest-timeout>=2.4.0",
+    "maturin>=1.7,<2.0",
+    "pyarrow>=15.0",
+    "numpy>=1.26",
+    "polars>=0.20",
+]

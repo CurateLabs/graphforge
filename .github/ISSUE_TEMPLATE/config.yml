@@ -1,0 +1,20 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/CurateLabs/graphforge-legecy/discussions
+    about: Ask questions, share ideas, and discuss GraphForge with the community
+  - name: 📚 Documentation
+    url: https://curatelabs.github.io/graphforge-legecy/
+    about: Browse the complete documentation including API reference and Cypher guide
+  - name: 📖 Contributing Guide
+    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CONTRIBUTING.md
+    about: Learn how to contribute to GraphForge under BUSL-1.1 and the CLA
+  - name: ⚖️ Licensing
+    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE
+    about: Business Source License 1.1 terms, Additional Use Grant, and commercial use
+  - name: 🤝 Code of Conduct
+    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CODE_OF_CONDUCT.md
+    about: Community standards and how to report unacceptable behavior
+  - name: 🔒 Security Vulnerability
+    url: https://github.com/CurateLabs/graphforge-legecy/security/advisories/new
+    about: Report security vulnerabilities privately

@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Unit tests for clean-environment verification harness (#2795)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+SCRIPT = Path(__file__).with_name("clean-env-verify.py")
+SPEC = importlib.util.spec_from_file_location("clean_env_verify", SCRIPT)
+assert SPEC and SPEC.loader
+cev = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = cev  # required for dataclasses under Python 3.9
+SPEC.loader.exec_module(cev)
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def sample_record(version: str = "0.5.0") -> dict[str, Any]:
+    return {
+        "schema": cev.RELEASE_RECORD_SCHEMA,
+        "version": version,
+        "tag": f"v{version}",
+        "commit_sha": "a" * 40,
+        "artifacts": [
+            {
+                "surface": "pypi",
+                "name": "graphforge",
+                "version": version,
+                "filename": f"graphforge-{version}-py3-none-any.whl",
+                "sha256": "b" * 64,
+            },
+            {
+                "surface": "crates",
+                "name": "gf-api",
+                "version": version,
+                "filename": f"gf-api-{version}.crate",
+                "sha256": "c" * 64,
+            },
+        ],
+    }
+
+
+def test_reject_dev_version() -> None:
+    try:
+        cev.require_version("0.5.0-dev")
+    except cev.VerifyError as exc:
+        assert "non-release" in str(exc)
+    else:
+        raise AssertionError("expected VerifyError for dev version")
+
+
+def test_validate_release_record_ok() -> None:
+    cev.validate_release_record(sample_record())
+
+
+def test_validate_release_record_bad_digest() -> None:
+    record = sample_record()
+    record["artifacts"][0]["sha256"] = "not-hex"
+    try:
+        cev.validate_release_record(record)
+    except cev.VerifyError:
+        return
+    raise AssertionError("expected VerifyError")
+
+
+def test_validate_evidence_ok() -> None:
+    evidence = cev.build_evidence(
+        "0.5.0",
+        [
+            cev.LaneResult(name="pip", issue=2809, ok=True),
+            cev.LaneResult(name="urls", issue=2814, ok=True),
+        ],
+        preflight=cev.LaneResult(name="preflight", issue=None, ok=True),
+    )
+    cev.validate_evidence(evidence)
+    assert evidence["ok"] is True
+    assert evidence["issue_map"]["pip"] == 2809
+
+
+def test_preflight_fails_closed_when_unpublished() -> None:
+    def fetch(_url: str) -> tuple[int, bytes, dict[str, str]]:
+        return 404, b"missing", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.run_preflight(ctx)
+        assert result.ok is False
+        assert result.error is not None
+        assert "#2794" in result.error
+        assert "unpublished" in " ".join(result.notes)
+
+
+def test_preflight_ok_when_published() -> None:
+    def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
+        if "pypi.org/pypi/graphforge/0.5.0/json" in url:
+            return 200, json.dumps({"info": {"version": "0.5.0"}}).encode(), {}
+        if "registry.npmjs.org/@graphforge/node/0.5.0" in url:
+            return 200, b"{}", {}
+        if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
+            return 200, b"{}", {}
+        if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
+            return 200, json.dumps({"version": {"num": "0.5.0"}}).encode(), {}
+        return 404, b"", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.run_preflight(ctx)
+        assert result.ok is True, result.error
+
+
+def test_urls_lane_reports_failures() -> None:
+    def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
+        if "quickstart" in url:
+            return 404, b"", {}
+        return 200, b"ok", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.lane_urls(ctx)
+        assert result.ok is False
+        assert result.error and "docs_quickstart" in result.error
+
+
+def test_checksums_match_release_record() -> None:
+    record = sample_record()
+
+    def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
+        if "pypi.org/pypi/graphforge/0.5.0/json" in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "urls": [
+                            {
+                                "filename": "graphforge-0.5.0-py3-none-any.whl",
+                                "digests": {"sha256": "b" * 64},
+                            }
+                        ]
+                    }
+                ).encode(),
+                {},
+            )
+        if "registry.npmjs.org/@graphforge/node/0.5.0" in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "dist": {
+                            "tarball": "https://example.test/graphforge-node-0.5.0.tgz",
+                            "integrity": "sha256-abc",
+                        }
+                    }
+                ).encode(),
+                {},
+            )
+        if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "dist": {
+                            "tarball": "https://example.test/agent-skills-0.5.0.tgz",
+                            "integrity": "sha256-def",
+                        }
+                    }
+                ).encode(),
+                {},
+            )
+        if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
+            return (
+                200,
+                json.dumps({"version": {"checksum": "c" * 64}}).encode(),
+                {},
+            )
+        return 404, b"", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=record,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.lane_checksums(ctx)
+        assert result.ok is True, result.error
+        assert "graphforge-0.5.0-py3-none-any.whl" in " ".join(result.artifacts["matched"])
+
+
+def test_cli_validate_release_record() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "record.json"
+        write_json(path, sample_record())
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "validate-release-record", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+def test_cli_run_refuses_without_lanes() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "run", "--version", "0.5.0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "lane" in (completed.stderr + completed.stdout).lower()
+
+
+def main() -> None:
+    test_reject_dev_version()
+    test_validate_release_record_ok()
+    test_validate_release_record_bad_digest()
+    test_validate_evidence_ok()
+    test_preflight_fails_closed_when_unpublished()
+    test_preflight_ok_when_published()
+    test_urls_lane_reports_failures()
+    test_checksums_match_release_record()
+    test_cli_validate_release_record()
+    test_cli_run_refuses_without_lanes()
+    print("clean-env-verify tests passed")
+
+
+if __name__ == "__main__":
+    main()

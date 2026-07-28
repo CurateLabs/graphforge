@@ -1,0 +1,1 @@
+{"version":1,"node_types":[{"name":"Person","properties":[{"name":"age","type":"int"}]}],"relationship_types":[]}

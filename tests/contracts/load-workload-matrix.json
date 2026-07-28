@@ -1,0 +1,51 @@
+{
+  "schema": "graphforge-load-workload-matrix/1",
+  "inventory": "tests/contracts/non-cypher-rust-surface.json",
+  "languages": ["rust", "python", "node"],
+  "workloads": [
+    {
+      "id": "public-project-and-knowledge-surfaces",
+      "inventory_selectors": ["release-tested-methods"],
+      "dataset_classes": ["XS", "S", "M", "L", "XL"],
+      "operations": [
+        "construction",
+        "mutation",
+        "execute",
+        "persistence-reopen"
+      ],
+      "assertions": [
+        "schema",
+        "ordering",
+        "fingerprint",
+        "reopen-equivalence",
+        "cleanup"
+      ]
+    },
+    {
+      "id": "m18-closed-algorithm-registry",
+      "inventory_selectors": ["m18-registry"],
+      "dataset_classes": ["XS", "S", "M", "L", "XL"],
+      "operations": ["direct-dispatch"],
+      "assertions": [
+        "schema",
+        "ordering",
+        "fingerprint",
+        "reopen-equivalence",
+        "binding-parity"
+      ]
+    },
+    {
+      "id": "m19-search-index-embedding-provider",
+      "inventory_selectors": ["m19-contracts"],
+      "dataset_classes": ["XS", "S", "M", "L", "XL"],
+      "operations": ["index", "text-find"],
+      "assertions": [
+        "schema",
+        "ordering",
+        "fingerprint",
+        "reopen-equivalence",
+        "binding-parity"
+      ]
+    }
+  ]
+}

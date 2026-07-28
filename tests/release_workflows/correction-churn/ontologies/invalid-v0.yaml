@@ -1,0 +1,6 @@
+ontology_id: correction_churn
+version: "0.0.0-invalid"
+entity_types:
+  - {name: Organization}
+properties:
+  - {owner: MissingType, name: risk_score, type: float64, nullable: true}

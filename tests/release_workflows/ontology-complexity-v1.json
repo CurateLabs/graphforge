@@ -1,0 +1,12 @@
+{
+  "schema": "ontology-complexity-v1",
+  "formula": {"kind":"weighted-sum","weights":{"entity_types":1,"relation_types":1,"property_definitions":1,"constraints":2,"inheritance_max_depth":2,"semantic_flags":1}},
+  "states": ["no-ontology", "exploratory", "advisory", "strict"],
+  "classes": {
+    "small-partial": {"minimum": 0, "maximum": 39, "allowed_states":["exploratory","advisory"]},
+    "small-shallow-stable": {"minimum": 0, "maximum": 39, "allowed_states":["strict"]},
+    "moderate-single-inheritance": {"minimum": 40, "maximum": 79, "allowed_states":["advisory"]},
+    "moderate-inherited-constrained": {"minimum": 40, "maximum": 79, "allowed_states":["advisory","strict"]},
+    "deep-wide-constrained": {"minimum": 80, "maximum": null, "allowed_states":["strict"]}
+  }
+}

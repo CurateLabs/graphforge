@@ -1,0 +1,23 @@
+ontology_id: sna_intelligence_partial
+version: "1"
+entity_types:
+  - name: Actor
+    abstract: false
+relation_types:
+  - name: COMMUNICATED
+    src: Actor
+    dst: Actor
+    semantic:
+      transitive: false
+      symmetric: false
+properties:
+  - owner: Actor
+    name: name
+    type: utf8
+    nullable: false
+  - owner: Actor
+    name: summary
+    type: utf8
+    nullable: true
+constraints: []
+migrations: []

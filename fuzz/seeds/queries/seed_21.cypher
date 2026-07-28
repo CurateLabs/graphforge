@@ -1,0 +1,1 @@
+RETURN 'string with \n newline and \t tab'

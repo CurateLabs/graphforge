@@ -1,0 +1,35 @@
+ontology_id: derived_state_freshness
+version: "1.0.0"
+entity_types:
+  - {name: Entity, abstract: true}
+  - {name: Actor, parent: Entity, abstract: true}
+  - {name: Person, parent: Actor}
+  - {name: Organization, parent: Actor}
+  - {name: Asset, parent: Entity, abstract: true}
+  - {name: Document, parent: Asset}
+  - {name: Location, parent: Entity}
+  - {name: Event, parent: Entity}
+relation_types:
+  - {name: KNOWS, src: Person, dst: Person, semantic: {symmetric: true}}
+  - {name: MEMBER_OF, src: Person, dst: Organization, semantic: {}}
+  - {name: REFERENCES, src: Document, dst: Entity, semantic: {}}
+  - {name: OCCURRED_AT, src: Event, dst: Location, semantic: {}}
+  - {name: ASSOCIATED_WITH, src: Entity, dst: Entity, semantic: {symmetric: true}}
+properties:
+  - {owner: Person, name: name, type: utf8, nullable: false}
+  - {owner: Person, name: summary, type: utf8, nullable: true}
+  - {owner: Person, name: risk_score, type: float64, nullable: true}
+  - {owner: Person, name: external_id, type: utf8, nullable: false}
+  - {owner: Person, name: role, type: utf8, nullable: true}
+  - {owner: Organization, name: sector, type: utf8, nullable: true}
+  - {owner: Document, name: body, type: utf8, nullable: false}
+  - {owner: Document, name: published, type: bool, nullable: false}
+  - {owner: Location, name: country, type: utf8, nullable: false}
+  - {owner: Event, name: severity, type: int64, nullable: true}
+  - {owner: Event, name: status, type: utf8, nullable: true}
+constraints:
+  - {owner: Person, kind: required_property, expr_json: '{"property":"name"}'}
+  - {owner: Person, kind: required_property, expr_json: '{"property":"external_id"}'}
+  - {owner: Document, kind: required_property, expr_json: '{"property":"body"}'}
+  - {owner: Location, kind: required_property, expr_json: '{"property":"country"}'}
+migrations: []

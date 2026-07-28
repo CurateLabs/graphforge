@@ -1,0 +1,1 @@
+MATCH (n) FOREACH (x IN n.list | SET n.y = x)

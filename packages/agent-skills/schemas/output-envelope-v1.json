@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/schemas/agent-skills/output-envelope-v1.json",
+  "title": "GraphForge agent skill output envelope v1",
+  "$defs": {
+    "payloadValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string", "maxLength": 4096 },
+        {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/payloadValue" }
+        },
+        {
+          "type": "object",
+          "maxProperties": 128,
+          "additionalProperties": { "$ref": "#/$defs/payloadValue" }
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "skill_id", "request_id", "status"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "skill_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$",
+      "maxLength": 64
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "status": { "enum": ["ok", "error"] },
+    "output": {
+      "type": "object",
+      "maxProperties": 128,
+      "additionalProperties": { "$ref": "#/$defs/payloadValue" }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^GF_AGENT_[A-Z0-9_]+$",
+          "maxLength": 80
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "details": {
+          "type": "object",
+          "maxProperties": 64,
+          "additionalProperties": { "$ref": "#/$defs/payloadValue" }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": { "status": { "const": "ok" } },
+      "required": ["output"],
+      "not": { "required": ["error"] }
+    },
+    {
+      "properties": { "status": { "const": "error" } },
+      "required": ["error"],
+      "not": { "required": ["output"] }
+    }
+  ]
+}

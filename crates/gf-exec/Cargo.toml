@@ -1,0 +1,34 @@
+[package]
+name = "gf-exec"
+description = "GraphForge execution session, algorithms, and search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+gf-core = { path = "../gf-core" }
+gf-ir = { path = "../gf-ir" }
+gf-ontology = { path = "../gf-ontology" }
+gf-plan = { path = "../gf-plan" }
+gf-rel = { path = "../gf-rel" }
+gf-storage = { path = "../gf-storage" }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+datafusion-datasource = { workspace = true }
+async-trait = "0.1"
+futures = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+gf-cypher = { path = "../gf-cypher" }
+insta = { workspace = true, features = ["filters"] }
+tempfile = "3"
+tokio = { workspace = true }
+parquet = { workspace = true }
+
+[lints]
+workspace = true

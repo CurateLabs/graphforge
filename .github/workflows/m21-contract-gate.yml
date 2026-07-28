@@ -1,0 +1,115 @@
+name: M21 Contract Gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust contract rows
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-m21-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
+      - name: Execute Rust matrix group
+        run: python3 scripts/ci/m21-contract-gate.py run-group --group rust --output gate-results
+      - name: Upload Rust evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m21-rust-${{ github.sha }}
+          path: gate-results/
+
+  python:
+    name: Python contract rows
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Execute Python matrix group
+        run: python3 scripts/ci/m21-contract-gate.py run-group --group python --output gate-results
+      - name: Upload Python evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m21-python-${{ github.sha }}
+          path: gate-results/
+
+  node:
+    name: Node contract rows
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-m21-node-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'pnpm-lock.yaml') }}
+      - name: Execute Node matrix group
+        run: python3 scripts/ci/m21-contract-gate.py run-group --group node --output gate-results
+      - name: Upload Node evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: m21-node-${{ github.sha }}
+          path: gate-results/
+
+  report:
+    name: SHA-bound closure report
+    if: always()
+    needs: [rust, python, node]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: m21-*-${{ github.sha }}
+          path: gate-fragments
+          merge-multiple: true
+      - name: Build exact closure report
+        run: >-
+          python3 scripts/ci/m21-contract-gate.py report
+          --sha "${{ github.sha }}"
+          --fragments gate-fragments
+          --output gate-report
+      - name: Upload M21 Contract Gate
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: M21-Contract-Gate-${{ github.sha }}
+          path: gate-report/
+          if-no-files-found: error

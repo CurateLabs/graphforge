@@ -1,0 +1,21 @@
+[package]
+name = "gf-cypher"
+description = "GraphForge Cypher lexer and recursive-descent / Pratt parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+gf-core = { path = "../gf-core" }
+gf-ast = { path = "../gf-ast" }
+gf-ir = { path = "../gf-ir" }
+gf-rel = { path = "../gf-rel" }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

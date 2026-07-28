@@ -1,0 +1,297 @@
+{
+  "contractVersion": 1,
+  "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
+  "releaseSurfaceCount": 179,
+  "releaseSurfaceDigest": "00838ed9c9cb72ed5d097128adb801bef1a7cdd8cc28ab8c998d6fdf0677b9bd",
+  "rustEvidenceGroupMap": {
+    "lifecycle-construction": "lifecycleConstruction",
+    "checkpoint-view": "checkpointView",
+    "m18": "m18",
+    "m19-provider-rerank": "m19ProviderRerank",
+    "m20": "m20",
+    "m21": "m21",
+    "streaming-errors-maintenance": "persistenceErrorsCancellation",
+    "compatibility": "arrowIpc"
+  },
+  "classification": {
+    "equivalent": [
+      "CheckpointView.execute",
+      "CheckpointView.inspect_adjacency",
+      "CheckpointView.project_capabilities",
+      "GraphForge.add_edge",
+      "GraphForge.add_edges",
+      "GraphForge.add_node",
+      "GraphForge.add_nodes",
+      "GraphForge.algorithm_run",
+      "GraphForge.algorithm_run_events",
+      "GraphForge.analyze",
+      "GraphForge.apply_valid_time",
+      "GraphForge.assertion",
+      "GraphForge.assertion_graph_refs",
+      "GraphForge.assertion_status",
+      "GraphForge.assess_confidence",
+      "GraphForge.attach_evidence",
+      "GraphForge.attach_resolved_run",
+      "GraphForge.begin",
+      "GraphForge.bind_embedding_space_alias",
+      "GraphForge.checkpoint",
+      "GraphForge.clear",
+      "GraphForge.cluster",
+      "GraphForge.commit",
+      "GraphForge.confidence_assessment",
+      "GraphForge.confidence_inputs",
+      "GraphForge.create_assertion",
+      "GraphForge.create_assertion_with_evidence",
+      "GraphForge.create_assertion_with_status",
+      "GraphForge.create_hypothesis_group",
+      "GraphForge.delete_checkpoint",
+      "GraphForge.delete_embedding_space",
+      "GraphForge.diff_checkpoints",
+      "GraphForge.embedding_refresh_project_policy",
+      "GraphForge.embedding_space",
+      "GraphForge.embedding_spaces",
+      "GraphForge.enable_capability",
+      "GraphForge.epistemic_snapshot",
+      "GraphForge.evidence_link",
+      "GraphForge.execute",
+      "GraphForge.explain",
+      "GraphForge.find",
+      "GraphForge.hypothesis_members",
+      "GraphForge.hypothesis_selection",
+      "GraphForge.index",
+      "GraphForge.index_adjacency",
+      "GraphForge.inspect_adjacency",
+      "GraphForge.inspect_embedding_refresh",
+      "GraphForge.inspect_embedding_space_freshness",
+      "GraphForge.inspect_provider_embedding_plan",
+      "GraphForge.inspect_text_index",
+      "GraphForge.invoke_descriptor",
+      "GraphForge.invoke_descriptor_bytes",
+      "GraphForge.invoke_recorded",
+      "GraphForge.invoke_resolved_recorded",
+      "GraphForge.labels",
+      "GraphForge.list_algorithm_runs",
+      "GraphForge.list_assertion_status",
+      "GraphForge.list_assertion_supersessions",
+      "GraphForge.list_assertion_validity",
+      "GraphForge.list_assertions",
+      "GraphForge.list_checkpoints",
+      "GraphForge.list_confidence_assessments",
+      "GraphForge.list_evidence_links",
+      "GraphForge.list_hypothesis_groups",
+      "GraphForge.list_hypothesis_membership",
+      "GraphForge.list_hypothesis_selection",
+      "GraphForge.list_provenance_history",
+      "GraphForge.list_reasoning",
+      "GraphForge.load_ontology",
+      "GraphForge.node_count",
+      "GraphForge.ontology_mode",
+      "GraphForge.open_checkpoint",
+      "GraphForge.paths",
+      "GraphForge.prepare_rank_invocation",
+      "GraphForge.prepare_cluster_invocation",
+      "GraphForge.prepare_paths_invocation",
+      "GraphForge.prepare_analyze_invocation",
+      "GraphForge.prepare_similar_invocation",
+      "GraphForge.project_capabilities",
+      "GraphForge.provenance_event",
+      "GraphForge.publish_bulk_edges",
+      "GraphForge.publish_bulk_nodes",
+      "GraphForge.publish_caller_embeddings",
+      "GraphForge.publish_composite_transaction",
+      "GraphForge.publish_m18_embeddings",
+      "GraphForge.publish_provider_embeddings",
+      "GraphForge.rank",
+      "GraphForge.reasoning",
+      "GraphForge.rebuild_adjacency",
+      "GraphForge.record_assertion_status",
+      "GraphForge.record_assertion_validity",
+      "GraphForge.record_hypothesis_membership",
+      "GraphForge.record_hypothesis_selection",
+      "GraphForge.record_reasoning",
+      "GraphForge.relationship_types",
+      "GraphForge.remove_embedding_space_alias",
+      "GraphForge.remove_hypothesis_member",
+      "GraphForge.resolve_belief_projection",
+      "GraphForge.resolve_belief_subject",
+      "GraphForge.revert_to_checkpoint",
+      "GraphForge.rollback",
+      "GraphForge.schema",
+      "GraphForge.set_default_embedding_space",
+      "GraphForge.set_embedding_refresh_project_policy",
+      "GraphForge.set_embedding_refresh_space_policy",
+      "GraphForge.similar",
+      "GraphForge.supersede_assertion"
+    ],
+    "languageSpecific": {
+      "GraphForge.execute_stream": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
+        "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
+      },
+      "GraphForge.execute_stream_owned": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
+        "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
+      },
+      "GraphForge.execute_stream_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
+        "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
+      },
+      "GraphForge.execute_to_parquet": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
+        "reason": "Node uses the asynchronous PlanHandle Parquet sink."
+      },
+      "GraphForge.execute_to_parquet_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
+        "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
+      },
+      "GraphForge.configure_provider_find_runtime": {
+        "nodeMembers": [
+          "GraphForge.configureOpenrouter"
+        ],
+        "reason": "Node exposes a bounded OpenRouter adapter instead of Rust runtime injection."
+      },
+      "crate.algorithm_descriptor_contracts": {
+        "nodeMembers": [
+          "GraphForge.algorithmDescriptorContracts"
+        ],
+        "reason": "Node projects the live Rust registry as a thin GraphForge method without opening knowledge or epistemic storage."
+      }
+    },
+    "nodeOnly": {
+      "CheckpointView.checkpointUuid": "Node getter for the Rust checkpoint_uuid value object accessor.",
+      "CheckpointView.generationUuid": "Node getter for the Rust generation_uuid value object accessor.",
+      "GraphForge.close": "Explicit Node lifecycle adapter.",
+      "GraphForge.configureOpenrouter": "Bounded Node provider adapter classified above.",
+      "GraphForge.algorithmDescriptorContracts": "Thin projection of crate.algorithm_descriptor_contracts.",
+      "GraphForge.path": "Node project-path getter corresponding to Rust introspection.",
+      "GraphForge.plan": "Node asynchronous execution adapter classified above.",
+      "PlanHandle.collectIpc": "Promise-delivered Arrow IPC adapter classified above.",
+      "PlanHandle.explain": "Node-only plan introspection for the asynchronous execution adapter.",
+      "PlanHandle.sinkParquet": "Asynchronous Parquet sink adapter classified above."
+    },
+    "notExposedDefaults": {
+      "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
+      "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
+      "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead."
+    }
+  },
+  "evidence": {
+    "lifecycleConstruction": {
+      "core.test.mjs": [
+        "add node"
+      ],
+      "smoke.test.mjs": [
+        "lifecycle"
+      ]
+    },
+    "checkpointView": {
+      "checkpoints.test.mjs": [
+        "checkpoint surfaces delegate to Rust and views stay read-only",
+        "checkpoint pagination and diff cancellation use the shared adapter"
+      ]
+    },
+    "m18": {
+      "invocation-descriptor.test.mjs": [
+        "rank descriptor matches the frozen cross-language vector and dispatches"
+      ],
+      "invocation-descriptor-facade.test.mjs": [
+        "live registry contracts are catalog-exhaustive and descriptor reachable",
+        "registry discovery and descriptor preparation stay knowledge isolated"
+      ],
+      "rank-centrality.test.mjs": [
+        "degree rank"
+      ],
+      "cluster-connectivity.test.mjs": [
+        "components cluster"
+      ],
+      "paths-shortest.test.mjs": [
+        "dijkstra paths"
+      ],
+      "analyze.test.mjs": [
+        "is dag"
+      ],
+      "similar-knn.test.mjs": [
+        "knn"
+      ]
+    },
+    "m19ProviderRerank": {
+      "search-index.test.mjs": [
+        "typed text and vector indexing persist through the Rust facade"
+      ],
+      "provider-workflow.test.mjs": [
+        "configured provider indexing, semantic find, rerank, and warnings stay in parity"
+      ]
+    },
+    "m20": {
+      "provenance.test.mjs": [
+        "provenance reads, addEdge, and cancellation use the native contract"
+      ],
+      "evidence.test.mjs": [
+        "assertion and evidence publish atomically through the Node surface"
+      ],
+      "confidence.test.mjs": [
+        "confidence assessments are atomic, idempotent, and Arrow-only"
+      ],
+      "reasoning.test.mjs": [
+        "reasoning is immutable, exact, idempotent, and Arrow-only"
+      ],
+      "assertions.test.mjs": [
+        "assertions are atomic, idempotent, exact, and Arrow-only"
+      ],
+      "composite_transaction.test.mjs": [
+        "publishCompositeTransaction receipts, reopen, invalid zero-mutation, exact retry",
+        "Node exposes one composite publish entrypoint with no inference helpers"
+      ]
+    },
+    "m21": {
+      "algorithm-runs.test.mjs": [
+        "recorded rank exposes the same result and durable lifecycle"
+      ],
+      "hypothesis-selection.test.mjs": [
+        "hypothesis membership and selection are explicit and Arrow-only"
+      ],
+      "valid-time.test.mjs": [
+        "valid time is opt-in, append-only, and evaluated after transaction time"
+      ],
+      "belief-projection.test.mjs": [
+        "resolved rank records M20 output and exactly retries its M21 attachment"
+      ],
+      "belief-subject.test.mjs": [
+        "belief subjects preserve Rust projection and canonical Arrow evidence"
+      ]
+    },
+    "arrowIpc": {
+      "arrow_roundtrip.test.mjs": [
+        "multi-column results keep column order",
+        "zero-row result keeps a valid schema"
+      ]
+    },
+    "persistenceErrorsCancellation": {
+      "core.test.mjs": [
+        "pre-v1 project error",
+        "parse error"
+      ],
+      "checkpoints.test.mjs": [
+        "checkpoint pagination and diff cancellation use the shared adapter"
+      ],
+      "cluster-vector.test.mjs": [
+        "k means cluster"
+      ]
+    }
+  }
+}

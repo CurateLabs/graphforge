@@ -1,0 +1,1 @@
+RETURN [x IN range(1, 10) WHERE x % 2 = 0 | x * x]

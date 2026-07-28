@@ -1,0 +1,45 @@
+ontology_id: finance-investigation
+version: "2.0.0-strict-target"
+entity_types:
+  - {name: FinancialObject, abstract: true}
+  - {name: Party, abstract: false, parent: FinancialObject}
+  - {name: Account, abstract: false, parent: FinancialObject}
+  - {name: Transaction, abstract: false, parent: FinancialObject}
+  - {name: Device, abstract: false, parent: FinancialObject}
+  - {name: Merchant, abstract: false, parent: FinancialObject}
+  - {name: Investigation, abstract: false, parent: FinancialObject}
+  - {name: Observation, abstract: false, parent: FinancialObject}
+  - {name: Institution, abstract: false, parent: FinancialObject}
+relation_types:
+  - {name: OWNS, src: Party, dst: Account, semantic: {acyclic: true}}
+  - {name: FROM_ACCOUNT, src: Transaction, dst: Account, semantic: {functional: true}}
+  - {name: TO_ACCOUNT, src: Transaction, dst: Account, semantic: {functional: true}}
+  - {name: TRANSFERRED_TO, src: Account, dst: Account, semantic: {}}
+  - {name: USED_DEVICE, src: Party, dst: Device, semantic: {}}
+  - {name: PAID_MERCHANT, src: Account, dst: Merchant, semantic: {}}
+  - {name: SAME_AS, src: Party, dst: Party, semantic: {symmetric: true}}
+  - {name: DISTINCT_FROM, src: Party, dst: Party, semantic: {symmetric: true}}
+  - {name: REVIEWS, src: Investigation, dst: Transaction, semantic: {}}
+properties:
+  - {owner: FinancialObject, name: name, type: utf8, nullable: false}
+  - {owner: Party, name: party_key, type: utf8, nullable: false}
+  - {owner: Party, name: risk_note, type: utf8, nullable: true}
+  - {owner: Account, name: account_key, type: utf8, nullable: false}
+  - {owner: Account, name: currency, type: utf8, nullable: false}
+  - {owner: Account, name: balance, type: float64, nullable: true}
+  - {owner: Transaction, name: transaction_key, type: utf8, nullable: false}
+  - {owner: Transaction, name: amount, type: float64, nullable: false}
+  - {owner: Transaction, name: posted_at, type: date_time, nullable: true}
+  - {owner: Transaction, name: reviewed, type: bool, nullable: false, default_json: "false"}
+  - {owner: Device, name: device_key, type: utf8, nullable: false}
+  - {owner: Device, name: fingerprint, type: utf8, nullable: true}
+  - {owner: Merchant, name: merchant_key, type: utf8, nullable: false}
+  - {owner: Merchant, name: category, type: utf8, nullable: true}
+  - {owner: Investigation, name: case_key, type: utf8, nullable: false}
+  - {owner: Observation, name: summary, type: utf8, nullable: false}
+  - {owner: TRANSFERRED_TO, name: amount, type: float64, nullable: false}
+  - {owner: TRANSFERRED_TO, name: transaction_key, type: utf8, nullable: false}
+constraints:
+  - {owner: Party, kind: unique_property, expr_json: '{"property":"party_key"}'}
+  - {owner: Account, kind: required_property, expr_json: '{"property":"account_key"}'}
+  - {owner: Transaction, kind: range_check, expr_json: '{"property":"amount","min":0}'}

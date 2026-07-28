@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "bootstrap",
+  "title": "Bootstrap a local GraphForge project",
+  "description": "Create or reopen a local project and verify a real zero-server create, reopen, and query cycle.",
+  "input_schema": "graphforge-agent-skill-input/v1",
+  "output_schema": "graphforge-agent-skill-output/v1",
+  "required_capabilities": { "graph": 1 }
+}
