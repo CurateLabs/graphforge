@@ -115,17 +115,29 @@ def assert_active_lines(section: str, *expected: str) -> None:
         assert line in active, f"missing active workflow line: {line}"
 
 
+def workflow_step(section: str, marker: str) -> str:
+    """Return only the workflow step containing marker."""
+    before, found, after = section.partition(marker)
+    assert found, f"missing workflow marker: {marker}"
+    start = before.rfind("\n      - ")
+    assert start >= 0, f"marker is not inside a workflow step: {marker}"
+    remainder = before[start + 1 :] + found + after
+    end = remainder.find("\n      - ", 1)
+    return remainder if end < 0 else remainder[:end]
+
+
 def validate_python_evidence_policy(workflow_text: str) -> None:
     """Reject drift from the cross-platform, read-only-wheel evidence contract."""
     prepare_step = "Prepare writable Python RC evidence directory"
     native_step = "Clean-install and execute native contract"
     write_step = "Write target evidence"
-    upload_step = "uses: actions/upload-artifact@v7"
+    stage_step = "Stage Python report for aggregate job"
+    transfer_step = "uses: actions/cache/save@v5"
     assert workflow_text.count(prepare_step) == 1
     python_job = required_section(workflow_text, "  python:\n", "  node:\n")
     assert (
         python_job.count("PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence")
-        == 3
+        == 4
     )
     _, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@v1")
     assert maturin_found, "missing maturin build marker"
@@ -133,7 +145,8 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
         post_maturin.index(prepare_step)
         < post_maturin.index(native_step)
         < post_maturin.index(write_step)
-        < post_maturin.index(upload_step)
+        < post_maturin.index(stage_step)
+        < post_maturin.index(transfer_step)
     )
     prepare = required_section(post_maturin, prepare_step, f"- name: {native_step}")
     assert_active_lines(
@@ -164,7 +177,9 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
         "--classification-only",
     )
     assert "GRAPHFORGE_PYTHON_PARITY_REPORT=dist/" not in native
-    write = required_section(post_maturin, f"- name: {write_step}", upload_step)
+    write = required_section(
+        post_maturin, f"- name: {write_step}", "- name: Stage Python report for aggregate job"
+    )
     assert_active_lines(
         write,
         "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
@@ -174,11 +189,14 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     )
     assert "--classification dist/" not in write
     assert '--output "dist/' not in write
-    _, upload_found, upload = post_maturin.partition(upload_step)
-    assert upload_found, "missing Python artifact upload marker"
+    stage = workflow_step(post_maturin, stage_step)
+    assert_active_lines(stage, "mkdir -p binding-rc-reports")
+    transfer = workflow_step(post_maturin, transfer_step)
     assert_active_lines(
-        upload,
-        "path: ${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
+        transfer,
+        transfer_step,
+        "path: binding-rc-reports",
+        "key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}",
     )
     for forbidden in ("chmod", "chown", "continue-on-error", "|| true", "retry"):
         assert forbidden not in post_maturin.lower()
@@ -410,8 +428,8 @@ def main() -> None:
         ),
         ("$PYTHON_RC_EVIDENCE_DIR/python-classification.json", "dist/python-classification.json"),
         (
-            "${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
-            "dist/python-target.json",
+            "path: binding-rc-reports",
+            "path: dist/python-target.json",
         ),
         ("python_rc_evidence_state=ready", "python_rc_evidence_state=ready; retry"),
         (
@@ -430,7 +448,7 @@ def main() -> None:
     prepare_marker = "Prepare writable Python RC evidence directory"
     native_marker = "Clean-install and execute native contract"
     write_marker = "Write target evidence"
-    upload_marker = "uses: actions/upload-artifact@v7"
+    transfer_marker = "uses: actions/cache/save@v5"
     for marker, active_line in (
         (
             prepare_marker,
@@ -464,8 +482,8 @@ def main() -> None:
         (write_marker, '--classification "$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \\'),
         (write_marker, '--output "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json"'),
         (
-            upload_marker,
-            "path: ${{ runner.temp }}/graphforge-python-rc-evidence/${{ matrix.target }}.json",
+            transfer_marker,
+            "path: binding-rc-reports",
         ),
     ):
         prefix, marker_found, remainder = rc_workflow_text.partition(marker)
@@ -485,7 +503,7 @@ def main() -> None:
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",
         "Write target evidence",
-        "uses: actions/upload-artifact@v7",
+        "uses: actions/cache/save@v5",
     ):
         rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
     wrapper_step = "Prepare Rust compiler wrapper for native contracts"
@@ -573,7 +591,13 @@ def main() -> None:
     assert "cargo " not in post_maturin.lower()
     assert "tests/*.py" not in post_maturin
     assert "native contract" not in post_maturin.lower()
-    assert "uses: actions/upload-artifact@v7" in post_maturin
+    publish_transfer = workflow_step(post_maturin, "uses: actions/cache/save@v5")
+    assert_active_lines(
+        publish_transfer,
+        "uses: actions/cache/save@v5",
+        "path: dist",
+        "key: publish-python-${{ github.run_id }}-${{ matrix.os }}",
+    )
 
     with tempfile.TemporaryDirectory() as directory:
         temp = Path(directory)

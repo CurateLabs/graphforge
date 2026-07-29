@@ -27,13 +27,13 @@ jobs:
             target
           key: ${{ runner.os }}-m20-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Execute Rust matrix group
-        run: python3 scripts/ci/m20-contract-gate.py run-group --group rust --output gate-results
-      - name: Upload Rust evidence
+        run: python3 scripts/ci/m20-contract-gate.py run-group --group rust --output gate-fragments
+      - name: Save Rust evidence for report job
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/cache/save@v5
         with:
-          name: m20-rust-${{ github.sha }}
-          path: gate-results/
+          path: gate-fragments/
+          key: m20-transfer-${{ github.run_id }}-rust
 
   python:
     name: Python contract rows
@@ -48,13 +48,13 @@ jobs:
         with:
           python-version: "3.13"
       - name: Execute Python matrix group
-        run: python3 scripts/ci/m20-contract-gate.py run-group --group python --output gate-results
-      - name: Upload Python evidence
+        run: python3 scripts/ci/m20-contract-gate.py run-group --group python --output gate-fragments
+      - name: Save Python evidence for report job
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/cache/save@v5
         with:
-          name: m20-python-${{ github.sha }}
-          path: gate-results/
+          path: gate-fragments/
+          key: m20-transfer-${{ github.run_id }}-python
 
   node:
     name: Node contract rows
@@ -80,13 +80,13 @@ jobs:
             target
           key: ${{ runner.os }}-m20-node-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'pnpm-lock.yaml') }}
       - name: Execute Node matrix group
-        run: python3 scripts/ci/m20-contract-gate.py run-group --group node --output gate-results
-      - name: Upload Node evidence
+        run: python3 scripts/ci/m20-contract-gate.py run-group --group node --output gate-fragments
+      - name: Save Node evidence for report job
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/cache/save@v5
         with:
-          name: m20-node-${{ github.sha }}
-          path: gate-results/
+          path: gate-fragments/
+          key: m20-transfer-${{ github.run_id }}-node
 
   report:
     name: SHA-bound closure report
@@ -95,21 +95,24 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/cache/restore@v5
         with:
-          pattern: m20-*-${{ github.sha }}
           path: gate-fragments
-          merge-multiple: true
+          key: m20-transfer-${{ github.run_id }}-rust
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: gate-fragments
+          key: m20-transfer-${{ github.run_id }}-python
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: gate-fragments
+          key: m20-transfer-${{ github.run_id }}-node
+          fail-on-cache-miss: true
       - name: Build exact closure report
         run: >-
           python3 scripts/ci/m20-contract-gate.py report
           --sha "${{ github.sha }}"
           --fragments gate-fragments
           --output gate-report
-      - name: Upload M20 Contract Gate
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: M20-Contract-Gate-${{ github.sha }}
-          path: gate-report/
-          if-no-files-found: error

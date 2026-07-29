@@ -110,6 +110,9 @@ jobs:
       - name: Test crates.io publish plan helper
         run: python3 scripts/ci/test-crate-publish-plan.py
 
+      - name: Test CI storage policy
+        run: python3 scripts/ci/test-ci-storage-policy.py
+
       - name: Validate GitHub Actions workflows
         run: scripts/check-workflows.sh
 
@@ -142,14 +145,6 @@ jobs:
 
       - name: Verify generated third-party notices
         run: python3 scripts/generate_third_party_notices.py --check
-
-      - name: Upload license compliance evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: license-compliance-${{ github.sha }}
-          path: |
-            license-compliance-report.json
-            legal/THIRD_PARTY_NOTICES.md
 
   python-quality:
     name: Python Quality
@@ -328,15 +323,6 @@ jobs:
       - name: Run workspace tests once
         run: cargo test --workspace --no-fail-fast
 
-      - name: Upload Rust BDD timings
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: bdd-rust-timings
-          path: target/bdd-timings/
-          if-no-files-found: warn
-          retention-days: 14
-
   python-binding:
     name: Python Binding
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -452,16 +438,6 @@ jobs:
             --case check_m20_m21_native_projection \
             --output dist/python-binding-parity-evidence.json
 
-      - name: Upload wheel
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-wheel-linux-x64
-          path: |
-            dist/*.whl
-            dist/artifact-sha
-            dist/python-non-cypher-classification.json
-            dist/python-binding-parity-evidence.json
-
   node-binding:
     name: Node Binding
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -548,15 +524,6 @@ jobs:
             --case "a future project format fails structurally without mutating the project" \
             --output crates/gf-bindings-node/node-binding-parity-evidence.json
 
-      - name: Upload addon parity evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-addon-linux-x64
-          path: |
-            crates/gf-bindings-node/*.node
-            crates/gf-bindings-node/tests/non-cypher-parity-policy.json
-            crates/gf-bindings-node/node-binding-parity-evidence.json
-
   concurrency-matrix:
     name: Concurrency Matrix
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -633,14 +600,6 @@ jobs:
           /tmp/gf-concurrency/bin/python
           scripts/ci/concurrency-short-gate.py run
           --output "${{ runner.temp }}/concurrency-short-evidence"
-
-      - name: Upload short concurrency evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: concurrency-short-${{ github.sha }}
-          path: ${{ runner.temp }}/concurrency-short-evidence/
-          if-no-files-found: warn
 
   # #[cfg(windows)] project-root lock unit tests in gf-storage do not run on
   # Linux rust-test. Host them here — not on Binding RC python-windows (#2700).

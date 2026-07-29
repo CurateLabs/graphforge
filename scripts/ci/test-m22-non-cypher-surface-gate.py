@@ -53,49 +53,23 @@ class M22SurfaceGateTests(unittest.TestCase):
             "repository": {"full_name": "CurateLabs/graphforge-legecy"},
             "html_url": "https://github.com/CurateLabs/graphforge-legecy/actions/runs/102",
         }
-        self.rust_artifacts = {
-            "total_count": 1,
-            "artifacts": [
-                {
-                    "id": 201,
-                    "name": "Rust-Non-Cypher-" + SHA,
-                    "expired": False,
-                    "workflow_run": {"id": 101},
-                }
-            ],
-        }
-        self.binding_artifacts = {
-            "total_count": 1,
-            "artifacts": [
-                {
-                    "id": 202,
-                    "name": "binding-release-candidate-" + SHA,
-                    "expired": False,
-                    "workflow_run": {"id": 102},
-                }
-            ],
-        }
 
     def rejected_runs(self, expected: str, **changes) -> None:
         values = {
             "rust_run": copy.deepcopy(self.rust_run),
-            "rust_artifacts": copy.deepcopy(self.rust_artifacts),
             "binding_run": copy.deepcopy(self.binding_run),
-            "binding_artifacts": copy.deepcopy(self.binding_artifacts),
         }
         values.update(changes)
         with self.assertRaisesRegex(ValueError, expected):
             GATE.validate_component_runs(expected_sha=SHA, **values)
 
-    def test_component_runs_require_exact_successful_manual_artifacts(self) -> None:
+    def test_component_runs_require_exact_successful_manual_runs(self) -> None:
         result = GATE.validate_component_runs(
             self.rust_run,
-            self.rust_artifacts,
             self.binding_run,
-            self.binding_artifacts,
             SHA,
         )
-        self.assertEqual(result["components"]["rust"]["artifact_id"], 201)
+        self.assertEqual(result["components"]["rust"]["cache_key"], "rust-non-cypher-" + SHA)
         for key, value, message in (
             ("status", "in_progress", "not completed"),
             ("conclusion", "failure", "not completed"),
@@ -106,15 +80,6 @@ class M22SurfaceGateTests(unittest.TestCase):
             run = copy.deepcopy(self.rust_run)
             run[key] = value
             self.rejected_runs(message, rust_run=run)
-        missing = copy.deepcopy(self.rust_artifacts)
-        missing["artifacts"] = []
-        self.rejected_runs("artifact listing", rust_artifacts=missing)
-        expired = copy.deepcopy(self.binding_artifacts)
-        expired["artifacts"][0]["expired"] = True
-        self.rejected_runs("expired", binding_artifacts=expired)
-        boolean_id = copy.deepcopy(self.rust_artifacts)
-        boolean_id["artifacts"][0]["id"] = True
-        self.rejected_runs("stable ID", rust_artifacts=boolean_id)
         boolean_attempt = copy.deepcopy(self.binding_run)
         boolean_attempt["run_attempt"] = True
         self.rejected_runs("run attempt", binding_run=boolean_attempt)
@@ -144,7 +109,7 @@ class M22SurfaceGateTests(unittest.TestCase):
         failure_job = jobs[validation_failure:load]
         self.assertIn("if: always() && needs.validate_source.result == 'failure'", failure_job)
         self.assertIn('else "invalid-sha"', failure_job)
-        self.assertIn("M22-Non-Cypher-Validation-Failed-${{ github.run_id }}", failure_job)
+        self.assertNotIn("upload-artifact", failure_job)
         load_job = jobs[load:aggregate]
         self.assertIn("needs: validate_source", load_job)
         self.assertIn("release-load-matrix.py run", load_job)
@@ -182,8 +147,7 @@ class M22SurfaceGateTests(unittest.TestCase):
         self.assertLess(rust_build, node_build)
         final_job = jobs[aggregate:]
         self.assertIn("Revalidate current main and component artifacts", final_job)
-        self.assertIn("run-id: ${{ inputs.rust_run_id }}", final_job)
-        self.assertIn("run-id: ${{ inputs.binding_rc_run_id }}", final_job)
+        self.assertIn("actions/cache/restore@v5", final_job)
 
     def rust_report(self) -> dict:
         inventory = GATE.load_json(GATE.SURFACE)
@@ -321,9 +285,7 @@ class M22SurfaceGateTests(unittest.TestCase):
                 paths[name] = path
             run_validation = GATE.validate_component_runs(
                 self.rust_run,
-                self.rust_artifacts,
                 self.binding_run,
-                self.binding_artifacts,
                 SHA,
             )
             run_path = root / "runs.json"

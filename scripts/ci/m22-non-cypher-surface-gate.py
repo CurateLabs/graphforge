@@ -58,37 +58,9 @@ def _run_id(value: Any, owner: str) -> int:
     return value
 
 
-def _artifact(
-    listing: dict[str, Any], expected_name: str, owner: str, run_id: int
-) -> dict[str, Any]:
-    artifacts = listing.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise ValueError(f"{owner}: malformed artifact listing")
-    if listing.get("total_count") != len(artifacts):
-        raise ValueError(f"{owner}: incomplete or paginated artifact listing")
-    matches = [item for item in artifacts if item.get("name") == expected_name]
-    if len(matches) != 1:
-        raise ValueError(f"{owner}: expected exactly one {expected_name!r} artifact")
-    artifact = matches[0]
-    if artifact.get("expired") is not False:
-        raise ValueError(f"{owner}: component artifact is expired")
-    if (
-        isinstance(artifact.get("id"), bool)
-        or not isinstance(artifact.get("id"), int)
-        or artifact["id"] <= 0
-    ):
-        raise ValueError(f"{owner}: component artifact has no stable ID")
-    workflow_run = artifact.get("workflow_run")
-    if not isinstance(workflow_run, dict) or workflow_run.get("id") != run_id:
-        raise ValueError(f"{owner}: component artifact belongs to another run")
-    return artifact
-
-
 def validate_component_runs(
     rust_run: dict[str, Any],
-    rust_artifacts: dict[str, Any],
     binding_run: dict[str, Any],
-    binding_artifacts: dict[str, Any],
     expected_sha: str,
 ) -> dict[str, Any]:
     if SHA_RE.fullmatch(expected_sha) is None:
@@ -97,20 +69,18 @@ def validate_component_runs(
         (
             "rust",
             rust_run,
-            rust_artifacts,
             ".github/workflows/non-cypher-surface-gate.yml",
-            "Rust-Non-Cypher-" + expected_sha,
+            "rust-non-cypher-" + expected_sha,
         ),
         (
             "binding",
             binding_run,
-            binding_artifacts,
             ".github/workflows/binding-release-candidate.yml",
             "binding-release-candidate-" + expected_sha,
         ),
     )
     components: dict[str, Any] = {}
-    for owner, run, artifacts, workflow_path, artifact_name in specifications:
+    for owner, run, workflow_path, cache_key in specifications:
         run_id = _run_id(run.get("id"), owner)
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             raise ValueError(f"{owner}: referenced run is not completed successfully")
@@ -125,7 +95,6 @@ def validate_component_runs(
         expected_url = "https://github.com/CurateLabs/graphforge-legecy/actions/runs/" + str(run_id)
         if run.get("html_url") != expected_url:
             raise ValueError(f"{owner}: unexpected run URL")
-        artifact = _artifact(artifacts, artifact_name, owner, run_id)
         if (
             isinstance(run.get("run_attempt"), bool)
             or not isinstance(run.get("run_attempt"), int)
@@ -137,8 +106,7 @@ def validate_component_runs(
             "run_url": expected_url,
             "run_attempt": run["run_attempt"],
             "workflow_path": workflow_path,
-            "artifact_id": artifact["id"],
-            "artifact_name": artifact_name,
+            "cache_key": cache_key,
         }
     return {"source_sha": expected_sha, "components": components}
 
@@ -355,24 +323,22 @@ def aggregate(
         "run_url",
         "run_attempt",
         "workflow_path",
-        "artifact_id",
-        "artifact_name",
+        "cache_key",
     }
     for name, component in components.items():
         if not isinstance(component, dict) or set(component) != component_keys:
             raise ValueError(f"{name}: component-run field ledger mismatch")
         run_id = _run_id(component["run_id"], f"{name} run")
-        artifact_id = _run_id(component["artifact_id"], f"{name} artifact")
         run_attempt = _run_id(component["run_attempt"], f"{name} attempt")
         expected_url = "https://github.com/CurateLabs/graphforge-legecy/actions/runs/" + str(run_id)
-        expected_artifact = {
-            "rust": "Rust-Non-Cypher-" + expected_sha,
+        expected_cache = {
+            "rust": "rust-non-cypher-" + expected_sha,
             "binding": "binding-release-candidate-" + expected_sha,
         }[name]
         if (
             component["run_url"] != expected_url
             or component["workflow_path"] != expected_workflows[name]
-            or component["artifact_name"] != expected_artifact
+            or component["cache_key"] != expected_cache
         ):
             raise ValueError(f"{name}: component-run provenance drift")
         normalized_components[name] = {
@@ -380,8 +346,7 @@ def aggregate(
             "run_url": expected_url,
             "run_attempt": run_attempt,
             "workflow_path": expected_workflows[name],
-            "artifact_id": artifact_id,
-            "artifact_name": expected_artifact,
+            "cache_key": expected_cache,
         }
     rust_report, binding_report, load_report = (
         load_json(rust_path),
@@ -431,9 +396,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     runs = subparsers.add_parser("validate-runs")
     runs.add_argument("--rust-run", type=Path, required=True)
-    runs.add_argument("--rust-artifacts", type=Path, required=True)
     runs.add_argument("--binding-run", type=Path, required=True)
-    runs.add_argument("--binding-artifacts", type=Path, required=True)
     runs.add_argument("--expected-sha", required=True)
     runs.add_argument("--output", type=Path, required=True)
     gate = subparsers.add_parser("aggregate")
@@ -449,9 +412,7 @@ def main() -> int:
         if args.command == "validate-runs":
             result = validate_component_runs(
                 load_json(args.rust_run),
-                load_json(args.rust_artifacts),
                 load_json(args.binding_run),
-                load_json(args.binding_artifacts),
                 args.expected_sha,
             )
         else:

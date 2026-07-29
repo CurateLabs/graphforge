@@ -49,7 +49,7 @@ jobs:
           main_sha="$(git rev-parse refs/remotes/origin/main)"
           test "$REQUESTED_SHA" = "$main_sha"
           printf 'evidence_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
-      - name: Resolve immutable successful component artifacts
+      - name: Resolve immutable successful component runs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,22 +61,12 @@ jobs:
           [[ "$BINDING_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           mkdir -p component-validation
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > component-validation/rust-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID/artifacts?per_page=100" > component-validation/rust-artifacts.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > component-validation/binding-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID/artifacts?per_page=100" > component-validation/binding-artifacts.json
           python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
             --rust-run component-validation/rust-run.json \
-            --rust-artifacts component-validation/rust-artifacts.json \
             --binding-run component-validation/binding-run.json \
-            --binding-artifacts component-validation/binding-artifacts.json \
             --expected-sha "$EXPECTED_SHA" \
             --output component-validation/report.json
-      - uses: actions/upload-artifact@v7
-        with:
-          name: m22-component-validation-${{ steps.source.outputs.evidence_sha }}
-          path: component-validation/report.json
-          if-no-files-found: error
-
   validation_failure:
     name: Preserve rejected source validation evidence
     if: always() && needs.validate_source.result == 'failure'
@@ -103,11 +93,6 @@ jobs:
               json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
           )
           PY
-      - uses: actions/upload-artifact@v7
-        with:
-          name: M22-Non-Cypher-Validation-Failed-${{ github.run_id }}
-          path: validation-failure/report.json
-          if-no-files-found: error
 
   load:
     name: Execute 144-case host-native load matrix
@@ -203,7 +188,7 @@ jobs:
         shell: bash
         env:
           GF_LOAD_WORK: ${{ runner.temp }}/graphforge-m22-load-work
-          GF_LOAD_OUTPUT: ${{ runner.temp }}/graphforge-m22-load-evidence/report.json
+          GF_LOAD_OUTPUT: ${{ github.workspace }}/m22-load-evidence/report.json
           TMPDIR: ${{ runner.temp }}/graphforge-m22-load-tmp
         run: |
           wheels=(dist/*.whl)
@@ -214,11 +199,11 @@ jobs:
           uv run --isolated --no-project --with "${wheels[0]}" \
             python scripts/ci/release-load-matrix.py run \
               --sha "$EVIDENCE_SHA" --work "$GF_LOAD_WORK" --output "$GF_LOAD_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - name: Save load report for aggregate job
+        uses: actions/cache/save@v5
         with:
-          name: M22-Load-Matrix-${{ needs.validate_source.outputs.evidence_sha }}
-          path: ${{ runner.temp }}/graphforge-m22-load-evidence/report.json
-          if-no-files-found: error
+          path: m22-load-evidence
+          key: m22-load-${{ github.run_id }}
 
   aggregate:
     name: Aggregate final M22 non-Cypher evidence
@@ -242,44 +227,35 @@ jobs:
           test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECTED_SHA"
           mkdir -p evidence/component-validation-final
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > evidence/component-validation-final/rust-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID/artifacts?per_page=100" > evidence/component-validation-final/rust-artifacts.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > evidence/component-validation-final/binding-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID/artifacts?per_page=100" > evidence/component-validation-final/binding-artifacts.json
           python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
             --rust-run evidence/component-validation-final/rust-run.json \
-            --rust-artifacts evidence/component-validation-final/rust-artifacts.json \
             --binding-run evidence/component-validation-final/binding-run.json \
-            --binding-artifacts evidence/component-validation-final/binding-artifacts.json \
             --expected-sha "$EXPECTED_SHA" \
             --output evidence/component-validation-final/report.json
-      - uses: actions/download-artifact@v8
+      - uses: actions/cache/restore@v5
         with:
-          name: m22-component-validation-${{ needs.validate_source.outputs.evidence_sha }}
-          path: evidence/component-validation
-      - uses: actions/download-artifact@v8
+          path: non-cypher-evidence
+          key: rust-non-cypher-${{ needs.validate_source.outputs.evidence_sha }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
         with:
-          name: Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}
-          path: evidence/rust
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.rust_run_id }}
-      - uses: actions/download-artifact@v8
-        with:
-          name: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
-          path: evidence/binding
-          github-token: ${{ github.token }}
-          run-id: ${{ inputs.binding_rc_run_id }}
-      - uses: actions/download-artifact@v8
+          path: binding-rc-aggregate
+          key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
         if: needs.load.result == 'success'
         with:
-          name: M22-Load-Matrix-${{ needs.validate_source.outputs.evidence_sha }}
-          path: evidence/load
+          path: m22-load-evidence
+          key: m22-load-${{ github.run_id }}
+          fail-on-cache-miss: true
       - name: Validate and aggregate every required component
         if: needs.load.result == 'success'
         run: >-
           python3 scripts/ci/m22-non-cypher-surface-gate.py aggregate
-          --rust-report evidence/rust/report.json
-          --binding-report evidence/binding/report.json
-          --load-report evidence/load/report.json
+          --rust-report non-cypher-evidence/report.json
+          --binding-report binding-rc-aggregate/report.json
+          --load-report m22-load-evidence/report.json
           --run-validation evidence/component-validation-final/report.json
           --expected-sha "${{ needs.validate_source.outputs.evidence_sha }}"
           --load-run-id "${{ github.run_id }}"
@@ -304,36 +280,3 @@ jobs:
               json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
           )
           PY
-      - name: Ensure failed validation remains downloadable
-        if: always()
-        shell: bash
-        env:
-          SOURCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
-        run: |
-          if test -f final-evidence/report.json; then
-            exit 0
-          fi
-          mkdir -p final-evidence
-          python3 - <<'PY'
-          import json, os
-          report = {
-              "schema": "graphforge-m22-non-cypher-surface-gate/1",
-              "source_sha": os.environ["SOURCE_SHA"],
-              "status": "failed",
-              "sanitized_failure": "component retrieval or final validation did not succeed",
-          }
-          open("final-evidence/report.json", "w", encoding="utf-8").write(
-              json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n"
-          )
-          PY
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: M22-Non-Cypher-Surface-Gate-${{ needs.validate_source.outputs.evidence_sha }}
-          path: |
-            final-evidence/report.json
-            evidence/rust/report.json
-            evidence/binding/report.json
-            evidence/load/report.json
-            evidence/component-validation-final/report.json
-          if-no-files-found: error
