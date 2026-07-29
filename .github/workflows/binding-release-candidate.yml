@@ -70,7 +70,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v9.0.0
 
       - name: Build native abi3 wheel
         uses: PyO3/maturin-action@v1

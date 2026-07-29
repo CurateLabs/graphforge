@@ -156,7 +156,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
@@ -334,7 +334,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
@@ -546,7 +546,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
