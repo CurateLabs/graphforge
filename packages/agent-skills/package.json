@@ -1,17 +1,24 @@
 {
   "name": "@graphforge/agent-skills",
   "version": "0.5.0-dev.0",
-  "description": "Agent skill package shell for GraphForge",
+  "description": "NPX-distributed agent skills and adapters for GraphForge",
   "license": "BUSL-1.1",
   "homepage": "https://curatelabs.github.io/graphforge-legecy/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CurateLabs/graphforge-legecy.git",
+    "url": "git+https://github.com/CurateLabs/graphforge-x.git",
     "directory": "packages/agent-skills"
   },
   "bugs": {
-    "url": "https://github.com/CurateLabs/graphforge-legecy/issues"
+    "url": "https://github.com/CurateLabs/graphforge-x/issues"
   },
+  "keywords": [
+    "graphforge",
+    "agent-skills",
+    "knowledge-graph",
+    "ai-agents",
+    "npx"
+  ],
   "type": "module",
   "bin": {
     "graphforge-agent-skills": "bin/graphforge-agent-skills.js"
@@ -54,6 +61,7 @@
     "format:check": "prettier --check package.json compatibility.json README.md adapter bin tests schemas skills workflows rc examples scripts"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
