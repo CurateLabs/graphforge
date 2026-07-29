@@ -249,9 +249,7 @@ git commit -m "feat: implement {feature}
 
 Brief description of what was implemented.
 
-Fixes #{issue-number}
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+Fixes #{issue-number}"
 
 git push -u origin feature/{issue-number}-{slug}
 

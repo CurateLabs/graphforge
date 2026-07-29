@@ -1,7 +1,6 @@
 # Documentation Validation Report
 
 **Date:** 2026-02-17
-**Validator:** Claude Opus 4.6
 **Scope:** Comprehensive OpenCypher feature inventory documentation (the work item)
 
 ---

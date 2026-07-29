@@ -191,7 +191,10 @@ benchmarks/real_dataset_baseline_v*.json
 # Rust (Cargo)
 # ==============================================================
 /target/
+/debug/
 **/*.rs.bk
+*.pdb
+rustc-ice-*.txt
 # Note: Cargo.lock is tracked (binary crates present)
 
 # ==============================================================
@@ -210,7 +213,7 @@ dist/
 *.pyd
 
 # ==============================================================
-# Claude Code agent worktrees (never commit)
+# Agent worktrees (never commit)
 # ==============================================================
 .claude/worktrees/
 crates/gf-bindings-node/coverage/

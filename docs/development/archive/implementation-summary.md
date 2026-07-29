@@ -323,7 +323,6 @@ Advanced but valuable:
 - Update CHANGELOG.md for each feature
 - Reference issues in commits: `Part of `
 - Final commit: `Fixes #<issue-number>` or `Closes #<issue-number>`
-- Co-author: `Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>`
 
 ---
 

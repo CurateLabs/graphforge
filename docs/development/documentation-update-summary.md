@@ -257,7 +257,7 @@ grep -r "custom WAL\|custom storage" docs/ --include="*.md" -i
 
 ```
 commit 5315709
-Author: David Spencer + Claude Opus 4.5
+Author: David Spencer
 
 Document architectural decision to use SQLite for storage
 

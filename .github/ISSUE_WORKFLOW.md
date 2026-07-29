@@ -58,7 +58,7 @@ This runs:
 
 ### 4. Commit Changes
 
-Use descriptive commit messages with the Co-Authored-By line:
+Use descriptive commit messages:
 
 ```bash
 git add -A
@@ -90,8 +90,6 @@ Tests:
 Coverage: 95.5% overall
 
 Closes #<issue-number>
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>
 EOF
 )"
 ```
@@ -178,8 +176,6 @@ gh pr create \
 - All pre-push checks pass ✅
 
 Closes #{issue-number}
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
 )"
 ```
