@@ -3,10 +3,13 @@
 <p align="center">
   <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi" alt="PyPI version" /></a>
   <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/dm/graphforge.svg?label=Downloads" alt="Monthly downloads" /></a>
-  <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/pyversions/graphforge.svg?logo=python&logoColor=white" alt="Python versions" /></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
+  <a href="https://github.com/CurateLabs/graphforge-x/tree/main/crates/gf-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
+  <a href="https://github.com/CurateLabs/graphforge-x/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
+  <a href="https://github.com/CurateLabs/graphforge-x/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge-x/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
   <a href="https://curatelabs.github.io/graphforge-legecy/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
   <a href="https://curatelabs.github.io/graphforge-legecy/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
-  <a href="https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-6f42c1.svg" alt="Source Available — BUSL 1.1" /></a>
+  <a href="https://github.com/CurateLabs/graphforge-x/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-6f42c1.svg" alt="Source Available — BUSL 1.1" /></a>
 </p>
 
 <p align="center">
