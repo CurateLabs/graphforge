@@ -146,8 +146,8 @@ jobs:
           )
           PY
 
-      - uses: actions/upload-artifact@v7
+      - name: Save Rust report for M22
+        uses: actions/cache/save@v5
         with:
-          name: Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
           path: non-cypher-evidence/
-          if-no-files-found: error
+          key: rust-non-cypher-${{ env.EVIDENCE_SHA }}

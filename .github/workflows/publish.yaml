@@ -17,12 +17,6 @@ jobs:
       - name: Verify release license policy
         run: python3 scripts/license_policy.py check --report license-compliance-report.json
 
-      - name: Upload SHA-bound license report
-        uses: actions/upload-artifact@v7
-        with:
-          name: license-compliance-${{ github.sha }}
-          path: license-compliance-report.json
-
   # Build the native abi3 wheel per OS. abi3-py310 → one wheel per OS covers
   # CPython 3.10+; the binding's pyproject is the canonical `graphforge` dist.
   build-wheels:
@@ -32,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest, windows-latest]
+        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15, blacksmith-4vcpu-windows-2025]
     steps:
       - uses: actions/checkout@v6
 
@@ -44,10 +38,12 @@ jobs:
           manylinux: auto # builds the Linux wheel in a manylinux container
           sccache: "true"
 
-      - uses: actions/upload-artifact@v7
+      - name: Save wheel for publish job
+        uses: actions/cache/save@v5
         with:
-          name: wheels-${{ matrix.os }}
-          path: dist/*.whl
+          path: dist
+          key: publish-python-${{ github.run_id }}-${{ matrix.os }}
+          enableCrossOsArchive: true
 
   build-sdist:
     name: Build sdist
@@ -62,10 +58,12 @@ jobs:
           command: sdist
           args: --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
 
-      - uses: actions/upload-artifact@v7
+      - name: Save sdist for publish job
+        uses: actions/cache/save@v5
         with:
-          name: wheels-sdist
-          path: dist/*.tar.gz
+          path: dist
+          key: publish-python-${{ github.run_id }}-sdist
+          enableCrossOsArchive: true
 
   publish:
     name: Publish to PyPI
@@ -74,11 +72,30 @@ jobs:
     permissions:
       id-token: write # PyPI trusted publishing (OIDC) — no API token needed
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/cache/restore@v5
         with:
-          pattern: wheels-* # every wheel OS + the sdist
-          merge-multiple: true
           path: dist
+          key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-ubuntu-2404
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: dist
+          key: publish-python-${{ github.run_id }}-blacksmith-6vcpu-macos-15
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: dist
+          key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-windows-2025
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: dist
+          key: publish-python-${{ github.run_id }}-sdist
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
 
       - uses: astral-sh/setup-uv@v8.1.0
 
@@ -97,11 +114,11 @@ jobs:
       fail-fast: false
       matrix:
         settings:
-          - { host: macos-latest, target: x86_64-apple-darwin }
-          - { host: macos-latest, target: aarch64-apple-darwin }
+          - { host: blacksmith-6vcpu-macos-15, target: x86_64-apple-darwin }
+          - { host: blacksmith-6vcpu-macos-15, target: aarch64-apple-darwin }
           - { host: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
           - { host: blacksmith-4vcpu-ubuntu-2404, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross", arm_cflags: "-D__ARM_ARCH=8" }
-          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+          - { host: blacksmith-4vcpu-windows-2025, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v6
 
@@ -124,10 +141,18 @@ jobs:
           CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.settings.arm_cflags || '' }}
         run: pnpm --filter @graphforge/node exec napi build --platform --release --target ${{ matrix.settings.target }} ${{ matrix.settings.cross || '' }}
 
-      - uses: actions/upload-artifact@v7
+      - name: Stage addon for publish job
+        shell: bash
+        run: |
+          mkdir -p node-artifacts
+          cp crates/gf-bindings-node/*.node node-artifacts/
+
+      - name: Save addon for publish job
+        uses: actions/cache/save@v5
         with:
-          name: bindings-${{ matrix.settings.target }}
-          path: crates/gf-bindings-node/*.node
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-${{ matrix.settings.target }}
+          enableCrossOsArchive: true
 
   publish-node:
     name: Publish to npm
@@ -153,12 +178,46 @@ jobs:
         run: pnpm install
         working-directory: .
 
-      - name: Download all built addons
-        uses: actions/download-artifact@v8
+      - name: Restore x86_64 macOS addon
+        uses: actions/cache/restore@v5
         with:
-          pattern: bindings-*
-          merge-multiple: true
-          path: crates/gf-bindings-node/artifacts
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-x86_64-apple-darwin
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - name: Restore aarch64 macOS addon
+        uses: actions/cache/restore@v5
+        with:
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-aarch64-apple-darwin
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - name: Restore x86_64 Linux addon
+        uses: actions/cache/restore@v5
+        with:
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-x86_64-unknown-linux-gnu
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - name: Restore aarch64 Linux addon
+        uses: actions/cache/restore@v5
+        with:
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-aarch64-unknown-linux-gnu
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+      - name: Restore Windows addon
+        uses: actions/cache/restore@v5
+        with:
+          path: node-artifacts
+          key: publish-node-${{ github.run_id }}-x86_64-pc-windows-msvc
+          fail-on-cache-miss: true
+          enableCrossOsArchive: true
+
+      - name: Stage restored addons
+        run: |
+          mkdir -p artifacts
+          cp ../../node-artifacts/*.node artifacts/
 
       - name: Assemble per-platform npm packages
         # create-npm-dirs scaffolds npm/<platform>/, artifacts moves each built
@@ -236,10 +295,3 @@ jobs:
           if [ "$status" -ne 0 ]; then
             echo "::warning::crates.io publish blocked — see publication-order.md disposition and crates-io-publish-check.txt"
           fi
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: crates-io-publish-plan-${{ github.sha }}
-          path: |
-            crates-io-publish-order.txt
-            crates-io-publish-check.txt
