@@ -26,7 +26,7 @@ From the repository root (requires Node ≥ 22.12 and the repo `pnpm` workspace)
 
 ```bash
 pnpm install
-pnpm docs:dev          # http://localhost:4321/graphforge-legecy/
+pnpm docs:dev          # http://localhost:4321/
 pnpm docs:build        # output: docs-site/dist/
 pnpm docs:check-links  # after build: zero broken same-site hrefs
 pnpm docs:preview      # serve the build output

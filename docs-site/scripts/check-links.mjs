@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const siteRoot = path.resolve(__dirname, '..');
 const dist = path.join(siteRoot, 'dist');
-const SITE_BASE = '/graphforge-legecy';
+const SITE_ORIGIN = 'https://docs.graphforge.sh';
+const SITE_BASE = '';
 
 if (!fs.existsSync(dist)) {
   console.error('Missing docs-site/dist — run `pnpm build` first.');
@@ -85,29 +86,29 @@ function consider(pageUrl, href, { assetsOnly = false } = {}) {
   ) {
     stale.push({ page: pageUrl, href, reason: 'DecisionNerd leftover' });
   }
-  if (href === '/graphforge' || href.startsWith('/graphforge/') || href.includes('://decisionnerd.github.io/graphforge')) {
-    stale.push({ page: pageUrl, href, reason: 'stale /graphforge base' });
+  if (
+    href === '/graphforge' ||
+    href.startsWith('/graphforge/') ||
+    href === '/graphforge-legecy' ||
+    href.startsWith('/graphforge-legecy/') ||
+    href.includes('://decisionnerd.github.io/graphforge') ||
+    href.includes('://curatelabs.github.io/graphforge-legecy')
+  ) {
+    stale.push({ page: pageUrl, href, reason: 'stale GitHub Pages project base' });
   }
 
   let pathname;
   if (/^https?:\/\//i.test(href)) {
     if (
-      href.startsWith(`https://curatelabs.github.io${SITE_BASE}`) ||
+      href.startsWith(SITE_ORIGIN) ||
       href.startsWith(`http://localhost:4321${SITE_BASE}`)
     ) {
       pathname = new URL(href).pathname;
     } else {
       return;
     }
-  } else if (href.startsWith(SITE_BASE) || href.startsWith(`${SITE_BASE}/`)) {
-    pathname = href.split('#')[0].split('?')[0];
   } else if (href.startsWith('/')) {
     pathname = href.split('#')[0].split('?')[0];
-    if (!pathname.startsWith(SITE_BASE)) {
-      broken.push({ page: pageUrl, href, reason: 'root path outside site base' });
-      checked += 1;
-      return;
-    }
   } else {
     try {
       pathname = new URL(href, `https://example.com${pageUrl}`).pathname;
@@ -155,7 +156,7 @@ console.log(
 
 if (uniqBroken.length || uniqStale.length) {
   console.error(
-    `\nlink check failed: ${uniqBroken.length} broken, ${uniqStale.length} stale DecisionNerd//graphforge hrefs`,
+    `\nlink check failed: ${uniqBroken.length} broken, ${uniqStale.length} stale repository/site hrefs`,
   );
   process.exit(1);
 }
