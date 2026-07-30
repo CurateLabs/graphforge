@@ -78,7 +78,7 @@ jobs:
           command: build
           args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
           manylinux: auto
-          sccache: "true"
+          sccache: "false"
 
       # The maturin action owns its build wrapper. Later Python contracts may
       # launch Cargo after that wrapper has left PATH, especially on containerized
@@ -233,16 +233,6 @@ jobs:
         with:
           toolchain: "1.96.0"
           targets: ${{ matrix.target }}
-
-      - name: Restore Windows Node Cargo build state
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0-${{ hashFiles('Cargo.lock') }}
 
       - name: Install workspace dependencies
         run: pnpm install

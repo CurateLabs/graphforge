@@ -355,10 +355,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: >-
-            ${{ runner.os }}-python-binding-v1-${{
-            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
-            'crates/**/*.rs', 'crates/gf-bindings-py/pyproject.toml') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Build same-SHA wheel
         shell: bash
@@ -478,10 +475,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: >-
-            ${{ runner.os }}-node-binding-v2-${{
-            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
-            'crates/**/*.rs', 'package.json', 'pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install workspace dependencies
         run: pnpm install
@@ -577,10 +571,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: >-
-            ${{ runner.os }}-concurrency-matrix-v1-${{
-            hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml',
-            'crates/**/*.rs', 'pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Build Python wheel and Node addon
         shell: bash
@@ -627,9 +618,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: >-
-            ${{ runner.os }}-gf-storage-locks-v1-${{
-            hashFiles('Cargo.lock', 'crates/gf-storage/**') }}
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Run Windows project-root lock unit tests
         shell: bash

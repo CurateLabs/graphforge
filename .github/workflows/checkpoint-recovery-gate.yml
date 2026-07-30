@@ -22,13 +22,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Validate frozen acceptance ledger
         run: python3 scripts/ci/checkpoint-recovery-gate.py
       - name: Execute Rust and CLI matrix
@@ -86,13 +79,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-python-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Build and prove isolated same-SHA wheel
         run: |
           uv run --with maturin maturin build --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
@@ -135,13 +121,6 @@ jobs:
         with:
           node-version: "20"
       - uses: pnpm/action-setup@v4
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-node-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'pnpm-lock.yaml') }}
       - name: Build and prove same-SHA Node package
         run: |
           pnpm install --frozen-lockfile

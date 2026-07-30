@@ -19,13 +19,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-m20-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Execute Rust matrix group
         run: python3 scripts/ci/m20-contract-gate.py run-group --group rust --output gate-fragments
       - name: Save Rust evidence for report job
@@ -72,13 +65,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-m20-node-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'pnpm-lock.yaml') }}
       - name: Execute Node matrix group
         run: python3 scripts/ci/m20-contract-gate.py run-group --group node --output gate-fragments
       - name: Save Node evidence for report job

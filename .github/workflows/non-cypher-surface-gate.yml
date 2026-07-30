@@ -26,11 +26,6 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-non-cypher-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
-
       - name: Validate exhaustive inventory
         env:
           GITHUB_SHA: ${{ env.EVIDENCE_SHA }}

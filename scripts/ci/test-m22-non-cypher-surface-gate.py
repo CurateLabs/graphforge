@@ -115,9 +115,11 @@ class M22SurfaceGateTests(unittest.TestCase):
         self.assertIn("release-load-matrix.py run", load_job)
         self.assertIn("useblacksmith/stickydisk@v1", load_job)
         self.assertIn(
-            "${{ github.repository }}-m22-load-${{ hashFiles('Cargo.lock') }}-target-v2",
+            "${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3",
             load_job,
         )
+        self.assertIn("useblacksmith/stickydisk-delete@v1", load_job)
+        self.assertIn("needs: load", load_job)
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", load_job)
         self.assertIn("Reclaim sticky-disk ownership after maturin", load_job)
         self.assertIn(

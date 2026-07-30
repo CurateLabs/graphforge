@@ -128,8 +128,8 @@ jobs:
       - name: Mount Cargo build disk
         uses: useblacksmith/stickydisk@v1
         with:
-          # v2: discard volumes that may retain root-owned maturin leftovers.
-          key: ${{ github.repository }}-m22-load-${{ hashFiles('Cargo.lock') }}-target-v2
+          # Per-certification workspace; cleanup_load_disk deletes it after load.
+          key: ${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3
           path: target
       - name: Install workspace dependencies
         run: pnpm install
@@ -139,7 +139,7 @@ jobs:
           command: build
           args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
           manylinux: auto
-          sccache: "true"
+          sccache: "false"
       # manylinux maturin writes into CARGO_TARGET_DIR as root; host cargo then
       # cannot open .cargo-build-lock (EACCES) without reclaiming ownership.
       - name: Reclaim sticky-disk ownership after maturin
@@ -205,10 +205,21 @@ jobs:
           path: m22-load-evidence
           key: m22-load-${{ github.run_id }}
 
+  cleanup_load_disk:
+    name: Delete one-run M22 build disk
+    if: always()
+    needs: load
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Delete M22 build disk
+        uses: useblacksmith/stickydisk-delete@v1
+        with:
+          delete-key: ${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3
+
   aggregate:
     name: Aggregate final M22 non-Cypher evidence
     if: always() && needs.validate_source.result == 'success'
-    needs: [validate_source, load]
+    needs: [validate_source, load, cleanup_load_disk]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6

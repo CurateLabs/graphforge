@@ -36,7 +36,7 @@ jobs:
           command: build
           args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
           manylinux: auto # builds the Linux wheel in a manylinux container
-          sccache: "true"
+          sccache: "false"
 
       - name: Save wheel for publish job
         uses: actions/cache/save@v5
