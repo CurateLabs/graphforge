@@ -149,7 +149,7 @@ class M22SurfaceGateTests(unittest.TestCase):
         self.assertLess(rust_build, node_build)
         final_job = jobs[aggregate:]
         self.assertIn("Revalidate current main and component artifacts", final_job)
-        self.assertIn("actions/cache/restore@v5", final_job)
+        self.assertIn("actions/cache/restore@v6", final_job)
 
     def rust_report(self) -> dict:
         inventory = GATE.load_json(GATE.SURFACE)

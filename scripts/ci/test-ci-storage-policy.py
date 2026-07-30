@@ -136,12 +136,12 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
         uses = field(step, "uses")
         if uses is None or not uses.startswith("actions/cache/"):
             continue
-        assert uses in {"actions/cache/save@v5", "actions/cache/restore@v5"}, (
+        assert uses in {"actions/cache/save@v6", "actions/cache/restore@v6"}, (
             f"unapproved cache transfer action: {uses}"
         )
         key = field(step, "key")
         assert key is not None, f"{uses} step has no exact key"
-        if uses == "actions/cache/save@v5":
+        if uses == "actions/cache/save@v6":
             saved.append(key)
         else:
             assert field(step, "fail-on-cache-miss") == "true", f"restore is not fail-closed: {key}"
@@ -152,8 +152,8 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
 def dependency_contracts(text: str) -> list[str]:
     keys: list[str] = []
     for step in action_steps(text, "actions/cache@"):
-        assert field(step, "uses") == "actions/cache@v5", (
-            "dependency cache must use actions/cache@v5"
+        assert field(step, "uses") == "actions/cache@v6", (
+            "dependency cache must use actions/cache@v6"
         )
         key = field(step, "key")
         assert key is not None, "dependency cache has no exact key"

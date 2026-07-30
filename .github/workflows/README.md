@@ -7,7 +7,7 @@ Release certification remains in `publish.yaml`.
 Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. Native PR
 jobs use Blacksmith sticky disks for job-isolated Cargo `target/` directories,
 while registry and pnpm dependencies use the colocated cache through upstream
-`actions/cache@v5` and `actions/setup-node@v6`. Cargo-lock changes create fresh
+`actions/cache@v6` and `actions/setup-node@v6`. Cargo-lock changes create fresh
 sticky disks; inactive disks expire under Blacksmith's retention policy. The
 M22 host-native load matrix also mounts a sticky `target/` so maturin, Cargo,
 and napi share one build volume instead of a second root-disk tree.

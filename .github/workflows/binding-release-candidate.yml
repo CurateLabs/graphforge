@@ -161,7 +161,7 @@ jobs:
           cp "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json" binding-rc-reports/
 
       - name: Save Python report for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}
@@ -331,7 +331,7 @@ jobs:
           cp "crates/gf-bindings-node/${{ matrix.report_target }}.json" binding-rc-reports/
 
       - name: Save Node report for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.report_target }}
@@ -351,56 +351,56 @@ jobs:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
 
       - name: Restore Python Ubuntu report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-python-ubuntu
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Python macOS report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-python-macos
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Python Windows report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-python-windows
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Node x86_64 macOS report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-apple-darwin
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Node aarch64 macOS report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-node-aarch64-apple-darwin
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Node x86_64 Linux report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-unknown-linux-gnu
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Node aarch64 Linux report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-node-aarch64-unknown-linux-gnu
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Node Windows report
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: binding-rc-reports
           key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-pc-windows-msvc
@@ -416,7 +416,7 @@ jobs:
           --output binding-rc-aggregate/report.json
 
       - name: Save fail-closed aggregate for M22
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: binding-rc-aggregate/report.json
           key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
