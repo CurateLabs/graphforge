@@ -1104,6 +1104,7 @@ mod tests {
         )
         .unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();
+        assert_eq!(context.load_config().unwrap().schema_version, 1);
         let actual = context.resolve_config().unwrap();
         let expected: Value = serde_json::from_str(include_str!(
             "../../../docs/contracts/examples/graphforge-resolved-v1.json"

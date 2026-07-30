@@ -1,10 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "c2d337db7483484d35da304dbc3d1c996100e93c01c8e2ded49551a5ac83122f",
+  "public_method_digest": "65d91b9fa187393a27796eb34bb2989f49a89c1e5f449aab4106dba432d0003d",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
+      "RepositoryContext": "release-tested",
       "crate": "release-tested",
       "CheckpointView": "release-tested",
       "OpenRouterProviderSession": "release-tested",
@@ -43,6 +44,7 @@
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
+      "RepositoryContext.discover": "introspection",
       "CheckpointView.checkpoint_uuid": "introspection",
       "CheckpointView.generation_uuid": "introspection",
       "OpenRouterProviderSession.new": "introspection",
@@ -81,6 +83,24 @@
     }
   },
   "method_evidence_groups": {
+    "repository-lifecycle": {
+      "ids": [
+        "RepositoryContext.contained_path",
+        "RepositoryContext.init",
+        "RepositoryContext.load_config",
+        "RepositoryContext.remove",
+        "RepositoryContext.resolve_config",
+        "RepositoryContext.sync"
+      ],
+      "test_refs": [
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "containment_and_symlinks_fail_closed"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "discovery_resolves_a_linked_git_worktree_not_the_common_directory"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "checked_in_fixture_resolves_to_the_contract_golden"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "unborn_git_repository_has_null_sha_and_dirty_definitions"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "remove_never_deletes_tracked_definitions"},
+        {"path": "crates/gf-cli/tests/repository.rs", "symbol": "repository_lifecycle_emits_stable_json_and_keeps_data_out_of_git"}
+      ]
+    },
     "lifecycle-construction": {
       "ids": [
         "GraphForge.add_edge", "GraphForge.add_edges", "GraphForge.add_node", "GraphForge.add_nodes",
