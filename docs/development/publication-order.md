@@ -141,7 +141,14 @@ final `#742` close.
 ## Human blockers (checklist)
 
 - [ ] Version freeze PR merged on the RC commit (#2796)
-- [ ] `NPM_TOKEN` (or npm trusted publishing) available to `publish.yaml`
+- [ ] `@graphforge` npm organization exists and the publishing maintainer can
+      create public organization-scoped packages
+- [ ] `NPM_TOKEN` is a granular token authorized for the `@graphforge` scope,
+      can bypass 2FA for CI publishing, and is available to `publish.yaml`
+- [ ] After the first publish, configure trusted publishing for each npm package
+      before removing the token path; npm requires an existing package and a
+      supported GitHub-hosted runner (the repository is currently private, so
+      npm provenance is not available)
 - [ ] PyPI trusted publishing OIDC configured for this repo / environment
 - [ ] `CARGO_REGISTRY_TOKEN` (or crates.io trusted publishing) once crates.io
       names are resolved
