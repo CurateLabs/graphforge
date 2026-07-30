@@ -1268,8 +1268,8 @@ mod tests {
         COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeKnowledgeParticipants,
     };
     use crate::{
-        CapabilityId, EnableCapabilityRequest, GraphForgeOptions, OperationId, ProjectWriteMode,
-        PropValue, WriteContext,
+        CancellationToken, CapabilityId, EnableCapabilityRequest, GraphForgeOptions, OperationId,
+        ProjectWriteMode, PropValue, WriteContext,
     };
     use gf_knowledge::{
         Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus, AssertionStatusEvent,
@@ -1489,6 +1489,46 @@ mod tests {
                 .lock()
                 .expect("generation UUID lock poisoned"),
             after
+        );
+    }
+
+    #[test]
+    fn cancelled_public_composite_publish_never_mutates() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new_with_options(
+            directory.path().to_str(),
+            GraphForgeOptions {
+                write_mode: ProjectWriteMode::QueuedWriter,
+                ..GraphForgeOptions::default()
+            },
+        )
+        .unwrap();
+        let before = *graph
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = graph
+            .publish_composite_transaction_with_cancellation(
+                graph_request(71, 72, "cancelled"),
+                Some(cancellation),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "GF_CANCELLED");
+        assert_eq!(
+            *graph
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned"),
+            before
+        );
+        assert!(
+            gf_storage::published_project_transaction(directory.path(), uuid7(71))
+                .unwrap()
+                .is_none()
         );
     }
 
