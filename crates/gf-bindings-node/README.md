@@ -47,5 +47,5 @@ to `new GraphForge(path)`.
 
 ## License
 
-GraphForge is source-available under the Business Source License 1.1. See the
+GraphForge is open source under the Apache License 2.0. See the
 included `LICENSE` and `NOTICE` files for terms and attribution.

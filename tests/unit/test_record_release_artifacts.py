@@ -20,7 +20,7 @@ def test_classify_and_hash(tmp_path: Path) -> None:
         notes="test",
     )
     assert record["version"] == "0.5.0"
-    assert record["licenses"]["first_party_spdx"] == "BUSL-1.1"
+    assert record["licenses"]["first_party_spdx"] == "Apache-2.0"
     assert record["contents_summary"]["total_artifacts"] == 1
     assert record["artifacts"][0]["class"] == "python-wheel"
     assert len(record["artifacts"][0]["sha256"]) == 64

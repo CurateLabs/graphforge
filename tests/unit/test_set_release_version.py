@@ -26,7 +26,6 @@ def test_expected_mapping() -> None:
         "python": "0.5.0",
         "node": "0.5.0",
         "skills": "0.5.0",
-        "license_policy": "0.5.0",
     }
     dev = set_release_version.expected_for("0.5.0", dev=True)
     assert dev["cargo"] == "0.5.0-dev"

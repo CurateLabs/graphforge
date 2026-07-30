@@ -21,10 +21,10 @@ security:  ## Run Bandit security scanner
 workflow-lint:  ## Validate GitHub Actions workflows with pinned actionlint
 	scripts/check-workflows.sh
 
-license-check:  ## Verify license policy, metadata, and distributed copies
-	python3 scripts/license_policy.py check
+license-check:  ## Verify Apache-2.0 metadata and distributed copies
+	python3 scripts/license_check.py
 
-release-version-check:  ## Verify Cargo/Python/Node/skills/license-policy versions align
+release-version-check:  ## Verify Cargo/Python/Node/skills versions align
 	python3 scripts/set_release_version.py --check
 
 package-license-verify:  ## Verify packaged Cargo/npm/Python artifacts include LICENSE+NOTICE

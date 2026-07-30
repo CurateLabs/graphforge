@@ -2,7 +2,7 @@
   "name": "graphforge-monorepo",
   "version": "0.0.0",
   "private": true,
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "packageManager": "pnpm@10.26.2",
   "scripts": {
     "build": "pnpm -r --filter '!@graphforge/docs-site' build",

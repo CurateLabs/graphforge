@@ -2,7 +2,7 @@
   "name": "@graphforge/node",
   "version": "0.5.0-dev.0",
   "description": "Native Node.js bindings for the GraphForge embedded graph engine",
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "homepage": "https://curatelabs.github.io/graphforge-legecy/",
   "repository": {
     "type": "git",

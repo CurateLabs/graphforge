@@ -1,9 +1,9 @@
 GraphForge
 Copyright 2026 Curate Labs Inc.
 
-GraphForge versions released before the BUSL-1.1 transition, including v0.4.0
-and earlier tags and artifacts, remain available under the MIT License shipped
-with those versions. The transition does not alter rights already granted.
+GraphForge v0.5.0 and later are licensed under the Apache License, Version 2.0.
+Previously published v0.4.0 and earlier artifacts remain under the MIT License
+shipped with those versions.
 
 The openCypher Technology Compatibility Kit material under tests/tck/ is
 third-party material distributed under its own Apache License 2.0 and NOTICE.
@@ -16,7 +16,3 @@ legal/THIRD_PARTY_NOTICES.md. Published binary packages include a copy of that
 file. Regenerate it with `make third-party-notices` after dependency changes.
 Rust dependency SPDX allowlisting is enforced with `cargo deny check licenses`
 using deny.toml.
-
-MariaDB copyright and trademark attribution for Business Source License 1.1:
-Copyright © 2017 MariaDB Corporation Ab, All Rights Reserved.
-"Business Source License" is a trademark of MariaDB Corporation Ab.

@@ -34,14 +34,14 @@ Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below
   identity predicates) and record RC execution evidence for guide + API + concurrency
   + agent-skills paths (#2789).
 
-- Identify **v0.5.0** as the first GraphForge line under BUSL-1.1 in licensing
-  docs (`docs/legal/licensing.md`) (#2791).
+- Identify **v0.5.0** as the first GraphForge line under Apache-2.0 in licensing
+  docs (`docs/legal/licensing.md`) (#218).
 - Align architecture/status banners with shipped v0.5.0: ADR 0005 `gf-provenance` /
   `gf-knowledge` wording, consistent Shipped / Partially built / Designed framing on
   roadmap and architecture pages, and drop stale provenance-stub requirements language
   (#2792).
-- Realign root `CONTRIBUTING.md` with the Rust-owned workspace: short pointer to
-  `docs/development/contributing.md`, preserve BUSL/CLA/conduct routing (#2826).
+- Realign root `CONTRIBUTING.md` with the Rust-owned workspace and Apache-2.0
+  inbound contribution terms (#218).
 
 ## [0.5.0]
 
@@ -63,10 +63,9 @@ the authoritative runnable corpus enforced by the BDD gate.
   compatibility view, generation-zero interpretation, identity conversion, loss
   report, rollback workflow, or historical fixture-retention obligation. The
   abandoned v0.4 SQLite importer proposal (#2438) is closed as not planned.
-- **License line changes to BUSL-1.1.** GraphForge is relicensed prospectively
-  from MIT to Business Source License 1.1 (`BUSL-1.1`), changing each release to
-  `AGPL-3.0-only` after three years. Existing v0.4.0 and earlier tags/packages
-  remain under their original MIT grants.
+- **License line changes to Apache-2.0.** GraphForge is relicensed prospectively
+  from MIT to the Apache License 2.0 (`Apache-2.0`). Existing v0.4.0 and earlier
+  tags/packages remain under their original MIT grants.
 - **Product architecture is the Rust core, not the Python 0.4 engine.** The
   public v0.5.0 product is Rust-owned (`gf-cypher → gf-ir → gf-rel → gf-exec`)
   with Parquet project storage and Arrow results. Python and Node are thin
@@ -115,7 +114,7 @@ the authoritative runnable corpus enforced by the BDD gate.
 
 - Add `scripts/verify_package_licenses.py` and `make package-license-verify` so
   Cargo/npm/Python publishable packages are checked for shipped `LICENSE` +
-  `NOTICE` (BUSL-1.1), and expect agent-skills `files[]` to list both (#2799).
+  `NOTICE` (Apache-2.0), and expect agent-skills `files[]` to list both (#218).
 
 
 - Add third-party Rust dependency SPDX allowlisting (`deny.toml` / `cargo deny`),
@@ -735,13 +734,8 @@ the authoritative runnable corpus enforced by the BDD gate.
   metadata-only changes stay fast, Rust quality/tests run on isolated runners,
   bindings use same-SHA Linux artifacts, and full cross-platform certification
   remains in the release workflow.
-- Relicense GraphForge prospectively from MIT to the source-available Business
-  Source License 1.1 (`BUSL-1.1`), changing each release to
-  `AGPL-3.0-only` after three years. Existing v0.4.0 and earlier tags and
-  artifacts remain MIT.
-- Define the BUSL production-use grant's per-application internal-use limits,
-  anti-sharding aggregation, affiliate/contractor attribution, process-level
-  concurrency, and prohibited hosted graph and closed-source OEM offerings.
+- Relicense GraphForge prospectively from MIT to the Apache License 2.0
+  (`Apache-2.0`). Existing v0.4.0 and earlier tags and artifacts remain MIT.
 - Execute the agent-grounding notebook twice against each PR's freshly built
   native wheel, proving deterministic offline M18 ranking, M19
   text/vector/hybrid retrieval, atomic embedding spaces, tokenizer inspection,

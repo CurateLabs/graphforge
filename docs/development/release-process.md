@@ -117,10 +117,8 @@ GraphForge is currently in **0.x.x** (pre-1.0.0):
 ### Pre-Release (1-2 days before)
 
 - [ ] All planned features merged to `main`
-- [ ] Generate the release license with the explicit version and release date:
-      `python3 scripts/license_policy.py generate --release-version X.Y.Z --release-date YYYY-MM-DD`
-- [ ] Review the resulting three-year Change Date and run
-      `python3 scripts/license_policy.py check --report license-compliance-report.json`
+- [ ] Verify Apache-2.0 metadata and distributed copies:
+      `python3 scripts/license_check.py --report license-compliance-report.json`
 - [ ] All CI checks passing
 - [ ] All tests passing (351 unit + integration tests)
 - [ ] Code coverage ≥ 81% (current baseline)
@@ -165,7 +163,7 @@ GraphForge is currently in **0.x.x** (pre-1.0.0):
 
 ### Release
 
-- [ ] Confirm the release commit contains `BUSL-1.1` metadata, `LICENSE`,
+- [ ] Confirm the release commit contains `Apache-2.0` metadata, `LICENSE`,
       `NOTICE`, `legal/THIRD_PARTY_NOTICES.md` (and packaging copies), a green
       `cargo deny check licenses`, and a passing SHA-bound license compliance report
 - [ ] Create release branch: `release/vX.Y.Z`
