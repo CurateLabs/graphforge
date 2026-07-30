@@ -92,6 +92,7 @@ function consider(pageUrl, href, { assetsOnly = false } = {}) {
     href === '/graphforge-legecy' ||
     href.startsWith('/graphforge-legecy/') ||
     href.includes('://decisionnerd.github.io/graphforge') ||
+    /https?:\/\/curatelabs\.github\.io\/graphforge(?:[/?#]|$)/i.test(href) ||
     href.includes('://curatelabs.github.io/graphforge-legecy')
   ) {
     stale.push({ page: pageUrl, href, reason: 'stale GitHub Pages project base' });
@@ -99,11 +100,9 @@ function consider(pageUrl, href, { assetsOnly = false } = {}) {
 
   let pathname;
   if (/^https?:\/\//i.test(href)) {
-    if (
-      href.startsWith(SITE_ORIGIN) ||
-      href.startsWith(`http://localhost:4321${SITE_BASE}`)
-    ) {
-      pathname = new URL(href).pathname;
+    const url = new URL(href);
+    if (url.origin === SITE_ORIGIN || url.origin === 'http://localhost:4321') {
+      pathname = url.pathname;
     } else {
       return;
     }
