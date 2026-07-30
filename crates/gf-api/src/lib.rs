@@ -89,6 +89,7 @@ mod shared_directory_semantics_tests;
 mod stream_cancellation_isolation_tests;
 mod valid_time;
 mod workspace_ontology;
+mod write_modes;
 
 // Re-export the foundational types callers need alongside the facade, so a
 // single `use gf_api::...` reaches the common surface.
@@ -219,6 +220,7 @@ pub use valid_time::{
     VALID_TIME_POLICY_VERSION,
 };
 pub use workspace_ontology::{AdoptOntologyRequest, ClearOntologyRequest};
+pub use write_modes::{GraphForgeOptions, ProjectWriteMode};
 
 fn insert_usize(
     parameters: &mut std::collections::BTreeMap<String, InvocationParameter>,
@@ -341,7 +343,9 @@ pub struct GraphForge {
     /// Cross-publication stability comes from `resolved_generation`; this lock
     /// closes the remaining window for mutation APIs that still operate through
     /// this exact facade instance.
-    graph_visibility: Arc<Mutex<()>>,
+    graph_visibility: Arc<write_modes::WriteCoordinator>,
+    /// Validated embedded write behavior for this facade.
+    write_options: GraphForgeOptions,
     /// Ensures mutation bursts share one bounded process-local driver thread.
     provider_refresh_driver_active: Arc<AtomicBool>,
     /// Runtime-only provider recipes capable of refreshing exact lineages.
@@ -373,6 +377,7 @@ impl std::fmt::Debug for GraphForge {
             )
             .field("dir", &self.dir)
             .field("ontology_mode", &self.ontology_mode)
+            .field("write_options", &self.write_options)
             .field("has_ontology", &self.ontology.is_some())
             .finish_non_exhaustive()
     }
@@ -398,8 +403,21 @@ impl GraphForge {
     /// provenance, or publication errors while reconciling an interrupted
     /// recorded algorithm run.
     pub fn new(path: Option<&str>) -> Result<Self, GfError> {
+        Self::new_with_options(path, GraphForgeOptions::default())
+    }
+
+    /// Create a facade with an explicit embedded project-write policy.
+    ///
+    /// # Errors
+    /// Returns the same open errors as [`Self::new`] and rejects unbounded or
+    /// otherwise invalid write-coordination limits.
+    pub fn new_with_options(
+        path: Option<&str>,
+        options: GraphForgeOptions,
+    ) -> Result<Self, GfError> {
+        let options = options.validate()?;
         if let Some(p) = path {
-            return Self::open_dir(PathBuf::from(p));
+            return Self::open_dir_with_options(PathBuf::from(p), options);
         }
         // In-memory: exploratory, backed by a temp directory kept alive for the
         // engine's lifetime.
@@ -427,7 +445,8 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(Mutex::new(())),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(options)),
+            write_options: options,
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -447,9 +466,7 @@ impl GraphForge {
         *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);
     }
 
-    /// Open a Parquet-backed project directory: load manifest + ontology +
-    /// runtime catalog and resolve the effective ontology mode.
-    fn open_dir(dir: PathBuf) -> Result<Self, GfError> {
+    fn open_dir_with_options(dir: PathBuf, options: GraphForgeOptions) -> Result<Self, GfError> {
         if !dir.exists() {
             return Err(GfError::Storage(format!(
                 "path does not exist: {}",
@@ -458,20 +475,27 @@ impl GraphForge {
         }
 
         let resolved_generation = gf_storage::open_or_initialize_project(&dir)?;
-        Self::open_resolved(dir, resolved_generation)
-    }
-
-    fn open_resolved(
-        container_dir: PathBuf,
-        resolved_generation: ResolvedProjectGeneration,
-    ) -> Result<Self, GfError> {
-        Self::open_resolved_with_mode(container_dir, resolved_generation, false)
+        Self::open_resolved_with_options(dir, resolved_generation, false, options)
     }
 
     fn open_resolved_with_mode(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
         read_only: bool,
+    ) -> Result<Self, GfError> {
+        Self::open_resolved_with_options(
+            container_dir,
+            resolved_generation,
+            read_only,
+            GraphForgeOptions::default(),
+        )
+    }
+
+    fn open_resolved_with_options(
+        container_dir: PathBuf,
+        resolved_generation: ResolvedProjectGeneration,
+        read_only: bool,
+        write_options: GraphForgeOptions,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology) = load_workspace_ontology(&resolved_generation)?;
@@ -497,7 +521,8 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(Mutex::new(())),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(write_options)),
+            write_options,
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -631,10 +656,6 @@ impl GraphForge {
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
     ) -> Result<ExecutionResult, GfError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -707,6 +728,10 @@ impl GraphForge {
             })
             .count();
         let is_write = write_ops > 0;
+        let _write_visibility = is_write.then(|| self.graph_visibility.lock()).transpose()?;
+        let _read_visibility = (!is_write)
+            .then(|| self.graph_visibility.read())
+            .transpose()?;
         let expected_generation_before_write = *self
             .current_generation_uuid
             .lock()
@@ -1133,10 +1158,7 @@ impl GraphForge {
     /// Returns [`GfError::Storage`] for persistent projects or if the in-memory
     /// project cannot be reset.
     pub fn clear(&self) -> Result<(), GfError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         if self.path.is_some() {
             return Err(GfError::Storage(
                 "clear is supported only for in-memory GraphForge instances".to_owned(),
@@ -1285,10 +1307,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Rank(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "rank dispatch requires a rank descriptor".into(),
@@ -1379,10 +1398,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Cluster(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "cluster dispatch requires a cluster descriptor".into(),
@@ -1471,10 +1487,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Similar(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "similar dispatch requires a similarity descriptor".into(),
@@ -1664,10 +1677,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Analyze(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "embedding dispatch requires an analyze descriptor".into(),
@@ -1874,10 +1884,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Analyze(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "analyze dispatch requires an analyze descriptor".into(),
@@ -2026,10 +2033,7 @@ impl GraphForge {
         &self,
         descriptor: &InvocationDescriptor,
     ) -> Result<arrow::record_batch::RecordBatch, InvocationError> {
-        let _graph_visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _graph_visibility = self.graph_visibility.lock()?;
         let Algorithm::Paths(by) = descriptor.algorithm() else {
             return Err(InvocationDescriptorError::Invalid(
                 "paths dispatch requires a paths descriptor".into(),
@@ -2147,11 +2151,10 @@ impl GraphForge {
             directed,
             write_property: None,
         };
-        let _graph_visibility = write_property.as_ref().map(|_| {
-            self.graph_visibility
-                .lock()
-                .expect("graph visibility lock poisoned")
-        });
+        let _graph_visibility = write_property
+            .as_ref()
+            .map(|_| self.graph_visibility.lock())
+            .transpose()?;
         let (label_id, stem) = self.algorithm_label(label, "rank")?;
         let _adjacency_visibility = self
             .adjacency_visibility
@@ -2202,11 +2205,10 @@ impl GraphForge {
             directed,
             write_property: None,
         };
-        let _graph_visibility = write_property.as_ref().map(|_| {
-            self.graph_visibility
-                .lock()
-                .expect("graph visibility lock poisoned")
-        });
+        let _graph_visibility = write_property
+            .as_ref()
+            .map(|_| self.graph_visibility.lock())
+            .transpose()?;
         let (label_id, stem) = self.algorithm_label(label, "cluster")?;
         let _adjacency_visibility = self
             .adjacency_visibility

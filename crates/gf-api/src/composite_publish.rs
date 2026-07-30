@@ -1,6 +1,6 @@
 //! Atomic publication of a composite graph + M20/M21 transaction.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
@@ -42,22 +42,26 @@ impl GraphForge {
         &self,
         request: CompositeTransactionRequest,
     ) -> Result<RecordBatch, GfError> {
-        let _visibility = crate::knowledge::lock_graph_visibility(self);
-        let root = self.resolved_generation.container_root();
-        let parent = gf_storage::resolve_project_generation(root)?;
-        parent.validate_complete_participant_inventory()?;
-        let expected_parent = *self
-            .current_generation_uuid
-            .lock()
-            .expect("generation UUID lock poisoned");
-        if parent.generation_uuid() != expected_parent {
-            return Err(GfError::Project {
-                code: ProjectErrorCode::TransactionConflict,
-                message: "project generation changed before composite publication".into(),
-            });
-        }
+        self.publish_composite_transaction_with_cancellation(request, None)
+    }
 
-        let snapshot = build_validation_snapshot(self, &parent)?;
+    /// Publish a composite transaction with cooperative queued-write cancellation.
+    ///
+    /// Cancellation is observed only before this operation starts mutating its
+    /// private workspace. Once admitted, the operation runs to a deterministic
+    /// publication or rollback boundary.
+    ///
+    /// # Errors
+    /// Returns `GF_CANCELLED` only while queued, plus the errors documented by
+    /// [`Self::publish_composite_transaction`].
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    pub fn publish_composite_transaction_with_cancellation(
+        &self,
+        request: CompositeTransactionRequest,
+        cancellation: Option<crate::CancellationToken>,
+    ) -> Result<RecordBatch, GfError> {
+        let _visibility = self.graph_visibility.acquire(cancellation.as_ref())?;
+        let root = self.resolved_generation.container_root();
         let content_fingerprint = request.canonical_fingerprint()?;
         let generation_uuid =
             composite_generation_uuid(request.context.operation_uuid.0, content_fingerprint);
@@ -77,8 +81,100 @@ impl GraphForge {
             return crate::composite_receipt::build_composite_receipt(&request);
         }
 
-        let receipt = authorize_composite_transaction(&request, &snapshot, None)?;
-        require_capabilities(&parent, &request)?;
+        let optimistic =
+            self.write_options.write_mode == crate::ProjectWriteMode::OptimisticMultiWriter;
+        let mut rebases = 0_u32;
+        let mut baseline = None;
+        loop {
+            let parent = gf_storage::resolve_project_generation(root)?;
+            parent.validate_complete_participant_inventory()?;
+            let mut reconciled = false;
+            let expected_parent = *self
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned");
+            if parent.generation_uuid() != expected_parent {
+                if !optimistic {
+                    return Err(idempotency_conflict(
+                        "project generation changed before composite publication",
+                    ));
+                }
+                if administrative_contract(&parent)?
+                    != administrative_contract(&self.resolved_generation)?
+                {
+                    return Err(write_conflict(
+                        "project capabilities or workspace configuration changed since open",
+                    ));
+                }
+                reconcile_workspace_to(self, &parent)?;
+                reconciled = true;
+            }
+
+            if optimistic && baseline.is_none() {
+                baseline = Some(capture_rebase_baseline(self, &request, &parent)?);
+            }
+            let snapshot = build_validation_snapshot(self, &parent)?;
+            let receipt =
+                authorize_composite_transaction(&request, &snapshot, None).map_err(|error| {
+                    if (reconciled || rebases > 0) && error.code() == "GF_IDENTITY_CONFLICT" {
+                        write_conflict("concurrent operation occupied a requested identity")
+                    } else {
+                        error
+                    }
+                })?;
+            require_capabilities(&parent, &request)?;
+
+            match self.publish_composite_attempt(
+                &request,
+                &parent,
+                receipt,
+                content_fingerprint,
+                generation_uuid,
+                optimistic,
+            ) {
+                Ok(batch) => return Ok(batch),
+                Err(error) if optimistic && error.code() == "GF_WRITE_CONFLICT" => {
+                    let baseline = baseline
+                        .as_ref()
+                        .expect("optimistic publication initializes its rebase baseline");
+                    if baseline.non_mergeable {
+                        return Err(write_conflict(
+                            "concurrent change conflicts with delete or administrative graph work",
+                        ));
+                    }
+                    if rebases >= self.write_options.max_rebase_attempts {
+                        return Err(GfError::Project {
+                            code: ProjectErrorCode::RebaseExhausted,
+                            message: format!(
+                                "operation_uuid={} attempts={} cause=optimistic_contention",
+                                transaction_uuid.hyphenated(),
+                                rebases + 1
+                            ),
+                        });
+                    }
+                    let latest = gf_storage::resolve_project_generation(root)?;
+                    reconcile_workspace_to(self, &latest)?;
+                    ensure_rebase_compatible(self, &request, &latest, baseline)?;
+                    rebases += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn publish_composite_attempt(
+        &self,
+        request: &CompositeTransactionRequest,
+        parent: &ResolvedProjectGeneration,
+        receipt: RecordBatch,
+        content_fingerprint: [u8; 32],
+        generation_uuid: Uuid,
+        optimistic: bool,
+    ) -> Result<RecordBatch, GfError> {
+        let root = self.resolved_generation.container_root();
+        let expected_parent = parent.generation_uuid();
+        let transaction_uuid = request.context.operation_uuid.0;
 
         let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
         let prior_catalog = self
@@ -90,12 +186,12 @@ impl GraphForge {
         let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
 
         let publication = (|| -> Result<RecordBatch, GfError> {
-            apply_graph_mutations(self, &request, &mut next_catalog, recorded_at)?;
+            apply_graph_mutations(self, request, &mut next_catalog, recorded_at)?;
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
             let graph = crate::graph_snapshot::capture(&self.dir)?;
-            let participants = assemble_composite_participants(self, &parent, &request, graph)?;
+            let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
                 .capabilities()
                 .into_iter()
@@ -110,7 +206,18 @@ impl GraphForge {
                 capabilities,
                 participants,
             };
-            let outcome = match gf_storage::stage_project_generation(root, &publication)? {
+            let staged = if optimistic {
+                gf_storage::stage_project_generation_optimistic(
+                    root,
+                    &publication,
+                    content_fingerprint,
+                )?
+            } else {
+                gf_storage::stage_project_generation(root, &publication)?
+            };
+            #[cfg(test)]
+            optimistic_publish_barrier_for_test(optimistic);
+            let outcome = match staged {
                 ProjectStageOutcome::AlreadyPublished(published) => published,
                 ProjectStageOutcome::Staged(staged) => staged
                     .validate(
@@ -153,27 +260,290 @@ impl GraphForge {
                 Ok(batch)
             }
             Err(error) => {
-                let still_prior = *self
-                    .current_generation_uuid
-                    .lock()
-                    .expect("generation UUID lock poisoned")
-                    == expected_parent;
-                if still_prior {
-                    crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
-                    *self
-                        .runtime_catalog
-                        .lock()
-                        .expect("runtime catalog poisoned") = prior_catalog;
-                } else {
-                    *self
-                        .runtime_catalog
-                        .lock()
-                        .expect("runtime catalog poisoned") = next_catalog;
-                    self.adjacency_provider.invalidate();
+                // Preserve the stable publication error. Recovery is best-effort:
+                // callers must not receive an unrelated storage code instead of
+                // the validation or conflict that caused publication to abort.
+                if let Ok(durable) = gf_storage::resolve_project_generation(root) {
+                    if durable.generation_uuid() == expected_parent {
+                        if crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir).is_ok()
+                        {
+                            *self
+                                .runtime_catalog
+                                .lock()
+                                .expect("runtime catalog poisoned") = prior_catalog;
+                        }
+                    } else {
+                        let _ = reconcile_workspace_to(self, &durable);
+                    }
                 }
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+fn optimistic_publish_barrier_for_test(optimistic: bool) {
+    if !optimistic {
+        return;
+    }
+    let barrier = OPTIMISTIC_PUBLISH_BARRIER
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("optimistic publish test barrier poisoned")
+        .clone();
+    if let Some(barrier) = barrier {
+        let (state, changed) = barrier.as_ref();
+        let mut state = state
+            .lock()
+            .expect("optimistic publish test barrier poisoned");
+        state.arrived += 1;
+        if state.arrived == 2 {
+            state.released = true;
+            changed.notify_all();
+        } else {
+            let (next, timeout) = changed
+                .wait_timeout_while(state, std::time::Duration::from_secs(5), |state| {
+                    !state.released
+                })
+                .expect("optimistic publish test barrier poisoned");
+            assert!(
+                !timeout.timed_out(),
+                "optimistic publish test barrier timed out waiting for a second writer"
+            );
+            state = next;
+        }
+        drop(state);
+        *OPTIMISTIC_PUBLISH_BARRIER
+            .get()
+            .expect("optimistic publish test barrier initialized")
+            .lock()
+            .expect("optimistic publish test barrier poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct OptimisticPublishBarrierState {
+    arrived: usize,
+    released: bool,
+}
+
+#[cfg(test)]
+type OptimisticPublishBarrier = std::sync::Arc<(
+    std::sync::Mutex<OptimisticPublishBarrierState>,
+    std::sync::Condvar,
+)>;
+
+#[cfg(test)]
+static OPTIMISTIC_PUBLISH_BARRIER: std::sync::OnceLock<
+    std::sync::Mutex<Option<OptimisticPublishBarrier>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+static OPTIMISTIC_PUBLISH_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RebaseEntity {
+    Node(Uuid),
+    Edge(Uuid),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RebaseField {
+    entity: RebaseEntity,
+    property: String,
+}
+
+type AdministrativeContract = Vec<(String, String, u32, [u8; 32])>;
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RebaseBaseline {
+    fields: BTreeMap<RebaseField, Option<IrLiteral>>,
+    node_targets: BTreeSet<Uuid>,
+    edge_targets: BTreeSet<Uuid>,
+    administrative_contract: AdministrativeContract,
+    non_mergeable: bool,
+}
+
+fn capture_rebase_baseline(
+    graph: &GraphForge,
+    request: &CompositeTransactionRequest,
+    generation: &ResolvedProjectGeneration,
+) -> Result<RebaseBaseline, GfError> {
+    let created_nodes = request
+        .graph_mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            CompositeGraphMutation::CreateNode { node_uuid, .. } => Some(*node_uuid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let created_edges = request
+        .graph_mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            CompositeGraphMutation::CreateEdge { edge_uuid, .. } => Some(*edge_uuid),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut baseline = RebaseBaseline {
+        administrative_contract: administrative_contract(generation)?,
+        ..RebaseBaseline::default()
+    };
+    for mutation in &request.graph_mutations {
+        match mutation {
+            CompositeGraphMutation::SetNodeProperty {
+                node_uuid,
+                property,
+                ..
+            }
+            | CompositeGraphMutation::RemoveNodeProperty {
+                node_uuid,
+                property,
+            } if !created_nodes.contains(node_uuid) => {
+                baseline.node_targets.insert(*node_uuid);
+                capture_rebase_field(graph, &mut baseline, *node_uuid, property, false)?;
+            }
+            CompositeGraphMutation::SetEdgeProperty {
+                edge_uuid,
+                property,
+                ..
+            }
+            | CompositeGraphMutation::RemoveEdgeProperty {
+                edge_uuid,
+                property,
+            } if !created_edges.contains(edge_uuid) => {
+                baseline.edge_targets.insert(*edge_uuid);
+                capture_rebase_field(graph, &mut baseline, *edge_uuid, property, true)?;
+            }
+            CompositeGraphMutation::DeleteNode { .. }
+            | CompositeGraphMutation::DeleteEdge { .. } => baseline.non_mergeable = true,
+            _ => {}
+        }
+    }
+    Ok(baseline)
+}
+
+fn capture_rebase_field(
+    graph: &GraphForge,
+    baseline: &mut RebaseBaseline,
+    uuid: Uuid,
+    property: &str,
+    is_edge: bool,
+) -> Result<(), GfError> {
+    let properties =
+        gf_storage::read_entity_properties(&graph.dir, "_untyped", &uuid.into_bytes(), is_edge)?;
+    let entity = if is_edge {
+        RebaseEntity::Edge(uuid)
+    } else {
+        RebaseEntity::Node(uuid)
+    };
+    baseline.fields.insert(
+        RebaseField {
+            entity,
+            property: property.to_owned(),
+        },
+        properties.get(property).cloned(),
+    );
+    Ok(())
+}
+
+fn ensure_rebase_compatible(
+    graph: &GraphForge,
+    request: &CompositeTransactionRequest,
+    latest: &ResolvedProjectGeneration,
+    baseline: &RebaseBaseline,
+) -> Result<(), GfError> {
+    if administrative_contract(latest)? != baseline.administrative_contract {
+        return Err(write_conflict(
+            "concurrent operation changed project capabilities or workspace configuration",
+        ));
+    }
+    let snapshot = build_validation_snapshot(graph, latest)?;
+    if !baseline.node_targets.is_subset(&snapshot.nodes)
+        || !baseline.edge_targets.is_subset(&snapshot.edges)
+    {
+        return Err(write_conflict(
+            "concurrent operation removed a graph mutation target",
+        ));
+    }
+    let current = capture_rebase_baseline(graph, request, latest)?;
+    if current.fields != baseline.fields {
+        return Err(write_conflict(
+            "concurrent operation changed a requested graph property",
+        ));
+    }
+    Ok(())
+}
+
+fn administrative_contract(
+    generation: &ResolvedProjectGeneration,
+) -> Result<AdministrativeContract, GfError> {
+    let mut contract = generation
+        .participant_descriptors()?
+        .into_iter()
+        .filter(|descriptor| descriptor.capability_id == "workspace")
+        .map(|descriptor| {
+            (
+                descriptor.capability_id,
+                descriptor.record_family_id,
+                descriptor.capability_version,
+                descriptor.content_sha256,
+            )
+        })
+        .collect::<Vec<_>>();
+    contract.extend(generation.capabilities().into_iter().map(|capability| {
+        (
+            capability.capability_id,
+            String::new(),
+            capability.capability_version,
+            [0; 32],
+        )
+    }));
+    contract.sort();
+    Ok(contract)
+}
+
+fn reconcile_workspace_to(
+    graph: &GraphForge,
+    generation: &ResolvedProjectGeneration,
+) -> Result<(), GfError> {
+    let snapshot = generation
+        .participant_snapshot("graph", "snapshot")?
+        .ok_or_else(|| GfError::Validation("generation is missing graph snapshot".into()))?;
+    if snapshot.capability_version != 1
+        || snapshot.record_version != 1
+        || snapshot.encoding != "arrow"
+    {
+        return Err(GfError::Validation(
+            "unsupported graph snapshot participant contract".into(),
+        ));
+    }
+    crate::graph_snapshot::restore(&snapshot.bytes, &graph.dir)?;
+    *graph
+        .runtime_catalog
+        .lock()
+        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir);
+    *graph
+        .current_generation_uuid
+        .lock()
+        .expect("generation UUID lock poisoned") = generation.generation_uuid();
+    graph.adjacency_provider.invalidate();
+    Ok(())
+}
+
+fn idempotency_conflict(message: impl Into<String>) -> GfError {
+    GfError::Project {
+        code: ProjectErrorCode::TransactionConflict,
+        message: message.into(),
+    }
+}
+
+fn write_conflict(message: impl Into<String>) -> GfError {
+    GfError::Project {
+        code: ProjectErrorCode::WriteConflict,
+        message: message.into(),
     }
 }
 
@@ -904,13 +1274,18 @@ mod tests {
     use crate::composite_transaction::{
         COMPOSITE_TRANSACTION_CONTRACT_VERSION, CompositeKnowledgeParticipants,
     };
-    use crate::{CapabilityId, EnableCapabilityRequest, OperationId, PropValue, WriteContext};
+    use crate::{
+        CancellationToken, CapabilityId, EnableCapabilityRequest, GraphForgeOptions, OperationId,
+        ProjectWriteMode, PropValue, WriteContext,
+    };
     use gf_knowledge::{
         Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus, AssertionStatusEvent,
         GraphObjectKind,
     };
     use gf_provenance::{EventKind, LineageRecord, LineageRole, ProvenanceEvent, SubjectKind};
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread;
     use tempfile::TempDir;
 
     fn uuid7(seed: u8) -> Uuid {
@@ -995,6 +1370,73 @@ mod tests {
         }
     }
 
+    fn graph_request(operation_seed: u8, node_seed: u8, name: &str) -> CompositeTransactionRequest {
+        CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(operation_seed)),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::CreateNode {
+                node_uuid: uuid7(node_seed),
+                label: "Person".into(),
+                properties: HashMap::from([("name".into(), PropValue::Str(name.into()))]),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        }
+    }
+
+    fn property_request(
+        operation_seed: u8,
+        node_seed: u8,
+        property: &str,
+        value: &str,
+    ) -> CompositeTransactionRequest {
+        CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(operation_seed)),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::SetNodeProperty {
+                node_uuid: uuid7(node_seed),
+                property: property.into(),
+                value: PropValue::Str(value.into()),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        }
+    }
+
+    fn optimistic_options(max_rebase_attempts: u32) -> GraphForgeOptions {
+        GraphForgeOptions {
+            write_mode: ProjectWriteMode::OptimisticMultiWriter,
+            max_rebase_attempts,
+            ..GraphForgeOptions::default()
+        }
+    }
+
+    fn publish_concurrently(
+        directory: &TempDir,
+        options: GraphForgeOptions,
+        left: CompositeTransactionRequest,
+        right: CompositeTransactionRequest,
+    ) -> [Result<RecordBatch, GfError>; 2] {
+        let left_graph =
+            Arc::new(GraphForge::new_with_options(directory.path().to_str(), options).unwrap());
+        let right_graph =
+            Arc::new(GraphForge::new_with_options(directory.path().to_str(), options).unwrap());
+        *OPTIMISTIC_PUBLISH_BARRIER
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some(Arc::new((
+            std::sync::Mutex::new(OptimisticPublishBarrierState::default()),
+            std::sync::Condvar::new(),
+        )));
+        let left_worker = thread::spawn(move || left_graph.publish_composite_transaction(left));
+        let right_worker = thread::spawn(move || right_graph.publish_composite_transaction(right));
+        [left_worker.join().unwrap(), right_worker.join().unwrap()]
+    }
+
     #[test]
     fn publish_composite_is_one_generation_with_canonical_receipt() {
         let directory = TempDir::new().unwrap();
@@ -1058,6 +1500,46 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_public_composite_publish_never_mutates() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new_with_options(
+            directory.path().to_str(),
+            GraphForgeOptions {
+                write_mode: ProjectWriteMode::QueuedWriter,
+                ..GraphForgeOptions::default()
+            },
+        )
+        .unwrap();
+        let before = *graph
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = graph
+            .publish_composite_transaction_with_cancellation(
+                graph_request(71, 72, "cancelled"),
+                Some(cancellation),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code(), "GF_CANCELLED");
+        assert_eq!(
+            *graph
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned"),
+            before
+        );
+        assert!(
+            gf_storage::published_project_transaction(directory.path(), uuid7(71))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn invalid_composite_request_does_not_mutate() {
         let directory = TempDir::new().unwrap();
         let graph = GraphForge::new(directory.path().to_str()).unwrap();
@@ -1115,5 +1597,99 @@ mod tests {
                 replay.column(index).as_ref()
             );
         }
+    }
+
+    #[test]
+    fn optimistic_distinct_creates_rebase_and_both_publish() {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let directory = TempDir::new().unwrap();
+        GraphForge::new(directory.path().to_str()).unwrap();
+        let results = publish_concurrently(
+            &directory,
+            optimistic_options(1),
+            graph_request(131, 132, "Ada"),
+            graph_request(133, 134, "Grace"),
+        );
+        assert!(
+            results.iter().all(Result::is_ok),
+            "concurrent results: {results:?}"
+        );
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let rows = reopened
+            .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
+            .unwrap();
+        assert_eq!(rows.batches[0].num_rows(), 2);
+    }
+
+    #[test]
+    fn optimistic_same_property_change_is_a_write_conflict() {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let directory = TempDir::new().unwrap();
+        let bootstrap = GraphForge::new(directory.path().to_str()).unwrap();
+        bootstrap
+            .publish_composite_transaction(graph_request(135, 136, "Initial"))
+            .unwrap();
+        drop(bootstrap);
+        let results = publish_concurrently(
+            &directory,
+            optimistic_options(1),
+            property_request(137, 136, "nickname", "left"),
+            property_request(138, 136, "nickname", "right"),
+        );
+        let codes = results
+            .iter()
+            .map(|result| result.as_ref().err().map(GfError::code))
+            .collect::<Vec<_>>();
+        assert_eq!(codes.iter().filter(|code| code.is_none()).count(), 1);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| **code == Some("GF_WRITE_CONFLICT"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn optimistic_first_reconciliation_remaps_identity_collision() {
+        let directory = TempDir::new().unwrap();
+        GraphForge::new(directory.path().to_str()).unwrap();
+        let options = optimistic_options(1);
+        let stale = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
+        let concurrent = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
+        concurrent
+            .publish_composite_transaction(graph_request(151, 152, "concurrent"))
+            .unwrap();
+
+        let error = stale
+            .publish_composite_transaction(graph_request(153, 152, "stale"))
+            .unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITE_CONFLICT");
+    }
+
+    #[test]
+    fn optimistic_retry_budget_is_bounded() {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let directory = TempDir::new().unwrap();
+        GraphForge::new(directory.path().to_str()).unwrap();
+        let results = publish_concurrently(
+            &directory,
+            optimistic_options(0),
+            graph_request(139, 140, "Ada"),
+            graph_request(141, 142, "Grace"),
+        );
+        let codes = results
+            .iter()
+            .map(|result| result.as_ref().err().map(GfError::code))
+            .collect::<Vec<_>>();
+        assert_eq!(codes.iter().filter(|code| code.is_none()).count(), 1);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|code| **code == Some("GF_REBASE_EXHAUSTED"))
+                .count(),
+            1
+        );
     }
 }

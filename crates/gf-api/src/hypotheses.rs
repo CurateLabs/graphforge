@@ -522,7 +522,7 @@ impl GraphForge {
     where
         F: FnOnce(&HypothesisLedger, i64) -> Result<Change, GfError>,
     {
-        let _visibility = crate::knowledge::lock_graph_visibility(self);
+        let _visibility = crate::knowledge::lock_graph_visibility(self)?;
         let parent = resolve_for_write(self)?;
         parent.validate_complete_participant_inventory()?;
         parent.require_capability("epistemic", EPISTEMIC_CAPABILITY_VERSION)?;

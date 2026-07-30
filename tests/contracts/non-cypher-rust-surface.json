@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "d9eb63063042d381288599f48b909f52b1701a74027595a0c630a17fffae82db",
+  "public_method_digest": "c2d337db7483484d35da304dbc3d1c996100e93c01c8e2ded49551a5ac83122f",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -41,6 +41,7 @@
       "crate.composite_receipt_schema": "introspection",
       "crate.hold_writer": "internal-helper",
       "GraphForge.new": "introspection",
+      "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
       "CheckpointView.checkpoint_uuid": "introspection",
       "CheckpointView.generation_uuid": "introspection",
@@ -191,7 +192,7 @@
       "ids": [
         "GraphForge.assertion", "GraphForge.assertion_graph_refs", "GraphForge.assertion_status", "GraphForge.assess_confidence",
         "GraphForge.attach_evidence", "GraphForge.confidence_assessment", "GraphForge.confidence_inputs", "GraphForge.create_assertion",
-        "GraphForge.create_assertion_with_evidence", "GraphForge.create_assertion_with_status", "GraphForge.enable_capability", "GraphForge.publish_composite_transaction",
+        "GraphForge.create_assertion_with_evidence", "GraphForge.create_assertion_with_status", "GraphForge.enable_capability", "GraphForge.publish_composite_transaction", "GraphForge.publish_composite_transaction_with_cancellation",
         "GraphForge.evidence_link", "GraphForge.list_assertion_status", "GraphForge.list_assertion_supersessions",
         "GraphForge.list_assertion_validity", "GraphForge.list_assertions", "GraphForge.list_confidence_assessments",
         "GraphForge.list_evidence_links", "GraphForge.list_provenance_history", "GraphForge.list_reasoning",
@@ -212,6 +213,7 @@
         {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
         {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_with_evidence_is_one_atomic_idempotent_generation"},
         {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "publish_composite_is_one_generation_with_canonical_receipt"},
+        {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "cancelled_public_composite_publish_never_mutates"},
         {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "invalid_composite_request_does_not_mutate"},
         {"path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
       ]

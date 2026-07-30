@@ -181,7 +181,10 @@ The default writer-lock acquisition is non-blocking and returns
 `GF_WRITER_BUSY`.
 Callers may supply a finite timeout measured by a monotonic clock; expiry
 returns the same code without mutation. Infinite waits are not exposed by a
-public API.
+public API. A validated optimistic attempt is the exception inside the storage
+protocol: it waits for the short commit lock, compares its pinned parent with
+`CURRENT`, and returns `GF_WRITE_CONFLICT` when another commit won. This wait is
+not a caller-configurable lock API and cannot expose partial state.
 
 Each generation has `lease.lock`. A reader:
 

@@ -123,6 +123,7 @@ const PAGES = [
   'adr/0012-m20-domain-ownership.md',
   'adr/0013-project-generation-protocol.md',
   'adr/0014-workspace-checkpoints.md',
+  'adr/0015-embedded-write-modes.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

@@ -215,6 +215,10 @@ export default defineConfig({
                   label: '0014 — Workspace Checkpoints',
                   slug: 'adr/0014-workspace-checkpoints',
                 },
+                {
+                  label: '0015 — Embedded Write Modes',
+                  slug: 'adr/0015-embedded-write-modes',
+                },
               ],
             },
           ],

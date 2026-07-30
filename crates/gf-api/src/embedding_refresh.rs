@@ -269,6 +269,7 @@ impl GraphForge {
             embedding_refresh_epoch: self.embedding_refresh_epoch,
             embedding_refresh_visibility: Arc::clone(&self.embedding_refresh_visibility),
             graph_visibility: Arc::clone(&self.graph_visibility),
+            write_options: self.write_options,
             provider_refresh_driver_active: Arc::clone(&self.provider_refresh_driver_active),
             provider_refresh_runtimes: Arc::clone(&self.provider_refresh_runtimes),
             provider_find_runtimes: Arc::clone(&self.provider_find_runtimes),

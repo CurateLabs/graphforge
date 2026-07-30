@@ -274,7 +274,7 @@ impl GraphForge {
         request: CreateAssertionRequest,
     ) -> Result<gf_exec::ExecutionResult, GfError> {
         request.validate_context()?;
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         validate_graph_refs(self, &request.graph_refs)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
@@ -392,7 +392,7 @@ impl GraphForge {
                 "superseded status requires the atomic supersession API".into(),
             ));
         }
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         validate_graph_refs(self, &request.assertion.graph_refs)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
@@ -610,7 +610,7 @@ impl GraphForge {
         validate_write_context(&request.context)?;
         require_uuid(request.confidence_uuid, "confidence_uuid")?;
         require_uuid(request.assertion_uuid, "assertion_uuid")?;
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -825,7 +825,7 @@ impl GraphForge {
                 "assertion evidence bundle must not be empty".into(),
             ));
         }
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         validate_graph_refs(self, &request.assertion.graph_refs)?;
         for input in &request.evidence {
             require_uuid(input.evidence_uuid, "evidence_uuid")?;
@@ -922,7 +922,7 @@ impl GraphForge {
         require_uuid(request.evidence_uuid, "evidence_uuid")?;
         require_uuid(request.assertion_uuid, "assertion_uuid")?;
         require_uuid(request.source_uuid, "source_uuid")?;
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         validate_evidence_source(self, request.source_uuid, request.source_kind)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
@@ -1090,7 +1090,7 @@ impl GraphForge {
         if let Some(previous) = request.supersedes_reasoning_uuid {
             require_uuid(previous, "supersedes_reasoning_uuid")?;
         }
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -1241,7 +1241,7 @@ impl GraphForge {
                 "superseded status requires the atomic supersession API".into(),
             ));
         }
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -1396,7 +1396,7 @@ impl GraphForge {
         ] {
             require_uuid(uuid, name)?;
         }
-        let _graph_visibility = lock_graph_visibility(self);
+        let _graph_visibility = lock_graph_visibility(self)?;
         let root = self.resolved_generation.container_root();
         let parent = gf_storage::resolve_project_generation(root)?;
         parent.validate_complete_participant_inventory()?;
@@ -2852,11 +2852,10 @@ fn validate_evidence_source(
     }
 }
 
-pub(crate) fn lock_graph_visibility(graph: &GraphForge) -> std::sync::MutexGuard<'_, ()> {
-    graph
-        .graph_visibility
-        .lock()
-        .expect("graph visibility lock poisoned")
+pub(crate) fn lock_graph_visibility(
+    graph: &GraphForge,
+) -> Result<crate::write_modes::WritePermit<'_>, GfError> {
+    graph.graph_visibility.lock()
 }
 
 fn match_requested_node_uuids(

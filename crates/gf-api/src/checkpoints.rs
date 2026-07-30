@@ -683,6 +683,7 @@ impl GraphForge {
         }
         let container_root = self.resolved_generation.container_root().to_path_buf();
         let clock = self.clock.lock().expect("clock lock poisoned").clone();
+        let write_options = self.write_options;
         let select_clock = Arc::clone(&clock);
         let prepared = std::cell::RefCell::new(None);
         let (receipt, resolved) = gf_storage::revert_checkpoint(
@@ -696,10 +697,11 @@ impl GraphForge {
             move || select_clock(),
             |generation| {
                 validate_revert_source(generation)?;
-                prepared.replace(Some(GraphForge::open_resolved_with_mode(
+                prepared.replace(Some(GraphForge::open_resolved_with_options(
                     container_root.clone(),
                     generation.clone(),
                     true,
+                    write_options,
                 )?));
                 Ok(())
             },
@@ -2084,7 +2086,14 @@ mod tests {
     #[test]
     fn revert_is_visible_on_the_same_graphforge_instance() {
         let directory = tempdir().unwrap();
-        let mut graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let write_options = crate::GraphForgeOptions {
+            write_mode: crate::ProjectWriteMode::QueuedWriter,
+            write_queue_capacity: 7,
+            max_rebase_attempts: 2,
+        };
+        let mut graph =
+            GraphForge::new_with_options(Some(directory.path().to_str().unwrap()), write_options)
+                .unwrap();
         graph.execute("CREATE (:Person {name: 'before'})").unwrap();
         graph
             .checkpoint(CheckpointRequest {
@@ -2094,6 +2103,7 @@ mod tests {
                 actor_uuid: None,
             })
             .unwrap();
+        assert_eq!(graph.write_options, write_options);
         graph.execute("CREATE (:Person {name: 'after'})").unwrap();
         let post_checkpoint_handle = graph.add_node("Transient", &HashMap::new()).unwrap();
 
