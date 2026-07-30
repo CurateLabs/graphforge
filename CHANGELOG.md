@@ -96,6 +96,11 @@ the authoritative runnable corpus enforced by the BDD gate.
   not planned.
 
 ### Added
+
+- Add transaction-addressed optimistic project staging with OS-backed attempt
+  leases, exact-base commit comparison, atomic generation promotion, and
+  recovery that preserves live attempts while removing abandoned ones (#212).
+
 - Add `scripts/record_release_artifacts.py` and
   `docs/development/release-artifact-record.md` for RC checksum/SBOM/contents
   inventories usable by GitHub Release and §7 clean-env checks (#2798).

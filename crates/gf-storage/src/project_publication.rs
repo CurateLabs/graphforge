@@ -22,7 +22,9 @@ use crate::project_generation::{
 
 pub(crate) const LOCKS_DIR: &str = "locks";
 pub(crate) const WRITER_LOCK_FILE: &str = "writer.lock";
+pub(crate) const TRANSACTION_LOCKS_DIR: &str = "transactions";
 pub(crate) const TRANSACTIONS_DIR: &str = "transactions";
+pub(crate) const ATTEMPTS_DIR: &str = "attempts";
 pub(crate) const GENERATIONS_DIR: &str = "generations";
 const PARTICIPANTS_DIR: &str = "participants";
 const LEASE_FILE: &str = "lease.lock";
@@ -138,7 +140,7 @@ pub struct ProjectPublicationReceipt {
 
 /// Result of the stage operation.
 pub enum ProjectStageOutcome {
-    /// New private generation staged under the writer lock.
+    /// New private generation staged under its required publication locks.
     Staged(Box<StagedProjectGeneration>),
     /// The transaction and identical immutable inputs were already published.
     AlreadyPublished(ProjectPublicationReceipt),
@@ -147,15 +149,22 @@ pub enum ProjectStageOutcome {
 /// A staged generation that still requires domain and composite validation.
 pub struct StagedProjectGeneration {
     root: PathBuf,
-    writer_lock: File,
+    publication_lock: PublicationLock,
     parent: ResolvedProjectGeneration,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
     generation_root: PathBuf,
+    requires_promotion: bool,
     request_fingerprint: String,
+    operation_fingerprint: String,
     capabilities: Vec<ProjectCapability>,
     participants: Vec<StagedParticipant>,
     revert: Option<RevertJournalExtension>,
+}
+
+enum PublicationLock {
+    Exclusive(File),
+    Optimistic(File),
 }
 
 /// Canonical revert metadata persisted in every ADR 0015 journal phase.
@@ -198,6 +207,33 @@ pub fn stage_project_generation(
     })
 }
 
+/// Stage a complete private generation while allowing other transaction
+/// identities to stage against the same committed parent.
+///
+/// A transaction-scoped kernel lock prevents two live attempts for the same
+/// logical operation. Publication later acquires the global writer lock and
+/// compares the pinned parent with `CURRENT`. `operation_fingerprint` is stable
+/// across rebase attempts even though carried-forward parent participant bytes
+/// may change.
+///
+/// # Errors
+/// Returns a stable busy, idempotency, validation, corruption, or storage error.
+pub fn stage_project_generation_optimistic(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    operation_fingerprint: [u8; 32],
+) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_optimistic_inner(
+        container_root.as_ref(),
+        request,
+        operation_fingerprint,
+    )
+    .map_err(|error| match error {
+        GfError::Storage(message) => publication_error(request, "STAGE", false, &message),
+        other => other,
+    })
+}
+
 fn stage_project_generation_inner(
     container_root: &Path,
     request: &ProjectGenerationRequest,
@@ -215,6 +251,24 @@ fn stage_project_generation_inner(
     stage_project_generation_with_lock(root, writer_lock, parent, request, None)
 }
 
+fn stage_project_generation_optimistic_inner(
+    container_root: &Path,
+    request: &ProjectGenerationRequest,
+    operation_fingerprint: [u8; 32],
+) -> Result<ProjectStageOutcome, GfError> {
+    let root = canonical_supported_root(container_root)?;
+    let transaction_lock = acquire_transaction_lock(&root, request)?;
+    let parent = resolve_project_generation(&root)?;
+    stage_project_generation_inner_with_locks(
+        root,
+        PublicationLock::Optimistic(transaction_lock),
+        parent,
+        request,
+        None,
+        Some(operation_fingerprint),
+    )
+}
+
 /// Stage a generation using a writer lock and parent resolved by a composed
 /// storage operation such as complete-workspace checkpoint revert.
 pub(crate) fn stage_project_generation_with_lock(
@@ -224,8 +278,28 @@ pub(crate) fn stage_project_generation_with_lock(
     request: &ProjectGenerationRequest,
     revert: Option<RevertJournalExtension>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_inner_with_locks(
+        root,
+        PublicationLock::Exclusive(writer_lock),
+        parent,
+        request,
+        revert,
+        None,
+    )
+}
+
+fn stage_project_generation_inner_with_locks(
+    root: PathBuf,
+    publication_lock: PublicationLock,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    revert: Option<RevertJournalExtension>,
+    operation_fingerprint: Option<[u8; 32]>,
+) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) = request_metadata(request)?;
+    let operation_fingerprint =
+        operation_fingerprint.map_or_else(|| request_fingerprint.clone(), hex_digest);
     let transactions_dir = ensure_machine_directory(&root, Path::new(TRANSACTIONS_DIR))?;
     sync_directory(&root)?;
     let journal_path =
@@ -235,6 +309,7 @@ pub(crate) fn stage_project_generation_with_lock(
             &root,
             request,
             &request_fingerprint,
+            &operation_fingerprint,
             revert.as_ref(),
             &journal_path,
         )?
@@ -242,14 +317,16 @@ pub(crate) fn stage_project_generation_with_lock(
         return Ok(outcome);
     }
 
-    let generation_root = prepare_generation_directory(&root, request)?;
+    let requires_promotion = matches!(publication_lock, PublicationLock::Optimistic(_));
+    let generation_root =
+        prepare_generation_directory(&root, request, &request_fingerprint, requires_promotion)?;
     write_journal(
         &journal_path,
         &JournalRecord::new(
             request,
             Some(parent.generation_uuid()),
             JournalPhase::Preparing,
-            request_fingerprint.clone(),
+            (request_fingerprint.clone(), operation_fingerprint.clone()),
             &participants,
             None,
             revert.clone(),
@@ -278,7 +355,7 @@ pub(crate) fn stage_project_generation_with_lock(
             request,
             Some(parent.generation_uuid()),
             JournalPhase::Staged,
-            request_fingerprint.clone(),
+            (request_fingerprint.clone(), operation_fingerprint.clone()),
             &participants,
             None,
             revert.clone(),
@@ -295,12 +372,14 @@ pub(crate) fn stage_project_generation_with_lock(
     Ok(ProjectStageOutcome::Staged(Box::new(
         StagedProjectGeneration {
             root,
-            writer_lock,
+            publication_lock,
             parent,
             transaction_uuid: request.transaction_uuid,
             generation_uuid: request.generation_uuid,
             generation_root,
+            requires_promotion,
             request_fingerprint,
+            operation_fingerprint,
             capabilities,
             participants,
             revert,
@@ -309,6 +388,14 @@ pub(crate) fn stage_project_generation_with_lock(
 }
 
 fn acquire_writer_lock(root: &Path, request: &ProjectGenerationRequest) -> Result<File, GfError> {
+    acquire_writer_lock_for_parts(root, request.transaction_uuid, request.generation_uuid)
+}
+
+fn acquire_writer_lock_for_parts(
+    root: &Path,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+) -> Result<File, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
@@ -317,23 +404,48 @@ fn acquire_writer_lock(root: &Path, request: &ProjectGenerationRequest) -> Resul
             ProjectErrorCode::WriterBusy,
             format!(
                 "transaction_uuid={} generation_uuid={} phase=WRITER_LOCK committed=false cause=busy",
-                request.transaction_uuid.hyphenated(),
-                request.generation_uuid.hyphenated()
+                transaction_uuid.hyphenated(),
+                generation_uuid.hyphenated()
             ),
         ));
     }
     Ok(writer_lock)
 }
 
+fn acquire_transaction_lock(
+    root: &Path,
+    request: &ProjectGenerationRequest,
+) -> Result<File, GfError> {
+    let lock = open_transaction_lock(root, request.transaction_uuid)?;
+    if !FileExt::try_lock_exclusive(&lock).map_err(publication_io)? {
+        return Err(project_error(
+            ProjectErrorCode::WriterBusy,
+            format!(
+                "transaction_uuid={} generation_uuid={} phase=TRANSACTION_LOCK committed=false cause=busy",
+                request.transaction_uuid.hyphenated(),
+                request.generation_uuid.hyphenated()
+            ),
+        ));
+    }
+    Ok(lock)
+}
+
+pub(crate) fn open_transaction_lock(root: &Path, transaction_uuid: Uuid) -> Result<File, GfError> {
+    let lock_dir =
+        ensure_machine_directory(root, &Path::new(LOCKS_DIR).join(TRANSACTION_LOCKS_DIR))?;
+    open_regular_lock(&lock_dir.join(format!("{}.lock", transaction_uuid.hyphenated())))
+}
+
 fn handle_existing_journal(
     root: &Path,
     request: &ProjectGenerationRequest,
     request_fingerprint: &str,
+    operation_fingerprint: &str,
     expected_revert: Option<&RevertJournalExtension>,
     journal_path: &Path,
 ) -> Result<Option<ProjectStageOutcome>, GfError> {
     let journal = read_journal(journal_path)?;
-    if journal.request_fingerprint != request_fingerprint
+    if journal.operation_fingerprint() != operation_fingerprint
         || journal.generation_uuid != request.generation_uuid.hyphenated().to_string()
         || journal.revert.as_ref() != expected_revert
     {
@@ -351,7 +463,13 @@ fn handle_existing_journal(
                 "aborted transaction cleanup is incomplete; run recovery again",
             ));
         }
+        cleanup_aborted_attempts(root, request.transaction_uuid)?;
         return Ok(None);
+    }
+    if journal.request_fingerprint != request_fingerprint
+        && journal.phase != JournalPhase::Published
+    {
+        return Err(transaction_conflict(request));
     }
     if journal.phase != JournalPhase::Published {
         return Err(publication_error(
@@ -391,6 +509,24 @@ fn handle_existing_journal(
             idempotent_replay: true,
         },
     )))
+}
+
+fn cleanup_aborted_attempts(root: &Path, transaction_uuid: Uuid) -> Result<(), GfError> {
+    let attempts_root = root.join(ATTEMPTS_DIR);
+    let transaction_root = attempts_root.join(transaction_uuid.hyphenated().to_string());
+    let metadata = match std::fs::symlink_metadata(&transaction_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(publication_io(error)),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(project_error(
+            ProjectErrorCode::ProjectCorrupt,
+            "aborted transaction attempt path is linked or not a directory",
+        ));
+    }
+    std::fs::remove_dir_all(&transaction_root).map_err(publication_io)?;
+    sync_directory(&attempts_root)
 }
 
 /// Load the canonical revert extension for direct idempotent replay lookup.
@@ -509,19 +645,21 @@ pub fn published_project_transaction(
 fn prepare_generation_directory(
     root: &Path,
     request: &ProjectGenerationRequest,
+    request_fingerprint: &str,
+    requires_promotion: bool,
 ) -> Result<PathBuf, GfError> {
-    let generation_root = root
-        .join(GENERATIONS_DIR)
-        .join(request.generation_uuid.hyphenated().to_string());
+    let relative_root = if requires_promotion {
+        Path::new(ATTEMPTS_DIR)
+            .join(request.transaction_uuid.hyphenated().to_string())
+            .join(request_fingerprint)
+    } else {
+        Path::new(GENERATIONS_DIR).join(request.generation_uuid.hyphenated().to_string())
+    };
+    let generation_root = root.join(&relative_root);
     if generation_root.exists() {
         return Err(transaction_conflict(request));
     }
-    ensure_machine_directory(
-        root,
-        &Path::new(GENERATIONS_DIR)
-            .join(request.generation_uuid.hyphenated().to_string())
-            .join(PARTICIPANTS_DIR),
-    )?;
+    ensure_machine_directory(root, &relative_root.join(PARTICIPANTS_DIR))?;
     Ok(generation_root)
 }
 
@@ -649,6 +787,7 @@ impl StagedProjectGeneration {
             parent_generation_uuid: Some(self.parent.generation_uuid().hyphenated().to_string()),
             phase,
             request_fingerprint: self.request_fingerprint.clone(),
+            operation_fingerprint: Some(self.operation_fingerprint.clone()),
             participant_paths: self
                 .participants
                 .iter()
@@ -667,7 +806,8 @@ impl ValidatedProjectGeneration {
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
     pub fn publish(self) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_inner().map_err(|error| {
+        let commit_lock = self.prepare_commit_lock()?;
+        let result = self.publish_inner().map_err(|error| {
             if matches!(error, GfError::Project { .. }) {
                 error
             } else {
@@ -679,7 +819,43 @@ impl ValidatedProjectGeneration {
                     &error.to_string(),
                 )
             }
-        })
+        });
+        drop(commit_lock);
+        result
+    }
+
+    fn prepare_commit_lock(&self) -> Result<Option<File>, GfError> {
+        if matches!(self.0.publication_lock, PublicationLock::Exclusive(_)) {
+            return Ok(None);
+        }
+        let staged = &self.0;
+        let writer_lock = acquire_writer_lock_for_parts(
+            &staged.root,
+            staged.transaction_uuid,
+            staged.generation_uuid,
+        )?;
+        project_failpoint::hit(
+            "project.after_optimistic_commit_lock",
+            Some(staged.transaction_uuid),
+            Some(staged.generation_uuid),
+            "COMMIT_LOCK",
+            false,
+        )?;
+        let current = resolve_project_generation(&staged.root)?;
+        if current.generation_uuid() != staged.parent.generation_uuid() {
+            abort_stale_generation(staged)?;
+            return Err(project_error(
+                ProjectErrorCode::WriteConflict,
+                format!(
+                    "transaction_uuid={} generation_uuid={} phase=COMMIT_LOCK committed=false cause=stale_parent expected_parent={} actual_parent={}",
+                    staged.transaction_uuid.hyphenated(),
+                    staged.generation_uuid.hyphenated(),
+                    staged.parent.generation_uuid().hyphenated(),
+                    current.generation_uuid().hyphenated()
+                ),
+            ));
+        }
+        Ok(Some(writer_lock))
     }
 
     fn publish_inner(&self) -> Result<ProjectPublicationReceipt, GfError> {
@@ -694,6 +870,23 @@ impl ValidatedProjectGeneration {
             idempotent_replay: false,
         })
     }
+}
+
+fn abort_stale_generation(staged: &StagedProjectGeneration) -> Result<(), GfError> {
+    write_journal(
+        &staged.journal_path(),
+        &staged.journal(JournalPhase::Aborted, None),
+    )?;
+    if staged.generation_root.exists() {
+        std::fs::remove_dir_all(&staged.generation_root).map_err(publication_io)?;
+        sync_directory(
+            staged
+                .generation_root
+                .parent()
+                .expect("machine attempt path has a parent"),
+        )?;
+    }
+    Ok(())
 }
 
 fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32], GfError> {
@@ -762,7 +955,11 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         "DURABLE",
         false,
     )?;
-    sync_directory(&staged.root.join(GENERATIONS_DIR))?;
+    if staged.requires_promotion {
+        promote_optimistic_generation(staged)?;
+    } else {
+        sync_directory(&staged.root.join(GENERATIONS_DIR))?;
+    }
     write_journal(
         &staged.journal_path(),
         &staged.journal(JournalPhase::Durable, Some(hex_digest(manifest_sha256))),
@@ -775,6 +972,37 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         false,
     )?;
     Ok(manifest_sha256)
+}
+
+fn promote_optimistic_generation(staged: &StagedProjectGeneration) -> Result<(), GfError> {
+    let generations_root = staged.root.join(GENERATIONS_DIR);
+    let destination = generations_root.join(staged.generation_uuid.hyphenated().to_string());
+    if destination.exists() {
+        return Err(project_error(
+            ProjectErrorCode::TransactionConflict,
+            format!(
+                "transaction_uuid={} generation_uuid={} phase=PROMOTE committed=false cause=generation_exists",
+                staged.transaction_uuid.hyphenated(),
+                staged.generation_uuid.hyphenated()
+            ),
+        ));
+    }
+    std::fs::rename(&staged.generation_root, &destination).map_err(publication_io)?;
+    let transaction_attempt_root = staged
+        .generation_root
+        .parent()
+        .expect("machine attempt path has a parent");
+    sync_directory(transaction_attempt_root)?;
+    std::fs::remove_dir(transaction_attempt_root).map_err(publication_io)?;
+    sync_directory(&staged.root.join(ATTEMPTS_DIR))?;
+    sync_directory(&generations_root)?;
+    project_failpoint::hit(
+        "project.after_optimistic_promotion",
+        Some(staged.transaction_uuid),
+        Some(staged.generation_uuid),
+        "DURABLE",
+        false,
+    )
 }
 
 fn replace_current(
@@ -901,7 +1129,11 @@ fn finish_published_generation(
 
 impl Drop for StagedProjectGeneration {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.writer_lock);
+        match &self.publication_lock {
+            PublicationLock::Exclusive(lock) | PublicationLock::Optimistic(lock) => {
+                let _ = FileExt::unlock(lock);
+            }
+        }
     }
 }
 
@@ -926,6 +1158,8 @@ pub(crate) struct JournalRecord {
     pub(crate) parent_generation_uuid: Option<String>,
     pub(crate) phase: JournalPhase,
     pub(crate) request_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) operation_fingerprint: Option<String>,
     pub(crate) participant_paths: Vec<String>,
     pub(crate) generation_manifest_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -937,11 +1171,12 @@ impl JournalRecord {
         request: &ProjectGenerationRequest,
         parent: Option<Uuid>,
         phase: JournalPhase,
-        request_fingerprint: String,
+        fingerprints: (String, String),
         participants: &[StagedParticipant],
         generation_manifest_sha256: Option<String>,
         revert: Option<RevertJournalExtension>,
     ) -> Self {
+        let (request_fingerprint, operation_fingerprint) = fingerprints;
         Self {
             format: "graphforge-transaction".into(),
             format_version: 1,
@@ -950,6 +1185,7 @@ impl JournalRecord {
             parent_generation_uuid: parent.map(|uuid| uuid.hyphenated().to_string()),
             phase,
             request_fingerprint,
+            operation_fingerprint: Some(operation_fingerprint),
             participant_paths: participants
                 .iter()
                 .map(|participant| participant.relative_path.clone())
@@ -957,6 +1193,12 @@ impl JournalRecord {
             generation_manifest_sha256,
             revert,
         }
+    }
+
+    pub(crate) fn operation_fingerprint(&self) -> &str {
+        self.operation_fingerprint
+            .as_deref()
+            .unwrap_or(&self.request_fingerprint)
     }
 }
 
@@ -1381,6 +1623,11 @@ pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
     if canonical_line(&journal)? != bytes
         || journal.format != "graphforge-transaction"
         || journal.format_version != 1
+        || parse_digest(&journal.request_fingerprint).is_none()
+        || journal
+            .operation_fingerprint
+            .as_deref()
+            .is_some_and(|fingerprint| parse_digest(fingerprint).is_none())
     {
         return Err(project_error(
             ProjectErrorCode::ProjectCorrupt,
@@ -1881,6 +2128,99 @@ mod tests {
             child
         );
         assert!(parent.generation_root().exists());
+    }
+
+    #[test]
+    fn optimistic_attempts_stage_concurrently_and_compare_parent_at_commit() {
+        let root = project();
+        let first = request(vec![participant("graph", "nodes", b"first")]);
+        let second = request(vec![participant("graph", "nodes", b"second")]);
+        let first_operation: [u8; 32] = Sha256::digest(b"logical-first").into();
+        let second_operation: [u8; 32] = Sha256::digest(b"logical-second").into();
+
+        let ProjectStageOutcome::Staged(first_staged) =
+            stage_project_generation_optimistic(root.path(), &first, first_operation).unwrap()
+        else {
+            panic!("first optimistic operation replayed unexpectedly");
+        };
+        let ProjectStageOutcome::Staged(second_staged) =
+            stage_project_generation_optimistic(root.path(), &second, second_operation).unwrap()
+        else {
+            panic!("second optimistic operation replayed unexpectedly");
+        };
+
+        let first_validated = first_staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
+        let second_validated = second_staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
+        first_validated.publish().unwrap();
+        let error = second_validated
+            .publish()
+            .expect_err("stale optimistic parent must not publish");
+        assert_eq!(error.code(), "GF_WRITE_CONFLICT");
+        assert!(
+            !root
+                .path()
+                .join(GENERATIONS_DIR)
+                .join(second.generation_uuid.hyphenated().to_string())
+                .exists()
+        );
+
+        let mut rebased = second.clone();
+        rebased.participants[0].bytes = b"second-rebased".to_vec();
+        let ProjectStageOutcome::Staged(rebased) =
+            stage_project_generation_optimistic(root.path(), &rebased, second_operation).unwrap()
+        else {
+            panic!("aborted optimistic operation did not permit a rebase attempt");
+        };
+        rebased
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            second.generation_uuid
+        );
+    }
+
+    #[test]
+    fn optimistic_transaction_identity_has_one_live_attempt() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"attempt")]);
+        let operation: [u8; 32] = Sha256::digest(b"logical-attempt").into();
+        let first = stage_project_generation_optimistic(root.path(), &request, operation).unwrap();
+
+        let error = stage_project_generation_optimistic(root.path(), &request, operation)
+            .err()
+            .expect("duplicate live attempt must be rejected");
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        drop(first);
+    }
+
+    #[test]
+    fn recovery_preserves_live_optimistic_attempt_then_cleans_it_after_release() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"live")]);
+        let operation: [u8; 32] = Sha256::digest(b"logical-live").into();
+        let (_, _, request_fingerprint) = request_metadata(&request).unwrap();
+        let generation_path = root
+            .path()
+            .join(ATTEMPTS_DIR)
+            .join(request.transaction_uuid.hyphenated().to_string())
+            .join(request_fingerprint);
+        let staged = stage_project_generation_optimistic(root.path(), &request, operation).unwrap();
+
+        let live_report = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(live_report.aborted_journals, 0);
+        assert_eq!(live_report.removed_generations, 0);
+        assert!(generation_path.exists());
+
+        drop(staged);
+        let abandoned_report = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(abandoned_report.aborted_journals, 1);
+        assert_eq!(abandoned_report.removed_generations, 1);
+        assert!(!generation_path.exists());
     }
 
     #[test]

@@ -22,8 +22,9 @@ any earlier development layout.
 
 ### Scope and filesystem support
 
-The protocol is for a local filesystem, one writer, and any number of readers.
-The implementation must preflight these primitives before creating or mutating
+The protocol is for a local filesystem, one commit writer, any number of
+readers, and optionally multiple private optimistic staging attempts. The
+implementation must preflight these primitives before creating or mutating
 a project:
 
 1. exclusive and shared advisory file locks released by the operating system
@@ -60,9 +61,14 @@ project/
 ├── FORMAT
 ├── CURRENT
 ├── locks/
-│   └── writer.lock
+│   ├── writer.lock
+│   └── transactions/
+│       └── <transaction-uuid>.lock
 ├── transactions/
 │   └── <transaction-uuid>.json
+├── attempts/
+│   └── <transaction-uuid>/<request-sha256>/
+│       └── participants/
 ├── generations/
 │   └── <generation-uuid>/
 │       ├── lease.lock
@@ -154,15 +160,25 @@ version returns the same code.
 
 ### Locks and ownership
 
-`locks/writer.lock` is held exclusively for the complete transaction,
-including cleanup after publication. The kernel lock is authoritative.
+`locks/writer.lock` is held exclusively for the complete transaction in the
+default single-writer protocol, including cleanup after publication. An
+optimistic attempt instead holds its transaction-scoped kernel lock while it
+prepares and validates in `attempts/`; it acquires `writer.lock` only for base
+comparison, promotion, publication, and cleanup. The kernel locks are
+authoritative.
 Metadata written after acquisition may contain an owner UUID, process ID,
 hostname hash, operation, and acquisition time for diagnostics only. PID,
 hostname, file age, heartbeat age, or wall-clock time never permits lock
 stealing. A dead process is proved only when the operating system releases its
 lock.
 
-The default acquisition is non-blocking and returns `GF_WRITER_BUSY`.
+Only one live attempt may own a transaction UUID. Different transaction UUIDs
+may stage concurrently. Transaction lock files carry no authority once their
+OS lock is released and are never reclaimed using PID, age, or heartbeat
+heuristics.
+
+The default writer-lock acquisition is non-blocking and returns
+`GF_WRITER_BUSY`.
 Callers may supply a finite timeout measured by a monotonic clock; expiry
 returns the same code without mutation. Infinite waits are not exposed by a
 public API.
@@ -200,11 +216,14 @@ Journal replacement itself uses write, file flush, atomic replace, and
 directory flush. Its failure can leave an earlier valid journal state without
 changing commit authority.
 
-The writer performs these ordered operations while holding `writer.lock`:
+The default writer performs these ordered operations while holding
+`writer.lock`. An optimistic writer performs steps 1 through 4 under its
+transaction lock, then acquires `writer.lock`, resolves `CURRENT` again, and
+continues only when it still names the pinned parent:
 
 1. **Resolve parent.** Pin and fully validate `CURRENT`, if present. An absent
    `CURRENT` is allowed only for an uninitialized v1 container.
-2. **PREPARING.** Create a transaction UUID and a private generation directory;
+2. **PREPARING.** Create a transaction UUID and a private attempt directory;
    persist a `PREPARING` journal containing only IDs, phases, and relative
    participant names.
 3. **STAGED.** Write every participant to its final path in the private
@@ -216,7 +235,9 @@ The writer performs these ordered operations while holding `writer.lock`:
 5. **DURABLE.** Write and flush `lease.lock`, write and flush
    `manifest.json`, reread and verify every participant and the manifest, flush
    `participants/` directories from leaves upward, flush the generation
-   directory, flush `generations/`, then persist the `DURABLE` journal.
+   directory, promote an optimistic attempt by atomic rename into
+   `generations/<generation-uuid>/`, flush both changed parent directories and
+   `generations/`, then persist the `DURABLE` journal.
 6. **Publish.** Write the exact new `CURRENT` bytes to a sibling private file,
    flush it, atomically replace `CURRENT` (or atomically create it for the first
    generation), and flush the project root.
@@ -228,6 +249,11 @@ The successful atomic replacement/creation of `CURRENT` in step 6 is the sole
 linearization point. Before it, every reader resolves the parent. After it,
 every new reader resolves the new generation. A journal state, directory scan,
 newer UUID, timestamp, or highest counter can never override `CURRENT`.
+
+If the optimistic base comparison finds a different committed parent, the
+attempt is marked `ABORTED`, its private directory is removed, and
+`GF_WRITE_CONFLICT` is returned without promoting a generation. Domain-level
+rebase policy belongs above this storage protocol.
 
 The root directory flush is required to make the pointer replacement durable
 against power loss. If the process stops between pointer replacement and root
@@ -270,6 +296,12 @@ Open always resolves authority first:
 4. verify the manifest digest and only the capabilities requested by the API.
 
 With the writer lock held, recovery classifies journals mechanically:
+
+Before classifying a journal, recovery also acquires its transaction lock
+without waiting. A busy transaction lock proves that the private attempt is
+live, so recovery leaves that journal and attempt untouched. Because recovery
+already owns `writer.lock`, that attempt cannot cross the commit boundary
+during classification.
 
 | Observed state | Classification | Action |
 |---|---|---|
@@ -326,6 +358,8 @@ The names are public test vocabulary:
 | `project.after_manifest_write` | parent / uninitialized |
 | `project.after_manifest_fsync` | parent / uninitialized |
 | `project.after_generation_dir_fsync` | parent / uninitialized |
+| `project.after_optimistic_commit_lock` | parent / uninitialized |
+| `project.after_optimistic_promotion` | parent / uninitialized |
 | `project.after_journal_durable` | parent / uninitialized |
 | `project.after_current_temp_write` | parent / uninitialized |
 | `project.after_current_temp_fsync` | parent / uninitialized |
@@ -341,7 +375,7 @@ the stable base name and outcome do not change. Each pre-publication failpoint
 also has an `.error` variant that makes that operation return its platform
 error instead of terminating; it must return `committed: false`. The
 `project.after_current_replace.error` variant must return `committed: true`.
- must exercise every row and every error variant for first publication and
+Tests must exercise every row and every error variant for first publication and
 replacement publication on each supported operating system. Tests assert
 selected UUID, manifest digest, participant checksums, and row visibility; they
 do not accept log inspection or timing as evidence.
