@@ -22,7 +22,7 @@ jobs:
     outputs:
       evidence_sha: ${{ steps.source.outputs.evidence_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 1
@@ -56,7 +56,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
 
@@ -212,7 +212,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
 
@@ -346,7 +346,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
 

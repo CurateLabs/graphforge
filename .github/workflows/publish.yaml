@@ -12,7 +12,7 @@ jobs:
     name: License Compliance
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Verify release license policy
         run: python3 scripts/license_policy.py check --report license-compliance-report.json
@@ -28,7 +28,7 @@ jobs:
       matrix:
         os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15, blacksmith-4vcpu-windows-2025]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build the native wheel (maturin)
         uses: PyO3/maturin-action@v1
@@ -50,7 +50,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: license-compliance
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build sdist (maturin)
         uses: PyO3/maturin-action@v1
@@ -120,7 +120,7 @@ jobs:
           - { host: blacksmith-4vcpu-ubuntu-2404, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross", arm_cflags: "-D__ARM_ARCH=8" }
           - { host: blacksmith-4vcpu-windows-2025, target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -165,7 +165,7 @@ jobs:
       run:
         working-directory: crates/gf-bindings-node
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -251,7 +251,7 @@ jobs:
       run:
         working-directory: packages/agent-skills
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
@@ -282,7 +282,7 @@ jobs:
     needs: license-compliance
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Emit ordered crate list and disposition
         run: |

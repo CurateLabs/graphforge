@@ -33,7 +33,7 @@ jobs:
     outputs:
       evidence_sha: ${{ steps.source.outputs.evidence_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 1
@@ -104,7 +104,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
       - name: Verify immutable checkout
@@ -222,7 +222,7 @@ jobs:
     needs: [validate_source, load, cleanup_load_disk]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
       - name: Revalidate current main and component artifacts
