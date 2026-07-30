@@ -136,6 +136,16 @@ impl WriteCoordinator {
                     self.changed.notify_all();
                     return Err(validation("write coordinator lock poisoned"));
                 };
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    drop(guard);
+                    let mut state = self
+                        .queued
+                        .lock()
+                        .map_err(|_| validation("write queue lock poisoned"))?;
+                    state.active = false;
+                    self.changed.notify_all();
+                    return Err(cancelled());
+                }
                 return Ok(WritePermit::Queued {
                     coordinator: self,
                     _guard: guard,
@@ -143,7 +153,8 @@ impl WriteCoordinator {
             }
             state = self
                 .changed
-                .wait(state)
+                .wait_timeout(state, std::time::Duration::from_millis(50))
+                .map(|(guard, _)| guard)
                 .map_err(|_| validation("write queue lock poisoned"))?;
         }
     }
@@ -275,15 +286,24 @@ mod tests {
         let cancellation = CancellationToken::new();
         let worker_coordinator = Arc::clone(&coordinator);
         let worker_token = cancellation.clone();
-        let worker = thread::spawn(move || worker_coordinator.acquire(Some(&worker_token)).err());
+        let (cancelled_tx, cancelled_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            cancelled_tx
+                .send(worker_coordinator.acquire(Some(&worker_token)).err())
+                .unwrap();
+        });
         while coordinator.queued.lock().unwrap().waiting.is_empty() {
             thread::yield_now();
         }
         let overflow = coordinator.acquire(None).err().unwrap();
         assert_eq!(overflow.code(), "GF_RESOURCE_LIMIT");
         cancellation.cancel();
+        let cancelled = cancelled_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("queued cancellation must not wait for the active writer")
+            .unwrap();
         drop(active);
-        let cancelled = worker.join().unwrap().unwrap();
+        worker.join().unwrap();
         assert_eq!(cancelled.code(), "GF_CANCELLED");
         assert!(coordinator.try_lock().is_ok());
     }
@@ -296,6 +316,36 @@ mod tests {
         assert!(coordinator.queued.lock().unwrap().waiting.is_empty());
         drop(second);
         drop(first);
+        assert!(coordinator.try_lock().is_ok());
+    }
+
+    #[test]
+    fn cancellation_after_admission_never_returns_a_write_permit() {
+        let coordinator = queued(1);
+        let reader = coordinator.read().unwrap();
+        let cancellation = CancellationToken::new();
+        let worker_coordinator = Arc::clone(&coordinator);
+        let worker_token = cancellation.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            result_tx
+                .send(worker_coordinator.acquire(Some(&worker_token)).err())
+                .unwrap();
+        });
+        while !coordinator.queued.lock().unwrap().active {
+            thread::yield_now();
+        }
+
+        cancellation.cancel();
+        drop(reader);
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("admitted cancellation must finish after the reader releases")
+            .expect("cancellation must not return a write permit");
+        worker.join().unwrap();
+
+        assert_eq!(error.code(), "GF_CANCELLED");
+        assert!(!coordinator.queued.lock().unwrap().active);
         assert!(coordinator.try_lock().is_ok());
     }
 

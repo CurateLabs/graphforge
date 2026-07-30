@@ -88,6 +88,7 @@ impl GraphForge {
         loop {
             let parent = gf_storage::resolve_project_generation(root)?;
             parent.validate_complete_participant_inventory()?;
+            let mut reconciled = false;
             let expected_parent = *self
                 .current_generation_uuid
                 .lock()
@@ -106,19 +107,16 @@ impl GraphForge {
                     ));
                 }
                 reconcile_workspace_to(self, &parent)?;
+                reconciled = true;
             }
 
-            if baseline.is_none() {
+            if optimistic && baseline.is_none() {
                 baseline = Some(capture_rebase_baseline(self, &request, &parent)?);
             }
-            let baseline = baseline
-                .as_ref()
-                .expect("rebase baseline initialized before publication")
-                .clone();
             let snapshot = build_validation_snapshot(self, &parent)?;
             let receipt =
                 authorize_composite_transaction(&request, &snapshot, None).map_err(|error| {
-                    if rebases > 0 && error.code() == "GF_IDENTITY_CONFLICT" {
+                    if (reconciled || rebases > 0) && error.code() == "GF_IDENTITY_CONFLICT" {
                         write_conflict("concurrent operation occupied a requested identity")
                     } else {
                         error
@@ -136,6 +134,9 @@ impl GraphForge {
             ) {
                 Ok(batch) => return Ok(batch),
                 Err(error) if optimistic && error.code() == "GF_WRITE_CONFLICT" => {
+                    let baseline = baseline
+                        .as_ref()
+                        .expect("optimistic publication initializes its rebase baseline");
                     if baseline.non_mergeable {
                         return Err(write_conflict(
                             "concurrent change conflicts with delete or administrative graph work",
@@ -153,7 +154,7 @@ impl GraphForge {
                     }
                     let latest = gf_storage::resolve_project_generation(root)?;
                     reconcile_workspace_to(self, &latest)?;
-                    ensure_rebase_compatible(self, &request, &latest, &baseline)?;
+                    ensure_rebase_compatible(self, &request, &latest, baseline)?;
                     rebases += 1;
                 }
                 Err(error) => return Err(error),
@@ -259,15 +260,21 @@ impl GraphForge {
                 Ok(batch)
             }
             Err(error) => {
-                let durable = gf_storage::resolve_project_generation(root)?;
-                if durable.generation_uuid() == expected_parent {
-                    crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
-                    *self
-                        .runtime_catalog
-                        .lock()
-                        .expect("runtime catalog poisoned") = prior_catalog;
-                } else {
-                    reconcile_workspace_to(self, &durable)?;
+                // Preserve the stable publication error. Recovery is best-effort:
+                // callers must not receive an unrelated storage code instead of
+                // the validation or conflict that caused publication to abort.
+                if let Ok(durable) = gf_storage::resolve_project_generation(root) {
+                    if durable.generation_uuid() == expected_parent {
+                        if crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir).is_ok()
+                        {
+                            *self
+                                .runtime_catalog
+                                .lock()
+                                .expect("runtime catalog poisoned") = prior_catalog;
+                        }
+                    } else {
+                        let _ = reconcile_workspace_to(self, &durable);
+                    }
                 }
                 Err(error)
             }
@@ -1641,6 +1648,24 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn optimistic_first_reconciliation_remaps_identity_collision() {
+        let directory = TempDir::new().unwrap();
+        GraphForge::new(directory.path().to_str()).unwrap();
+        let options = optimistic_options(1);
+        let stale = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
+        let concurrent = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
+        concurrent
+            .publish_composite_transaction(graph_request(151, 152, "concurrent"))
+            .unwrap();
+
+        let error = stale
+            .publish_composite_transaction(graph_request(153, 152, "stale"))
+            .unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITE_CONFLICT");
     }
 
     #[test]
