@@ -56,7 +56,7 @@ jobs:
           )
           PY
       - name: Save Rust evidence for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-rust
@@ -100,7 +100,7 @@ jobs:
           )
           PY
       - name: Save Python evidence for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-python
@@ -142,7 +142,7 @@ jobs:
           )
           PY
       - name: Save Node evidence for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: checkpoint-fragments/
           key: checkpoint-transfer-${{ github.run_id }}-node
@@ -154,17 +154,17 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: checkpoint-fragments
           key: checkpoint-transfer-${{ github.run_id }}-rust
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: checkpoint-fragments
           key: checkpoint-transfer-${{ github.run_id }}-python
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: checkpoint-fragments
           key: checkpoint-transfer-${{ github.run_id }}-node

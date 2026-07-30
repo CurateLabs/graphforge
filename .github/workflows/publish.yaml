@@ -1,4 +1,4 @@
-name: Publish
+name: Publish to PyPI and npm
 
 on:
   release:
@@ -39,7 +39,7 @@ jobs:
           sccache: "false"
 
       - name: Save wheel for publish job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-${{ matrix.os }}
@@ -59,7 +59,7 @@ jobs:
           args: --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
 
       - name: Save sdist for publish job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-sdist
@@ -72,25 +72,25 @@ jobs:
     permissions:
       id-token: write # PyPI trusted publishing (OIDC) — no API token needed
     steps:
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-ubuntu-2404
           fail-on-cache-miss: true
           enableCrossOsArchive: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-blacksmith-6vcpu-macos-15
           fail-on-cache-miss: true
           enableCrossOsArchive: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-windows-2025
           fail-on-cache-miss: true
           enableCrossOsArchive: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: dist
           key: publish-python-${{ github.run_id }}-sdist
@@ -148,7 +148,7 @@ jobs:
           cp crates/gf-bindings-node/*.node node-artifacts/
 
       - name: Save addon for publish job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-${{ matrix.settings.target }}
@@ -156,11 +156,10 @@ jobs:
 
   publish-node:
     name: Publish to npm
-    needs: build-node
+    needs: [build-node, publish]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
-      id-token: write # npm provenance
     defaults:
       run:
         working-directory: crates/gf-bindings-node
@@ -179,35 +178,35 @@ jobs:
         working-directory: .
 
       - name: Restore x86_64 macOS addon
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-x86_64-apple-darwin
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore aarch64 macOS addon
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-aarch64-apple-darwin
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore x86_64 Linux addon
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-x86_64-unknown-linux-gnu
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore aarch64 Linux addon
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-aarch64-unknown-linux-gnu
           fail-on-cache-miss: true
           enableCrossOsArchive: true
       - name: Restore Windows addon
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: node-artifacts
           key: publish-node-${{ github.run_id }}-x86_64-pc-windows-msvc
@@ -228,25 +227,26 @@ jobs:
           python3 ../../../scripts/ci/validate-napi-artifacts.py \
             --npm-dir npm --manifest package.json
 
-      - name: Publish platform packages + main package
-        # prepublish publishes the npm/<platform> packages and wires the main
-        # package's optionalDependencies; `npm publish` then ships the main one.
-        run: |
-          pnpm exec napi prepublish -t npm --skip-gh-release
-          npm publish --access public --provenance
+      - name: Verify npm publishing identity
+        run: npm whoami
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish platform packages and main package
+        # npm invokes prepublishOnly exactly once. napi then publishes each
+        # generated public platform package and wires those exact versions into
+        # the main package before npm publishes it.
+        run: npm publish --access public
+        env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---- NPX agent skills (@graphforge/agent-skills) ----
   publish-agent-skills:
     name: Publish agent-skills to npm
-    needs: license-compliance
+    needs: publish-node
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
-      id-token: write # npm provenance
     defaults:
       run:
         working-directory: packages/agent-skills
@@ -268,8 +268,13 @@ jobs:
         run: pnpm --filter @graphforge/agent-skills test:offline
         working-directory: .
 
+      - name: Verify npm publishing identity
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish @graphforge/agent-skills
-        run: npm publish --access public --provenance
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

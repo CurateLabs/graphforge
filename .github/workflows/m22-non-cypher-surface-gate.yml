@@ -200,7 +200,7 @@ jobs:
             python scripts/ci/release-load-matrix.py run \
               --sha "$EVIDENCE_SHA" --work "$GF_LOAD_WORK" --output "$GF_LOAD_OUTPUT"
       - name: Save load report for aggregate job
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: m22-load-evidence
           key: m22-load-${{ github.run_id }}
@@ -244,17 +244,17 @@ jobs:
             --binding-run evidence/component-validation-final/binding-run.json \
             --expected-sha "$EXPECTED_SHA" \
             --output evidence/component-validation-final/report.json
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: non-cypher-evidence
           key: rust-non-cypher-${{ needs.validate_source.outputs.evidence_sha }}
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: binding-rc-aggregate
           key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         if: needs.load.result == 'success'
         with:
           path: m22-load-evidence
