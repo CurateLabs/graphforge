@@ -1,8 +1,6 @@
 name: Test Suite
 
 on:
-  push:
-    branches: ["main", "develop"]
   pull_request:
     branches: ["main"]
 
@@ -34,7 +32,7 @@ jobs:
         shell: bash
         run: |
           scripts/ci/classify-changes.sh \
-            "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            "${{ github.event.pull_request.base.sha }}" \
             "${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
   policy:

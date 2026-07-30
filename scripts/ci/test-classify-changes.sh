@@ -109,23 +109,9 @@ missing=$(
   exit 1
 }
 
-# A push receives `github.event.before`, so a docs-only merge remains scoped.
-printf 'docs\n' >"$fixture/docs.md"
-git -C "$fixture" add docs.md
-git -C "$fixture" commit -qm "docs-only push"
-push=$(
-  cd "$fixture"
-  "$classifier" "$base" HEAD
-)
-[[ "$push" == "$none" ]] || {
-  printf 'docs-only push classification must remain scoped, got:\n%s\n' "$push" >&2
-  exit 1
-}
-git -C "$fixture" reset --hard -q "$base"
-
-# The workflow must select the PR base when present and the push `before` SHA
-# otherwise. An absent or unusable base still fails closed in the classifier.
-grep -Fq '"${{ github.event.pull_request.base.sha || github.event.before }}"' "$workflow"
+# The PR-only workflow must classify against the pull request base. An absent
+# or unusable base still fails closed in the classifier.
+grep -Fq '"${{ github.event.pull_request.base.sha }}"' "$workflow"
 empty=$(
   cd "$fixture"
   "$classifier" "" HEAD
