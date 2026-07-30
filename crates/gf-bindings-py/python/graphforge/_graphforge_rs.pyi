@@ -160,7 +160,16 @@ class ResolvedBeliefProjection:
     ) -> InvocationDescriptor: ...
 
 class GraphForge:
-    def __init__(self, path: str | None = None) -> None: ...
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        write_mode: Literal[
+            "single_writer", "queued_writer", "optimistic_multi_writer"
+        ] = "single_writer",
+        write_queue_capacity: int = 64,
+        max_rebase_attempts: int = 3,
+    ) -> None: ...
     def project_capabilities(self) -> pyarrow.Table: ...
     def checkpoint(
         self,

@@ -8,6 +8,13 @@ mutation, opens them only through `@graphforge/node`, decodes native Arrow IPC
 through `apache-arrow`, checks exact capability versions, and normalizes errors
 for agents. It contains no alternate backend or runtime fallback.
 
+Every adapter and workflow open selects native embedded-write options. The
+validated choices are `single_writer` (default), `queued_writer`, and
+`optimistic_multi_writer`, with bounded queue capacity and rebase attempts.
+These options are forwarded unchanged to `@graphforge/node`; the package does
+not infer operation, actor, provenance, graph, or knowledge identities and does
+not provide MCP, HTTP, or any other server transport.
+
 The adapter's deterministic interchange rules are lowercase hyphenated UUIDs,
 Arrow schema-order rows, decimal strings for 64-bit integers, recursively
 key-sorted JSON objects, and one trailing LF. Unsupported or future capability

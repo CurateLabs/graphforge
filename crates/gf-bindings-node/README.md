@@ -39,6 +39,21 @@ surfaces. Decode them with `apache-arrow` as shown above.
 For persistent projects, create the project directory before passing its path
 to `new GraphForge(path)`.
 
+Choose an embedded write mode with the optional second constructor argument:
+
+```js
+const forge = new GraphForge(path, {
+  writeMode: "optimistic_multi_writer",
+  writeQueueCapacity: 64,
+  maxRebaseAttempts: 3,
+});
+```
+
+The stable mode names are `single_writer` (default), `queued_writer`, and
+`optimistic_multi_writer`. Queue capacity is bounded to 1–65,536 and rebase
+attempts to 0–32. Optimistic replay applies only to composite transactions.
+GraphForge remains embedded; remote transports are separate extensions.
+
 ## Documentation and support
 
 - [Documentation](https://curatelabs.github.io/graphforge-legecy/)

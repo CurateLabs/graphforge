@@ -16,6 +16,7 @@ import {
   capabilitiesFromTable,
   discoverProject,
   normalizeGraphForgeError,
+  normalizeWriteOptions,
   openProject,
   requestSubprocess,
   requireCapabilities,
@@ -117,8 +118,9 @@ test("opens only through shipped surfaces and checks exact capabilities", async 
     status: ["supported", "supported"],
   });
   class GraphForge {
-    constructor(opened) {
+    constructor(opened, options) {
       this.opened = opened;
+      this.options = options;
     }
     async projectCapabilities() {
       return Buffer.from("ipc");
@@ -131,10 +133,43 @@ test("opens only through shipped surfaces and checks exact capabilities", async 
     tableFromIPC: () => capabilityTable,
   });
   assert.equal(opened.graph.opened, path);
+  assert.deepEqual(opened.graph.options, {
+    maxRebaseAttempts: 3,
+    writeMode: "single_writer",
+    writeQueueCapacity: 64,
+  });
   assert.deepEqual(opened.capabilities, {
     graph: { status: "supported", version: 1 },
     workspace: { status: "supported", version: 1 },
   });
+});
+
+test("validates and forwards explicit embedded write modes", async () => {
+  assert.deepEqual(
+    normalizeWriteOptions({
+      maxRebaseAttempts: 7,
+      writeMode: "optimistic_multi_writer",
+      writeQueueCapacity: 8,
+    }),
+    {
+      maxRebaseAttempts: 7,
+      writeMode: "optimistic_multi_writer",
+      writeQueueCapacity: 8,
+    },
+  );
+  for (const options of [
+    { writeMode: "server" },
+    { writeQueueCapacity: 0 },
+    { writeQueueCapacity: -1 },
+    { maxRebaseAttempts: -1 },
+    { maxRebaseAttempts: 33 },
+    null,
+  ]) {
+    assert.throws(
+      () => normalizeWriteOptions(options),
+      ({ code }) => code === "GF_AGENT_ADAPTER_CONFIGURATION",
+    );
+  }
 });
 
 test("does not construct GraphForge for unsupported project formats", async () => {

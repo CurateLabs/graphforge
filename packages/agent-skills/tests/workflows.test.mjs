@@ -24,7 +24,7 @@ const uuids = Array.from(
 );
 
 class GraphForge {
-  constructor(path) {
+  constructor(path, writeOptions) {
     this.openedPath = path;
     if (!projects.has(path)) {
       mkdirSync(path, { recursive: true });
@@ -38,10 +38,12 @@ class GraphForge {
         edges: [],
         marker: undefined,
         nodes: [],
+        openOptions: [],
         ontologyMode: "exploratory",
       });
     }
     this.state = projects.get(path);
+    this.state.openOptions.push(writeOptions);
     this.ontologyMode = this.state.ontologyMode;
   }
 
@@ -299,11 +301,18 @@ test("build knowledge preserves domain confidence and leaves M20 statusless", as
   const root = await realpath(await mkdtemp(join(tmpdir(), "gf-agent-build-")));
   const path = join(root, "project");
   await bootstrapProject({ GraphForge, path, tableFromIPC });
+  const input = buildInput();
+  const writeOptions = {
+    maxRebaseAttempts: 5,
+    writeMode: "optimistic_multi_writer",
+    writeQueueCapacity: 12,
+  };
   const result = await buildKnowledge({
     GraphForge,
-    input: buildInput(),
+    input,
     path,
     tableFromIPC,
+    writeOptions,
   });
   const state = projects.get(path);
 
@@ -329,6 +338,28 @@ test("build knowledge preserves domain confidence and leaves M20 statusless", as
     state.calls.filter(([name]) => name === "assertion_with_evidence").length,
     1,
   );
+  assert.deepEqual(state.openOptions.at(-1), writeOptions);
+  for (const [, request] of state.calls.filter(([name]) => name === "enable")) {
+    assert.equal(request.actorUuid, input.actor_uuid);
+    assert.equal(
+      request.operationUuid,
+      input.capability_operation_uuids[request.capabilityId],
+    );
+  }
+  const assertion = state.calls.find(
+    ([name]) => name === "assertion_with_evidence",
+  )[1];
+  assert.equal(assertion.actorUuid, input.actor_uuid);
+  assert.equal(assertion.assertionUuid, input.assertion.assertion_uuid);
+  assert.equal(assertion.operationUuid, input.assertion.operation_uuid);
+  assert.equal(
+    assertion.evidence[0].evidenceUuid,
+    input.evidence[0].evidence_uuid,
+  );
+  const confidence = state.calls.find(([name]) => name === "confidence")[1];
+  assert.equal(confidence.actorUuid, input.actor_uuid);
+  assert.equal(confidence.confidenceUuid, input.confidence.confidence_uuid);
+  assert.equal(confidence.operationUuid, input.confidence.operation_uuid);
 });
 
 test("build knowledge rejects missing baseline M20 records", async () => {

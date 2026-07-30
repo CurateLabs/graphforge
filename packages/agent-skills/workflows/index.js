@@ -8,6 +8,7 @@ import {
   tableToJson,
   uuidToString,
   validateProjectPath,
+  normalizeWriteOptions,
 } from "../adapter/index.js";
 
 const BOOTSTRAP_QUERY =
@@ -20,6 +21,7 @@ export async function bootstrapProject({
   cwd,
   ontologyMode = "exploratory",
   ontologyPath,
+  writeOptions,
 }) {
   configuredSurfaces(GraphForge, tableFromIPC);
   if (!["exploratory", "advisory", "strict"].includes(ontologyMode)) {
@@ -35,7 +37,8 @@ export async function bootstrapProject({
       if (error?.code !== "EEXIST") throw error;
     });
     await validateProjectPath({ path: projectPath });
-    graph = new GraphForge(projectPath);
+    const normalizedWriteOptions = normalizeWriteOptions(writeOptions);
+    graph = new GraphForge(projectPath, normalizedWriteOptions);
     if (ontologyMode === "advisory" && graph.ontologyMode === "exploratory") {
       if (typeof ontologyPath !== "string" || ontologyPath.length === 0) {
         throw new AgentAdapterError(
@@ -77,6 +80,7 @@ export async function bootstrapProject({
       path: projectPath,
       requiredCapabilities: { graph: 1 },
       tableFromIPC,
+      writeOptions: normalizedWriteOptions,
     });
     graph = reopened.graph;
     const verified = decode(tableFromIPC, await graph.execute(BOOTSTRAP_QUERY));
@@ -100,7 +104,7 @@ export async function bootstrapProject({
   }
 }
 
-export async function buildKnowledge({ GraphForge, tableFromIPC, path, input }) {
+export async function buildKnowledge({ GraphForge, tableFromIPC, path, input, writeOptions }) {
   configuredSurfaces(GraphForge, tableFromIPC);
   validateBuildInput(input);
   let graph;
@@ -110,6 +114,7 @@ export async function buildKnowledge({ GraphForge, tableFromIPC, path, input }) 
       path,
       requiredCapabilities: { graph: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     for (const capabilityId of requiredCapabilitiesFor(input)) {
@@ -236,7 +241,13 @@ export async function buildKnowledge({ GraphForge, tableFromIPC, path, input }) 
  * workflow only decodes the canonical native evidence and exposes the opaque
  * projection for a later recorded invocation.
  */
-export async function resolveBeliefSubject({ GraphForge, tableFromIPC, path, input }) {
+export async function resolveBeliefSubject({
+  GraphForge,
+  tableFromIPC,
+  path,
+  input,
+  writeOptions,
+}) {
   configuredSurfaces(GraphForge, tableFromIPC);
   const request = validateBeliefSubjectInput(input);
   let graph;
@@ -246,6 +257,7 @@ export async function resolveBeliefSubject({ GraphForge, tableFromIPC, path, inp
       path,
       requiredCapabilities: { epistemic: 1, graph: 1, knowledge: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     const resolved = await graph.resolveBeliefSubject({
@@ -321,9 +333,21 @@ const NEXT_PAGE_TOKEN_KEY = "graphforge.next_page_token";
  * fails closed when the caller budget is exhausted, and returns UUID-addressed
  * descriptors for broader project-level collections instead of truncating them.
  */
-export async function narrateBeliefRecords({ GraphForge, tableFromIPC, path, input }) {
+export async function narrateBeliefRecords({
+  GraphForge,
+  tableFromIPC,
+  path,
+  input,
+  writeOptions,
+}) {
   configuredSurfaces(GraphForge, tableFromIPC);
-  const resolved = await resolveBeliefSubject({ GraphForge, tableFromIPC, path, input });
+  const resolved = await resolveBeliefSubject({
+    GraphForge,
+    tableFromIPC,
+    path,
+    input,
+    writeOptions,
+  });
   const budget = narrationBudget(input?.record_budget);
   const pageLimit = narrationPageLimit(input?.page_limit);
   const counter = { budget, remaining: budget };
@@ -334,6 +358,7 @@ export async function narrateBeliefRecords({ GraphForge, tableFromIPC, path, inp
       path,
       requiredCapabilities: { epistemic: 1, graph: 1, knowledge: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     const assertionUuids = resolved.assertions.map((row) => row.assertion_uuid);
@@ -520,7 +545,13 @@ export async function narrateBeliefRecords({ GraphForge, tableFromIPC, path, inp
  * Optionally dispatch one caller-prepared neutral M18 analysis on a resolved
  * belief projection, preserving completed M20 runs when M21 attachment fails.
  */
-export async function dispatchRecordedNeutralAnalysis({ GraphForge, tableFromIPC, path, input }) {
+export async function dispatchRecordedNeutralAnalysis({
+  GraphForge,
+  tableFromIPC,
+  path,
+  input,
+  writeOptions,
+}) {
   configuredSurfaces(GraphForge, tableFromIPC);
   const request = validateRecordedAnalysisInput(input);
   let graph;
@@ -530,6 +561,7 @@ export async function dispatchRecordedNeutralAnalysis({ GraphForge, tableFromIPC
       path,
       requiredCapabilities: { epistemic: 1, graph: 1, knowledge: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     const recorded = await graph.invokeResolvedRecorded(request.projection, {
@@ -575,7 +607,7 @@ const MAX_EXPLORE_DEPTH = 10_000;
  * finite agent bounds, dispatches the selected public paths algorithm, and
  * returns UUID-addressed summaries with complete Arrow/JSON linkage.
  */
-export async function exploreGraph({ GraphForge, tableFromIPC, path, input }) {
+export async function exploreGraph({ GraphForge, tableFromIPC, path, input, writeOptions }) {
   configuredSurfaces(GraphForge, tableFromIPC);
   const request = validateExploreInput(input);
   let graph;
@@ -585,6 +617,7 @@ export async function exploreGraph({ GraphForge, tableFromIPC, path, input }) {
       path,
       requiredCapabilities: { graph: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     if (request.signal?.aborted) {
@@ -783,7 +816,7 @@ const MAX_RETRIEVE_RESULT_LIMIT = 10_000;
  * algorithm/search semantics; this workflow only enforces finite bounds and
  * agent-legible truncation while opening the graph capability alone.
  */
-export async function retrieveAnalyze({ GraphForge, tableFromIPC, path, input }) {
+export async function retrieveAnalyze({ GraphForge, tableFromIPC, path, input, writeOptions }) {
   configuredSurfaces(GraphForge, tableFromIPC);
   const request = validateRetrieveInput(input);
   let graph;
@@ -793,6 +826,7 @@ export async function retrieveAnalyze({ GraphForge, tableFromIPC, path, input })
       path,
       requiredCapabilities: { graph: 1 },
       tableFromIPC,
+      writeOptions,
     });
     graph = opened.graph;
     if (request.signal?.aborted) {

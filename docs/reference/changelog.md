@@ -91,6 +91,10 @@ the authoritative runnable corpus enforced by the BDD gate.
   `optimistic_multi_writer` embedded modes. Optimistic composite transactions
   rebase compatible creates, immutable-ledger rows, and disjoint property
   changes while returning stable conflict and exhausted-retry errors (#213).
+- Expose the three embedded write modes through equivalent validated Python and
+  Node constructor options, thread explicit selections through agent workflows,
+  and verify compatible multi-agent publication, reopen, identity preservation,
+  and conflict atomicity across the native concurrency matrix (#214).
 
 - Add `scripts/record_release_artifacts.py` and
   `docs/development/release-artifact-record.md` for RC checksum/SBOM/contents
