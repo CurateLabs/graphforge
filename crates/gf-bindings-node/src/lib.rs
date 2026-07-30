@@ -6885,7 +6885,7 @@ mod tests {
 
     #[test]
     fn node_engine_lock_allows_shared_reads_and_blocks_exclusive_replacement() {
-        let graph = Arc::new(GraphForge::new(None).unwrap());
+        let graph = Arc::new(GraphForge::new(None, None).unwrap());
 
         let read_guard = graph.open_guard().unwrap();
         let reader = Arc::clone(&graph);
@@ -6975,7 +6975,7 @@ mod tests {
 
     #[test]
     fn source_free_minimum_steiner_reaches_active_rust_handler() {
-        let graph = GraphForge::new(None).unwrap();
+        let graph = GraphForge::new(None, None).unwrap();
         let first = graph.add_node("Person".into(), None).unwrap();
         let second = graph.add_node("Person".into(), None).unwrap();
 
@@ -7009,7 +7009,7 @@ mod tests {
 
     #[test]
     fn capability_tasks_return_rust_owned_arrow_ipc() {
-        let graph = GraphForge::new(None).unwrap();
+        let graph = GraphForge::new(None, None).unwrap();
         let mut inspect = ProjectCapabilitiesTask {
             engine: Arc::clone(&graph.inner),
         };
