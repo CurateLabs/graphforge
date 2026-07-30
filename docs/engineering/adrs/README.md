@@ -52,3 +52,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0013 | Durable v0.5 project-generation protocol | Accepted | [`../../adr/0013-project-generation-protocol.md`](../../adr/0013-project-generation-protocol.md) |
 | 0014 | Complete-workspace checkpoints | Accepted | [`../../adr/0014-workspace-checkpoints.md`](../../adr/0014-workspace-checkpoints.md) |
 | 0015 | Three embedded project-write modes | Accepted | [`../../adr/0015-embedded-write-modes.md`](../../adr/0015-embedded-write-modes.md) |
+| 0016 | Repository integration and deployment configuration boundary | Proposed | [`../../adr/0016-repository-integration-and-deployment-configuration.md`](../../adr/0016-repository-integration-and-deployment-configuration.md) |

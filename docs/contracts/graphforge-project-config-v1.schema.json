@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/contracts/graphforge-project-config-v1.schema.json",
+  "title": "GraphForge project configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project", "targets"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project": { "$ref": "#/$defs/project" },
+    "sources": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/source" }
+    },
+    "secrets": {
+      "type": "array",
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/secret_reference" }
+    },
+    "targets": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": { "$ref": "#/$defs/stable_id" },
+      "additionalProperties": { "$ref": "#/$defs/target" }
+    }
+  },
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ontology", "schemas", "seeds", "migrations"],
+      "properties": {
+        "ontology": { "$ref": "#/$defs/relative_path" },
+        "schemas": { "$ref": "#/$defs/relative_path" },
+        "seeds": { "$ref": "#/$defs/relative_path" },
+        "migrations": { "$ref": "#/$defs/relative_path" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "uri", "sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stable_id" },
+        "uri": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "media_type": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "secret_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stable_id" },
+        "source": {
+          "enum": ["environment", "pulumi", "terraform", "secret_manager"]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "version", "sha256"],
+      "properties": {
+        "kind": {
+          "enum": ["python_wheel", "node_package", "native_binary", "oci_image"]
+        },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "write": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "enum": ["single_writer", "queued_writer", "optimistic_multi_writer"]
+        },
+        "queue_capacity": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "max_rebase_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["local", "volume", "object"] },
+        "persistent": { "type": "boolean" },
+        "class": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "capacity_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu_millis": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exposure": { "enum": ["none", "private", "public"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "tls_required": { "type": "boolean" }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_seconds"],
+      "properties": {
+        "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 300 }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logs": { "type": "boolean" },
+        "metrics": { "type": "boolean" },
+        "traces": { "type": "boolean" }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "checkpoints": { "type": "boolean" },
+        "retention_count": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "artifact", "write", "storage"],
+      "properties": {
+        "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "write": { "$ref": "#/$defs/write" },
+        "storage": { "$ref": "#/$defs/storage" },
+        "resources": { "$ref": "#/$defs/resources" },
+        "network": { "$ref": "#/$defs/network" },
+        "health": { "$ref": "#/$defs/health" },
+        "observability": { "$ref": "#/$defs/observability" },
+        "backup": { "$ref": "#/$defs/backup" },
+        "source_ids": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/stable_id" }
+        },
+        "secret_ids": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/stable_id" }
+        }
+      }
+    }
+  }
+}

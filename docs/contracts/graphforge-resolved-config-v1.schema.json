@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/contracts/graphforge-resolved-config-v1.schema.json",
+  "title": "GraphForge resolved configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contract", "project", "sources", "secrets", "targets"],
+  "properties": {
+    "contract": { "const": "graphforge-resolved-config/1" },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "integration_root",
+        "state",
+        "imports",
+        "exports",
+        "ontology",
+        "schemas",
+        "seeds",
+        "migrations"
+      ],
+      "properties": {
+        "integration_root": { "const": ".graphforge" },
+        "state": { "const": ".graphforge/state" },
+        "imports": { "const": ".graphforge/imports" },
+        "exports": { "const": ".graphforge/exports" },
+        "ontology": { "type": "string" },
+        "schemas": { "type": "string" },
+        "seeds": { "type": "string" },
+        "migrations": { "type": "string" }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "graphforge-project-config-v1.schema.json#/$defs/source"
+      }
+    },
+    "secrets": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "graphforge-project-config-v1.schema.json#/$defs/secret_reference"
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "artifact",
+          "write",
+          "storage",
+          "resources",
+          "network",
+          "health",
+          "observability",
+          "backup",
+          "source_ids",
+          "secret_ids"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
+          },
+          "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+          "artifact": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/artifact"
+          },
+          "write": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/write"
+          },
+          "storage": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/storage"
+          },
+          "resources": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/resources"
+          },
+          "network": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/network"
+          },
+          "health": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/health"
+          },
+          "observability": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/observability"
+          },
+          "backup": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/backup"
+          },
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
+            }
+          },
+          "secret_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
+            }
+          }
+        }
+      }
+    }
+  }
+}

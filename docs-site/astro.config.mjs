@@ -219,6 +219,10 @@ export default defineConfig({
                   label: '0015 — Embedded Write Modes',
                   slug: 'adr/0015-embedded-write-modes',
                 },
+                {
+                  label: '0016 — Repository Integration',
+                  slug: 'adr/0016-repository-integration-and-deployment-configuration',
+                },
               ],
             },
           ],
