@@ -36,12 +36,26 @@ valid-time, resolved-projection, and attachment behavior is normative in
 ```python
 forge = GraphForge()            # in-memory, ephemeral
 forge = GraphForge("path/")     # Parquet-backed, persistent
+forge = GraphForge(
+    "path/",
+    write_mode="optimistic_multi_writer",
+    write_queue_capacity=64,
+    max_rebase_attempts=3,
+)
 ```
 
 The persistent form opens a project root that must already exist. GraphForge initializes
 project files inside an existing directory; it never creates the directory itself. A missing
 path fails with `StorageError: path does not exist`, and a foreign non-project directory fails
 with `GF_UNSUPPORTED_PROJECT_FORMAT`, both before any mutation.
+
+Python and Node expose the same three embedded modes: `single_writer` (the
+default), `queued_writer`, and `optimistic_multi_writer`. Node passes them as a
+second options object using `writeMode`, `writeQueueCapacity`, and
+`maxRebaseAttempts`. Queue capacity is bounded to 1–65,536 and optimistic
+rebase attempts to 0–32. Only composite transactions use optimistic replay;
+other mutation APIs retain their single-writer behavior. See
+[ADR 0015](../adr/0015-embedded-write-modes.md).
 
 ---
 

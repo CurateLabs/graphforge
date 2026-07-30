@@ -23,16 +23,16 @@ use gf_api::{
     EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection,
     EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo, EmbeddingSpaceProducer,
     EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult, FastRpOptions,
-    FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError, GraphSageAggregator,
-    GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError, IrLiteral,
-    M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
+    FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError, GraphForgeOptions,
+    GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError,
+    IrLiteral, M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
     Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
-    OpenRouterWireLimits, OperationId, PropValue, ProviderBatchLimits, ProviderCapabilities,
-    ProviderCapability, ProviderEmbeddingDistance, ProviderEmbeddingNormalization,
-    ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest, ProviderExecutionLimits,
-    ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy, RuntimeGuard,
-    SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection, TokenCountClass,
-    WriteContext, validate_embedding_options,
+    OpenRouterWireLimits, OperationId, ProjectWriteMode, PropValue, ProviderBatchLimits,
+    ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
+    ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
+    ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
+    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
+    TokenCountClass, WriteContext, validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -2293,15 +2293,47 @@ impl GraphForge {
     }
 }
 
+fn project_write_mode(value: &str) -> Result<ProjectWriteMode, GfError> {
+    match value {
+        "single_writer" => Ok(ProjectWriteMode::SingleWriter),
+        "queued_writer" => Ok(ProjectWriteMode::QueuedWriter),
+        "optimistic_multi_writer" => Ok(ProjectWriteMode::OptimisticMultiWriter),
+        _ => Err(GfError::Validation(
+            "write_mode must be single_writer, queued_writer, or optimistic_multi_writer".into(),
+        )),
+    }
+}
+
 #[pymethods]
 impl GraphForge {
     /// Open an in-memory (`path=None`) or Parquet-backed (`path=<dir>`) instance.
     #[new]
-    #[pyo3(signature = (path=None))]
-    fn new(py: Python<'_>, path: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (path=None, *, write_mode="single_writer", write_queue_capacity=64, max_rebase_attempts=3))]
+    fn new(
+        py: Python<'_>,
+        path: Option<&str>,
+        write_mode: &str,
+        write_queue_capacity: i64,
+        max_rebase_attempts: i64,
+    ) -> PyResult<Self> {
         let path = path.map(str::to_owned);
+        let options = GraphForgeOptions {
+            write_mode: project_write_mode(write_mode).map_err(|error| to_pyerr(py, &error))?,
+            write_queue_capacity: usize::try_from(write_queue_capacity).map_err(|_| {
+                to_pyerr(
+                    py,
+                    &GfError::Validation("write_queue_capacity must be between 1 and 65536".into()),
+                )
+            })?,
+            max_rebase_attempts: u32::try_from(max_rebase_attempts).map_err(|_| {
+                to_pyerr(
+                    py,
+                    &GfError::Validation("max_rebase_attempts must not exceed 32".into()),
+                )
+            })?,
+        };
         let inner = py
-            .detach(|| gf_api::GraphForge::new(path.as_deref()))
+            .detach(|| gf_api::GraphForge::new_with_options(path.as_deref(), options))
             .map_err(|e| to_pyerr(py, &e))?;
         Ok(Self {
             inner,

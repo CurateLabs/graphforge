@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+from uuid import UUID
 
 import gil_release
 
@@ -45,6 +46,15 @@ def _join(phase: str, worker: threading.Thread, deadline: float) -> None:
     worker.join(timeout=_remaining(deadline))
     if worker.is_alive():
         raise AssertionError(f"phase={phase} timeout={DEADLINE_SECONDS}s worker hung")
+
+
+def _expect_constructor_validation(kwargs: dict[str, object]) -> None:
+    try:
+        g.GraphForge(**kwargs)
+    except g.GraphForgeError as error:
+        assert error.code == "GF_VALIDATION", error.code
+    else:
+        raise AssertionError(f"constructor accepted invalid options: {kwargs}")
 
 
 def check_gil_release_native_boundary() -> None:
@@ -249,12 +259,101 @@ def check_shared_directory_writer_busy_and_reopen() -> None:
         assert _names(reopened) == ["Alice", "Bob", "Carol", "Delta"]
 
 
+def check_write_mode_options_and_optimistic_agents() -> None:
+    for mode in ("single_writer", "queued_writer", "optimistic_multi_writer"):
+        with tempfile.TemporaryDirectory() as directory:
+            forge = g.GraphForge(
+                directory,
+                write_mode=mode,
+                write_queue_capacity=8,
+                max_rebase_attempts=4,
+            )
+            forge.execute("CREATE (:Person {name:'mode'})")
+            forge.close()
+            assert _names(g.GraphForge(directory)) == ["mode"]
+
+    for kwargs in (
+        {"write_mode": "server"},
+        {"write_queue_capacity": 0},
+        {"write_queue_capacity": -1},
+        {"max_rebase_attempts": -1},
+        {"max_rebase_attempts": 33},
+    ):
+        _expect_constructor_validation(kwargs)
+
+    deadline = _deadline()
+    with tempfile.TemporaryDirectory() as directory:
+        agents = [
+            g.GraphForge(directory, write_mode="optimistic_multi_writer"),
+            g.GraphForge(directory, write_mode="optimistic_multi_writer"),
+        ]
+        operations = [
+            "018f0f4e-7b8c-7000-8000-000000002141",
+            "018f0f4e-7b8c-7000-8000-000000002142",
+        ]
+        nodes = [
+            "018f0f4e-7b8c-7000-8000-000000002143",
+            "018f0f4e-7b8c-7000-8000-000000002144",
+        ]
+        barrier = threading.Barrier(2)
+        outcomes: list[object | None] = [None, None]
+
+        def publish(index: int) -> None:
+            try:
+                barrier.wait(timeout=_remaining(deadline))
+                outcomes[index] = agents[index].publish_composite_transaction(
+                    operation_uuid=operations[index],
+                    graph_mutations=[
+                        {
+                            "kind": "create_node",
+                            "node_uuid": nodes[index],
+                            "label": "Person",
+                            "properties": {"name": f"agent-{index}"},
+                        }
+                    ],
+                )
+            except BaseException as error:
+                outcomes[index] = error
+
+        workers = [threading.Thread(target=publish, args=(index,)) for index in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            _join("optimistic-agents", worker, deadline)
+        for index, outcome in enumerate(outcomes):
+            if isinstance(outcome, BaseException):
+                raise AssertionError(f"optimistic agent {index} failed") from outcome
+            assert outcome.column("request_identity").to_pylist() == [UUID(operations[index]).bytes]
+
+        reopened = g.GraphForge(directory)
+        assert _names(reopened) == ["agent-0", "agent-1"]
+        before = _names(reopened)
+        try:
+            agents[0].publish_composite_transaction(
+                operation_uuid=operations[0],
+                graph_mutations=[
+                    {
+                        "kind": "create_node",
+                        "node_uuid": "018f0f4e-7b8c-7000-8000-000000002145",
+                        "label": "Person",
+                        "properties": {"name": "conflict"},
+                    }
+                ],
+            )
+        except g.GraphForgeError as error:
+            assert error.code == "GF_IDEMPOTENCY_CONFLICT", error.code
+        else:
+            raise AssertionError("conflicting agent operation was accepted")
+        assert _names(g.GraphForge(directory)) == before
+
+
 def main() -> None:
     check_gil_release_native_boundary()
     check_independent_and_same_instance_reads()
     check_cancellation_isolation()
     check_stream_early_drop_isolation()
     check_shared_directory_writer_busy_and_reopen()
+    check_write_mode_options_and_optimistic_agents()
     print("python concurrency parity passed")
 
 

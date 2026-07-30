@@ -25,12 +25,12 @@ use gf_api::{
     EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState,
     EmbeddingSpaceInfo, EmbeddingSpaceProducer, EmbeddingSpaceReadDecision,
     EmbeddingTokenCountClass, ExecutionResult, FastRpOptions, FindDiagnostic, FindExecutionOptions,
-    FindOptions, FindRerankOptions, GfError, GraphObjectKind, GraphSageAggregator,
-    GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError, IrLiteral,
-    M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
+    FindOptions, FindRerankOptions, GfError, GraphForgeOptions, GraphObjectKind,
+    GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError,
+    IrLiteral, M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
     Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
-    OpenRouterWireLimits, OperationId, PathsOptions, PropValue, ProviderBatchLimits,
-    ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
+    OpenRouterWireLimits, OperationId, PathsOptions, ProjectWriteMode, PropValue,
+    ProviderBatchLimits, ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
     ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
     ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
     ResolveBeliefProjectionRequest, ResolveBeliefSubjectRequest, ResolvedAttachmentOutcome,
@@ -55,6 +55,28 @@ pub(crate) type Result<T> = std::result::Result<T, NodeError>;
 
 pub(crate) fn napi_validation(message: &'static str) -> NodeError {
     to_napi_err(&GfError::Validation(message.into()))
+}
+
+fn project_write_mode(value: &str) -> Result<ProjectWriteMode> {
+    match value {
+        "single_writer" => Ok(ProjectWriteMode::SingleWriter),
+        "queued_writer" => Ok(ProjectWriteMode::QueuedWriter),
+        "optimistic_multi_writer" => Ok(ProjectWriteMode::OptimisticMultiWriter),
+        _ => Err(napi_validation(
+            "writeMode must be single_writer, queued_writer, or optimistic_multi_writer",
+        )),
+    }
+}
+
+#[napi(object)]
+/// Embedded project-write construction options.
+pub struct GraphForgeOptionsInput {
+    /// Write coordination policy name.
+    pub write_mode: Option<String>,
+    /// Maximum number of queued same-instance writers.
+    pub write_queue_capacity: Option<i32>,
+    /// Maximum optimistic rebase attempts after initial staging.
+    pub max_rebase_attempts: Option<i32>,
 }
 
 fn to_napi_invocation_err(error: &InvocationError) -> NodeError {
@@ -2743,8 +2765,44 @@ impl GraphForge {
 impl GraphForge {
     /// Open an in-memory (`path` omitted) or Parquet-backed (`path` = dir) instance.
     #[napi(constructor)]
-    pub fn new(path: Option<String>) -> Result<Self> {
-        let inner = gf_api::GraphForge::new(path.as_deref()).map_err(|e| to_napi_err(&e))?;
+    pub fn new(path: Option<String>, options: Option<GraphForgeOptionsInput>) -> Result<Self> {
+        let defaults = GraphForgeOptions::default();
+        let options = options.unwrap_or(GraphForgeOptionsInput {
+            write_mode: None,
+            write_queue_capacity: None,
+            max_rebase_attempts: None,
+        });
+        let options = GraphForgeOptions {
+            write_mode: match options.write_mode {
+                Some(value) => project_write_mode(&value)?,
+                None => defaults.write_mode,
+            },
+            write_queue_capacity: match options.write_queue_capacity {
+                Some(value) if (1..=65_536).contains(&value) => {
+                    usize::try_from(value).map_err(|_| {
+                        napi_validation("writeQueueCapacity must be between 1 and 65536")
+                    })?
+                }
+                Some(_) => {
+                    return Err(napi_validation(
+                        "writeQueueCapacity must be between 1 and 65536",
+                    ));
+                }
+                None => defaults.write_queue_capacity,
+            },
+            max_rebase_attempts: match options.max_rebase_attempts {
+                Some(value) if (0..=32).contains(&value) => u32::try_from(value)
+                    .map_err(|_| napi_validation("maxRebaseAttempts must be between 0 and 32"))?,
+                Some(_) => {
+                    return Err(napi_validation(
+                        "maxRebaseAttempts must be between 0 and 32",
+                    ));
+                }
+                None => defaults.max_rebase_attempts,
+            },
+        };
+        let inner = gf_api::GraphForge::new_with_options(path.as_deref(), options)
+            .map_err(|e| to_napi_err(&e))?;
         Ok(Self {
             inner: OwnedEngine::new(inner),
             provider: None,
@@ -6827,7 +6885,7 @@ mod tests {
 
     #[test]
     fn node_engine_lock_allows_shared_reads_and_blocks_exclusive_replacement() {
-        let graph = Arc::new(GraphForge::new(None).unwrap());
+        let graph = Arc::new(GraphForge::new(None, None).unwrap());
 
         let read_guard = graph.open_guard().unwrap();
         let reader = Arc::clone(&graph);
@@ -6917,7 +6975,7 @@ mod tests {
 
     #[test]
     fn source_free_minimum_steiner_reaches_active_rust_handler() {
-        let graph = GraphForge::new(None).unwrap();
+        let graph = GraphForge::new(None, None).unwrap();
         let first = graph.add_node("Person".into(), None).unwrap();
         let second = graph.add_node("Person".into(), None).unwrap();
 
@@ -6951,7 +7009,7 @@ mod tests {
 
     #[test]
     fn capability_tasks_return_rust_owned_arrow_ipc() {
-        let graph = GraphForge::new(None).unwrap();
+        let graph = GraphForge::new(None, None).unwrap();
         let mut inspect = ProjectCapabilitiesTask {
             engine: Arc::clone(&graph.inner),
         };

@@ -23,6 +23,11 @@ const opened = await openProject({
   path: "/absolute/path/to/project",
   requiredCapabilities: { graph: 1, workspace: 1 },
   tableFromIPC,
+  writeOptions: {
+    writeMode: "optimistic_multi_writer",
+    writeQueueCapacity: 64,
+    maxRebaseAttempts: 3,
+  },
 });
 ```
 
@@ -30,6 +35,12 @@ Discovery accepts only an existing, real directory with the exact v0.5
 `FORMAT` marker. Missing, ambiguous, symlinked, malformed, and future-format
 inputs fail before the native constructor is called. Capability checks require
 exact versions and reject `unsupported_future` rows.
+
+Every adapter/workflow open passes an explicit validated embedded-write options
+object to the native binding. Callers may select `single_writer` (the default),
+`queued_writer`, or `optimistic_multi_writer`; invalid names, unbounded queues,
+and unbounded retry counts fail before native construction. The adapter does not
+add coordination semantics, identity inference, a server, or a transport.
 
 The adapter contract version is `1`. `uuidToString` emits lowercase hyphenated
 UUIDs, `tableToJson` preserves Arrow schema column order while representing

@@ -190,7 +190,48 @@ async function containsSymlink(candidate) {
   return false;
 }
 
-export async function openProject({ path, GraphForge, tableFromIPC, requiredCapabilities = {} }) {
+const WRITE_MODES = new Set(["single_writer", "queued_writer", "optimistic_multi_writer"]);
+
+export function normalizeWriteOptions(options = {}) {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new AgentAdapterError(
+      "GF_AGENT_ADAPTER_CONFIGURATION",
+      "write options must be an object",
+    );
+  }
+  const { writeMode = "single_writer", writeQueueCapacity = 64, maxRebaseAttempts = 3 } = options;
+  if (!WRITE_MODES.has(writeMode)) {
+    throw new AgentAdapterError(
+      "GF_AGENT_ADAPTER_CONFIGURATION",
+      "write mode must be single_writer, queued_writer, or optimistic_multi_writer",
+    );
+  }
+  if (
+    !Number.isInteger(writeQueueCapacity) ||
+    writeQueueCapacity < 1 ||
+    writeQueueCapacity > 65_536
+  ) {
+    throw new AgentAdapterError(
+      "GF_AGENT_ADAPTER_CONFIGURATION",
+      "write queue capacity must be an integer between 1 and 65536",
+    );
+  }
+  if (!Number.isInteger(maxRebaseAttempts) || maxRebaseAttempts < 0 || maxRebaseAttempts > 32) {
+    throw new AgentAdapterError(
+      "GF_AGENT_ADAPTER_CONFIGURATION",
+      "max rebase attempts must be an integer between 0 and 32",
+    );
+  }
+  return { maxRebaseAttempts, writeMode, writeQueueCapacity };
+}
+
+export async function openProject({
+  path,
+  GraphForge,
+  tableFromIPC,
+  requiredCapabilities = {},
+  writeOptions,
+}) {
   if (typeof GraphForge !== "function" || typeof tableFromIPC !== "function") {
     throw new AgentAdapterError(
       "GF_AGENT_ADAPTER_CONFIGURATION",
@@ -198,10 +239,11 @@ export async function openProject({ path, GraphForge, tableFromIPC, requiredCapa
     );
   }
   const projectPath = await discoverProject({ candidates: [path] });
+  const normalizedWriteOptions = normalizeWriteOptions(writeOptions);
   let graph;
   try {
     await validateProjectPath({ path: projectPath });
-    graph = new GraphForge(projectPath);
+    graph = new GraphForge(projectPath, normalizedWriteOptions);
     const capabilities = capabilitiesFromTable(tableFromIPC(await graph.projectCapabilities()));
     requireCapabilities(capabilities, requiredCapabilities);
     return { capabilities, graph, path: projectPath };

@@ -224,12 +224,7 @@ impl GraphForge {
                         |_| Ok(()),
                         |actual_parent, _| {
                             if actual_parent.generation_uuid() != expected_parent {
-                                return Err(GfError::Project {
-                                    code: ProjectErrorCode::TransactionConflict,
-                                    message:
-                                        "project generation changed before composite publication"
-                                            .into(),
-                                });
+                                return Err(publication_parent_changed(optimistic));
                             }
                             Ok(())
                         },
@@ -544,6 +539,15 @@ fn write_conflict(message: impl Into<String>) -> GfError {
     GfError::Project {
         code: ProjectErrorCode::WriteConflict,
         message: message.into(),
+    }
+}
+
+fn publication_parent_changed(optimistic: bool) -> GfError {
+    let message = "project generation changed before composite publication";
+    if optimistic {
+        write_conflict(message)
+    } else {
+        idempotency_conflict(message)
     }
 }
 
@@ -1413,6 +1417,15 @@ mod tests {
             max_rebase_attempts,
             ..GraphForgeOptions::default()
         }
+    }
+
+    #[test]
+    fn publication_parent_drift_is_retriable_only_in_optimistic_mode() {
+        assert_eq!(publication_parent_changed(true).code(), "GF_WRITE_CONFLICT");
+        assert_eq!(
+            publication_parent_changed(false).code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
     }
 
     fn publish_concurrently(
