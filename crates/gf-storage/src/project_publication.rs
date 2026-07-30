@@ -412,6 +412,14 @@ fn acquire_writer_lock_for_parts(
     Ok(writer_lock)
 }
 
+fn wait_for_writer_lock(root: &Path) -> Result<File, GfError> {
+    let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
+    sync_directory(root)?;
+    let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
+    FileExt::lock_exclusive(&writer_lock).map_err(publication_io)?;
+    Ok(writer_lock)
+}
+
 fn acquire_transaction_lock(
     root: &Path,
     request: &ProjectGenerationRequest,
@@ -829,11 +837,7 @@ impl ValidatedProjectGeneration {
             return Ok(None);
         }
         let staged = &self.0;
-        let writer_lock = acquire_writer_lock_for_parts(
-            &staged.root,
-            staged.transaction_uuid,
-            staged.generation_uuid,
-        )?;
+        let writer_lock = wait_for_writer_lock(&staged.root)?;
         project_failpoint::hit(
             "project.after_optimistic_commit_lock",
             Some(staged.transaction_uuid),
@@ -1528,12 +1532,26 @@ pub(crate) fn ensure_machine_directory(root: &Path, relative: &Path) -> Result<P
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(publication_io)?;
-                sync_directory(
-                    current
-                        .parent()
-                        .expect("machine directory beneath project has a parent"),
-                )?;
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {
+                        sync_directory(
+                            current
+                                .parent()
+                                .expect("machine directory beneath project has a parent"),
+                        )?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata =
+                            std::fs::symlink_metadata(&current).map_err(publication_io)?;
+                        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                            return Err(project_error(
+                                ProjectErrorCode::ProjectCorrupt,
+                                "concurrently created machine path is linked or not a directory",
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(publication_io(error)),
+                }
             }
             Err(error) => return Err(publication_io(error)),
         }

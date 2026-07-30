@@ -86,6 +86,12 @@ the authoritative runnable corpus enforced by the BDD gate.
   not planned.
 
 ### Added
+
+- Add explicit `single_writer`, bounded FIFO `queued_writer`, and
+  `optimistic_multi_writer` embedded modes. Optimistic composite transactions
+  rebase compatible creates, immutable-ledger rows, and disjoint property
+  changes while returning stable conflict and exhausted-retry errors (#213).
+
 - Add `scripts/record_release_artifacts.py` and
   `docs/development/release-artifact-record.md` for RC checksum/SBOM/contents
   inventories usable by GitHub Release and §7 clean-env checks (#2798).

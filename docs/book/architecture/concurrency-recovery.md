@@ -10,10 +10,29 @@ Dropping a stream or cancelling one request affects only that operation. A peer
 continues to a complete result, while cooperative cancellation reports
 `GF_CANCELLED`.
 
-Project mutation is single-writer. A competing writer is rejected with
-`GF_WRITER_BUSY` before it creates staging or publication state. Multi-writer
-merge semantics and throughput guarantees are unsupported. Cross-process
-publication exposes one complete generation, never a partially staged one.
+Project mutation has three explicit embedded modes. `single_writer` is the
+default and rejects a competing writer with `GF_WRITER_BUSY` before it creates
+staging or publication state. `queued_writer` adds a bounded, first-in-first-out
+queue per facade; snapshot reads do not enter that queue, and cancellation can
+remove only work that has not started. `optimistic_multi_writer` lets distinct
+composite transaction identities stage concurrently, serializes only the
+`CURRENT` commit point, and rebases compatible work against the winning
+generation. Cross-process publication always exposes one complete generation,
+never a partially staged one.
+
+Optimistic merge rules are deliberately finite. Distinct creates and immutable
+ledger identities merge. Changes to different properties of the same graph
+object merge. Reusing an identity with changed content, changing the same
+property, losing a mutation target, and delete or administrative work do not
+merge. Stable outcomes are `GF_IDEMPOTENCY_CONFLICT`, `GF_WRITE_CONFLICT`, or
+`GF_REBASE_EXHAUSTED`. Only the composite publication API is replayed
+optimistically in v0.5.0; other mutation APIs keep their established
+single-writer behavior even when the facade selects optimistic mode.
+
+These modes coordinate embedded callers directly against the project directory.
+GraphForge core does not include an MCP or HTTP server. A separately packaged
+extension may expose one authenticated remote authority without changing the
+storage engine into a distributed database.
 
 Recovery after a writer is killed selects either the previous complete
 generation or the newly published complete generation according to the durable

@@ -81,7 +81,7 @@ impl GraphForge {
         if let Some(uuid) = request.reasoning_uuid {
             require_uuid(uuid, "reasoning_uuid")?;
         }
-        let _visibility = crate::knowledge::lock_graph_visibility(self);
+        let _visibility = crate::knowledge::lock_graph_visibility(self)?;
         let parent = resolve(self)?;
         parent.validate_complete_participant_inventory()?;
         parent.require_capability("valid_time", 1)?;

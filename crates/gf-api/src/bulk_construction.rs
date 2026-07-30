@@ -337,10 +337,13 @@ impl GraphForge {
         operation_uuid: OperationId,
         batches: &[RecordBatch],
     ) -> Result<ValidatedBulkNodes, BulkValidationError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.read().map_err(|error| {
+            contract_error(
+                BulkInputKind::Node,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
         self.normalize_bulk_nodes(operation_uuid, batches, true)
     }
 
@@ -442,10 +445,7 @@ impl GraphForge {
         operation_uuid: OperationId,
         batches: &[RecordBatch],
     ) -> Result<RecordBatch, BulkNodePublicationError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.lock()?;
         let normalized = self.normalize_bulk_nodes(operation_uuid, batches, false)?;
         if normalized.rows.is_empty() {
             return Ok(node_receipt(&normalized.rows, operation_uuid, Uuid::nil())?);
@@ -584,10 +584,13 @@ impl GraphForge {
         batches: &[RecordBatch],
         same_request_nodes: &ValidatedBulkNodes,
     ) -> Result<ValidatedBulkEdges, BulkValidationError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.read().map_err(|error| {
+            contract_error(
+                BulkInputKind::Edge,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
         self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true)
     }
 
@@ -707,10 +710,7 @@ impl GraphForge {
         operation_uuid: OperationId,
         batches: &[RecordBatch],
     ) -> Result<RecordBatch, BulkEdgePublicationError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.lock()?;
         let empty_nodes = ValidatedBulkNodes {
             rows: Vec::new(),
             operation_uuid,

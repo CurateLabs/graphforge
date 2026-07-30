@@ -97,6 +97,11 @@ the authoritative runnable corpus enforced by the BDD gate.
 
 ### Added
 
+- Add explicit `single_writer`, bounded FIFO `queued_writer`, and
+  `optimistic_multi_writer` embedded modes. Optimistic composite transactions
+  rebase compatible creates, immutable-ledger rows, and disjoint property
+  changes while returning stable conflict and exhausted-retry errors (#213).
+
 - Add transaction-addressed optimistic project staging with OS-backed attempt
   leases, exact-base commit comparison, atomic generation promotion, and
   recovery that preserves live attempts while removing abandoned ones (#212).

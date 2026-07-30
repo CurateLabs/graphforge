@@ -234,10 +234,7 @@ impl GraphForge {
         &self,
         cancellation: Option<CancellationToken>,
     ) -> Result<AdjacencyInspection, GfError> {
-        let visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let visibility = self.graph_visibility.lock()?;
         let adjacency_visibility = self
             .adjacency_visibility
             .write()
@@ -343,10 +340,7 @@ impl GraphForge {
     /// # Errors
     /// Returns [`GfError::Storage`] when canonical topology cannot be read.
     pub fn inspect_adjacency(&self) -> Result<AdjacencyInspection, GfError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.read()?;
         let _adjacency_visibility = self
             .adjacency_visibility
             .read()

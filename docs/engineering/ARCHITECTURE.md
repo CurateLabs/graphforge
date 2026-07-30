@@ -118,6 +118,7 @@ The DocSlime index is [`adrs/README.md`](adrs/README.md) (links only; does not r
 | [0012](../adr/0012-m20-domain-ownership.md) | Knowledge and epistemic domain ownership and schema evolution |
 | [0013](../adr/0013-project-generation-protocol.md) | Durable project-generation protocol |
 | [0014](../adr/0014-workspace-checkpoints.md) | Complete-workspace checkpoints |
+| [0015](../adr/0015-embedded-write-modes.md) | Three embedded project-write modes |
 
 ## Risks & trade-offs
 

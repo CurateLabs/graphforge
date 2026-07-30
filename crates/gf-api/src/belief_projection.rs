@@ -338,10 +338,7 @@ impl GraphForge {
         &self,
         request: ResolveBeliefProjectionRequest,
     ) -> Result<ResolvedBeliefProjection, GfError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.read()?;
         self.resolve_belief_projection_locked(&request, None)
             .map(|(projection, _)| projection)
     }
@@ -351,10 +348,7 @@ impl GraphForge {
         &self,
         request: &ResolveBeliefSubjectRequest,
     ) -> Result<ResolvedBeliefSubject, GfError> {
-        let _visibility = self
-            .graph_visibility
-            .lock()
-            .expect("graph visibility lock poisoned");
+        let _visibility = self.graph_visibility.read()?;
         let (projection, evidence) =
             self.resolve_belief_projection_locked(&request.projection, Some(&request.subject))?;
         let evidence = subject_evidence_envelope(
@@ -505,7 +499,7 @@ impl GraphForge {
     ) -> Result<gf_exec::ExecutionResult, GfError> {
         validate_attachment_request(&request)?;
         fail_attachment_for_test()?;
-        let _visibility = crate::knowledge::lock_graph_visibility(self);
+        let _visibility = crate::knowledge::lock_graph_visibility(self)?;
         let parent =
             gf_storage::resolve_project_generation(self.resolved_generation.container_root())?;
         parent.validate_complete_participant_inventory()?;
