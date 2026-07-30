@@ -15,7 +15,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
@@ -33,7 +33,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
@@ -57,7 +57,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: "20"
@@ -80,7 +80,7 @@ jobs:
     needs: [rust, python, node]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/cache/restore@v6
         with:
           path: gate-fragments
