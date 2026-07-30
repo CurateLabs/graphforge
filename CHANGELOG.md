@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
 
+- Publish the GitHub Pages documentation at `https://docs.graphforge.sh`, with
+  root-relative site URLs and current `CurateLabs/graphforge` source links (#223).
+
 - Stop rerunning the full Test Suite after an already-green pull request is
   squash-merged; exact-head pull-request CI remains the required merge gate
   ([#209](https://github.com/CurateLabs/graphforge/issues/209)).

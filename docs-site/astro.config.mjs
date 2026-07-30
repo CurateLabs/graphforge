@@ -4,8 +4,7 @@ import starlight from '@astrojs/starlight';
 
 /** @type {import('astro').AstroUserConfig} */
 export default defineConfig({
-  site: 'https://curatelabs.github.io',
-  base: '/graphforge-legecy',
+  site: 'https://docs.graphforge.sh',
   outDir: 'dist',
   integrations: [
     starlight({
@@ -16,11 +15,11 @@ export default defineConfig({
         {
           icon: 'github',
           label: 'GitHub',
-          href: 'https://github.com/CurateLabs/graphforge-legecy',
+          href: 'https://github.com/CurateLabs/graphforge',
         },
       ],
       editLink: {
-        baseUrl: 'https://github.com/CurateLabs/graphforge-legecy/edit/main/docs/',
+        baseUrl: 'https://github.com/CurateLabs/graphforge/edit/main/docs/',
       },
       customCss: ['./src/styles/custom.css'],
       // Published nav is reader-journey ordered (Diátaxis). On-disk trees remain

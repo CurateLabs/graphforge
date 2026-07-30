@@ -7,8 +7,8 @@
   <a href="https://github.com/CurateLabs/graphforge-x/tree/main/crates/gf-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="https://github.com/CurateLabs/graphforge-x/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
   <a href="https://github.com/CurateLabs/graphforge-x/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge-x/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
-  <a href="https://curatelabs.github.io/graphforge-legecy/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
-  <a href="https://curatelabs.github.io/graphforge-legecy/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
+  <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
+  <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
 </p>
 
@@ -272,7 +272,7 @@ into the Starlight content collection at build time.
 ```bash
 # Docs site (local) — see also docs/README.md and docs-site/README.md
 pnpm install
-pnpm docs:dev          # http://localhost:4321/graphforge-legecy/
+pnpm docs:dev          # http://localhost:4321/
 pnpm docs:build        # output: docs-site/dist/
 pnpm docs:preview      # serve docs-site/dist/
 # or: make docs-serve / make docs-build / make docs-clean

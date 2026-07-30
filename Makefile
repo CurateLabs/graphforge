@@ -214,7 +214,7 @@ clean:  ## Clean up cache files
 	rm -f test-results*.xml coverage.xml .coverage 2>/dev/null || true
 	rm -rf htmlcov/ build/coverage-rust/ crates/gf-bindings-node/coverage/ 2>/dev/null || true
 
-docs-serve:  ## Serve Starlight docs locally (http://localhost:4321/graphforge-legecy/)
+docs-serve:  ## Serve Starlight docs locally (http://localhost:4321/)
 	pnpm docs:dev
 
 docs-build:  ## Build Starlight docs site to docs-site/dist/
