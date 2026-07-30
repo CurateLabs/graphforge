@@ -18,8 +18,9 @@ use crate::project_generation::{
     resolve_project_generation, validated_generation_manifest_sha256, validated_generation_parent,
 };
 use crate::project_publication::{
-    GENERATIONS_DIR, JournalPhase, LOCKS_DIR, TRANSACTIONS_DIR, WRITER_LOCK_FILE,
-    ensure_machine_directory, open_regular_lock, read_journal, sync_directory, write_journal,
+    ATTEMPTS_DIR, GENERATIONS_DIR, JournalPhase, LOCKS_DIR, TRANSACTIONS_DIR, WRITER_LOCK_FILE,
+    ensure_machine_directory, open_regular_lock, open_transaction_lock, read_journal,
+    sync_directory, write_journal,
 };
 
 const TRASH_DIR: &str = "trash";
@@ -112,6 +113,13 @@ fn recover_journals(
                 "transaction directory contains a noncanonical journal entry",
             ));
         };
+        let transaction_lock = open_transaction_lock(root, transaction_uuid)?;
+        if !FileExt::try_lock_exclusive(&transaction_lock).map_err(storage_io)? {
+            // A live optimistic writer owns this exact attempt. The global
+            // commit lock prevents it from publishing during this recovery
+            // pass, while its transaction lease prevents false abandonment.
+            continue;
+        }
         let mut journal = read_journal(&journal_path)
             .map_err(|_| recovery_corrupt("transaction journal is torn, invalid, or ambiguous"))?;
         if parse_canonical_uuid(&journal.transaction_uuid) != Some(transaction_uuid) {
@@ -142,8 +150,13 @@ fn recover_journals(
                 write_journal(&journal_path, &journal)?;
                 report.aborted_journals += 1;
             }
-            report.removed_generations +=
-                cleanup_abandoned_generation(root, transaction_uuid, generation_uuid, retained)?;
+            report.removed_generations += cleanup_abandoned_generation(
+                root,
+                transaction_uuid,
+                generation_uuid,
+                &journal.request_fingerprint,
+                retained,
+            )?;
         }
     }
     Ok(())
@@ -202,6 +215,7 @@ fn cleanup_abandoned_generation(
     root: &Path,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
+    request_fingerprint: &str,
     retained: &BTreeSet<Uuid>,
 ) -> Result<u64, GfError> {
     if retained.contains(&generation_uuid) {
@@ -209,6 +223,29 @@ fn cleanup_abandoned_generation(
     }
     let generation_name = generation_uuid.hyphenated().to_string();
     let generation_path = root.join(GENERATIONS_DIR).join(&generation_name);
+    let attempt_path = root
+        .join(ATTEMPTS_DIR)
+        .join(transaction_uuid.hyphenated().to_string())
+        .join(request_fingerprint);
+    let mut removed = 0;
+    if attempt_path.exists() {
+        reject_real_directory(&attempt_path)?;
+        std::fs::remove_dir_all(&attempt_path).map_err(storage_io)?;
+        sync_directory(
+            attempt_path
+                .parent()
+                .expect("machine attempt path has a parent"),
+        )?;
+        let transaction_attempt_root = attempt_path
+            .parent()
+            .expect("machine attempt path has a parent");
+        match std::fs::remove_dir(transaction_attempt_root) {
+            Ok(()) => sync_directory(&root.join(ATTEMPTS_DIR))?,
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => return Err(storage_io(error)),
+        }
+        removed = 1;
+    }
     let trash_root = ensure_machine_directory(root, Path::new(TRASH_DIR))?;
     let trash_path = trash_root.join(&generation_name);
 
@@ -223,7 +260,7 @@ fn cleanup_abandoned_generation(
         return Ok(1);
     }
     if !generation_path.exists() {
-        return Ok(0);
+        return Ok(removed);
     }
     reject_real_directory(&generation_path)?;
     let lease_path = generation_path.join("lease.lock");
@@ -400,7 +437,7 @@ mod tests {
     use crate::{
         ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
         ProjectParticipantEncoding, ProjectStageOutcome, open_or_initialize_project,
-        stage_project_generation,
+        stage_project_generation, stage_project_generation_optimistic,
     };
 
     const ENABLE_COOKIE: &str = "graphforge-internal-subprocess-v1";
@@ -529,6 +566,33 @@ mod tests {
             .unwrap()
     }
 
+    fn spawn_optimistic_writer(
+        root: &Path,
+        transaction_uuid: Uuid,
+        generation_uuid: Uuid,
+        failpoint: &str,
+    ) -> std::process::ExitStatus {
+        Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(WRITER_HELPER)
+            .arg("--nocapture")
+            .env("GRAPHFORGE_TEST_PROJECT_ROOT", root)
+            .env(
+                "GRAPHFORGE_TEST_TRANSACTION_UUID",
+                transaction_uuid.hyphenated().to_string(),
+            )
+            .env(
+                "GRAPHFORGE_TEST_GENERATION_UUID",
+                generation_uuid.hyphenated().to_string(),
+            )
+            .env("GRAPHFORGE_TEST_PARTICIPANT_SET", "graph")
+            .env("GRAPHFORGE_TEST_OPTIMISTIC", "1")
+            .env("GRAPHFORGE_PROJECT_FAILPOINTS", ENABLE_COOKIE)
+            .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+            .status()
+            .unwrap()
+    }
+
     fn assert_reopen(root: &Path, expected: Uuid, set: &str, expect_child: bool) {
         let before_recovery = resolve_project_generation(root).unwrap();
         assert_eq!(before_recovery.generation_uuid(), expected);
@@ -604,6 +668,23 @@ mod tests {
                 "graph",
                 committed,
             );
+        }
+    }
+
+    #[test]
+    fn optimistic_commit_failpoints_never_expose_a_partial_generation() {
+        for failpoint in [
+            "project.after_optimistic_commit_lock",
+            "project.after_optimistic_promotion",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let parent = open_or_initialize_project(root.path())
+                .unwrap()
+                .generation_uuid();
+            let status =
+                spawn_optimistic_writer(root.path(), Uuid::now_v7(), Uuid::now_v7(), failpoint);
+            assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+            assert_reopen(root.path(), parent, "graph", false);
         }
     }
 
@@ -1026,8 +1107,16 @@ mod tests {
             participants: participants(&set),
         };
         let result = (|| {
-            let ProjectStageOutcome::Staged(staged) = stage_project_generation(&root, &request)?
-            else {
+            let outcome = if std::env::var("GRAPHFORGE_TEST_OPTIMISTIC").is_ok() {
+                stage_project_generation_optimistic(
+                    &root,
+                    &request,
+                    Sha256::digest(b"optimistic-subprocess-operation").into(),
+                )?
+            } else {
+                stage_project_generation(&root, &request)?
+            };
+            let ProjectStageOutcome::Staged(staged) = outcome else {
                 panic!("new transaction replayed");
             };
             staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()

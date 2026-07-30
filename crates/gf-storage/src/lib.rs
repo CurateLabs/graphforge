@@ -44,6 +44,7 @@ pub use project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectPublicationReceipt, ProjectStageOutcome, StagedParticipant, StagedProjectGeneration,
     ValidatedProjectGeneration, published_project_transaction, stage_project_generation,
+    stage_project_generation_optimistic,
 };
 
 pub mod project_recovery;

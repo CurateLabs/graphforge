@@ -266,6 +266,10 @@ pub enum ProjectErrorCode {
     UnsupportedFilesystem,
     /// Another process currently owns the project writer lock.
     WriterBusy,
+    /// A staged write cannot be applied to the latest committed generation.
+    WriteConflict,
+    /// Compatible contention exceeded the caller's bounded rebase attempts.
+    RebaseExhausted,
     /// A transaction UUID was reused with different immutable inputs.
     TransactionConflict,
     /// A generation failed before or after its commit point.
@@ -298,6 +302,8 @@ impl ProjectErrorCode {
             Self::ProjectCorrupt => "GF_PROJECT_CORRUPT",
             Self::UnsupportedFilesystem => "GF_UNSUPPORTED_FILESYSTEM",
             Self::WriterBusy => "GF_WRITER_BUSY",
+            Self::WriteConflict => "GF_WRITE_CONFLICT",
+            Self::RebaseExhausted => "GF_REBASE_EXHAUSTED",
             Self::TransactionConflict => "GF_IDEMPOTENCY_CONFLICT",
             Self::PublicationFailed => "GF_PUBLICATION_FAILED",
             Self::UnsupportedCapabilityVersion => "GF_UNSUPPORTED_CAPABILITY_VERSION",
