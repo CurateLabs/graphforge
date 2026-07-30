@@ -23,7 +23,7 @@ jobs:
         run: python3 scripts/ci/m21-contract-gate.py run-group --group rust --output gate-fragments
       - name: Save Rust evidence for report job
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: gate-fragments/
           key: m21-transfer-${{ github.run_id }}-rust
@@ -44,7 +44,7 @@ jobs:
         run: python3 scripts/ci/m21-contract-gate.py run-group --group python --output gate-fragments
       - name: Save Python evidence for report job
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: gate-fragments/
           key: m21-transfer-${{ github.run_id }}-python
@@ -69,7 +69,7 @@ jobs:
         run: python3 scripts/ci/m21-contract-gate.py run-group --group node --output gate-fragments
       - name: Save Node evidence for report job
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: gate-fragments/
           key: m21-transfer-${{ github.run_id }}-node
@@ -81,17 +81,17 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: gate-fragments
           key: m21-transfer-${{ github.run_id }}-rust
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: gate-fragments
           key: m21-transfer-${{ github.run_id }}-python
           fail-on-cache-miss: true
-      - uses: actions/cache/restore@v5
+      - uses: actions/cache/restore@v6
         with:
           path: gate-fragments
           key: m21-transfer-${{ github.run_id }}-node

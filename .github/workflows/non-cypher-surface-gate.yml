@@ -142,7 +142,7 @@ jobs:
           PY
 
       - name: Save Rust report for M22
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: non-cypher-evidence/
           key: rust-non-cypher-${{ env.EVIDENCE_SHA }}

@@ -125,7 +125,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -273,7 +273,7 @@ jobs:
           path: target
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -313,7 +313,7 @@ jobs:
           path: target
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -350,7 +350,7 @@ jobs:
           path: target
 
       - name: Cache Cargo build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -470,7 +470,7 @@ jobs:
           path: target
 
       - name: Cache Cargo build
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -566,7 +566,7 @@ jobs:
           path: target
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -613,7 +613,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
