@@ -123,6 +123,7 @@ const PAGES = [
   'adr/0013-project-generation-protocol.md',
   'adr/0014-workspace-checkpoints.md',
   'adr/0015-embedded-write-modes.md',
+  'adr/0016-repository-integration-and-deployment-configuration.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

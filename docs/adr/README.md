@@ -21,6 +21,7 @@ are not retained in this tree.
 | 0013 | [Durable v0.5 project-generation protocol](0013-project-generation-protocol.md) | `0013-project-generation-protocol.md` |
 | 0014 | [Complete-workspace checkpoints and generation-preserving revert](0014-workspace-checkpoints.md) | `0014-workspace-checkpoints.md` |
 | 0015 | [Three embedded project-write modes](0015-embedded-write-modes.md) | `0015-embedded-write-modes.md` |
+| 0016 | [Repository integration and deployment configuration boundary](0016-repository-integration-and-deployment-configuration.md) | `0016-repository-integration-and-deployment-configuration.md` |
 
 ## Numbering
 

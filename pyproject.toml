@@ -37,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 pandas = ["pandas>=2.0"]
 dev = [
+    "jsonschema>=4.23",
     "pytest>=9.0.3",
     "pytest-cov>=4.0",
     "pytest-xdist>=3.0",

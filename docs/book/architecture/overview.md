@@ -253,7 +253,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog across rank/cluster/paths/analyze/similar
 - [Execution Model](execution-model.md) — DataFusion integration, custom graph operators, Arrow result streams
 - [Storage](storage.md) — StorageProvider trait, Parquet provider
-- [ADR Index](../../adr/README.md) — contiguous v0.5.0 decision log (`0001`–`0015`)
+- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0016`)
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Rust core and binding strategy
 - [ADR 0002: RD+Pratt Parser](../../adr/0002-lr1-grammar.md) — Parser algorithm decision
 - [ADR 0003: Progressive Ontology](../../adr/0003-progressive-ontology.md) — exploration-first ontology modes
@@ -266,4 +266,5 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [ADR 0013: Project Generations](../../adr/0013-project-generation-protocol.md) — durable project-generation protocol
 - [ADR 0014: Workspace Checkpoints](../../adr/0014-workspace-checkpoints.md) — complete-workspace checkpoints and revert
 - [ADR 0015: Embedded Write Modes](../../adr/0015-embedded-write-modes.md) — single, queued, and optimistic project writes
+- [ADR 0016: Repository integration and deployment configuration](../../adr/0016-repository-integration-and-deployment-configuration.md) — tracked definitions, local data, CLI, skills, and IaC ownership boundaries
 - [Roadmap](../../releases/roadmap.md) — Milestones and timeline

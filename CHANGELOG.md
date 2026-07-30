@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
 
+- Define the `.graphforge/` repository integration and deployment configuration
+  boundary, including closed versioned contracts, ignored data surfaces,
+  secret-free IaC resolution, and cross-ecosystem ownership (#225).
 - Publish the GitHub Pages documentation at `https://docs.graphforge.sh`, with
   root-relative site URLs and current `CurateLabs/graphforge` source links (#223).
 

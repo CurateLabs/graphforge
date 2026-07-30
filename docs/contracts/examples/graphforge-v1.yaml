@@ -1,0 +1,39 @@
+schema_version: 1
+project:
+  ontology: .graphforge/ontology
+  schemas: .graphforge/schemas
+  seeds: .graphforge/seeds
+  migrations: .graphforge/migrations
+sources:
+  - id: example-data
+    uri: https://example.invalid/graphforge/example.parquet
+    sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    media_type: application/vnd.apache.parquet
+secrets:
+  - id: service-token
+    source: secret_manager
+targets:
+  local:
+    kind: embedded
+    artifact:
+      kind: python_wheel
+      version: 0.5.0
+      sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    write: { mode: single_writer }
+    storage: { kind: local, persistent: true }
+    source_ids: [example-data]
+  production:
+    kind: service
+    artifact:
+      kind: oci_image
+      version: 0.5.1
+      sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    write: { mode: queued_writer, queue_capacity: 64 }
+    storage: { kind: volume, persistent: true, capacity_bytes: 10737418240 }
+    resources: { cpu_millis: 1000, memory_bytes: 2147483648 }
+    network: { exposure: private, port: 8443, tls_required: true }
+    health: { timeout_seconds: 30 }
+    observability: { logs: true, metrics: true, traces: false }
+    backup: { checkpoints: true, retention_count: 14 }
+    source_ids: [example-data]
+    secret_ids: [service-token]
