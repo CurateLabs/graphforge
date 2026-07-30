@@ -1,6 +1,6 @@
 # ADR 0016: Repository integration and deployment configuration boundary
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Date:** 2026-07-30
 
@@ -140,4 +140,4 @@ portable imports. Schema changes are explicit and fail closed while pre-v1.
 Issue #219 remains the close gate. Its native sub-issues implement lifecycle,
 interchange, binding CLIs, skills, static IaC validation, and #215-dependent
 remote provisioning. Direct contract and clean-environment evidence is required
-before this ADR changes from Proposed to Accepted.
+before the canonical tracker closes.

@@ -16,7 +16,10 @@ CONTRACTS = ROOT / "docs" / "contracts"
 def _objects_are_closed(value: object, path: str = "$") -> None:
     if isinstance(value, dict):
         if value.get("type") == "object":
-            assert "additionalProperties" in value, f"open object schema at {path}"
+            additional = value.get("additionalProperties")
+            assert additional is False or (
+                isinstance(additional, dict) and set(additional) == {"$ref"}
+            ), f"open object schema at {path}"
         for key, child in value.items():
             _objects_are_closed(child, f"{path}.{key}")
     elif isinstance(value, list):
@@ -53,11 +56,11 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
     Draft202012Validator(config_schema, registry=registry).validate(config)
     Draft202012Validator(resolved_schema, registry=registry).validate(resolved)
     assert config["schema_version"] == 1
-    assert set(config["project"].values()) == {
-        ".graphforge/ontology",
-        ".graphforge/schemas",
-        ".graphforge/seeds",
-        ".graphforge/migrations",
+    assert config["project"] == {
+        "ontology": ".graphforge/ontology",
+        "schemas": ".graphforge/schemas",
+        "seeds": ".graphforge/seeds",
+        "migrations": ".graphforge/migrations",
     }
     assert [resolved["project"][key] for key in ("state", "imports", "exports")] == [
         ".graphforge/state",
@@ -71,11 +74,12 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
 
 
 def test_resolved_example_has_canonicalizable_ordered_content() -> None:
-    resolved = json.loads((CONTRACTS / "examples" / "graphforge-resolved-v1.json").read_text())
+    source = (CONTRACTS / "examples" / "graphforge-resolved-v1.json").read_text()
+    resolved = json.loads(source)
     canonical = (
         json.dumps(resolved, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
     )
-    assert canonical.endswith("\n") and json.loads(canonical) == resolved
+    assert source == canonical
     assert [item["id"] for item in resolved["sources"]] == sorted(
         item["id"] for item in resolved["sources"]
     )
