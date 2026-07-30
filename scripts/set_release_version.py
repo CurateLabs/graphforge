@@ -6,7 +6,6 @@ Surfaces:
 - Python ``crates/gf-bindings-py/pyproject.toml`` (PEP 440)
 - Node ``crates/gf-bindings-node/package.json``
 - NPX skills ``packages/agent-skills/package.json``
-- ``license-policy.json`` ``release_version`` (metadata only; does not regenerate LICENSE)
 
 Usage:
     python3 scripts/set_release_version.py --check
@@ -32,7 +31,6 @@ CARGO_TOML = ROOT / "Cargo.toml"
 PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
 NODE_PACKAGE = ROOT / "crates" / "gf-bindings-node" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
-LICENSE_POLICY = ROOT / "license-policy.json"
 
 
 def parse_base(version: str) -> tuple[str, bool]:
@@ -72,7 +70,6 @@ def read_current() -> dict[str, str]:
     )
     node = json.loads(NODE_PACKAGE.read_text(encoding="utf-8"))["version"]
     skills = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))["version"]
-    policy = json.loads(LICENSE_POLICY.read_text(encoding="utf-8"))["release_version"]
     if not cargo or not py:
         raise ValueError("could not read Cargo or Python version")
     return {
@@ -80,7 +77,6 @@ def read_current() -> dict[str, str]:
         "python": py.group(1),
         "node": node,
         "skills": skills,
-        "license_policy": policy,
     }
 
 
@@ -90,7 +86,6 @@ def expected_for(base: str, *, dev: bool) -> dict[str, str]:
         "python": python_version(base, dev=dev),
         "node": npm_version(base, dev=dev),
         "skills": npm_version(base, dev=dev),
-        "license_policy": cargo_version(base, dev=dev),
     }
 
 
@@ -142,9 +137,6 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
         meta["version"] = expected[key]
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
-    policy = json.loads(LICENSE_POLICY.read_text(encoding="utf-8"))
-    policy["release_version"] = expected["license_policy"]
-    LICENSE_POLICY.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
     return expected
 
 
@@ -158,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Verify Cargo/Python/Node/skills/license-policy versions are aligned",
+        help="Verify Cargo/Python/Node/skills versions are aligned",
     )
     parser.add_argument(
         "--dry-run",
@@ -196,10 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {key}: {value}")
     if not args.dry_run:
         print()
-        print("Next: review git diff; regenerate LICENSE if release_version/date change via")
-        print(
-            "  python3 scripts/license_policy.py generate --release-version ... --release-date ..."
-        )
+        print("Next: review git diff before committing or publishing.")
         print("Do not push registry tags from this script.")
     return 0
 

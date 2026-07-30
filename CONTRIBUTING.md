@@ -3,9 +3,9 @@
 Thank you for your interest in contributing to GraphForge.
 
 Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
-GraphForge is source-available under `BUSL-1.1`, and contributions are accepted
-under the [Contributor License Agreement](CLA.md) — see
-[License](#license) below and [licensing details](docs/legal/licensing.md).
+GraphForge is open source under the Apache License 2.0 (`Apache-2.0`).
+Contributions are accepted under the same terms — see [License](#license)
+below and [licensing details](docs/legal/licensing.md).
 
 ## Contributor guide
 
@@ -40,18 +40,13 @@ make pre-push
 
 ## License
 
-GraphForge is source-available under `BUSL-1.1`. External contributors must
-accept the [Contributor License Agreement](CLA.md), including its relicensing
-grant, before a contribution may merge. Contributions made within the scope of
-employment require employer authorization or an accepted corporate agreement.
+GraphForge is licensed under `Apache-2.0`. Under Section 5 of that license,
+unless explicitly stated otherwise, any contribution intentionally submitted
+for inclusion in GraphForge is provided under Apache-2.0 without additional
+terms. You retain ownership of your contribution and must have the right to
+submit it; contributions made within the scope of employment require employer
+authorization.
 
-The repository is currently private and does not accept external contributions
-until the CLA service and required status check are enabled. Curate Labs
-employees, authorized contractors, and explicitly approved dependency-update
-bots follow separate authorization records.
-
-`BUSL-1.1` is not an OSI-approved open-source license before a release's Change
-Date, after which that release converts to `AGPL-3.0-only`. The scope of free
-use, the Additional Use Grant, and when commercial terms are required are
-described in [LICENSE](LICENSE) and summarized in
-[licensing details](docs/legal/licensing.md).
+See [LICENSE](LICENSE) for the authoritative terms and
+[licensing details](docs/legal/licensing.md) for package and third-party
+attribution guidance.

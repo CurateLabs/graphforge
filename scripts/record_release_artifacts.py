@@ -106,7 +106,7 @@ def build_record(
             "reproducible link recorded in notes/links."
         ),
         "licenses": {
-            "first_party_spdx": "BUSL-1.1",
+            "first_party_spdx": "Apache-2.0",
             "license_files": ["LICENSE", "NOTICE"],
             "third_party_notices": "legal/THIRD_PARTY_NOTICES.md",
             "related_issues": ["#2783", "#2799"],

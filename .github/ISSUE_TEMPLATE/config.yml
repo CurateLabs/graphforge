@@ -8,10 +8,10 @@ contact_links:
     about: Browse the complete documentation including API reference and Cypher guide
   - name: 📖 Contributing Guide
     url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CONTRIBUTING.md
-    about: Learn how to contribute to GraphForge under BUSL-1.1 and the CLA
+    about: Learn how to contribute to GraphForge under Apache-2.0
   - name: ⚖️ Licensing
     url: https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE
-    about: Business Source License 1.1 terms, Additional Use Grant, and commercial use
+    about: Apache License 2.0 terms and third-party attribution
   - name: 🤝 Code of Conduct
     url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CODE_OF_CONDUCT.md
     about: Community standards and how to report unacceptable behavior

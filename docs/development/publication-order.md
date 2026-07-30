@@ -22,7 +22,7 @@ Related operational docs:
    `0.5.0.dev0`) on the intended RC commit ([#2796](https://github.com/CurateLabs/graphforge-legecy/issues/2796)).
 2. Artifact checksum / SBOM / license record exists for that same commit
    ([#2798](https://github.com/CurateLabs/graphforge-legecy/issues/2798)).
-3. First-party packages declare `BUSL-1.1` with `LICENSE` / `NOTICE` (and
+3. First-party packages declare `Apache-2.0` with `LICENSE` / `NOTICE` (and
    third-party notices intact) ([#2799](https://github.com/CurateLabs/graphforge-legecy/issues/2799)).
 4. Dry-runs are green for applicable surfaces: `cargo publish --dry-run` (see
    crates disposition below), TestPyPI/wheel clean-install, `npm publish

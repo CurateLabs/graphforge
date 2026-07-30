@@ -2,7 +2,7 @@
   "name": "@graphforge/agent-skills",
   "version": "0.5.0-dev.0",
   "description": "NPX-distributed agent skills and adapters for GraphForge",
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "homepage": "https://curatelabs.github.io/graphforge-legecy/",
   "repository": {
     "type": "git",

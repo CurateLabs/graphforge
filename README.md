@@ -9,7 +9,7 @@
   <a href="https://github.com/CurateLabs/graphforge-x/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge-x/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
   <a href="https://curatelabs.github.io/graphforge-legecy/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
   <a href="https://curatelabs.github.io/graphforge-legecy/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
-  <a href="https://github.com/CurateLabs/graphforge-x/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-BUSL--1.1-6f42c1.svg" alt="Source Available — BUSL 1.1" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
 </p>
 
 <p align="center">
@@ -310,11 +310,9 @@ Release notes accumulate in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Source Available under the Business Source License 1.1 (`BUSL-1.1`) © Curate
-Labs Inc. Each release changes to `AGPL-3.0-only` three years after its release
-date. Limited non-commercial and scale-limited commercial internal use is
-granted; hosted services, OEM distribution, and use above the stated limits
-require commercial terms. See [LICENSE](LICENSE) and
+Open source under the Apache License 2.0 (`Apache-2.0`) © Curate Labs Inc.
+You may use, modify, and distribute GraphForge, including for commercial
+purposes, subject to the license terms. See [LICENSE](LICENSE) and
 [licensing details](docs/legal/licensing.md).
 
 Built on Apache Arrow, DataFusion, Parquet, and the

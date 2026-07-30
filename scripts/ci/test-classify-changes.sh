@@ -71,7 +71,7 @@ assert_classification "$all" tests/contracts/concurrency-short-matrix.json concu
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.
-perl -0pi -e 's/license = "MIT"/license = "BUSL-1.1"/' "$fixture/Cargo.toml"
+perl -0pi -e 's/license = "MIT"/license = "Apache-2.0"/' "$fixture/Cargo.toml"
 git -C "$fixture" add Cargo.toml
 git -C "$fixture" commit -qm "change license metadata"
 metadata_actual=$(

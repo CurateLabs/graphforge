@@ -44,7 +44,7 @@ python3 scripts/record_release_artifacts.py \
 
 ## License / third-party pointers
 
-- First-party: `BUSL-1.1`, shipped `LICENSE` + `NOTICE` (`make package-license-verify` / #2799).
+- First-party: `Apache-2.0`, shipped `LICENSE` + `NOTICE` (`make package-license-verify` / #218).
 - Third-party inventory: [`legal/THIRD_PARTY_NOTICES.md`](../../legal/THIRD_PARTY_NOTICES.md) (#2783).
 - Do not duplicate counsel work on #2434 / #2726 here.
 

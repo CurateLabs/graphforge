@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/graphforge.svg)](https://pypi.org/project/graphforge/)
 [![Docs](https://img.shields.io/badge/docs-online-0A66C2.svg)](https://curatelabs.github.io/graphforge-legecy/)
 [![openCypher TCK](https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg)](reference/tck-compliance.md)
-[![Source Available — BUSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-6f42c1.svg)](https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE)
+[![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 
 GraphForge lets you write openCypher queries against an in-memory or Parquet-backed graph
 with no external services. The v0.5.0 release passes **all 3,897 openCypher TCK scenarios**

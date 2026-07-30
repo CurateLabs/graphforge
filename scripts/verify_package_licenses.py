@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Verify first-party publishable packages ship BUSL LICENSE + NOTICE.
+"""Verify first-party publishable packages ship Apache LICENSE + NOTICE.
 
 Checks package *contents* (not only source-tree copies):
 
 - Cargo: ``cargo package --list`` includes LICENSE and NOTICE
 - npm: ``npm pack --dry-run`` lists LICENSE and NOTICE
-- Python: maturin/pyproject ``license-files`` exist and declare BUSL-1.1
+- Python: maturin/pyproject ``license-files`` exist and declare Apache-2.0
 
 Usage:
     python3 scripts/verify_package_licenses.py
@@ -92,7 +92,7 @@ def verify_cargo_crate(name: str) -> list[str]:
             # cargo may prefix with crate-version/
             if not any(line.endswith(f"/{required}") or line == required for line in files):
                 errors.append(f"{name}: packaged crate lacks {required}")
-    # Metadata SPDX / license-file already enforced by license_policy.py.
+    # Metadata SPDX / license-file is also enforced by license_check.py.
     return errors
 
 
@@ -103,8 +103,8 @@ def verify_npm_package(package_dir: Path) -> list[str]:
     if not package_json.exists():
         return [f"{package_dir.relative_to(ROOT)}: missing package.json"]
     meta = json.loads(package_json.read_text(encoding="utf-8"))
-    if meta.get("license") != "BUSL-1.1":
-        errors.append(f"{package_dir.relative_to(ROOT)}: license is not BUSL-1.1")
+    if meta.get("license") != "Apache-2.0":
+        errors.append(f"{package_dir.relative_to(ROOT)}: license is not Apache-2.0")
     files_field = meta.get("files")
     if isinstance(files_field, list):
         for required in ("LICENSE", "NOTICE"):
@@ -176,8 +176,8 @@ def verify_python_package() -> list[str]:
     """Return errors for Python package license metadata and files."""
     errors: list[str] = []
     text = PYTHON_PYPROJECT.read_text(encoding="utf-8") if PYTHON_PYPROJECT.exists() else ""
-    if 'license = "BUSL-1.1"' not in text:
-        errors.append("crates/gf-bindings-py/pyproject.toml lacks license = BUSL-1.1")
+    if 'license = "Apache-2.0"' not in text:
+        errors.append("crates/gf-bindings-py/pyproject.toml lacks license = Apache-2.0")
     match = re.search(r"license-files\s*=\s*\[([^\]]+)\]", text)
     if not match:
         errors.append("crates/gf-bindings-py/pyproject.toml lacks license-files")

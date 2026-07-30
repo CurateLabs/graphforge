@@ -133,6 +133,6 @@ pytest -m "not slow"
 **By submitting this PR, I confirm that:**
 
 - [ ] I have read and followed the [CONTRIBUTING.md](../CONTRIBUTING.md) guidelines
-- [ ] I have accepted the current [Contributor License Agreement](../CLA.md), or I am an explicitly authorized Curate Labs contributor/bot
+- [ ] I understand that intentionally submitted contributions are licensed under Apache-2.0
 - [ ] I am contributing personally, or my employer has authorized this contribution
 - [ ] I am authorized to make these contributions

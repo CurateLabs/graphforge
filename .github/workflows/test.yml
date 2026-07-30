@@ -115,7 +115,7 @@ jobs:
         run: scripts/check-workflows.sh
 
       - name: Verify license policy
-        run: python3 scripts/license_policy.py check --report license-compliance-report.json
+        run: python3 scripts/license_check.py --report license-compliance-report.json
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

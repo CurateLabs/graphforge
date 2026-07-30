@@ -200,7 +200,7 @@ All PRs must:
 - Reference the issue number in the commit and PR body (`Closes #XX` or `Refs #XX`)
 
 See [AGENTS.md](../../AGENTS.md) for agent workflow and
-[CONTRIBUTING.md](../../CONTRIBUTING.md) for the CLA / conduct / licensing
+[CONTRIBUTING.md](../../CONTRIBUTING.md) for contribution, conduct, and licensing
 onboarding contract.
 
 ---
@@ -274,11 +274,8 @@ See [release-process.md](release-process.md) for the full release procedure and
 
 ## License
 
-GraphForge is source-available under `BUSL-1.1`. External contributors must
-accept the repository [Contributor License Agreement](https://github.com/CurateLabs/graphforge-legecy/blob/main/CLA.md), including
-its relicensing grant, before a contribution may merge. Contributions made
-within the scope of employment require employer authorization or an accepted
-corporate agreement.
-
-The repository is currently private and does not accept external contributions
-until the CLA service and required status check are enabled.
+GraphForge is open source under the Apache License 2.0 (`Apache-2.0`). Under
+Section 5 of that license, intentionally submitted contributions are provided
+under Apache-2.0 unless explicitly stated otherwise. Contributors retain
+ownership and must have the right to submit their work; contributions made
+within the scope of employment require employer authorization.

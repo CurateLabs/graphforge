@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Verify release license policy
-        run: python3 scripts/license_policy.py check --report license-compliance-report.json
+        run: python3 scripts/license_check.py --report license-compliance-report.json
 
   # Build the native abi3 wheel per OS. abi3-py310 → one wheel per OS covers
   # CPython 3.10+; the binding's pyproject is the canonical `graphforge` dist.

@@ -1,107 +1,67 @@
 # GraphForge Licensing
 
-GraphForge `main` is source-available under the Business Source License 1.1
-(`BUSL-1.1`). **v0.5.0 is the first GraphForge line under BUSL-1.1** (the first
-BUSL-1.1 publication line). The Business Source License is not an OSI-approved
-open-source license before the applicable Change Date.
+GraphForge `main` and the v0.5.0 release line are open source under the
+Apache License 2.0 (`Apache-2.0`). The repository-root [LICENSE](../../LICENSE)
+contains the authoritative terms.
 
-## Current license
+## Covered first-party work
 
-- Licensor: Curate Labs Inc.
-- Licensed Work: GraphForge first-party source and distributions identified by
-  the commit or release tag that contains the license.
-- Change License: GNU Affero General Public License v3.0 only
-  (`AGPL-3.0-only`).
-- Change Date: three calendar years after each release’s recorded release date.
-  A February 29 release changes on February 28 when the third anniversary year
-  is not a leap year.
+The Apache-2.0 grant covers the first-party source and distributions in this
+repository, including the Rust engine, language bindings, command-line tools,
+agent skills, build and release tooling, and first-party documentation.
+Published Cargo, Python, and npm package metadata reports `Apache-2.0` and the
+packages include `LICENSE` and `NOTICE`.
 
-The authoritative terms and the exact Additional Use Grant are in the
-repository-root [`LICENSE`](https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE).
-The machine-readable release parameters are in
-[`license-policy.json`](https://github.com/CurateLabs/graphforge-legecy/blob/main/license-policy.json).
+The Apache license permits use, modification, redistribution, and commercial
+use subject to its conditions. It does not grant rights to Curate Labs or
+GraphForge trademarks beyond the license's customary descriptive-use terms.
 
-## Additional Use Grant
+Commercial extensions, managed services, support, or other products distributed
+separately from this repository are not part of the covered work and may have
+their own terms. Their existence does not narrow the Apache-2.0 rights granted
+for this repository.
 
-The license permits non-production use. Its Additional Use Grant also permits:
+## Third-party open-source dependencies
 
-- non-commercial production use by students, academic institutions, and active
-  non-commercial open-source projects as defined in `LICENSE`; and
-- commercial internal production use only while the workload stays at or below
-  both 500,000 aggregate nodes and edges and three concurrently active
-  GraphForge process instances.
+Third-party crates and other incorporated materials retain their own licenses.
 
-A separate commercial license is required for commercial internal use above
-either limit, any hosted GraphForge-powered service offered to third parties,
-or embedding GraphForge in a closed-source product commercially supplied to
-third parties.
-
-The restrictions are contractual. GraphForge does not add telemetry, remote
-metering, a kill switch, or collection of graph contents to enforce them.
-
-## Third-party OSS dependencies
-
-Third-party crates remain under their own licenses. GraphForge does not relicense
-them.
-
-- SPDX allowlist and CI gate: [`deny.toml`](https://github.com/CurateLabs/graphforge-legecy/blob/main/deny.toml)
-  via `cargo deny check licenses` / `make cargo-deny-licenses`.
-- Generated attribution texts for binary redistributions (Python wheels, native
-  Node addons, CLI): [`legal/THIRD_PARTY_NOTICES.md`](https://github.com/CurateLabs/graphforge-legecy/blob/main/legal/THIRD_PARTY_NOTICES.md).
-  Regenerate after dependency changes with `make third-party-notices`
-  (requires [`cargo-about`](https://github.com/EmbarkStudios/cargo-about)).
-- First-party `NOTICE` points at that inventory; published binary packages include
-  `THIRD_PARTY_NOTICES.md` alongside `LICENSE` and `NOTICE`.
+- The SPDX allowlist and CI gate are defined in [`deny.toml`](../../deny.toml)
+  and run with `cargo deny check licenses` / `make cargo-deny-licenses`.
+- Generated attribution texts for binary redistributions are in
+  [`legal/THIRD_PARTY_NOTICES.md`](../../legal/THIRD_PARTY_NOTICES.md).
+  Regenerate them after dependency changes with `make third-party-notices`.
+- Published Python wheels, native Node addons, and CLI packages include the
+  relevant third-party notices alongside `LICENSE` and `NOTICE`.
 - Vendored openCypher TCK material under `tests/tck/` keeps its own Apache-2.0
   `LICENSE` and `NOTICE`.
 
-Python and Node package metadata for published GraphForge packages report
-`BUSL-1.1`. Their runtime/tooling dependencies (for example PyArrow on PyPI, or
-dev-only npm packages) retain their upstream licenses; consult those packages’
-own metadata when redistributing them separately.
-
 ## Previously published MIT artifacts
 
-Prior releases through `v0.4.0` shipped under MIT (`license-policy.json`
-`legacy_mit_boundary`). Those tags, published packages, and source archives keep
-the MIT rights included with the artifacts; the repository does not rewrite
-history or replace them. **v0.5.0** is the first GraphForge line under
-BUSL-1.1.
+Releases through v0.4.0 were published under the MIT License. Those tags,
+packages, and source archives retain the rights included with their artifacts;
+the repository does not rewrite history or replace those grants. v0.5.0 is the
+first GraphForge release line under Apache-2.0.
 
 ## Release controls
 
-Release preparation must run:
+Release preparation verifies the license and packaged attribution surfaces:
 
 ```bash
-python3 scripts/license_policy.py generate \
-  --release-version X.Y.Z \
-  --release-date YYYY-MM-DD
-python3 scripts/license_policy.py check \
-  --report license-compliance-report.json
+python3 scripts/license_check.py --report license-compliance-report.json
+make package-license-verify
 cargo deny check licenses
 python3 scripts/generate_third_party_notices.py --check
 ```
 
-Generation updates the version, release date, three-year Change Date, policy
-digests, and root license together. The release workflow blocks package builds
-and publication when the checked-in policy, canonical terms, manifests, or
-documentation drift.
+The release workflow blocks publication if first-party metadata, canonical
+license copies, notices, or documentation drift.
 
 ## Contributions
 
-Future external contributors must accept the repository’s
-[Contributor License Agreement](https://github.com/CurateLabs/graphforge-legecy/blob/main/CLA.md).
-Because this repository is
-currently private, external contributions remain disabled until a CLA service
-and required status check are configured and their audit export is stored
-under Curate Labs control.
+Under Section 5 of Apache-2.0, unless explicitly stated otherwise, any
+contribution intentionally submitted for inclusion in GraphForge is provided
+under Apache-2.0 without additional terms. Contributors retain ownership and
+must have the right to submit their work, including any required employer
+authorization. See [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
-## Authority record
-
-On July 24, 2026, David Spencer, owner of Curate Labs Inc. and its Chairman and
-Chief Executive Officer, directed the prospective MIT-to-BUSL transition for
-GraphForge. Repository history at the transition boundary contains
-contributions authored by David Spencer plus automated dependency-update
-commits; third-party materials retain their own licenses.
-
-This page is an engineering summary, not legal advice. The `LICENSE` controls.
+This page is an engineering summary, not legal advice. `LICENSE` controls.
