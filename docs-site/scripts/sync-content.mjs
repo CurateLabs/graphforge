@@ -10,10 +10,9 @@ const repoRoot = path.resolve(siteRoot, '..');
 const contentRoot = path.join(siteRoot, 'src/content/docs');
 const docsRoot = path.join(repoRoot, 'docs');
 
-/** Must match `base` in astro.config.mjs (CurateLabs GH Pages project site). */
-const GH_DOCS_BLOB = 'https://github.com/CurateLabs/graphforge-legecy/blob/main/docs';
-const GH_REPO_BLOB = 'https://github.com/CurateLabs/graphforge-legecy/blob/main';
-const GH_DOCS_TREE = 'https://github.com/CurateLabs/graphforge-legecy/tree/main/docs';
+const GH_DOCS_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main/docs';
+const GH_REPO_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main';
+const GH_DOCS_TREE = 'https://github.com/CurateLabs/graphforge/tree/main/docs';
 
 /** Directory hrefs with no published index → concrete allowlisted page (docs-relative). */
 const DIRECTORY_DEFAULTS = {

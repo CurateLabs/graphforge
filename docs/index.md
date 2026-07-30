@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/graphforge.svg)](https://pypi.org/project/graphforge/)
 [![Python](https://img.shields.io/pypi/pyversions/graphforge.svg)](https://pypi.org/project/graphforge/)
-[![Docs](https://img.shields.io/badge/docs-online-0A66C2.svg)](https://curatelabs.github.io/graphforge-legecy/)
+[![Docs](https://img.shields.io/badge/docs-online-0A66C2.svg)](https://docs.graphforge.sh/)
 [![openCypher TCK](https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg)](reference/tck-compliance.md)
 [![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 
