@@ -9,7 +9,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use gf_api::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
     DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
-    ListCheckpointsRequest, OperationId, PageRequest, PageToken, RevertCheckpointRequest,
+    ListCheckpointsRequest, OperationId, PageRequest, PageToken, RepositoryContext,
+    RevertCheckpointRequest,
 };
 use uuid::Uuid;
 
@@ -25,17 +26,53 @@ struct Cli {
     #[arg(long, global = true)]
     project: Option<PathBuf>,
 
+    /// Code repository root; defaults to discovery from the current directory.
+    #[arg(long, global = true)]
+    project_dir: Option<PathBuf>,
+
+    /// Emit the stable JSON result for repository lifecycle commands.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Initialize repository-local GraphForge definitions and state.
+    Init,
+    /// Validate declared definitions and source digests without ingesting data.
+    Sync,
+    /// Remove only repository-local runtime state.
+    Remove(RemoveArgs),
+    /// Validate or resolve repository configuration.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Restore the complete workspace from a checkpoint.
+    Revert(RevertArgs),
     /// Manage immutable named workspace checkpoints.
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+}
+
+#[derive(Args)]
+struct RemoveArgs {
+    /// Required explicit non-interactive confirmation.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Parse and validate graphforge.yaml.
+    Validate,
+    /// Emit deterministic, secret-free resolved configuration.
+    Resolve,
 }
 
 #[derive(Subcommand)]
@@ -201,6 +238,49 @@ fn write_result(result: &ExecutionResult) -> Result<(), gf_api::GfError> {
         .map_err(|error| gf_api::GfError::Execution(error.to_string()))
 }
 
+fn run_repository(
+    command: Command,
+    project_dir: Option<PathBuf>,
+    json: bool,
+) -> Result<(), gf_api::GfError> {
+    let start = project_dir.unwrap_or(
+        std::env::current_dir().map_err(|error| gf_api::GfError::Storage(error.to_string()))?,
+    );
+    let repository = RepositoryContext::discover(start)?;
+    let always_json = matches!(
+        &command,
+        Command::Config {
+            command: ConfigCommand::Resolve
+        }
+    );
+    let value = match command {
+        Command::Init => serde_json::to_value(repository.init()?),
+        Command::Sync => serde_json::to_value(repository.sync()?),
+        Command::Remove(args) => serde_json::to_value(repository.remove(args.yes)?),
+        Command::Config {
+            command: ConfigCommand::Validate,
+        } => {
+            repository.load_config()?;
+            Ok(serde_json::json!({"valid": true}))
+        }
+        Command::Config {
+            command: ConfigCommand::Resolve,
+        } => Ok(repository.resolve_config()?),
+        _ => unreachable!(),
+    }
+    .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    if json || always_json {
+        println!(
+            "{}",
+            serde_json::to_string(&value)
+                .map_err(|error| gf_api::GfError::Execution(error.to_string()))?
+        );
+    } else {
+        println!("ok");
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), gf_api::GfError> {
     if cli.info {
         println!("graphforge {}", env!("CARGO_PKG_VERSION"));
@@ -210,14 +290,35 @@ fn run(cli: Cli) -> Result<(), gf_api::GfError> {
         println!("GraphForge — use --help for options");
         return Ok(());
     };
-    let path = cli.project.ok_or_else(|| {
-        gf_api::GfError::Validation("--project is required for checkpoint commands".into())
-    })?;
+    if matches!(
+        &command,
+        Command::Init | Command::Sync | Command::Remove(_) | Command::Config { .. }
+    ) {
+        return run_repository(command, cli.project_dir, cli.json);
+    }
+    let path = match cli.project {
+        Some(path) => path,
+        None => {
+            RepositoryContext::discover(
+                cli.project_dir.unwrap_or(
+                    std::env::current_dir()
+                        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?,
+                ),
+            )?
+            .state_path
+        }
+    };
     let path = path
         .to_str()
         .ok_or_else(|| gf_api::GfError::Validation("--project must be valid UTF-8".into()))?;
     let mut graph = GraphForge::new(Some(path))?;
     let result = match command {
+        Command::Revert(args) => graph.revert_to_checkpoint(RevertCheckpointRequest {
+            name: args.name,
+            reason: args.reason,
+            idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
+            actor_uuid: actor(args.actor_uuid.as_deref())?,
+        })?,
         Command::Checkpoint { command } => match command {
             CheckpointCommand::Create(args) => graph.checkpoint(CheckpointRequest {
                 name: args.name,
@@ -268,15 +369,29 @@ fn run(cli: Cli) -> Result<(), gf_api::GfError> {
                 })?
             }
         },
+        _ => unreachable!(),
     };
     write_result(&result)
 }
 
 fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
     if let Err(error) = run(cli) {
-        eprintln!("{}: {error}", error.code());
-        std::process::exit(1);
+        if json {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error":{"code":error.code(),"message":error.to_string()}})
+            );
+        } else {
+            eprintln!("{}: {error}", error.code());
+        }
+        let exit_code = match error {
+            gf_api::GfError::Validation(_) => 2,
+            gf_api::GfError::Storage(_) => 3,
+            _ => 1,
+        };
+        std::process::exit(exit_code);
     }
 }
 
@@ -371,5 +486,18 @@ mod tests {
         };
         assert_eq!(args.name, "before-change");
         assert_eq!(args.query.join(" "), "MATCH (n) RETURN n");
+    }
+
+    #[test]
+    fn repository_commands_use_project_dir_and_explicit_remove_confirmation() {
+        assert!(Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "init"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "config", "resolve"]).is_ok()
+        );
+        let cli = Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "remove"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Remove(RemoveArgs { yes: false }))
+        ));
     }
 }

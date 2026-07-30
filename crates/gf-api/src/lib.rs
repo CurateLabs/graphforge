@@ -76,6 +76,7 @@ mod provider_embedding_execution;
 mod provider_find;
 mod provider_rerank;
 mod provider_session;
+mod repository;
 #[cfg(test)]
 mod same_process_concurrency_tests;
 #[cfg(test)]
@@ -90,6 +91,11 @@ mod stream_cancellation_isolation_tests;
 mod valid_time;
 mod workspace_ontology;
 mod write_modes;
+
+pub use repository::{
+    GitProvenance, ProjectConfig, RepositoryContext, RepositoryInitReceipt,
+    RepositoryRemoveReceipt, RepositorySyncReceipt,
+};
 
 // Re-export the foundational types callers need alongside the facade, so a
 // single `use gf_api::...` reaches the common surface.

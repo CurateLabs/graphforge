@@ -23,6 +23,8 @@ datafusion = { workspace = true }
 futures = { workspace = true }
 parquet = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -31,7 +33,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 cucumber = { workspace = true }
-serde = { workspace = true }
 tokio = { workspace = true }
 gf-cypher = { path = "../gf-cypher" }
 gf-storage = { path = "../gf-storage", features = ["test-failpoints"] }
