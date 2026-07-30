@@ -132,7 +132,7 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     native_step = "Clean-install and execute native contract"
     write_step = "Write target evidence"
     stage_step = "Stage Python report for aggregate job"
-    transfer_step = "uses: actions/cache/save@v5"
+    transfer_step = "uses: actions/cache/save@v6"
     assert workflow_text.count(prepare_step) == 1
     python_job = required_section(workflow_text, "  python:\n", "  node:\n")
     assert (
@@ -229,9 +229,9 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(node_job, "timeout-minutes: ${{ matrix.timeout_minutes || 60 }}")
 
-    assert "actions/cache@v5" not in node_job
-    assert "actions/cache/restore@v5" not in node_job
-    assert node_job.count("actions/cache/save@v5") == 1
+    assert "actions/cache@v6" not in node_job
+    assert "actions/cache/restore@v6" not in node_job
+    assert node_job.count("actions/cache/save@v6") == 1
     assert_active_lines(
         node_job,
         "path: binding-rc-reports",
@@ -365,7 +365,7 @@ def main() -> None:
         "duplicate Windows matrix entry",
     )
     install_marker = "      - name: Install workspace dependencies"
-    for cache_action in ("actions/cache/restore@v5", "actions/cache/save@v5"):
+    for cache_action in ("actions/cache/restore@v6", "actions/cache/save@v6"):
         injected = (
             "      - name: Unapproved Windows cache transfer\n"
             f"        uses: {cache_action}\n"
@@ -435,7 +435,7 @@ def main() -> None:
     prepare_marker = "Prepare writable Python RC evidence directory"
     native_marker = "Clean-install and execute native contract"
     write_marker = "Write target evidence"
-    transfer_marker = "uses: actions/cache/save@v5"
+    transfer_marker = "uses: actions/cache/save@v6"
     for marker, active_line in (
         (
             prepare_marker,
@@ -490,7 +490,7 @@ def main() -> None:
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",
         "Write target evidence",
-        "uses: actions/cache/save@v5",
+        "uses: actions/cache/save@v6",
     ):
         rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
     wrapper_step = "Prepare Rust compiler wrapper for native contracts"
@@ -578,10 +578,10 @@ def main() -> None:
     assert "cargo " not in post_maturin.lower()
     assert "tests/*.py" not in post_maturin
     assert "native contract" not in post_maturin.lower()
-    publish_transfer = workflow_step(post_maturin, "uses: actions/cache/save@v5")
+    publish_transfer = workflow_step(post_maturin, "uses: actions/cache/save@v6")
     assert_active_lines(
         publish_transfer,
-        "uses: actions/cache/save@v5",
+        "uses: actions/cache/save@v6",
         "path: dist",
         "key: publish-python-${{ github.run_id }}-${{ matrix.os }}",
     )
