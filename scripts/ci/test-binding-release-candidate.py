@@ -229,27 +229,18 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(node_job, "timeout-minutes: ${{ matrix.timeout_minutes || 60 }}")
 
-    cache_name = "Restore Windows Node Cargo build state"
-    assert node_job.count(cache_name) == 1
-    cache = required_section(
-        node_job, f"- name: {cache_name}", "- name: Install workspace dependencies"
-    )
+    assert "actions/cache@v5" not in node_job
+    assert "actions/cache/restore@v5" not in node_job
+    assert node_job.count("actions/cache/save@v5") == 1
     assert_active_lines(
-        cache,
-        "if: matrix.target == 'x86_64-pc-windows-msvc'",
-        "uses: actions/cache@v5",
-        "~/.cargo/registry",
-        "~/.cargo/git/db",
-        "target",
-        "key: ${{ runner.os }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0-"
-        "${{ hashFiles('Cargo.lock') }}",
+        node_job,
+        "path: binding-rc-reports",
+        "key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.report_target }}",
     )
-    assert all(
-        forbidden not in cache
-        for forbidden in ("inputs.commit_sha", "EVIDENCE_SHA", "github.sha", "restore-keys")
+    assert "Restore Windows Node Cargo build state" not in node_job
+    assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(
+        "Build declared publish target"
     )
-    assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(cache_name)
-    assert node_job.index(cache_name) < node_job.index("Build declared publish target")
 
     assert_active_lines(
         node_job,
@@ -373,25 +364,21 @@ def main() -> None:
         rc_workflow_text.replace(windows_entry, windows_entry + windows_entry, 1),
         "duplicate Windows matrix entry",
     )
+    install_marker = "      - name: Install workspace dependencies"
+    for cache_action in ("actions/cache/restore@v5", "actions/cache/save@v5"):
+        injected = (
+            "      - name: Unapproved Windows cache transfer\n"
+            f"        uses: {cache_action}\n"
+            "        with:\n"
+            "          path: target\n"
+            "          key: unapproved-windows-build-cache\n"
+        )
+        rejected_windows_node_cold_start_policy(
+            rc_workflow_text.replace(install_marker, injected + install_marker, 1),
+            cache_action,
+        )
     for original, invalid in (
         ("timeout_minutes: 90", "timeout_minutes: 60"),
-        (
-            "${{ runner.os }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0-"
-            "${{ hashFiles('Cargo.lock') }}",
-            "${{ github.sha }}-cargo-x86_64-pc-windows-msvc-release-rust-1.96.0",
-        ),
-        ("${{ runner.os }}-cargo-", "cargo-"),
-        ("x86_64-pc-windows-msvc-release", "windows-release"),
-        ("-release-rust-", "-rust-"),
-        ("rust-1.96.0-", "rust-unpinned-"),
-        ("${{ hashFiles('Cargo.lock') }}", "no-lockfile"),
-        (
-            "if: matrix.target == 'x86_64-pc-windows-msvc'",
-            "if: matrix.execution_mode == 'native'",
-        ),
-        ("~/.cargo/registry", "~/.cargo/registry-disabled"),
-        ("~/.cargo/git/db", "~/.cargo/git-disabled"),
-        ("            target\n", "            target-disabled\n"),
         ("--platform --release", "--platform --debug"),
         ("pnpm --filter @graphforge/node test:smoke", "sleep 1"),
         ("pnpm --filter @graphforge/node test:smoke", "retry native-smoke"),

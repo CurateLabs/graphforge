@@ -9,6 +9,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 FORBIDDEN = ("actions/upload-artifact@", "actions/download-artifact@", "retention-days:")
+EXPECTED_DEPENDENCY_KEYS = Counter(
+    {
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 7,
+        "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
+    }
+)
+EXPECTED_STICKY_KEYS = Counter(
+    {
+        "${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1": 5,
+        (
+            "${{ github.repository }}-daily-fuzz-"
+            "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
+        ): 1,
+        "${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3": 1,
+    }
+)
+EXPECTED_STICKY_DELETES = Counter(
+    {"${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3": 1}
+)
 EXPECTED_SAVES = Counter(
     {
         "binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}": 1,
@@ -65,13 +84,13 @@ EXPECTED_RESTORES = Counter(
 )
 
 
-def cache_steps(text: str) -> list[list[str]]:
-    """Return cache action steps without accepting matches from later steps."""
+def action_steps(text: str, action_prefix: str) -> list[list[str]]:
+    """Return matching action steps without accepting fields from later steps."""
     lines = text.splitlines()
     steps: list[list[str]] = []
     for index, line in enumerate(lines):
         normalized = line.strip().removeprefix("- ").removeprefix("uses:").strip().strip("'\"")
-        if not normalized.startswith("actions/cache/"):
+        if not normalized.startswith(action_prefix):
             continue
         uses_indent = len(line) - len(line.lstrip())
         start = index
@@ -96,6 +115,10 @@ def cache_steps(text: str) -> list[list[str]]:
             end += 1
         steps.append(lines[start:end])
     return steps
+
+
+def cache_steps(text: str) -> list[list[str]]:
+    return action_steps(text, "actions/cache/")
 
 
 def field(step: list[str], name: str) -> str | None:
@@ -126,6 +149,50 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
     return saved, restored
 
 
+def dependency_contracts(text: str) -> list[str]:
+    keys: list[str] = []
+    for step in action_steps(text, "actions/cache@"):
+        assert field(step, "uses") == "actions/cache@v5", (
+            "dependency cache must use actions/cache@v5"
+        )
+        key = field(step, "key")
+        assert key is not None, "dependency cache has no exact key"
+        rendered = "\n".join(step)
+        assert "target" not in rendered, f"large build tree stored in actions/cache: {key}"
+        assert "crates/**/*.rs" not in key and "crates/**" not in key, (
+            f"dependency cache is keyed by source files: {key}"
+        )
+        keys.append(key)
+    return keys
+
+
+def sticky_contracts(text: str) -> tuple[list[str], list[str]]:
+    mounted: list[str] = []
+    deleted: list[str] = []
+    for step in action_steps(text, "useblacksmith/stickydisk"):
+        uses = field(step, "uses")
+        if uses == "useblacksmith/stickydisk@v1":
+            key = field(step, "key")
+            assert key is not None, "sticky disk has no exact key"
+            mounted.append(key)
+        elif uses == "useblacksmith/stickydisk-delete@v1":
+            key = field(step, "delete-key")
+            assert key is not None, "sticky disk deletion has no exact key"
+            deleted.append(key)
+        else:
+            raise AssertionError(f"unapproved sticky-disk action: {uses}")
+    return mounted, deleted
+
+
+def validate_maturin_storage(text: str) -> None:
+    for step in action_steps(text, "PyO3/maturin-action@"):
+        assert field(step, "uses") == "PyO3/maturin-action@v1", "unapproved Maturin action"
+        sccache = field(step, "sccache")
+        assert sccache is None or sccache.lower() == "false", (
+            f"Maturin sccache uses GitHub storage: {sccache}"
+        )
+
+
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
     for path, text in texts.items():
@@ -134,14 +201,26 @@ def main() -> None:
 
     saved: list[str] = []
     restored: list[str] = []
+    dependency_keys: list[str] = []
+    sticky_keys: list[str] = []
+    sticky_deletes: list[str] = []
     for text in texts.values():
         file_saves, file_restores = cache_contracts(text)
         saved.extend(file_saves)
         restored.extend(file_restores)
+        dependency_keys.extend(dependency_contracts(text))
+        file_sticky, file_deletes = sticky_contracts(text)
+        sticky_keys.extend(file_sticky)
+        sticky_deletes.extend(file_deletes)
+        validate_maturin_storage(text)
     assert Counter(saved) == EXPECTED_SAVES, "CI transfer producer contract drift"
     assert Counter(restored) == EXPECTED_RESTORES, "CI transfer consumer contract drift"
+    assert Counter(dependency_keys) == EXPECTED_DEPENDENCY_KEYS, "dependency cache contract drift"
+    assert Counter(sticky_keys) == EXPECTED_STICKY_KEYS, "sticky-disk contract drift"
+    assert Counter(sticky_deletes) == EXPECTED_STICKY_DELETES, "sticky-disk cleanup contract drift"
     print(
-        f"CI storage policy passed: {len(saved)} producers, {len(restored)} consumers, "
+        f"CI storage policy passed: {len(saved)} transfer producers, {len(restored)} consumers, "
+        f"{len(dependency_keys)} dependency caches, {len(sticky_keys)} bounded sticky disks, "
         "zero retained GitHub artifacts"
     )
 
