@@ -193,8 +193,20 @@ def validate_maturin_storage(text: str) -> None:
         )
 
 
+def validate_test_suite_trigger(text: str) -> None:
+    trigger, found, _ = text.partition("\npermissions:\n")
+    assert found, "Test Suite workflow is missing its permissions boundary"
+    assert '  pull_request:\n    branches: ["main"]' in trigger, (
+        "Test Suite must gate pull requests to main"
+    )
+    assert "  push:" not in trigger, (
+        "Test Suite must not duplicate exact-head PR validation after merge"
+    )
+
+
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
+    validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
     for path, text in texts.items():
         for forbidden in FORBIDDEN:
             assert forbidden not in text, f"{path.relative_to(ROOT)} uses {forbidden}"
