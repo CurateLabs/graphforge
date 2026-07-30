@@ -22,13 +22,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-rust-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Validate frozen acceptance ledger
         run: python3 scripts/ci/checkpoint-recovery-gate.py
       - name: Execute Rust and CLI matrix
@@ -39,7 +32,7 @@ jobs:
           cargo build -p gf-cli
       - name: Record Rust and CLI artifacts
         run: |
-          mkdir -p checkpoint-fragment
+          mkdir -p checkpoint-fragments
           python3 - <<'PY'
           import hashlib
           import json
@@ -58,15 +51,15 @@ jobs:
               "rust-test-sha": test_sha,
               "cli-binary-sha": digest(root / "target/debug/gf"),
           }
-          Path("checkpoint-fragment/rust.json").write_text(
+          Path("checkpoint-fragments/rust.json").write_text(
               json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
           )
           PY
-      - uses: actions/upload-artifact@v7
+      - name: Save Rust evidence for aggregate job
+        uses: actions/cache/save@v5
         with:
-          name: checkpoint-rust-${{ env.EVIDENCE_SHA }}
-          path: checkpoint-fragment/
-          if-no-files-found: error
+          path: checkpoint-fragments/
+          key: checkpoint-transfer-${{ github.run_id }}-rust
 
   python:
     name: Python checkpoint evidence
@@ -86,13 +79,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-python-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
       - name: Build and prove isolated same-SHA wheel
         run: |
           uv run --with maturin maturin build --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
@@ -101,7 +87,7 @@ jobs:
           /tmp/gf-checkpoint/bin/python crates/gf-bindings-py/tests/checkpoints.py
       - name: Record Python artifact
         run: |
-          mkdir -p checkpoint-fragment
+          mkdir -p checkpoint-fragments
           python3 - <<'PY'
           import hashlib
           import json
@@ -109,15 +95,15 @@ jobs:
 
           wheel = next(Path("dist").glob("*.whl"))
           record = {"python-wheel-sha": hashlib.sha256(wheel.read_bytes()).hexdigest()}
-          Path("checkpoint-fragment/python.json").write_text(
+          Path("checkpoint-fragments/python.json").write_text(
               json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
           )
           PY
-      - uses: actions/upload-artifact@v7
+      - name: Save Python evidence for aggregate job
+        uses: actions/cache/save@v5
         with:
-          name: checkpoint-python-${{ env.EVIDENCE_SHA }}
-          path: checkpoint-fragment/
-          if-no-files-found: error
+          path: checkpoint-fragments/
+          key: checkpoint-transfer-${{ github.run_id }}-python
 
   node:
     name: Node checkpoint evidence
@@ -135,13 +121,6 @@ jobs:
         with:
           node-version: "20"
       - uses: pnpm/action-setup@v4
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-checkpoint-node-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs', 'pnpm-lock.yaml') }}
       - name: Build and prove same-SHA Node package
         run: |
           pnpm install --frozen-lockfile
@@ -150,7 +129,7 @@ jobs:
           pnpm --filter @graphforge/node pack --pack-destination "${{ github.workspace }}/dist"
       - name: Record Node artifact
         run: |
-          mkdir -p checkpoint-fragment
+          mkdir -p checkpoint-fragments
           python3 - <<'PY'
           import hashlib
           import json
@@ -158,15 +137,15 @@ jobs:
 
           package = next(Path("dist").glob("*.tgz"))
           record = {"node-package-sha": hashlib.sha256(package.read_bytes()).hexdigest()}
-          Path("checkpoint-fragment/node.json").write_text(
+          Path("checkpoint-fragments/node.json").write_text(
               json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
           )
           PY
-      - uses: actions/upload-artifact@v7
+      - name: Save Node evidence for aggregate job
+        uses: actions/cache/save@v5
         with:
-          name: checkpoint-node-${{ env.EVIDENCE_SHA }}
-          path: checkpoint-fragment/
-          if-no-files-found: error
+          path: checkpoint-fragments/
+          key: checkpoint-transfer-${{ github.run_id }}-node
 
   checkpoint-evidence:
     name: SHA-bound checkpoint evidence
@@ -175,11 +154,21 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/cache/restore@v5
         with:
-          pattern: checkpoint-*-${{ env.EVIDENCE_SHA }}
           path: checkpoint-fragments
-          merge-multiple: true
+          key: checkpoint-transfer-${{ github.run_id }}-rust
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: checkpoint-fragments
+          key: checkpoint-transfer-${{ github.run_id }}-python
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v5
+        with:
+          path: checkpoint-fragments
+          key: checkpoint-transfer-${{ github.run_id }}-node
+          fail-on-cache-miss: true
       - name: Produce exact SHA-bound report
         run: |
           mkdir -p checkpoint-evidence
@@ -217,9 +206,3 @@ jobs:
               json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
           )
           PY
-      - name: Upload exact checkpoint evidence
-        uses: actions/upload-artifact@v7
-        with:
-          name: Checkpoint-Recovery-${{ env.EVIDENCE_SHA }}
-          path: checkpoint-evidence/
-          if-no-files-found: error

@@ -97,13 +97,3 @@ jobs:
             done
           fi
           python3 scripts/ci/clean-env-verify.py run "${args[@]}"
-
-      - name: Upload evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: clean-env-evidence-${{ inputs.version }}-${{ github.run_id }}
-          path: |
-            clean-env-preflight.json
-            clean-env-evidence.json
-          if-no-files-found: warn

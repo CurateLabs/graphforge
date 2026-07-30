@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
 
+- Stop rerunning the full Test Suite after an already-green pull request is
+  squash-merged; exact-head pull-request CI remains the required merge gate
+  ([#209](https://github.com/CurateLabs/graphforge/issues/209)).
+
+- Minimize Blacksmith CI storage by removing speculative caches from infrequent
+  gates, sharing dependency caches by lockfile identity, and deleting the
+  one-run M22 build disk after certification (#207).
+- Remove unconsumed CI artifacts and move required cross-job transfers to
+  Blacksmith-backed cache storage, eliminating GitHub artifact-quota failures
+  from the required CI Gate (#205).
 - Restore local multi-surface coverage via `make coverage`: Rust (`cargo llvm-cov` →
   `build/coverage-rust/`), Python wrapper (`pytest-cov` on
   `crates/gf-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`

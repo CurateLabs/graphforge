@@ -44,14 +44,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-concurrency-stress-v1-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
-
       - name: Validate stress configuration
         run: |
           python3 scripts/ci/concurrency-stress-gate.py validate
@@ -73,11 +65,3 @@ jobs:
           --seed "${GF_STRESS_SEED}"
           --iterations "${GF_STRESS_ITERATIONS}"
           --output "${{ runner.temp }}/concurrency-stress-evidence"
-
-      - name: Upload stress evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: Concurrency-Stress-${{ github.sha }}
-          path: ${{ runner.temp }}/concurrency-stress-evidence/
-          if-no-files-found: error
