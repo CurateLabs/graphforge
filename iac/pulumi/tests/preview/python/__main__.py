@@ -18,11 +18,7 @@ resolved_config = json.loads(
 )
 golden_receipt = json.loads(
     (
-        root
-        / "docs"
-        / "contracts"
-        / "examples"
-        / "graphforge-infra-validation-production-v1.json"
+        root / "docs" / "contracts" / "examples" / "graphforge-infra-validation-production-v1.json"
     ).read_text()
 )
 if os.environ.get("GRAPHFORGE_INJECT_FORBIDDEN") == "1":

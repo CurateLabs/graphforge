@@ -57,11 +57,7 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
         (CONTRACTS / "graphforge-infra-validation-v1.schema.json").read_text()
     )
     infra = json.loads(
-        (
-            CONTRACTS
-            / "examples"
-            / "graphforge-infra-validation-production-v1.json"
-        ).read_text()
+        (CONTRACTS / "examples" / "graphforge-infra-validation-production-v1.json").read_text()
     )
     registry = Registry().with_resources(
         [
@@ -99,9 +95,7 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
         "local-service",
         "production",
     ]
-    assert {
-        (target["kind"], target["ownership"]) for target in resolved["targets"]
-    } >= {
+    assert {(target["kind"], target["ownership"]) for target in resolved["targets"]} >= {
         ("embedded", "embedded"),
         ("service", "local"),
         ("service", "external"),

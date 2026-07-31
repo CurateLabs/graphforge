@@ -998,6 +998,18 @@ fn resolve_project_path(
     }
 }
 
+fn is_repository_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Init(_)
+            | Command::Sync(_)
+            | Command::Remove(_)
+            | Command::Config { .. }
+            | Command::Infra { .. }
+            | Command::Skills { .. }
+    )
+}
+
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -1009,15 +1021,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
             .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
         return Ok(0);
     };
-    if matches!(
-        &command,
-        Command::Init(_)
-            | Command::Sync(_)
-            | Command::Remove(_)
-            | Command::Config { .. }
-            | Command::Infra { .. }
-            | Command::Skills { .. }
-    ) {
+    if is_repository_command(&command) {
         return run_repository_with_bundle(
             command,
             cli.project_dir,

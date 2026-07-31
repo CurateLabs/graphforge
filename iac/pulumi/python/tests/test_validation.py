@@ -117,4 +117,6 @@ class ComponentTests(unittest.TestCase):
             self.assertNotIn("service-token", serialized)
             self.assertNotIn("SECRET_SENTINEL", serialized)
 
-        return component.receipt.apply(check)
+        return pulumi.Output.all(receipt=component.receipt, urn=component.urn).apply(
+            lambda values: check(values["receipt"])
+        )

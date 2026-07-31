@@ -1,6 +1,7 @@
 {
   "name": "graphforge-static-typescript-preview",
   "private": true,
+  "license": "Apache-2.0",
   "dependencies": {
     "@pulumi/pulumi": "3.255.0"
   }
