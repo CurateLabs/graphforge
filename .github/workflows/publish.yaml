@@ -321,9 +321,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---- Rust crates (crates.io) ----
-  # Automation records the ordered plan. Real `cargo publish` stays
-  # maintainer-gated until name conflicts / path+version deps are resolved
-  # (see docs/development/publication-order.md).
+  # v0.5.0 has an approved no-publish disposition. Automation records the
+  # ordered plan and fail-closed blockers; it never runs `cargo publish`
+  # (see docs/development/publication-order.md and #196).
   crates-publish-plan:
     name: Record crates.io publish plan
     needs: license-compliance

@@ -47,7 +47,7 @@ deterministic success evidence (or an explicit maintainer disposition to skip).
 | 3 | `publish.yaml` (triggered by the published release) builds and publishes **Python** to PyPI | [#2805](https://github.com/CurateLabs/graphforge-legecy/issues/2805) | Workflow green; `graphforge==0.5.0` on PyPI; checksums match RC record |
 | 4 | Same workflow publishes **Node** `@graphforge/node` to npm | [#2806](https://github.com/CurateLabs/graphforge-legecy/issues/2806) | Workflow green; npm `0.5.0`; checksums match |
 | 5 | Same workflow publishes **NPX skills** `@graphforge/agent-skills` to npm | [#2806](https://github.com/CurateLabs/graphforge-legecy/issues/2806) | Workflow green; npm `0.5.0`; checksums match |
-| 6 | Publish applicable **Rust crates** to crates.io in dependency order (see disposition) | [#2804](https://github.com/CurateLabs/graphforge-legecy/issues/2804) | Plan script + publish evidence, or recorded skip disposition |
+| 6 | Record the approved **no crates.io publication** disposition for v0.5.0 | [#196](https://github.com/CurateLabs/graphforge/issues/196) | Plan script output + this recorded disposition |
 | 7 | Deploy / confirm **versioned docs** for the release commit/tag | [#2807](https://github.com/CurateLabs/graphforge-legecy/issues/2807) | Live docs URL(s) for v0.5.0 set |
 | 8 | Verify registry/package **metadata** (repo, license, docs, tag) | [#2808](https://github.com/CurateLabs/graphforge-legecy/issues/2808) | Checklist evidence on #2808 |
 
@@ -95,18 +95,29 @@ python3 scripts/ci/crate-publish-plan.py check
 
 ### Crates.io disposition (v0.5.0)
 
-As of the prep of this document, **`gf-core` and `gf-cli` crate names are
-already occupied on crates.io by unrelated projects**. GraphForge must not
-attempt to overwrite or squat those names. Until maintainers choose and land a
-rename (or an alternate publish set) and crate ownership is confirmed:
+**Final maintainer disposition:** GraphForge v0.5.0 publishes no Rust crates to
+crates.io. This is the approved no-publish outcome tracked by
+[#196](https://github.com/CurateLabs/graphforge/issues/196); it applies to the
+complete 14-crate plan above, so no partial GraphForge crate set may be
+published as `0.5.0`.
 
-- Treat step 6 / [#2804](https://github.com/CurateLabs/graphforge-legecy/issues/2804)
-  as **blocked** (human disposition required).
-- Do **not** partial-publish a subset under conflicting names.
-- Binding and skills publication (steps 3–5) may still proceed once other
-  preconditions hold; they do not depend on crates.io.
+The disposition is required because **`gf-core` is already owned on crates.io
+by an unrelated project**. The excluded `gf-cli` name is also foreign-owned,
+and the planned library crates still lack the path-plus-`version` dependency
+metadata required by `cargo publish`. Resolving those blockers would require a
+separate, maintainer-approved crate naming and publication project; renaming
+the crate graph during v0.5.0 release execution is outside #196.
 
-Record the disposition on #2804 before closing that child.
+The evidence command remains:
+
+```bash
+python3 scripts/ci/crate-publish-plan.py check
+```
+
+It intentionally fails closed while reporting the ordered plan's name and
+manifest blockers. The release workflow records the same output without
+running `cargo publish`. Python, Node, and agent-skills publication may proceed
+once their own preconditions hold because they do not depend on crates.io.
 
 ## Stop conditions
 
