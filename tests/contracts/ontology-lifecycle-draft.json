@@ -1,0 +1,14 @@
+{
+  "ontology_id": "binding-parity",
+  "version": "1.0.0",
+  "entity_types": [
+    {
+      "name": "Person",
+      "abstract": false
+    }
+  ],
+  "relation_types": [],
+  "properties": [],
+  "constraints": [],
+  "migrations": []
+}

@@ -28,7 +28,7 @@ EXPECTED_RELEASE_DIGEST = "18028d423dc8968ee8512b3cba2098a2d7d28934b3216416e2b4c
 
 EVIDENCE = {
     "ontology-lifecycle": {
-        "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
+        "ontology_lifecycle.py": ["main"],
     },
     "lifecycle-construction": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],

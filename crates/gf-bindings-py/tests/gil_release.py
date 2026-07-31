@@ -123,6 +123,13 @@ def check_native_call_inventory() -> None:
         "create_assertion",  # M20
         "resolve_belief_projection",  # M21
         "project_capabilities",  # release capability contract
+        "inspect_runtime_catalog",  # ontology runtime-catalog inspection
+        "suggest_ontology",  # ontology draft suggestion
+        "validate_ontology",  # ontology validation
+        "export_ontology",  # ontology export
+        "workspace_ontology",  # adopted ontology inspection
+        "adopt_ontology",  # ontology adoption
+        "clear_ontology",  # ontology removal
     }
     missing = sorted(name for name in required if f".{name}(" not in detached)
     assert not missing, f"native calls missing GIL-release boundary: {missing}"

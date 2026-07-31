@@ -20,15 +20,31 @@ fn error_code(err: &GfError) -> &'static str {
         GfError::Parse { .. } => "ParseError",
         GfError::Bind { .. } | GfError::Plan(_) => "PlanError",
         GfError::Execution(_) | GfError::Provider { .. } => "ExecutionError",
-        GfError::Storage(_) => "StorageError",
+        GfError::Storage(_) => "GF_IO",
         GfError::Project { code, .. } => code.as_str(),
         GfError::Api { code, .. } => code.as_str(),
         GfError::Lifecycle(_) => "LifecycleError",
-        GfError::Validation(message) if is_uuid_parameter_validation(message) => "GF_VALIDATION",
+        GfError::Validation(message)
+            if is_uuid_parameter_validation(message)
+                || is_ontology_lifecycle_validation(message) =>
+        {
+            "GF_VALIDATION"
+        }
         GfError::Validation(_) => "ValidationError",
         GfError::Ontology(_) => "OntologyError",
         GfError::NotImplemented(_) => "NotImplementedError",
     }
+}
+
+fn is_ontology_lifecycle_validation(message: &str) -> bool {
+    matches!(
+        message,
+        "ontology_id and version must be non-empty"
+            | "ontology mode must be advisory or strict"
+            | "ontology export format must be yaml or json"
+            | "ontology export source must be suggested, loaded, or adopted"
+            | "document is required for suggested ontology export"
+    ) || message.starts_with("invalid ontology document: ")
 }
 
 fn is_uuid_parameter_validation(message: &str) -> bool {
@@ -102,7 +118,7 @@ mod tests {
                 },
                 "ExecutionError",
             ),
-            (GfError::Storage("s".into()), "StorageError"),
+            (GfError::Storage("s".into()), "GF_IO"),
             (
                 GfError::Project {
                     code: gf_api::ProjectErrorCode::UnsupportedProjectFormat,
@@ -121,6 +137,21 @@ mod tests {
             if *code == "GF_UNSUPPORTED_PROJECT_FORMAT" {
                 assert_eq!(mapped.reason, "unsupported");
             }
+        }
+    }
+
+    #[test]
+    fn ontology_lifecycle_validation_preserves_the_rust_code() {
+        for message in [
+            "ontology_id and version must be non-empty",
+            "ontology mode must be advisory or strict",
+            "ontology export format must be yaml or json",
+            "ontology export source must be suggested, loaded, or adopted",
+            "document is required for suggested ontology export",
+            "invalid ontology document: missing field `ontology_id`",
+        ] {
+            let error = GfError::Validation(message.into());
+            assert_eq!(error_code(&error), error.code());
         }
     }
 

@@ -3,8 +3,17 @@
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
   "releaseSurfaceCount": 184,
   "releaseSurfaceDigest": "18028d423dc8968ee8512b3cba2098a2d7d28934b3216416e2b4cd4b72982dc4",
+  "requiredEquivalent": [
+    "GraphForge.adopt_ontology",
+    "GraphForge.clear_ontology",
+    "GraphForge.export_ontology",
+    "GraphForge.inspect_runtime_catalog",
+    "GraphForge.suggest_ontology",
+    "GraphForge.validate_ontology",
+    "GraphForge.workspace_ontology"
+  ],
   "rustEvidenceGroupMap": {
-    "ontology-lifecycle": "lifecycleConstruction",
+    "ontology-lifecycle": "ontologyLifecycle",
     "lifecycle-construction": "lifecycleConstruction",
     "checkpoint-view": "checkpointView",
     "m18": "m18",
@@ -23,6 +32,7 @@
       "GraphForge.add_edges",
       "GraphForge.add_node",
       "GraphForge.add_nodes",
+      "GraphForge.adopt_ontology",
       "GraphForge.algorithm_run",
       "GraphForge.algorithm_run_events",
       "GraphForge.analyze",
@@ -37,6 +47,7 @@
       "GraphForge.bind_embedding_space_alias",
       "GraphForge.checkpoint",
       "GraphForge.clear",
+      "GraphForge.clear_ontology",
       "GraphForge.cluster",
       "GraphForge.commit",
       "GraphForge.confidence_assessment",
@@ -56,12 +67,14 @@
       "GraphForge.evidence_link",
       "GraphForge.execute",
       "GraphForge.explain",
+      "GraphForge.export_ontology",
       "GraphForge.find",
       "GraphForge.hypothesis_members",
       "GraphForge.hypothesis_selection",
       "GraphForge.index",
       "GraphForge.index_adjacency",
       "GraphForge.inspect_adjacency",
+      "GraphForge.inspect_runtime_catalog",
       "GraphForge.inspect_embedding_refresh",
       "GraphForge.inspect_embedding_space_freshness",
       "GraphForge.inspect_provider_embedding_plan",
@@ -122,54 +135,38 @@
       "GraphForge.set_embedding_refresh_project_policy",
       "GraphForge.set_embedding_refresh_space_policy",
       "GraphForge.similar",
-      "GraphForge.supersede_assertion"
+      "GraphForge.supersede_assertion",
+      "GraphForge.suggest_ontology",
+      "GraphForge.validate_ontology",
+      "GraphForge.workspace_ontology"
     ],
     "languageSpecific": {
       "GraphForge.execute_stream": {
-        "nodeMembers": [
-          "GraphForge.plan",
-          "PlanHandle.collectIpc"
-        ],
+        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_owned": {
-        "nodeMembers": [
-          "GraphForge.plan",
-          "PlanHandle.collectIpc"
-        ],
+        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_with_params": {
-        "nodeMembers": [
-          "GraphForge.plan",
-          "PlanHandle.collectIpc"
-        ],
+        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
         "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
       },
       "GraphForge.execute_to_parquet": {
-        "nodeMembers": [
-          "GraphForge.plan",
-          "PlanHandle.sinkParquet"
-        ],
+        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
         "reason": "Node uses the asynchronous PlanHandle Parquet sink."
       },
       "GraphForge.execute_to_parquet_with_params": {
-        "nodeMembers": [
-          "GraphForge.plan",
-          "PlanHandle.sinkParquet"
-        ],
+        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
       },
       "GraphForge.configure_provider_find_runtime": {
-        "nodeMembers": [
-          "GraphForge.configureOpenrouter"
-        ],
+        "nodeMembers": ["GraphForge.configureOpenrouter"],
         "reason": "Node exposes a bounded OpenRouter adapter instead of Rust runtime injection."
       },
       "crate.algorithm_descriptor_contracts": {
-        "nodeMembers": [
-          "GraphForge.algorithmDescriptorContracts"
-        ],
+        "nodeMembers": ["GraphForge.algorithmDescriptorContracts"],
         "reason": "Node projects the live Rust registry as a thin GraphForge method without opening knowledge or epistemic storage."
       }
     },
@@ -192,13 +189,14 @@
     }
   },
   "evidence": {
-    "lifecycleConstruction": {
-      "core.test.mjs": [
-        "add node"
-      ],
-      "smoke.test.mjs": [
-        "lifecycle"
+    "ontologyLifecycle": {
+      "ontology-lifecycle.test.mjs": [
+        "Rust-owned ontology lifecycle is deterministic and durable"
       ]
+    },
+    "lifecycleConstruction": {
+      "core.test.mjs": ["add node"],
+      "smoke.test.mjs": ["lifecycle"]
     },
     "checkpointView": {
       "checkpoints.test.mjs": [
@@ -214,21 +212,11 @@
         "live registry contracts are catalog-exhaustive and descriptor reachable",
         "registry discovery and descriptor preparation stay knowledge isolated"
       ],
-      "rank-centrality.test.mjs": [
-        "degree rank"
-      ],
-      "cluster-connectivity.test.mjs": [
-        "components cluster"
-      ],
-      "paths-shortest.test.mjs": [
-        "dijkstra paths"
-      ],
-      "analyze.test.mjs": [
-        "is dag"
-      ],
-      "similar-knn.test.mjs": [
-        "knn"
-      ]
+      "rank-centrality.test.mjs": ["degree rank"],
+      "cluster-connectivity.test.mjs": ["components cluster"],
+      "paths-shortest.test.mjs": ["dijkstra paths"],
+      "analyze.test.mjs": ["is dag"],
+      "similar-knn.test.mjs": ["knn"]
     },
     "m19ProviderRerank": {
       "search-index.test.mjs": [
@@ -283,16 +271,11 @@
       ]
     },
     "persistenceErrorsCancellation": {
-      "core.test.mjs": [
-        "pre-v1 project error",
-        "parse error"
-      ],
+      "core.test.mjs": ["pre-v1 project error", "parse error"],
       "checkpoints.test.mjs": [
         "checkpoint pagination and diff cancellation use the shared adapter"
       ],
-      "cluster-vector.test.mjs": [
-        "k means cluster"
-      ]
+      "cluster-vector.test.mjs": ["k means cluster"]
     }
   }
 }
