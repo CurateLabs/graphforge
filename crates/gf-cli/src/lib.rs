@@ -12,8 +12,8 @@ use gf_api::{
     DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
     ListCheckpointsRequest, OperationId, PageRequest, PageToken, PortableExportRequest,
     PortableExportResult, PortableImportRequest, PortableImportResult, PortableSelection,
-    PreviewRevertCheckpointRequest, RepositoryContext, RevertCheckpointPreview,
-    RevertCheckpointRequest, ShowCheckpointRequest,
+    PreviewRevertCheckpointRequest, RepositoryContext, RepositorySyncRequest, RepositorySyncStatus,
+    RevertCheckpointPreview, RevertCheckpointRequest, ShowCheckpointRequest,
 };
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SKILL_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SKILL_BUNDLE_FILES: usize = 256;
 const MAX_SKILL_PATH_BYTES: usize = 1024;
+const OUT_OF_SYNC_EXIT_CODE: i32 = 4;
 
 fn project_skill_bundle() -> gf_api::SkillBundle<'static> {
     gf_api::SkillBundle {
@@ -236,8 +237,8 @@ struct Cli {
 enum Command {
     /// Initialize repository-local GraphForge definitions and state.
     Init(InitArgs),
-    /// Validate declared definitions and source digests without ingesting data.
-    Sync,
+    /// Compare or reconcile declared definitions and source digests without ingesting data.
+    Sync(SyncArgs),
     /// Remove only repository-local runtime state.
     Remove(RemoveArgs),
     /// Validate or resolve repository configuration.
@@ -268,6 +269,19 @@ struct InitArgs {
     /// Do not install missing project-local GraphForge agent skills.
     #[arg(long)]
     no_skills: bool,
+}
+
+#[derive(Args)]
+struct SyncArgs {
+    /// Compare declared repository state without publishing a generation.
+    #[arg(long, conflicts_with_all = ["idempotency_key", "actor_uuid"])]
+    check: bool,
+    /// Caller-owned operation identity, required only when applying drift.
+    #[arg(long)]
+    idempotency_key: Option<String>,
+    /// Optional caller-owned actor identity for a published snapshot.
+    #[arg(long, requires = "idempotency_key")]
+    actor_uuid: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -810,7 +824,7 @@ fn run_repository(
     json: bool,
     skill_bundle: &gf_api::SkillBundle<'_>,
     output: &mut dyn Write,
-) -> Result<(), gf_api::GfError> {
+) -> Result<i32, gf_api::GfError> {
     let start = project_dir.unwrap_or(
         std::env::current_dir().map_err(|error| gf_api::GfError::Storage(error.to_string()))?,
     );
@@ -821,6 +835,8 @@ fn run_repository(
             command: ConfigCommand::Resolve
         }
     );
+    let mut exit_code = 0;
+    let mut plain_output = "ok";
     let value = match command {
         Command::Init(args) => {
             let init = repository.init_without_skills()?;
@@ -837,7 +853,26 @@ fn run_repository(
                 "skills": skills
             }))
         }
-        Command::Sync => serde_json::to_value(repository.sync()?),
+        Command::Sync(args) => {
+            let result = repository.sync(RepositorySyncRequest {
+                check: args.check,
+                operation_uuid: args
+                    .idempotency_key
+                    .as_deref()
+                    .map(canonical_uuid)
+                    .transpose()?,
+                actor_uuid: actor(args.actor_uuid.as_deref())?,
+            })?;
+            if args.check && result.status == RepositorySyncStatus::Drift {
+                exit_code = OUT_OF_SYNC_EXIT_CODE;
+            }
+            plain_output = match result.status {
+                RepositorySyncStatus::InSync => "in_sync",
+                RepositorySyncStatus::Drift => "drift",
+                RepositorySyncStatus::Published => "published",
+            };
+            serde_json::to_value(result)
+        }
         Command::Remove(args) => {
             let receipt = repository.remove(args.yes)?;
             serde_json::to_value(serde_json::json!({
@@ -878,9 +913,10 @@ fn run_repository(
         )
         .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
     } else {
-        writeln!(output, "ok").map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+        writeln!(output, "{plain_output}")
+            .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
     }
-    Ok(())
+    Ok(exit_code)
 }
 
 fn run_repository_with_bundle(
@@ -889,7 +925,7 @@ fn run_repository_with_bundle(
     json: bool,
     bundle_dir: Option<&Path>,
     output: &mut dyn Write,
-) -> Result<(), gf_api::GfError> {
+) -> Result<i32, gf_api::GfError> {
     let needs_packaged_bundle = matches!(&command, Command::Init(args) if !args.no_skills)
         || matches!(
             &command,
@@ -938,21 +974,21 @@ fn resolve_project_path(
     }
 }
 
-fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
+fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
             .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
-        return Ok(());
+        return Ok(0);
     }
     let Some(command) = cli.command else {
         writeln!(output, "GraphForge — use --help for options")
             .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
-        return Ok(());
+        return Ok(0);
     };
     if matches!(
         &command,
         Command::Init(_)
-            | Command::Sync
+            | Command::Sync(_)
             | Command::Remove(_)
             | Command::Config { .. }
             | Command::Skills { .. }
@@ -967,25 +1003,25 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
     }
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
-        Command::Import(args) => return run_import(args, &path, cli.json, output),
+        Command::Import(args) => return run_import(args, &path, cli.json, output).map(|()| 0),
         command => command,
     };
     if handle_revert_before_open(&command, &path, cli.json, output)? {
-        return Ok(());
+        return Ok(0);
     }
     let path_text = path
         .to_str()
         .ok_or_else(|| gf_api::GfError::Validation("--project must be valid UTF-8".into()))?;
     let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
-        Command::Export(args) => return run_export(&graph, args, cli.json, output),
+        Command::Export(args) => return run_export(&graph, args, cli.json, output).map(|()| 0),
         command => command,
     };
     let command = match command {
         Command::Revert(args)
         | Command::Checkpoint {
             command: CheckpointCommand::Revert(args),
-        } => return run_revert(&mut graph, args, cli.json, output),
+        } => return run_revert(&mut graph, args, cli.json, output).map(|()| 0),
         command => command,
     };
     let result = match command {
@@ -1037,7 +1073,8 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
         },
         _ => unreachable!(),
     };
-    write_execution_result(&result, cli.json, output)
+    write_execution_result(&result, cli.json, output)?;
+    Ok(0)
 }
 
 /// Captured result of one Rust-owned CLI invocation.
@@ -1097,11 +1134,12 @@ where
         }
     };
     let json = cli.json;
-    let exit_code = if let Err(error) = run(cli, &mut stdout) {
-        write_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
-        error_exit_code(&error)
-    } else {
-        0
+    let exit_code = match run(cli, &mut stdout) {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            write_error(&error, json, &mut stderr).expect("writing to Vec cannot fail");
+            error_exit_code(&error)
+        }
     };
     CliExecution {
         exit_code,
@@ -1201,11 +1239,18 @@ pub fn run_process() {
     let json = cli.json;
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    if let Err(error) = run(cli, &mut output) {
-        let _ = output.flush();
-        let stderr = io::stderr();
-        write_error(&error, json, &mut stderr.lock()).expect("write CLI stderr");
-        std::process::exit(error_exit_code(&error));
+    match run(cli, &mut output) {
+        Ok(exit_code) if exit_code != 0 => {
+            let _ = output.flush();
+            std::process::exit(exit_code);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let _ = output.flush();
+            let stderr = io::stderr();
+            write_error(&error, json, &mut stderr.lock()).expect("write CLI stderr");
+            std::process::exit(error_exit_code(&error));
+        }
     }
 }
 
@@ -1427,6 +1472,32 @@ mod tests {
         assert!(Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "init"]).is_ok());
         assert!(
             Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "config", "resolve"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "sync", "--check",]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gf",
+                "--project-dir",
+                "/tmp/repo",
+                "sync",
+                "--check",
+                "--idempotency-key",
+                "41414141-4141-4141-4141-414141414141",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gf",
+                "--project-dir",
+                "/tmp/repo",
+                "sync",
+                "--actor-uuid",
+                "42424242-4242-4242-4242-424242424242",
+            ])
+            .is_err()
         );
         let cli = Cli::try_parse_from(["gf", "--project-dir", "/tmp/repo", "remove"]).unwrap();
         assert!(matches!(

@@ -39,7 +39,11 @@ agent experience across clones.
 gf --project-dir . init
 gf --project-dir . config validate
 gf --project-dir . config resolve --json
-gf --project-dir . sync --json
+gf --project-dir . sync --check --json
+gf --project-dir . sync \
+  --idempotency-key 41414141-4141-4141-4141-414141414141 \
+  --actor-uuid 42424242-4242-4242-4242-424242424242 \
+  --json
 gf --project-dir . remove --yes
 ```
 
@@ -106,6 +110,31 @@ gf --project-dir . revert before-change \
 Omitting `--yes` refuses the mutation. Successful and idempotently replayed
 receipts identify the prior current generation so automation can relate the
 previewed state to the published result.
+
+## Repository synchronization
+
+`sync --check` compares the current repository inputs with the authoritative
+`workspace/repository_snapshot@1` participant without changing `CURRENT` or
+creating a generation. It prints `in_sync` and exits successfully when the
+snapshots match; drift prints `drift` and exits with status 4. With `--json`,
+both outcomes use the same deterministic receipt. The persisted participant is
+closed by
+[`repository-snapshot-v1.schema.json`](../contracts/repository-snapshot-v1.schema.json).
+
+A mutating `sync` publishes only when drift exists and then requires a
+caller-owned `--idempotency-key`; `--actor-uuid` is optional but cannot be
+supplied without the operation identity. The snapshot contains only the
+secret-free resolved-config digest, ordered validated-definition digests,
+ordered external source IDs and declared checksums, bounded Git commit/dirty
+provenance, and caller identity. It contains no definition contents, source or
+graph data, secrets, diffs, commit messages, or unrestricted paths.
+
+Publication replaces only the repository snapshot participant in one complete
+generation. Ontology, configuration, graph, knowledge, and every other
+participant remain byte-identical. Reusing the same operation and actor for the
+same desired state is an idempotent replay; reusing that operation for different
+state or a different actor fails closed. A different operation on unchanged
+desired state is a no-op and is not recorded.
 
 ## Portable export and import
 

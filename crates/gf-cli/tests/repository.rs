@@ -10,6 +10,115 @@ fn gf() -> Command {
     Command::new(env!("CARGO_BIN_EXE_gf"))
 }
 
+fn assert_sync_check_publish_and_replay(root: &std::path::Path) {
+    let current_before_check = fs::read_to_string(root.join(".graphforge/state/CURRENT")).unwrap();
+    let plain_check = gf()
+        .args(["--project-dir", root.to_str().unwrap(), "sync", "--check"])
+        .output()
+        .unwrap();
+    assert_eq!(plain_check.status.code(), Some(4));
+    assert_eq!(plain_check.stdout, b"drift\n");
+    assert!(plain_check.stderr.is_empty());
+    assert_eq!(
+        fs::read_to_string(root.join(".graphforge/state/CURRENT")).unwrap(),
+        current_before_check
+    );
+
+    let check = gf()
+        .args([
+            "--project-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "sync",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(check.status.code(), Some(4));
+    let value: Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(value["status"], "drift");
+    assert_eq!(value["requested_operation_uuid"], Value::Null);
+    assert!(check.stderr.is_empty());
+
+    let operation = "41414141-4141-4141-4141-414141414141";
+    let actor = "42424242-4242-4242-4242-424242424242";
+    let sync = gf()
+        .args([
+            "--project-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "sync",
+            "--idempotency-key",
+            operation,
+            "--actor-uuid",
+            actor,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        sync.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sync.stderr)
+    );
+    let value: Value = serde_json::from_slice(&sync.stdout).unwrap();
+    assert_eq!(value["status"], "published");
+    assert_eq!(value["requested_operation_uuid"], operation);
+    assert_eq!(value["snapshot_operation_uuid"], operation);
+    assert_eq!(value["snapshot_actor_uuid"], actor);
+
+    let replay = gf()
+        .args([
+            "--project-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "sync",
+            "--idempotency-key",
+            operation,
+            "--actor-uuid",
+            actor,
+        ])
+        .output()
+        .unwrap();
+    assert!(replay.status.success());
+    let value: Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(value["status"], "in_sync");
+    assert_eq!(value["idempotent_replay"], true);
+
+    let in_sync = gf()
+        .args([
+            "--project-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "sync",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+    assert!(in_sync.status.success());
+    let value: Value = serde_json::from_slice(&in_sync.stdout).unwrap();
+    assert_eq!(value["status"], "in_sync");
+    assert_eq!(value["requested_operation_uuid"], Value::Null);
+}
+
+fn assert_sync_detects_definition_drift(root: &std::path::Path) {
+    fs::write(root.join(".graphforge/ontology/keep.yaml"), "version: 1\n").unwrap();
+    let drift = gf()
+        .args([
+            "--project-dir",
+            root.to_str().unwrap(),
+            "--json",
+            "sync",
+            "--check",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(drift.status.code(), Some(4));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&drift.stdout).unwrap()["status"],
+        "drift"
+    );
+}
+
 #[test]
 fn repository_lifecycle_emits_stable_json_and_keeps_data_out_of_git() {
     let root = tempdir().unwrap();
@@ -77,24 +186,8 @@ fn repository_lifecycle_emits_stable_json_and_keeps_data_out_of_git() {
     let ignore = fs::read_to_string(root.path().join(".gitignore")).unwrap();
     assert!(!ignore.contains(".agents/"));
 
-    let sync = gf()
-        .args([
-            "--project-dir",
-            root.path().to_str().unwrap(),
-            "--json",
-            "sync",
-        ])
-        .output()
-        .unwrap();
-    assert!(sync.status.success());
-    let value: Value = serde_json::from_slice(&sync.stdout).unwrap();
-    assert!(
-        value["definition_digests"]
-            .as_object()
-            .is_some_and(|value| value.len() == 4)
-    );
-
-    fs::write(root.path().join(".graphforge/ontology/keep.yaml"), "keep").unwrap();
+    assert_sync_check_publish_and_replay(root.path());
+    assert_sync_detects_definition_drift(root.path());
     let remove = gf()
         .args([
             "--project-dir",

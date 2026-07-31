@@ -49,6 +49,7 @@
       "GraphForge.preview_revert_to_checkpoint": "designed-only",
       "GraphForge.show_checkpoint": "designed-only",
       "RepositoryContext.discover": "introspection",
+      "RepositoryContext.sync": "release-tested",
       "CheckpointView.checkpoint_uuid": "introspection",
       "CheckpointView.generation_uuid": "introspection",
       "OpenRouterProviderSession.new": "introspection",
@@ -87,6 +88,16 @@
     }
   },
   "method_evidence_groups": {
+    "repository-sync": {
+      "ids": [
+        "RepositoryContext.sync"
+      ],
+      "test_refs": [
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_checks_applies_replays_conflicts_and_preserves_authority"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_rechecks_definitions_at_publication_boundary"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_failure_boundaries_recover_to_one_authoritative_state"}
+      ]
+    },
     "ontology-lifecycle": {
       "ids": [
         "GraphForge.export_ontology", "GraphForge.inspect_runtime_catalog",
