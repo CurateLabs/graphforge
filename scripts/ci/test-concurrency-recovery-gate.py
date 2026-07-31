@@ -308,6 +308,54 @@ fn cited<'a, 'b>() {
         assert any(path.endswith("/jobs?per_page=100") for path in api_paths)
         GATE.verify_report(output, fragments, ci_path, fake_api)
 
+        valid_ci = {
+            "repository": "CurateLabs/graphforge",
+            "run_id": 101,
+            "job_id": 202,
+        }
+
+        def expect_ci_rejection(value: dict[str, object], message: str) -> None:
+            try:
+                GATE.resolve_ci_evidence(value, sha, fake_api)
+            except GATE.GateError:
+                return
+            raise AssertionError(message)
+
+        for field, invalid in (
+            ("run_id", True),
+            ("run_id", 0),
+            ("run_id", -1),
+            ("job_id", False),
+            ("job_id", 0),
+            ("job_id", -1),
+        ):
+            expect_ci_rejection(
+                {**valid_ci, field: invalid},
+                f"CI evidence accepted invalid {field}={invalid!r}",
+            )
+
+        original_run_url = run_payload["html_url"]
+        run_payload["html_url"] = "https://github.com/CurateLabs/graphforge/actions/runs/999"
+        try:
+            GATE.resolve_ci_evidence(valid_ci, sha, fake_api)
+        except GATE.GateError:
+            pass
+        else:
+            raise AssertionError("CI evidence accepted a mismatched same-repository run URL")
+        run_payload["html_url"] = original_run_url
+
+        original_job_url = jobs_payload["jobs"][0]["html_url"]
+        jobs_payload["jobs"][0]["html_url"] = (
+            "https://github.com/CurateLabs/graphforge/actions/runs/101/job/999"
+        )
+        try:
+            GATE.resolve_ci_evidence(valid_ci, sha, fake_api)
+        except GATE.GateError:
+            pass
+        else:
+            raise AssertionError("CI evidence accepted a mismatched same-repository job URL")
+        jobs_payload["jobs"][0]["html_url"] = original_job_url
+
         report_path = output / "concurrency-recovery-report.json"
         original_report = report_path.read_text(encoding="utf-8")
         report_path.write_text(original_report + " ", encoding="utf-8")

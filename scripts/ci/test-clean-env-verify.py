@@ -111,6 +111,8 @@ def test_preflight_ok_when_published() -> None:
             return 200, b"{}", {}
         if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
             return 200, b"{}", {}
+        if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
+            return 200, json.dumps({"version": {"num": "0.5.0"}}).encode(), {}
         return 404, b"", {}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -126,6 +128,27 @@ def test_preflight_ok_when_published() -> None:
         )
         result = cev.run_preflight(ctx)
         assert result.ok is True, result.error
+        assert result.notes == [
+            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills); "
+            "no crates.io packages configured; probes OK for v0.5.0"
+        ]
+
+        crate_ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        crate_result = cev.run_preflight(crate_ctx)
+        assert crate_result.ok is True, crate_result.error
+        assert crate_result.notes == [
+            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills), "
+            "plus crates.io (gf-api); probes OK for v0.5.0"
+        ]
 
 
 def test_urls_lane_reports_failures() -> None:

@@ -550,8 +550,12 @@ def resolve_ci_evidence(value: object, sha: str, api_get: Any = github_json) -> 
     repository = value["repository"]
     run_id = value["run_id"]
     job_id = value["job_id"]
-    if repository != REPOSITORY or not isinstance(run_id, int) or not isinstance(job_id, int):
+    valid_run_id = isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0
+    valid_job_id = isinstance(job_id, int) and not isinstance(job_id, bool) and job_id > 0
+    if repository != REPOSITORY or not valid_run_id or not valid_job_id:
         raise GateError("CI evidence repository or immutable IDs are invalid")
+    expected_run_url = f"https://github.com/{repository}/actions/runs/{run_id}"
+    expected_job_url = f"{expected_run_url}/job/{job_id}"
     run = api_get(f"repos/{repository}/actions/runs/{run_id}")
     if (
         run.get("id") != run_id
@@ -559,6 +563,7 @@ def resolve_ci_evidence(value: object, sha: str, api_get: Any = github_json) -> 
         or run.get("name") != "Test Suite"
         or run.get("conclusion") != "success"
         or run.get("repository", {}).get("full_name") != repository
+        or run.get("html_url") != expected_run_url
     ):
         raise GateError("GitHub Test Suite run does not match repository, SHA, or success")
     jobs = api_get(f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100")
@@ -567,22 +572,18 @@ def resolve_ci_evidence(value: object, sha: str, api_get: Any = github_json) -> 
         len(matching) != 1
         or matching[0].get("name") != "CI Gate"
         or matching[0].get("conclusion") != "success"
+        or matching[0].get("html_url") != expected_job_url
     ):
         raise GateError("GitHub CI Gate job is absent, duplicated, or unsuccessful")
-    url_prefix = f"https://github.com/{repository}/actions/runs/"
-    if not str(run.get("html_url", "")).startswith(url_prefix) or not str(
-        matching[0].get("html_url", "")
-    ).startswith(url_prefix):
-        raise GateError("GitHub run or job URL does not belong to the required repository")
     return {
         "repository": repository,
         "commit_sha": sha,
         "workflow": "Test Suite",
         "run_id": run_id,
-        "run_url": run.get("html_url"),
+        "run_url": expected_run_url,
         "job": "CI Gate",
         "job_id": job_id,
-        "job_url": matching[0].get("html_url"),
+        "job_url": expected_job_url,
         "conclusion": "success",
     }
 

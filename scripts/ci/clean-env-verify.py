@@ -257,10 +257,12 @@ def run_preflight(ctx: Context) -> LaneResult:
         result.notes.append("do not fake green checkoffs against unpublished packages")
         return result
     result.ok = True
-    result.notes.append(
-        "PyPI, npm (@graphforge/node, @graphforge/cli, "
-        "and @graphforge/agent-skills) probes OK; v0.5.0 has no crates.io surface"
-    )
+    registry_note = "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills)"
+    if ctx.crates:
+        registry_note += f", plus crates.io ({', '.join(ctx.crates)})"
+    else:
+        registry_note += "; no crates.io packages configured"
+    result.notes.append(f"{registry_note}; probes OK for v{ctx.version}")
     return result
 
 
