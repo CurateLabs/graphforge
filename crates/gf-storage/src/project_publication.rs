@@ -901,6 +901,10 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         .open(&lease_path)
         .map_err(publication_io)?;
     lease.sync_all().map_err(publication_io)?;
+    // Windows rejects a parent-directory rename while a descendant file handle
+    // is still live. The transaction lock, not this newly created lease file,
+    // owns the staged attempt, so release the handle after its durability sync.
+    drop(lease);
 
     let manifest = GenerationManifestRecord {
         format: "graphforge-generation".into(),
@@ -929,6 +933,9 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
         false,
     )?;
     manifest_file.sync_all().map_err(publication_io)?;
+    // Optimistic publication promotes the complete staging directory below.
+    // Close the manifest handle before that rename for Windows parity.
+    drop(manifest_file);
     project_failpoint::hit(
         "project.after_manifest_fsync",
         Some(staged.transaction_uuid),
@@ -2199,6 +2206,32 @@ mod tests {
                 .unwrap()
                 .generation_uuid(),
             second.generation_uuid
+        );
+    }
+
+    #[test]
+    fn optimistic_promotion_closes_staged_handles_before_directory_rename() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"promoted")]);
+        let generation_uuid = request.generation_uuid;
+        let operation: [u8; 32] = Sha256::digest(b"windows-promotion-handles").into();
+
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
+        else {
+            panic!("optimistic operation replayed unexpectedly");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            generation_uuid
         );
     }
 
