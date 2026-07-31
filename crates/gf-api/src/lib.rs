@@ -30,7 +30,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use arrow::datatypes::SchemaRef;
 use gf_core::{GraphIdentity, TypeId};
 use gf_ir::{BindError, Binder, GraphOp, GraphPlan, IrExpr, ProcedureRegistry, RuntimeCatalog};
-use gf_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+use gf_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader};
 use gf_storage::GraphCatalog;
 use gf_storage::ResolvedProjectGeneration;
 use sha2::{Digest, Sha256};
@@ -69,6 +69,7 @@ mod m18_embedding_publication;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
+mod ontology_lifecycle;
 mod paging;
 mod portable;
 mod provenance;
@@ -223,6 +224,11 @@ pub use knowledge::{
     ListConfidenceAssessmentsRequest, ListEvidenceLinksRequest, ListReasoningRequest,
     RecordAssertionStatusRequest, RecordReasoningRequest, SupersedeAssertionRequest,
 };
+pub use ontology_lifecycle::{
+    CatalogEntryKind, OntologyExportFormat, OntologyExportSource, OntologySuggestion,
+    OntologySuggestionOptions, OntologyValidationReport, RuntimeCatalogEntry,
+    RuntimeCatalogSnapshot,
+};
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
 pub use provenance::ProvenanceHistoryRequest;
 pub use search_index::{AdjacencyInspection, TextIndexInspection};
@@ -330,6 +336,8 @@ pub struct GraphForge {
     tempdir: Option<Arc<tempfile::TempDir>>,
     /// Compiled ontology, present in advisory/strict mode.
     ontology: Option<OntologyHandle>,
+    /// Source document backing the live, session-scoped compiled ontology.
+    ontology_document: Option<OntologyDoc>,
     /// Shared runtime catalog (grown by the binder during `execute`).
     runtime_catalog: Arc<Mutex<RuntimeCatalog>>,
     /// Procedures available to `CALL` clauses on this engine instance.
@@ -436,7 +444,8 @@ impl GraphForge {
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
         let resolved_generation = gf_storage::open_or_initialize_project(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
-        let (ontology_mode, ontology) = load_workspace_ontology(&resolved_generation)?;
+        let (ontology_mode, ontology, ontology_document) =
+            load_workspace_ontology(&resolved_generation)?;
         let workspace = hydrate_graph_workspace(&resolved_generation)?;
         let dir = workspace.path().to_path_buf();
         Ok(Self {
@@ -465,6 +474,7 @@ impl GraphForge {
             workspace_guard: workspace,
             tempdir: Some(Arc::new(tmp)),
             ontology,
+            ontology_document,
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
@@ -509,7 +519,8 @@ impl GraphForge {
         write_options: GraphForgeOptions,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
-        let (ontology_mode, ontology) = load_workspace_ontology(&resolved_generation)?;
+        let (ontology_mode, ontology, ontology_document) =
+            load_workspace_ontology(&resolved_generation)?;
         let workspace = hydrate_graph_workspace(&resolved_generation)?;
         let dir = workspace.path().to_path_buf();
 
@@ -541,6 +552,7 @@ impl GraphForge {
             workspace_guard: workspace,
             tempdir: None,
             ontology,
+            ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
@@ -2526,6 +2538,7 @@ impl GraphForge {
         let runtime = OntologyCompiler::compile(&doc)
             .map_err(|e| GfError::Ontology(format!("failed to compile ontology: {e}")))?;
         self.ontology = Some(OntologyHandle::new(runtime));
+        self.ontology_document = Some(doc);
         if matches!(self.ontology_mode, OntologyMode::Exploratory) {
             self.ontology_mode = OntologyMode::Advisory;
             // The provider caches the construction-time mode and drives edge
@@ -2950,7 +2963,7 @@ fn hydrate_graph_workspace(
 
 fn load_workspace_ontology(
     generation: &ResolvedProjectGeneration,
-) -> Result<(OntologyMode, Option<OntologyHandle>), GfError> {
+) -> Result<(OntologyMode, Option<OntologyHandle>, Option<OntologyDoc>), GfError> {
     generation.require_capability(
         gf_storage::WORKSPACE_CAPABILITY_ID,
         gf_storage::WORKSPACE_CAPABILITY_VERSION,
@@ -2992,18 +3005,24 @@ fn load_workspace_ontology(
         ));
     }
     let mode = ontology_record.mode.execution_mode();
-    let ontology = ontology_record
+    let document = ontology_record
         .canonical_ontology
         .map(|document| {
             let document: gf_ontology::OntologyDoc = serde_json::from_value(document)
                 .map_err(|error| GfError::Ontology(format!("invalid adopted ontology: {error}")))?;
-            let runtime = OntologyCompiler::compile(&document).map_err(|error| {
+            Ok::<OntologyDoc, GfError>(document)
+        })
+        .transpose()?;
+    let ontology = document
+        .as_ref()
+        .map(|document| {
+            let runtime = OntologyCompiler::compile(document).map_err(|error| {
                 GfError::Ontology(format!("failed to compile ontology: {error}"))
             })?;
             Ok::<OntologyHandle, GfError>(OntologyHandle::new(runtime))
         })
         .transpose()?;
-    Ok((mode, ontology))
+    Ok((mode, ontology, document))
 }
 
 fn participant_encoding(value: &str) -> Result<gf_storage::ProjectParticipantEncoding, GfError> {

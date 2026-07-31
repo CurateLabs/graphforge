@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes (#226).
+- Add Rust-owned deterministic runtime-catalog inspection, conservative ontology
+  drafts, structured non-mutating validation, and explicit-source atomic
+  YAML/JSON ontology export (#236).
 - Add deterministic portable export of the current generation or a named
   checkpoint and validate-before-mutation atomic import into new or empty
   projects, excluding live pointers, locks, journals, caches, and trash (#229).

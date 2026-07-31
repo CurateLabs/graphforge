@@ -100,6 +100,7 @@ impl GraphForge {
             &configuration,
         )?;
         self.ontology = Some(OntologyHandle::new(runtime));
+        self.ontology_document = Some(document);
         self.ontology_mode = requested_mode;
         self.adjacency_provider = std::sync::Arc::new(gf_exec::PersistentAdjacencyProvider::new(
             self.dir.clone(),
@@ -124,6 +125,7 @@ impl GraphForge {
             &configuration,
         )?;
         self.ontology = None;
+        self.ontology_document = None;
         self.ontology_mode = OntologyMode::Exploratory;
         self.adjacency_provider = std::sync::Arc::new(gf_exec::PersistentAdjacencyProvider::new(
             self.dir.clone(),

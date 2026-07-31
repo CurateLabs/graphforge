@@ -94,15 +94,23 @@ RuntimeCatalog
 ├── relation_types    name → RuntimeTypeId
 ├── property_names    name → RuntimePropId
 ├── statistics        observation counts, first-seen, last-seen timestamps
-└── inference_hints   suggested ontology entries based on observed patterns
+└── observations      structural evidence for conservative ontology drafts
 ```
 
 **Key properties:**
 - Always present (even in strict mode — records what was observed)
 - Persisted to `topology/runtime_catalog.parquet`
-- Exportable to `ontology.yaml` via `forge.export_ontology()` (future feature)
+- Exposed through a deterministic snapshot that omits runtime IDs and timestamps
+- Suggestible as a non-authoritative draft and atomically exportable as YAML/JSON
 - Survives project merges (UUIDs for RuntimeCatalog entries follow the same UUID identity model)
 - RuntimeTypeIds are **local** integers (not globally stable like UUID identity) — suitable for query planning within a session, not for cross-project references
+
+Suggestion uses only supported structural evidence: observed labels become
+entity types and entity-owned properties become nullable UTF-8 declarations.
+Relationship names are surfaced but omitted from the draft because the catalog
+does not retain endpoint evidence. Constraints, inheritance, cardinality,
+semantics, and value types are never guessed. Loading a draft is session-scoped;
+durable authority still requires explicit ontology adoption.
 
 **RuntimeCatalog in the binder (exploratory/advisory modes):**
 
