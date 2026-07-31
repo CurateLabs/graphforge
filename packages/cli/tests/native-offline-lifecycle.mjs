@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -34,7 +34,9 @@ const pack = (directory, pnpm = false) => {
     execFileSync(command, args, { cwd: directory, encoding: "utf8" }),
   );
   const result = Array.isArray(payload) ? payload[0] : payload;
-  return join(fixture, result.filename);
+  return isAbsolute(result.filename)
+    ? result.filename
+    : join(fixture, result.filename);
 };
 
 try {
