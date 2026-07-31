@@ -568,9 +568,7 @@ class GraphForge:
         operation_uuid: str,
         actor_uuid: str | None = None,
     ) -> None: ...
-    def clear_ontology(
-        self, *, operation_uuid: str, actor_uuid: str | None = None
-    ) -> None: ...
+    def clear_ontology(self, *, operation_uuid: str, actor_uuid: str | None = None) -> None: ...
     def rank(
         self,
         label: str,

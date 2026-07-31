@@ -1,17 +1,28 @@
 """Native Python ontology lifecycle parity and persistence acceptance (#237)."""
 
+from collections.abc import Callable
 import json
 from pathlib import Path
 import tempfile
 
 import graphforge as g
 
-
 ROOT = Path(__file__).parents[3]
 EXPECTED = ROOT / "tests/contracts/ontology-lifecycle-draft.json"
 EXPECTED_YAML = ROOT / "tests/contracts/ontology-lifecycle-draft.yaml"
 ADOPT = "018f5f0d-65dd-7a88-b6ef-0123456789ab"
 CLEAR = "018f5f0d-65dd-7a88-b6ef-0123456789ac"
+
+
+def expect_error(
+    call: Callable[[], None], expected_type: type[Exception], expected_code: str
+) -> None:
+    try:
+        call()
+    except expected_type as error:
+        assert error.code == expected_code
+    else:
+        raise AssertionError(f"expected {expected_type.__name__}")
 
 
 def main() -> None:
@@ -33,9 +44,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-ontology-py-") as directory:
         root = Path(directory)
         exported = root / "suggested.json"
-        forge.export_ontology(
-            "suggested", str(exported), "json", document=suggestion["document"]
-        )
+        forge.export_ontology("suggested", str(exported), "json", document=suggestion["document"])
         expected_bytes = EXPECTED.read_bytes().rstrip(b"\n")
         assert exported.read_bytes() == expected_bytes
         exported_yaml = root / "suggested.yaml"
@@ -44,18 +53,18 @@ def main() -> None:
         )
         assert exported_yaml.read_bytes() == EXPECTED_YAML.read_bytes()
 
-        for call, expected_type, expected_code in [
-            (
+        for error_case in [
+            lambda: expect_error(
                 lambda: forge.export_ontology("invalid", str(exported), "json"),
                 g.ValidationError,
                 "GF_VALIDATION",
             ),
-            (
+            lambda: expect_error(
                 lambda: forge.export_ontology("suggested", str(exported), "xml"),
                 g.ValidationError,
                 "GF_VALIDATION",
             ),
-            (
+            lambda: expect_error(
                 lambda: forge.export_ontology(
                     "suggested",
                     str(root / "missing" / "out.json"),
@@ -66,12 +75,7 @@ def main() -> None:
                 "GF_IO",
             ),
         ]:
-            try:
-                call()
-            except expected_type as error:
-                assert error.code == expected_code
-            else:
-                raise AssertionError(f"expected {expected_type.__name__}")
+            error_case()
 
         project = root / "project"
         project.mkdir()
@@ -82,17 +86,11 @@ def main() -> None:
         reopened = g.GraphForge(str(project))
         assert reopened.ontology_mode == "exploratory"
 
-        reopened.adopt_ontology(
-            str(EXPECTED), "strict", operation_uuid=ADOPT
-        )
-        reopened.adopt_ontology(
-            str(EXPECTED), "strict", operation_uuid=ADOPT
-        )
+        reopened.adopt_ontology(str(EXPECTED), "strict", operation_uuid=ADOPT)
+        reopened.adopt_ontology(str(EXPECTED), "strict", operation_uuid=ADOPT)
         assert reopened.workspace_ontology()["mode"] == "strict"
         try:
-            reopened.adopt_ontology(
-                str(EXPECTED), "advisory", operation_uuid=ADOPT
-            )
+            reopened.adopt_ontology(str(EXPECTED), "advisory", operation_uuid=ADOPT)
         except g.StorageError as error:
             assert error.code == "GF_IDEMPOTENCY_CONFLICT"
         else:

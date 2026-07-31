@@ -17,14 +17,14 @@ function checkConstruction() {
 }
 
 function checkConstructionError() {
-  // A real fault (missing project dir) maps to err.code === "StorageError".
+  // A real fault preserves the Rust stable I/O code.
   try {
     new GraphForge("/no/such/dir/graphforge-node-smoke");
   } catch (e) {
-    assert.equal(e.code, "StorageError", `got code=${e.code}`);
+    assert.equal(e.code, "GF_IO", `got code=${e.code}`);
     return;
   }
-  throw new Error("expected StorageError for a missing path");
+  throw new Error("expected GF_IO for a missing path");
 }
 
 function checkExecute() {

@@ -34,7 +34,10 @@ def main() -> None:
     assert set(node["rustEvidenceGroupMap"].values()) == set(node["evidence"])
 
     equivalent = set(node["classification"]["equivalent"])
+    required_equivalent = set(node["requiredEquivalent"])
     adapters = set(node["classification"]["languageSpecific"])
+    assert required_equivalent <= release
+    assert required_equivalent <= equivalent
     assert not equivalent & adapters
     assert equivalent | adapters <= release
     defaults = node["classification"]["notExposedDefaults"]

@@ -20,7 +20,7 @@ fn error_code(err: &GfError) -> &'static str {
         GfError::Parse { .. } => "ParseError",
         GfError::Bind { .. } | GfError::Plan(_) => "PlanError",
         GfError::Execution(_) | GfError::Provider { .. } => "ExecutionError",
-        GfError::Storage(_) => "StorageError",
+        GfError::Storage(_) => "GF_IO",
         GfError::Project { code, .. } => code.as_str(),
         GfError::Api { code, .. } => code.as_str(),
         GfError::Lifecycle(_) => "LifecycleError",
@@ -118,7 +118,7 @@ mod tests {
                 },
                 "ExecutionError",
             ),
-            (GfError::Storage("s".into()), "StorageError"),
+            (GfError::Storage("s".into()), "GF_IO"),
             (
                 GfError::Project {
                     code: gf_api::ProjectErrorCode::UnsupportedProjectFormat,

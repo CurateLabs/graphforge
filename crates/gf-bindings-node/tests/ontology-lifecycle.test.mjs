@@ -73,7 +73,7 @@ test("Rust-owned ontology lifecycle is deterministic and durable", () => {
           "json",
           expected,
         ),
-      (error) => error.code === "StorageError",
+      (error) => error.code === "GF_IO",
     );
 
     const project = join(directory, "project");
