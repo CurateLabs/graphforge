@@ -29,7 +29,7 @@ class SurfaceGateTests(unittest.TestCase):
 
     def test_checked_in_inventory_is_complete(self) -> None:
         self.assertEqual(GATE.validate(), [])
-        self.assertEqual(len(GATE.public_methods()), 261)
+        self.assertEqual(len(GATE.public_methods()), 265)
         self.assertEqual(len(GATE.m18_registry()), 94)
 
     def test_new_or_removed_public_method_fails_frozen_digest(self) -> None:

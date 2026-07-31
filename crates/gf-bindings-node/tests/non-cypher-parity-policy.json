@@ -1,9 +1,10 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 180,
-  "releaseSurfaceDigest": "ca1d54b28ed0cb6b2e57b081020494c35c5c8842a37c6bc349bfa6936cf067a8",
+  "releaseSurfaceCount": 184,
+  "releaseSurfaceDigest": "18028d423dc8968ee8512b3cba2098a2d7d28934b3216416e2b4cd4b72982dc4",
   "rustEvidenceGroupMap": {
+    "ontology-lifecycle": "lifecycleConstruction",
     "lifecycle-construction": "lifecycleConstruction",
     "checkpoint-view": "checkpointView",
     "m18": "m18",

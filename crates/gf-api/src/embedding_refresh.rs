@@ -260,6 +260,7 @@ impl GraphForge {
             workspace_guard: Arc::clone(&self.workspace_guard),
             tempdir: self.tempdir.clone(),
             ontology: self.ontology.clone(),
+            ontology_document: self.ontology_document.clone(),
             runtime_catalog: Arc::clone(&self.runtime_catalog),
             procedures: Arc::clone(&self.procedures),
             ontology_mode: self.ontology_mode,

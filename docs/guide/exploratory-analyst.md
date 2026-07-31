@@ -58,70 +58,71 @@ GraphForge accepts all of this without complaint. The RuntimeCatalog records eve
 
 As the graph grows, the analyst runs queries to discover patterns. GraphForge works with whatever labels and types have been ingested, even without a formal ontology.
 
-```python
-# Who is connected to Alice?
-result = forge.execute("""
-    MATCH (a:Person {name: 'Alice'})-[r]->(b)
-    RETURN b.name, type(r)
-""")
-
-# What entity types have I seen so far?
-catalog = forge.runtime_catalog()
-print(catalog.entity_types())    # ["Person", "Organization", "Document", "UnknownEntity"]
-print(catalog.relation_types())  # ["WORKS_AT", "MENTIONED_IN"]
-
-# What properties have I seen on Person nodes?
-print(catalog.properties_for("Person"))  # ["name", "source"]
+```rust
+// The Rust facade returns a frozen, deterministically ordered product view.
+let catalog = forge.inspect_runtime_catalog()?;
+for entry in catalog.entries {
+    println!("{:?}: {} ({})", entry.kind, entry.name, entry.observation_count);
+}
 ```
+
+The snapshot deliberately excludes mutable catalog handles, runtime IDs, and
+first/last-seen timestamps. Python and Node parity is tracked separately.
 
 ### Phase 3: Refinement — structure emerges
 
 After exploring the data, the analyst understands the domain better. They start renaming and normalising.
 
-```python
-# I realise "UnknownEntity" should be "Location"
-forge.execute("""
-    MATCH (n:UnknownEntity)
-    SET n:Location
-    REMOVE n:UnknownEntity
-""")
+```rust
+use gf_api::OntologySuggestionOptions;
 
-# I want to see what an ontology would look like for this graph
-suggested_ontology = forge.suggest_ontology()
-print(suggested_ontology)
-# entity_types: [Person, Organization, Document, Location]
-# relation_types: [WORKS_AT, MENTIONED_IN]
-# properties: {Person: [name, source], Organization: [name]}
+let suggestion = forge.suggest_ontology(OntologySuggestionOptions {
+    ontology_id: "analyst-draft".into(),
+    version: "0.1.0".into(),
+})?;
+assert!(suggestion.draft);
+assert!(forge.validate_ontology(&suggestion.document).valid);
 ```
+
+Suggestion is deliberately conservative. Observed labels become concrete entity
+types, and properties with a known entity owner become nullable UTF-8 properties.
+No constraints, inheritance, cardinality, semantic flags, or property value
+types are guessed. Observed relationship names are reported in
+`omitted_relation_types` because the runtime catalog does not retain endpoint
+evidence sufficient to create a valid relation declaration.
 
 ### Phase 4: Formalisation — optional structure
 
 If the analyst wants to enforce constraints or share a validated graph, they can graduate to an ontology.
 
-```python
-# Export a draft ontology
-forge.export_ontology("ontology.yaml")
+```rust
+use gf_api::{OntologyExportFormat, OntologyExportSource};
 
-# Edit ontology.yaml to add constraints, types, cardinality...
-# Then switch to advisory mode
-forge.set_ontology_mode("advisory")
-forge.load_ontology("ontology.yaml")
+forge.export_ontology(
+    OntologyExportSource::Suggested(suggestion.document),
+    std::path::Path::new("ontology.yaml"),
+    OntologyExportFormat::Yaml,
+)?;
 
-# Now the system will warn on schema violations but still accept data
+// Edit and review the draft, then choose authority explicitly:
+forge.load_ontology("ontology.yaml")?; // session-scoped
+// or forge.adopt_ontology(...)?;      // durable project authority
 ```
 
-For production graphs, strict mode enforces all constraints:
-
-```python
-forge.set_ontology_mode("strict")
-# Now unknown labels will raise BindError
-```
+`Loaded` and `Adopted` are also explicit export sources. Export validates and
+canonicalizes entity, relation, property, and constraint declaration order
+before serializing and atomically replacing the destination. Authored migration
+order is preserved because it breaks ties between equal-length migration routes.
+This applies to caller-supplied `Suggested` documents as well as loaded and
+adopted documents. Export never changes the live mode, loaded ontology, project
+configuration, or durable generation.
 
 ---
 
 ## GraphForge Exploratory Mode Features
 
-When no ontology is present (or `ontology_mode: exploratory` is set in `graphforge.yaml`):
+When the committed workspace records explicit ontology absence (at project
+initialization or after `clear_ontology`):
 
 - **No ontology required** — start immediately with `forge.add_node()` / `forge.add_edge()`
 - **Arbitrary labels** — any string is a valid label

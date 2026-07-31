@@ -24,7 +24,7 @@ Without an explicit progressive model, several defaults would force ontology-fir
 - The binder would reject unknown labels/types/properties
 - Typed edge tables would require ontology-driven file layout before any write
 - The `GraphPlan` IR envelope would treat `ontology_version` as always required
-- Project layout would assume `ontology.yaml` is always present
+- Project layout would assume an authoritative ontology is always present
 
 This ADR resolves that tension by formalising **three progressive ontology modes**.
 
@@ -46,7 +46,7 @@ GraphForge supports three ontology modes that determine how the system responds 
 - The RuntimeCatalog is persisted to `topology/runtime_catalog.parquet`
 - Typed edge tables are not used in exploratory mode — all edges go to `topology/edges/_exploratory.parquet`
 - The IR envelope carries `ontology_version: None`
-- This is the **default mode when no `ontology.yaml` is present**
+- This is the mode recorded when the committed workspace has no adopted ontology
 
 ### Mode 2: `advisory`
 
@@ -58,7 +58,7 @@ GraphForge supports three ontology modes that determine how the system responds 
 - The RuntimeCatalog tracks schema drift: new types, renamed types, property mismatches
 - Typed edge tables are used for known relation types; unknown types fall back to `_exploratory.parquet`
 - The system may suggest ontology improvements but never blocks data ingestion or queries
-- This is the **default mode when `ontology.yaml` is present** and `ontology_mode` is not explicitly set
+- This mode is selected only by explicit durable ontology adoption
 
 ### Mode 3: `strict`
 
@@ -70,17 +70,20 @@ GraphForge supports three ontology modes that determine how the system responds 
 - All edge types must be declared in the ontology; typed edge tables cover all edges
 - The IR envelope carries a required `ontology_version`
 - Appropriate for production deployments, validated knowledge graphs, compliance workflows
-- Must be **explicitly enabled** via `ontology_mode: strict` in `graphforge.yaml`
+- Must be explicitly selected during durable ontology adoption
 
 ### Default mode logic
 
-| Condition | Default mode |
+| Committed workspace authority | Effective mode |
 |---|---|
-| No `ontology.yaml`, no `ontology_mode` in manifest | `exploratory` |
-| `ontology.yaml` present, no `ontology_mode` in manifest | `advisory` |
-| `ontology_mode: strict` in manifest | `strict` |
-| `ontology_mode: exploratory` in manifest | `exploratory` (override) |
-| `ontology_mode: advisory` in manifest | `advisory` (override) |
+| Explicit ontology absence, published by project initialization or `clear_ontology` | `exploratory` |
+| Adopted ontology with advisory enforcement | `advisory` |
+| Adopted ontology with strict enforcement | `strict` |
+
+Loose `graphforge.yaml` and `ontology.yaml` files are inputs or repository
+configuration, not runtime authority. `load_ontology` is a session-scoped
+override. Only `adopt_ontology` and `clear_ontology` publish durable ontology
+authority and enforcement mode into one committed project generation.
 
 ---
 
@@ -94,15 +97,24 @@ RuntimeCatalog
 ├── relation_types    name → RuntimeTypeId
 ├── property_names    name → RuntimePropId
 ├── statistics        observation counts, first-seen, last-seen timestamps
-└── inference_hints   suggested ontology entries based on observed patterns
+└── observations      structural evidence for conservative ontology drafts
 ```
 
 **Key properties:**
 - Always present (even in strict mode — records what was observed)
 - Persisted to `topology/runtime_catalog.parquet`
-- Exportable to `ontology.yaml` via `forge.export_ontology()` (future feature)
-- Survives project merges (UUIDs for RuntimeCatalog entries follow the same UUID identity model)
+- Exposed through a deterministic snapshot that omits runtime IDs and timestamps
+- Suggestible as a non-authoritative draft and atomically exportable as YAML/JSON
+- Persists within its project generation as `topology/runtime_catalog.parquet`;
+  cross-project merge identity is not defined
 - RuntimeTypeIds are **local** integers (not globally stable like UUID identity) — suitable for query planning within a session, not for cross-project references
+
+Suggestion uses only supported structural evidence: observed labels become
+entity types and entity-owned properties become nullable UTF-8 declarations.
+Relationship names are surfaced but omitted from the draft because the catalog
+does not retain endpoint evidence. Constraints, inheritance, cardinality,
+semantics, and value types are never guessed. Loading a draft is session-scoped;
+durable authority still requires explicit ontology adoption.
 
 **RuntimeCatalog in the binder (exploratory/advisory modes):**
 
@@ -139,32 +151,17 @@ All edge types are pre-declared; typed edge tables cover all edges; `_explorator
 
 ---
 
-## `graphforge.yaml` manifest changes
+## Durable authority amendment
 
-The project manifest gains an `ontology_mode` field:
+The original manifest-based proposal has been superseded by the committed
+workspace ontology and configuration records. Adoption validates the input
+document, publishes its canonical content and advisory/strict mode atomically,
+and then updates the live facade. Clearing publishes explicit ontology absence
+and exploratory mode atomically. Reopen reads only those committed records.
 
-```yaml
-# Exploratory project (no ontology)
-project_uuid: "0195f3a2-..."
-name: "OSINT Investigation Alpha"
-version: "1"
-ontology_mode: exploratory   # default when no ontology.yaml present
-ontology: null
-
-# Advisory project (ontology present, non-enforcing)
-project_uuid: "0195f3a2-..."
-name: "Entity Graph v2"
-version: "1"
-ontology_mode: advisory      # default when ontology.yaml present
-ontology: "./ontology.yaml"
-
-# Strict project (fully validated)
-project_uuid: "0195f3a2-..."
-name: "Production Knowledge Base"
-version: "1"
-ontology_mode: strict        # must be explicitly declared
-ontology: "./ontology.yaml"
-```
+`graphforge.yaml` may describe repository integration, and an ontology YAML/JSON
+file may be passed to `load_ontology` or `adopt_ontology`, but neither loose file
+becomes authority merely by existing in the project directory.
 
 ---
 

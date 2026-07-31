@@ -30,7 +30,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use arrow::datatypes::SchemaRef;
 use gf_core::{GraphIdentity, TypeId};
 use gf_ir::{BindError, Binder, GraphOp, GraphPlan, IrExpr, ProcedureRegistry, RuntimeCatalog};
-use gf_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
+use gf_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader};
 use gf_storage::GraphCatalog;
 use gf_storage::ResolvedProjectGeneration;
 use sha2::{Digest, Sha256};
@@ -69,6 +69,7 @@ mod m18_embedding_publication;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
+mod ontology_lifecycle;
 mod paging;
 mod portable;
 mod provenance;
@@ -223,6 +224,11 @@ pub use knowledge::{
     ListConfidenceAssessmentsRequest, ListEvidenceLinksRequest, ListReasoningRequest,
     RecordAssertionStatusRequest, RecordReasoningRequest, SupersedeAssertionRequest,
 };
+pub use ontology_lifecycle::{
+    CatalogEntryKind, OntologyExportFormat, OntologyExportSource, OntologySuggestion,
+    OntologySuggestionOptions, OntologyValidationReport, RuntimeCatalogEntry,
+    RuntimeCatalogSnapshot,
+};
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
 pub use provenance::ProvenanceHistoryRequest;
 pub use search_index::{AdjacencyInspection, TextIndexInspection};
@@ -330,6 +336,8 @@ pub struct GraphForge {
     tempdir: Option<Arc<tempfile::TempDir>>,
     /// Compiled ontology, present in advisory/strict mode.
     ontology: Option<OntologyHandle>,
+    /// Source document backing the live, session-scoped compiled ontology.
+    ontology_document: Option<OntologyDoc>,
     /// Shared runtime catalog (grown by the binder during `execute`).
     runtime_catalog: Arc<Mutex<RuntimeCatalog>>,
     /// Procedures available to `CALL` clauses on this engine instance.
@@ -397,19 +405,20 @@ impl std::fmt::Debug for GraphForge {
 impl GraphForge {
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
     ///
-    /// For a Parquet-backed instance, the directory must exist; a
-    /// `graphforge.yaml` manifest is loaded if present (otherwise defaults are
-    /// used), and the [`OntologyMode`] is resolved per the manifest's default-mode
-    /// logic (an `ontology.yaml` present on disk → advisory). When an ontology
-    /// file is found it is compiled and applied. An existing
-    /// `topology/runtime_catalog.parquet` seeds the runtime catalog.
+    /// For a persistent instance, the directory must exist. Ontology authority
+    /// and enforcement mode are resolved from the committed workspace ontology
+    /// and configuration participants in the selected project generation.
+    /// Loose `graphforge.yaml` or `ontology.yaml` files are not authority and
+    /// are not loaded implicitly. An existing runtime-catalog participant seeds
+    /// the runtime catalog.
     ///
     /// An in-memory instance is exploratory and backed by a temp directory.
     ///
     /// # Errors
     /// Returns [`GfError::Storage`] if `path` does not exist or the temp dir
-    /// cannot be created, [`GfError::Validation`] for a malformed manifest, and
-    /// [`GfError::Ontology`] if the ontology file cannot be loaded or compiled.
+    /// cannot be created, [`GfError::Validation`] for malformed committed
+    /// workspace records, and [`GfError::Ontology`] if the adopted ontology
+    /// cannot be decoded or compiled.
     /// Opening a persistent project can also return structured knowledge,
     /// provenance, or publication errors while reconciling an interrupted
     /// recorded algorithm run.
@@ -436,7 +445,8 @@ impl GraphForge {
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
         let resolved_generation = gf_storage::open_or_initialize_project(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
-        let (ontology_mode, ontology) = load_workspace_ontology(&resolved_generation)?;
+        let (ontology_mode, ontology, ontology_document) =
+            load_workspace_ontology(&resolved_generation)?;
         let workspace = hydrate_graph_workspace(&resolved_generation)?;
         let dir = workspace.path().to_path_buf();
         Ok(Self {
@@ -465,6 +475,7 @@ impl GraphForge {
             workspace_guard: workspace,
             tempdir: Some(Arc::new(tmp)),
             ontology,
+            ontology_document,
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
@@ -509,7 +520,8 @@ impl GraphForge {
         write_options: GraphForgeOptions,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
-        let (ontology_mode, ontology) = load_workspace_ontology(&resolved_generation)?;
+        let (ontology_mode, ontology, ontology_document) =
+            load_workspace_ontology(&resolved_generation)?;
         let workspace = hydrate_graph_workspace(&resolved_generation)?;
         let dir = workspace.path().to_path_buf();
 
@@ -541,6 +553,7 @@ impl GraphForge {
             workspace_guard: workspace,
             tempdir: None,
             ontology,
+            ontology_document,
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
@@ -2512,11 +2525,12 @@ impl GraphForge {
     /// mode-dependent, so a stale provider would scan the wrong edge files).
     ///
     /// **Session-scoped**: the ontology is applied to this live instance only —
-    /// it is **not** written to disk and the project manifest is not updated, so
-    /// reopening a Parquet-backed project does not see it. Because the on-disk
+    /// it is **not** published to the committed workspace ontology/configuration
+    /// records, so reopening a persistent project does not see it. Because the on-disk
     /// layout differs by mode, this is intended for a fresh instance (or before
-    /// writing data); to permanently type a project, place an `ontology.yaml` in
-    /// the project directory and open it with [`new`](Self::new).
+    /// writing data). Durable authority changes only through
+    /// [`adopt_ontology`](Self::adopt_ontology) and
+    /// [`clear_ontology`](Self::clear_ontology).
     ///
     /// # Errors
     /// Returns [`GfError::Ontology`] if the file cannot be loaded or compiled.
@@ -2526,6 +2540,7 @@ impl GraphForge {
         let runtime = OntologyCompiler::compile(&doc)
             .map_err(|e| GfError::Ontology(format!("failed to compile ontology: {e}")))?;
         self.ontology = Some(OntologyHandle::new(runtime));
+        self.ontology_document = Some(doc);
         if matches!(self.ontology_mode, OntologyMode::Exploratory) {
             self.ontology_mode = OntologyMode::Advisory;
             // The provider caches the construction-time mode and drives edge
@@ -2950,7 +2965,7 @@ fn hydrate_graph_workspace(
 
 fn load_workspace_ontology(
     generation: &ResolvedProjectGeneration,
-) -> Result<(OntologyMode, Option<OntologyHandle>), GfError> {
+) -> Result<(OntologyMode, Option<OntologyHandle>, Option<OntologyDoc>), GfError> {
     generation.require_capability(
         gf_storage::WORKSPACE_CAPABILITY_ID,
         gf_storage::WORKSPACE_CAPABILITY_VERSION,
@@ -2992,18 +3007,24 @@ fn load_workspace_ontology(
         ));
     }
     let mode = ontology_record.mode.execution_mode();
-    let ontology = ontology_record
+    let document = ontology_record
         .canonical_ontology
         .map(|document| {
             let document: gf_ontology::OntologyDoc = serde_json::from_value(document)
                 .map_err(|error| GfError::Ontology(format!("invalid adopted ontology: {error}")))?;
-            let runtime = OntologyCompiler::compile(&document).map_err(|error| {
+            Ok::<OntologyDoc, GfError>(document)
+        })
+        .transpose()?;
+    let ontology = document
+        .as_ref()
+        .map(|document| {
+            let runtime = OntologyCompiler::compile(document).map_err(|error| {
                 GfError::Ontology(format!("failed to compile ontology: {error}"))
             })?;
             Ok::<OntologyHandle, GfError>(OntologyHandle::new(runtime))
         })
         .transpose()?;
-    Ok((mode, ontology))
+    Ok((mode, ontology, document))
 }
 
 fn participant_encoding(value: &str) -> Result<gf_storage::ProjectParticipantEncoding, GfError> {
