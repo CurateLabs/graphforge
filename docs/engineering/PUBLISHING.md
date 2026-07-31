@@ -13,7 +13,7 @@ multi-tenant service. Operational detail:
 
 | Artifact | Destination | Versioned by | Owner |
 | --- | --- | --- | --- |
-| Rust crates | crates.io | SemVer / git tag | Maintainers |
+| Rust crates | No crates.io publication for v0.5.0; future surface requires a separate naming decision | SemVer / git tag | Maintainers |
 | Python package (wheels/sdist) | PyPI | Same release version | Maintainers |
 | Node binding package | npm | Same release version | Maintainers |
 | Agent skills package | npm (`npx` skills) | Same release line | Maintainers |
@@ -48,7 +48,7 @@ pnpm docs:build
 # Publication tooling — authoritative order:
 # docs/development/publication-order.md
 python3 scripts/ci/crate-publish-plan.py check
-python3 scripts/ci/crate-publish-plan.py dry-run-commands
+# v0.5.0: check intentionally fails closed and no cargo publish is run.
 # Python: maturin / TestPyPI clean-install checks
 # Node / skills: npm publish --dry-run
 ```
