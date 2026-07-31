@@ -49,6 +49,26 @@ def test_python_and_npm_payloads_are_exact_copies() -> None:
         assert packaged == canonical
 
 
+def test_digest_protected_assets_are_checked_out_with_lf_bytes() -> None:
+    protected = [
+        path.relative_to(ROOT)
+        for base in (SOURCE, PYTHON_COPY, NPM_COPY)
+        for path in base.rglob("*")
+        if path.is_file()
+    ]
+    result = subprocess.run(
+        ["git", "check-attr", "eol", "--", *(str(path) for path in protected)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    observed = {
+        Path(line.split(": ", 2)[0]): line.rsplit(": ", 1)[1] for line in result.stdout.splitlines()
+    }
+    assert observed == dict.fromkeys(protected, "lf")
+
+
 def test_sync_script_is_importable_without_mutating_assets() -> None:
     spec = importlib.util.spec_from_file_location(
         "sync_project_skills", ROOT / "scripts" / "sync_project_skills.py"

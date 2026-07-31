@@ -40,6 +40,9 @@ _Nothing yet._
 - Package host-discoverable project-local GraphForge skills from one canonical
   source in both the `graphforge` wheel and `@graphforge/cli`, with
   deterministic compatibility metadata and byte-parity checks (#230).
+- Preserve LF bytes for canonical and packaged project skills on Windows
+  checkouts so release-candidate wheels satisfy their recorded SHA-256 digests
+  (#259).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes, with packed clean-install `uvx`/offline `npx`
