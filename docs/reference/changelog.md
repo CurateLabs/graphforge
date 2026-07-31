@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add deterministic portable export of the current generation or a named
+  checkpoint and validate-before-mutation atomic import into new or empty
+  projects, excluding live pointers, locks, journals, caches, and trash (#229).
 - Add Rust-owned repository lifecycle commands and APIs for safe `.graphforge/`
   initialization, deterministic configuration resolution, declared-input sync,
   Git provenance, and guarded state-only removal (#228).

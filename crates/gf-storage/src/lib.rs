@@ -50,6 +50,12 @@ pub use project_publication::{
 pub mod project_recovery;
 pub use project_recovery::{ProjectRecoveryReport, recover_project_transactions};
 
+pub mod project_portable;
+pub use project_portable::{
+    PortableExportReceipt, PortableImportReceipt, PortableProjectLimits, encode_portable_project,
+    export_portable_project, import_portable_project, import_portable_project_file,
+};
+
 pub mod workspace_participants;
 pub use workspace_participants::{
     WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,

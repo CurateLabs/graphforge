@@ -70,6 +70,7 @@ mod m18_embedding_publication;
 mod multi_process_publication_tests;
 mod node_selector;
 mod paging;
+mod portable;
 mod provenance;
 mod provider_embedding;
 mod provider_embedding_execution;
@@ -92,6 +93,10 @@ mod valid_time;
 mod workspace_ontology;
 mod write_modes;
 
+pub use portable::{
+    PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
+    PortableSelection,
+};
 pub use repository::{
     GitProvenance, ProjectConfig, RepositoryContext, RepositoryInitReceipt,
     RepositoryRemoveReceipt, RepositorySyncReceipt,
