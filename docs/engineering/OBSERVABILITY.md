@@ -3,8 +3,8 @@
 GraphForge is local-first and embedded: there is no multi-tenant production service with
 classic uptime SLOs. “Production” means published artifacts running in user notebooks, agent
 loops, and CI. Observability therefore emphasizes **correctness signals, release health, and
-developer/agent outcomes**, feeding learning back into private
-[experience journeys](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/experience).
+developer/agent outcomes**, feeding validated learning into bounded issues, regression tests,
+and current documentation.
 
 Roadmap merge gates also name product-facing diagnostic surfaces: `explain`, query IDs,
 provenance IDs, and structured errors ([`../releases/roadmap.md`](../releases/roadmap.md)).
@@ -75,11 +75,6 @@ There is no hosted ops dashboard product; CI and release artifacts are the share
 
 1. CI and release gates surface correctness or DX failures.
 2. Maintainers file bounded issues (root cause, not log-line spam) per `AGENTS.md` failure handling.
-3. Update private
-   [experience journeys](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/experience)
-   when a recurring user/agent friction appears.
-4. Promote validated needs into private
-   [`REQUIREMENTS.md`](https://github.com/CurateLabs/graphforge-nextjs/blob/main/docs/REQUIREMENTS.md)
-   and tests.
-5. Docs narrative and Starlight site reflect current behavior — not historical archaeology.
-6. Strategy/roadmap pages stay linked summaries; do not fork a second milestone tracker here.
+3. Translate validated failures into regression tests and explicit public contracts.
+4. Docs narrative and the Starlight site reflect current behavior — not historical archaeology.
+5. The roadmap stays a linked summary; do not fork a second milestone tracker here.

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Align the published homepage and root README with the v0.5 development line, remove legacy
+  PyPI v0.4 badges/install claims, and route readers to current Python, Node, CLI, and VS Code
+  workflows (#255).
 - Integrate the GraphForge VS Code extension into the public guide by mechanically importing
   its curated `docs/published/` pages from an immutable, checksummed revision (#252).
 - Add a runtime- and provider-agnostic deployment specification for Pulumi
@@ -193,17 +196,15 @@ the authoritative runnable corpus enforced by the BDD gate.
 - Align the Python release-load probe bulk Arrow schema with Node/Rust probes so
   required columns (including `label`) are non-nullable (#2776).
 
-- Move DocSlime product & strategy docs (`PRODUCT`, `DESIGN`, `REQUIREMENTS`,
-  `strategy/`, `experience/`) to private `graphforge-nextjs`; drop the Product &
-  strategy Starlight group; keep public `engineering/` contributor docs and ADRs
-  under **Engineering** (not Understand); keep Guide / Book / Reference /
-  development public (#2772).
+- Keep the Starlight site focused on public user and contributor documentation;
+  keep `engineering/` contributor docs and ADRs under **Engineering** (not
+  Understand), alongside Guide / Book / Reference / development (#2772).
 
 - After manylinux maturin on the M22 load sticky disk, reclaim `target/`
   ownership for the host runner so Cargo can open `.cargo-build-lock` (#2765).
 
-- Place Architecture Decision Records under **Product & strategy → Engineering** in
-  the published Starlight sidebar (no longer under Understand → Decisions); keep
+- Place Architecture Decision Records under **Engineering** in the published
+  Starlight sidebar (no longer under Understand → Decisions); keep
   `docs/adr/` body paths stable (#2770).
 
 - Bump the Python `ruff` development dependency from 0.15.20 to 0.16.0 and
@@ -225,14 +226,13 @@ the authoritative runnable corpus enforced by the BDD gate.
 - Drop M## milestone staging labels from published docs (book architecture, API reference, roadmap, ADRs, engineering indexes, and light testing/release-process prose), rewriting shipped capability as present-tense **v0.5.0** language; keep literal CI artifact/workflow names, schema inventory filenames, and test binary ids (`m22_m18_public_surface`, etc.) (#2761).
 
 - Reorganize the published Starlight docs site around reader journeys (Get started,
-  Use every day, Understand, Reference, Contribute & operate, Product & strategy,
-  Community) instead of DocSlime/Guide/Book-first left nav; keep content paths stable
+  Use every day, Understand, Reference, Contribute & operate, Engineering,
+  Community) instead of Guide/Book-first left nav; keep content paths stable
   and update the homepage / docs map accordingly (#2757).
 
-- Deepen DocSlime strategy, experience, and engineering lifecycle docs from authoritative
-  repo sources (market/positioning/roadmap summaries; analyst, ontology, reopen, and agent
-  journeys; testing/publishing/observability detail), with Starlight referenced as the
-  current docs site (#2729).
+- Deepen public engineering lifecycle docs from authoritative repository sources,
+  covering testing, publishing, and observability with Starlight as the current
+  docs site (#2729).
 
 - Fix README and docs homepage badges: drop DecisionNerd / private-repo Actions
   and Codecov images that 404 anonymously, and use public shields.io badges for
@@ -288,9 +288,9 @@ the authoritative runnable corpus enforced by the BDD gate.
   core, Arrow results, Parquet projects, analyst verbs) without prior-release
   product narrative (#2723).
 
-- Add DocSlime 0.3.0 lifecycle documentation under `docs/` (`PRODUCT.md`, `DESIGN.md`,
-  `REQUIREMENTS.md`, `strategy/`, `experience/`, `engineering/`) filled from existing
-  architecture, testing, and release sources, with ADR bodies still indexed from `docs/adr/`.
+- Add engineering lifecycle documentation under `docs/`, filled from existing
+  architecture, testing, and release sources, with ADR bodies still indexed from
+  `docs/adr/`.
 
 - Remove past GitHub issue numbers and historical milestone cross-references from documentation, replacing them with durable module, behavior, and process wording.
 

@@ -10,11 +10,8 @@ The **published Starlight site** is organized around **reader journeys** (Diáta
 6. **Engineering** — contributor lifecycle summaries and ADRs
 7. **Community** — licensing, security, code of conduct
 
-On disk, public sources live in Guide / Book / Reference / `engineering/` plus supporting
-folders. **Product & strategy** DocSlime lifecycle docs (PRODUCT, DESIGN, REQUIREMENTS,
-strategy, experience) live in the private
-[`CurateLabs/graphforge-nextjs`](https://github.com/CurateLabs/graphforge-nextjs) repository
-and are not published on GitHub Pages.
+On disk, published sources live in Guide / Book / Reference / `engineering/` plus supporting
+folders. This repository contains only current user and contributor documentation.
 
 The Astro Starlight site (`docs-site/`) syncs an allowlisted subset of these trees.
 Sidebar labels follow reader journeys; **content paths / URLs stay on the Guide / Book /
@@ -99,18 +96,11 @@ extension documents are eligible for publication.
 | [`adr/`](adr/) | ADR bodies (v0.5.0 keepers `0001`–`0014`) |
 | [`releases/roadmap.md`](releases/roadmap.md) | Public product roadmap |
 
-### Private product & strategy
-
-Maintainer-oriented DocSlime product planning (market, positioning, requirements, experience
-journeys) is in
-[`graphforge-nextjs` `docs/`](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs)
-([#2772](https://github.com/CurateLabs/graphforge-legecy/issues/2772)). Public engineering
-contributor docs remain in this repository.
-
 ## Conventions
 
 - **Keep docs current.** When behavior changes, update the doc in the same change.
-- **Link, don't duplicate.** Deep dives stay in `book/`; product strategy stays private.
+- **Link, don't duplicate.** Deep dives stay in `book/`; published pages stay focused on
+  current product behavior and contributor operations.
 - **Decisions are recorded.** Significant choices get ADRs under [`adr/`](adr/), indexed from
   [`engineering/adrs/`](engineering/adrs/).
 - **Site tooling is separate.** Starlight config under `docs-site/` owns published nav.

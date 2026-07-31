@@ -4,8 +4,7 @@ Deeper GraphForge material: architecture, research notes, and richer usage narra
 
 This is the explanation and deep-usage layer. For install and everyday workflows, start in
 the [Guide](../guide/overview.md). Contributor engineering lifecycle docs live under
-[`../engineering/`](../engineering/README.md). Private product/strategy DocSlime docs live in
-[`graphforge-nextjs`](https://github.com/CurateLabs/graphforge-nextjs).
+[`../engineering/`](../engineering/README.md).
 
 ## Contents
 

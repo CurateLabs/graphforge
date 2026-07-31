@@ -38,8 +38,7 @@ Published sidebar order (reader experience): **Get started**, **Use every day**,
 **Engineering** (includes ADRs), and **Community**.
 
 On-disk authoring trees remain Guide / Book / Reference / `engineering/`
-(+ `adr/`, `development/`); product/strategy DocSlime content is not published
-from this repo.
+(+ `adr/`, `development/`). Only explicitly allowlisted public sources are published.
 
 ## Updating the extension guide
 

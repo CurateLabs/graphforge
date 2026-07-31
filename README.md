@@ -1,12 +1,11 @@
 <h1 align="center">GraphForge</h1>
 
 <p align="center">
-  <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi" alt="PyPI version" /></a>
-  <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/dm/graphforge.svg?label=Downloads" alt="Monthly downloads" /></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg" alt="GraphForge v0.5 development line" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
-  <a href="https://github.com/CurateLabs/graphforge-x/tree/main/crates/gf-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
-  <a href="https://github.com/CurateLabs/graphforge-x/blob/main/rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
-  <a href="https://github.com/CurateLabs/graphforge-x/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge-x/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
+  <a href="crates/gf-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
+  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
+  <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
   <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
   <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
@@ -51,7 +50,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | `pip install` | Run a server |
+| **Setup** | `pip install` | Embedded package (v0.5 registries pending) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
@@ -72,13 +71,32 @@ aggregations remain edge-count bound. See scale limits for measured ceilings.*
 
 ## Installation
 
+GraphForge v0.5 packages are not published yet. The `graphforge` package currently
+visible on PyPI is the legacy v0.4.0 line, and the v0.5 Node and CLI packages are
+not yet available from npm. Build the current Rust-owned engine from source:
+
 ```bash
-pip install graphforge
-# or
-uv add graphforge
+git clone https://github.com/CurateLabs/graphforge.git
+cd graphforge
+uv sync --dev
+maturin develop --release -m crates/gf-bindings-py/Cargo.toml
 ```
 
 **Requirements:** Python 3.10–3.14
+
+See the [installation guide](docs/guide/installation.md) for Node setup, source-build
+requirements, verification, and registry status.
+
+### Ways to use GraphForge
+
+| Surface | Current role |
+|---|---|
+| [Python](crates/gf-bindings-py/README.md) | Thin PyO3 binding, Arrow results, and the `graphforge` CLI launcher |
+| [Node](crates/gf-bindings-node/README.md) | Thin N-API binding over the same Rust-owned behavior |
+| [CLI](packages/cli/README.md) | Repository lifecycle, configuration, checkpoints, and portable import/export |
+| [VS Code extension](https://docs.graphforge.sh/guide/vscode-extension/) | Project exploration, Cypher, analyst verbs, result views, and agent interop |
+
+Swift and Kotlin bindings remain planned; they are not shipped surfaces.
 
 ---
 
@@ -299,7 +317,7 @@ heads and stale commits before any platform matrix build starts.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| **v0.5.0** | Rust core, Arrow results, Parquet projects, seven analyst verbs | **Current** |
+| **v0.5.0** | Rust core, Arrow results, Parquet projects, seven analyst verbs | **Development line** |
 | v0.5.1 | Swift + Kotlin bindings (UniFFI) | Planned |
 | v1.0 | Long-term API stability commitment | Future |
 

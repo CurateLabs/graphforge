@@ -4,8 +4,7 @@ GraphForge is a Rust-core embedded workbench: Cypher and analyst verbs converge 
 DataFusion execution and Arrow results, with Parquet/JSON project storage and thin
 language bindings. Detail and status banners live in
 [`../book/architecture/overview.md`](../book/architecture/overview.md); this document is the
-DocSlime lifecycle summary that serves private
-[`REQUIREMENTS.md`](https://github.com/CurateLabs/graphforge-nextjs/blob/main/docs/REQUIREMENTS.md).
+public contributor lifecycle summary.
 
 ## Context diagram
 

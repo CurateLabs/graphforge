@@ -31,6 +31,7 @@ export default defineConfig({
             { label: 'Installation', slug: 'guide/installation' },
             { label: 'Quick Start', slug: 'guide/quickstart' },
             { label: 'Tutorial', slug: 'guide/tutorial' },
+            { label: 'CLI & repositories', slug: 'guides/repository-integration' },
           ],
         },
         {
