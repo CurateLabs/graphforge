@@ -1,3 +1,5 @@
+* text=auto eol=lf
+
 /.github/workflows/test.yml text eol=lf
 /crates/gf-bindings-node/package.json text eol=lf
 /crates/gf-bindings-node/tests/*.mjs text eol=lf

@@ -48,6 +48,9 @@ jobs:
       - name: Test changed-path classifier
         run: scripts/ci/test-classify-changes.sh
 
+      - name: Test text checkout byte policy
+        run: python3 scripts/ci/test-text-checkout-policy.py
+
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 
