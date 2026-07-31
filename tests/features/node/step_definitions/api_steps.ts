@@ -1228,7 +1228,7 @@ Then("an ExecutionError is raised", function (this: GraphForgeWorld) {
 });
 
 Then("a StorageError is raised", function (this: GraphForgeWorld) {
-  expectErrCode(this, "StorageError");
+  expectErrCode(this, "GF_IO");
 });
 
 Then("a LifecycleError is raised", function (this: GraphForgeWorld) {

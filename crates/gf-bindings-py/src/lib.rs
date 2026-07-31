@@ -4071,12 +4071,14 @@ impl GraphForge {
         version: &str,
     ) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
+        let ontology_id = ontology_id.to_owned();
+        let version = version.to_owned();
         let suggestion = py
             .detach(|| {
                 self.inner
                     .suggest_ontology(gf_api::OntologySuggestionOptions {
-                        ontology_id: ontology_id.to_owned(),
-                        version: version.to_owned(),
+                        ontology_id,
+                        version,
                     })
             })
             .map_err(|error| to_pyerr(py, &error))?;
