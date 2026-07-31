@@ -405,19 +405,20 @@ impl std::fmt::Debug for GraphForge {
 impl GraphForge {
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
     ///
-    /// For a Parquet-backed instance, the directory must exist; a
-    /// `graphforge.yaml` manifest is loaded if present (otherwise defaults are
-    /// used), and the [`OntologyMode`] is resolved per the manifest's default-mode
-    /// logic (an `ontology.yaml` present on disk → advisory). When an ontology
-    /// file is found it is compiled and applied. An existing
-    /// `topology/runtime_catalog.parquet` seeds the runtime catalog.
+    /// For a persistent instance, the directory must exist. Ontology authority
+    /// and enforcement mode are resolved from the committed workspace ontology
+    /// and configuration participants in the selected project generation.
+    /// Loose `graphforge.yaml` or `ontology.yaml` files are not authority and
+    /// are not loaded implicitly. An existing runtime-catalog participant seeds
+    /// the runtime catalog.
     ///
     /// An in-memory instance is exploratory and backed by a temp directory.
     ///
     /// # Errors
     /// Returns [`GfError::Storage`] if `path` does not exist or the temp dir
-    /// cannot be created, [`GfError::Validation`] for a malformed manifest, and
-    /// [`GfError::Ontology`] if the ontology file cannot be loaded or compiled.
+    /// cannot be created, [`GfError::Validation`] for malformed committed
+    /// workspace records, and [`GfError::Ontology`] if the adopted ontology
+    /// cannot be decoded or compiled.
     /// Opening a persistent project can also return structured knowledge,
     /// provenance, or publication errors while reconciling an interrupted
     /// recorded algorithm run.
@@ -2524,11 +2525,12 @@ impl GraphForge {
     /// mode-dependent, so a stale provider would scan the wrong edge files).
     ///
     /// **Session-scoped**: the ontology is applied to this live instance only —
-    /// it is **not** written to disk and the project manifest is not updated, so
-    /// reopening a Parquet-backed project does not see it. Because the on-disk
+    /// it is **not** published to the committed workspace ontology/configuration
+    /// records, so reopening a persistent project does not see it. Because the on-disk
     /// layout differs by mode, this is intended for a fresh instance (or before
-    /// writing data); to permanently type a project, place an `ontology.yaml` in
-    /// the project directory and open it with [`new`](Self::new).
+    /// writing data). Durable authority changes only through
+    /// [`adopt_ontology`](Self::adopt_ontology) and
+    /// [`clear_ontology`](Self::clear_ontology).
     ///
     /// # Errors
     /// Returns [`GfError::Ontology`] if the file cannot be loaded or compiled.

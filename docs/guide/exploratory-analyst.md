@@ -60,7 +60,7 @@ As the graph grows, the analyst runs queries to discover patterns. GraphForge wo
 
 ```rust
 // The Rust facade returns a frozen, deterministically ordered product view.
-let catalog = forge.inspect_runtime_catalog();
+let catalog = forge.inspect_runtime_catalog()?;
 for entry in catalog.entries {
     println!("{:?}: {} ({})", entry.kind, entry.name, entry.observation_count);
 }
@@ -110,8 +110,10 @@ forge.load_ontology("ontology.yaml")?; // session-scoped
 ```
 
 `Loaded` and `Adopted` are also explicit export sources. Export validates and
-serializes before atomically replacing the destination; it never changes the
-live mode, loaded ontology, project configuration, or durable generation.
+canonicalizes declaration order before serializing and atomically replacing the
+destination. This applies to caller-supplied `Suggested` documents as well as
+loaded and adopted documents. Export never changes the live mode, loaded
+ontology, project configuration, or durable generation.
 
 ---
 
