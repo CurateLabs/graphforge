@@ -1,11 +1,12 @@
 //! Safe integration between a code repository and an embedded GraphForge project.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+use fs4::fs_std::FileExt;
 use gf_core::GfError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -19,9 +20,85 @@ const IGNORE_LINES: [&str; 3] = [
     "/.graphforge/imports/",
     "/.graphforge/exports/",
 ];
+const SKILLS_ROOT: &str = ".agents/skills";
+const SKILLS_MANIFEST: &str = ".agents/skills/.graphforge-managed.json";
+const SKILLS_LIFECYCLE_ROOT: &str = ".graphforge/imports/skills-lifecycle";
+const SKILLS_TRANSACTION: &str = ".graphforge/imports/skills-lifecycle/transaction";
+const SKILLS_LOCK: &str = ".graphforge/imports/skills-lifecycle/lock";
+const SKILLS_STAGE: &str = ".graphforge/imports/skills-lifecycle/stage";
+const SKILLS_BACKUP: &str = ".graphforge/imports/skills-lifecycle/backup";
+const MANAGED_SKILL_NAMES: [&str; 2] = ["graphforge-bootstrap", "graphforge-build-knowledge"];
 
 fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
+}
+
+#[cfg(not(windows))]
+fn sync_directory(path: &Path) -> Result<(), GfError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| GfError::Storage(error.to_string()))
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), GfError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| GfError::Storage(error.to_string()))
+}
+
+fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), GfError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| validation("durable file has no parent"))?,
+    )
+}
+
+fn rename_durable(from: &Path, to: &Path) -> Result<(), GfError> {
+    let from_parent = from
+        .parent()
+        .ok_or_else(|| validation("rename source has no parent"))?;
+    let to_parent = to
+        .parent()
+        .ok_or_else(|| validation("rename destination has no parent"))?;
+    fs::rename(from, to).map_err(|error| GfError::Storage(error.to_string()))?;
+    sync_directory(from_parent)?;
+    if to_parent != from_parent {
+        sync_directory(to_parent)?;
+    }
+    Ok(())
+}
+
+fn create_dir_durable(path: &Path) -> Result<(), GfError> {
+    fs::create_dir(path).map_err(|error| GfError::Storage(error.to_string()))?;
+    sync_directory(path)?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| validation("directory has no parent"))?,
+    )
+}
+
+fn remove_file_durable(path: &Path) -> Result<(), GfError> {
+    fs::remove_file(path).map_err(|error| GfError::Storage(error.to_string()))?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| validation("removed file has no parent"))?,
+    )
 }
 
 /// A safely discovered repository integration context.
@@ -105,6 +182,15 @@ impl RepositoryContext {
 
     /// Create the repository namespace, required definitions, ignore block, and live project.
     pub fn init(&self) -> Result<RepositoryInitReceipt, GfError> {
+        self.init_without_skills()
+    }
+
+    /// Initialize repository-local GraphForge state without installing agent skills.
+    ///
+    /// The CLI's default `init` path calls this and then installs its verified
+    /// embedded bundle. Keeping the filesystem lifecycle separate lets thin
+    /// bindings provide the same canonical bundle without duplicating behavior.
+    pub fn init_without_skills(&self) -> Result<RepositoryInitReceipt, GfError> {
         reject_symlink_components(&self.root, &self.root.join(".graphforge"))?;
         self.reject_tracked_data()?;
         // Complete every read-only check before the first mutation.
@@ -149,6 +235,373 @@ impl RepositoryContext {
             ignore_changed,
             state: self.state_path.clone(),
         })
+    }
+
+    /// Inspect the installed project-local skill bundle without changing it.
+    pub fn skills_status(&self, bundle: &SkillBundle<'_>) -> Result<SkillStatusReceipt, GfError> {
+        let expected = validate_skill_bundle(bundle)?;
+        let _lock = self.lock_skills()?;
+        self.recover_skill_transaction()?;
+        self.skills_status_locked(&expected)
+    }
+
+    fn skills_status_locked(
+        &self,
+        expected: &CanonicalSkillManifest,
+    ) -> Result<SkillStatusReceipt, GfError> {
+        self.reject_skill_symlinks()?;
+        let manifest_path = self.contained_path(SKILLS_MANIFEST)?;
+        if !manifest_path.exists() {
+            let occupied = MANAGED_SKILL_NAMES
+                .iter()
+                .any(|name| self.root.join(SKILLS_ROOT).join(name).exists());
+            return Ok(SkillStatusReceipt {
+                status: if occupied {
+                    SkillStatus::Conflict
+                } else {
+                    SkillStatus::Missing
+                },
+                bundle_version: None,
+                expected_bundle_version: expected.bundle_version,
+                edited_files: Vec::new(),
+            });
+        }
+        let Ok(installed) = read_installed_manifest(&manifest_path) else {
+            return Ok(SkillStatusReceipt {
+                status: SkillStatus::Conflict,
+                bundle_version: None,
+                expected_bundle_version: expected.bundle_version,
+                edited_files: vec![".graphforge-managed.json".to_owned()],
+            });
+        };
+        let edited_files = verify_installed_files(self, &installed)?;
+        let status = if !edited_files.is_empty()
+            || installed.graphforge_compatibility != expected.graphforge_compatibility
+            || installed.source != "graphforge-packaged-bundle"
+        {
+            SkillStatus::Conflict
+        } else if installed.bundle_version == expected.bundle_version
+            && installed.files == expected.files
+        {
+            SkillStatus::Current
+        } else {
+            SkillStatus::Outdated
+        };
+        Ok(SkillStatusReceipt {
+            status,
+            bundle_version: Some(installed.bundle_version),
+            expected_bundle_version: expected.bundle_version,
+            edited_files,
+        })
+    }
+
+    /// Atomically install the verified project-local skill bundle.
+    pub fn skills_install(
+        &self,
+        bundle: &SkillBundle<'_>,
+        force: bool,
+    ) -> Result<SkillMutationReceipt, GfError> {
+        self.install_or_update_skills(bundle, force, SkillMutation::Install)
+    }
+
+    /// Atomically update the managed project-local skill bundle.
+    pub fn skills_update(
+        &self,
+        bundle: &SkillBundle<'_>,
+        force: bool,
+    ) -> Result<SkillMutationReceipt, GfError> {
+        self.install_or_update_skills(bundle, force, SkillMutation::Update)
+    }
+
+    /// Remove managed skill namespaces, preserving edits unless `force` explicitly resolves them.
+    pub fn skills_remove(&self, force: bool) -> Result<SkillMutationReceipt, GfError> {
+        let _lock = self.lock_skills()?;
+        self.recover_skill_transaction()?;
+        self.reject_skill_symlinks()?;
+        let manifest_path = self.contained_path(SKILLS_MANIFEST)?;
+        if !manifest_path.exists() {
+            return Ok(SkillMutationReceipt {
+                changed: false,
+                bundle_version: None,
+                installed_files: 0,
+            });
+        }
+        let installed = match read_installed_manifest(&manifest_path) {
+            Ok(installed) => Some(installed),
+            Err(error) if !force => {
+                return Err(validation(format!(
+                    "managed skill manifest conflicts with the supported contract: {error}; rerun with --force to resolve the conflict"
+                )));
+            }
+            Err(_) => None,
+        };
+        let edited = installed
+            .as_ref()
+            .map(|manifest| verify_installed_files(self, manifest))
+            .transpose()?
+            .unwrap_or_default();
+        if !edited.is_empty() && !force {
+            return Err(validation(format!(
+                "managed skill files were edited: {}; rerun with --force to resolve the conflict",
+                edited.join(", ")
+            )));
+        }
+        let backup = self.contained_path(SKILLS_BACKUP)?;
+        if backup.exists() {
+            return Err(validation("stale managed skill transaction path"));
+        }
+        self.begin_skill_transaction()?;
+        if let Err(error) = create_dir_durable(&backup) {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+        let publish = (|| -> Result<(), GfError> {
+            for name in MANAGED_SKILL_NAMES {
+                let target = self.contained_path(Path::new(SKILLS_ROOT).join(name))?;
+                if target.exists() {
+                    rename_durable(&target, &backup.join(name))?;
+                }
+            }
+            rename_durable(&manifest_path, &backup.join(".graphforge-managed.json"))
+        })();
+        if let Err(error) = publish {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+        if let Err(error) = remove_file_durable(&self.contained_path(SKILLS_TRANSACTION)?) {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+        fs::remove_dir_all(backup).map_err(|error| GfError::Storage(error.to_string()))?;
+        sync_directory(&self.contained_path(SKILLS_LIFECYCLE_ROOT)?)?;
+        Ok(SkillMutationReceipt {
+            changed: true,
+            bundle_version: installed.map(|manifest| manifest.bundle_version),
+            installed_files: 0,
+        })
+    }
+
+    fn install_or_update_skills(
+        &self,
+        bundle: &SkillBundle<'_>,
+        force: bool,
+        mutation: SkillMutation,
+    ) -> Result<SkillMutationReceipt, GfError> {
+        let expected = validate_skill_bundle(bundle)?;
+        let _lock = self.lock_skills()?;
+        self.recover_skill_transaction()?;
+        self.reject_skill_symlinks()?;
+        let status = self.skills_status_locked(&expected)?;
+        if status.status == SkillStatus::Current {
+            return Ok(SkillMutationReceipt {
+                changed: false,
+                bundle_version: Some(expected.bundle_version),
+                installed_files: expected.files.len(),
+            });
+        }
+        if status.status == SkillStatus::Conflict && !force {
+            let action = match mutation {
+                SkillMutation::Install => "install",
+                SkillMutation::Update => "update",
+            };
+            return Err(validation(format!(
+                "cannot {action}: project-local skill files conflict with the managed bundle; rerun with --force to resolve the conflict"
+            )));
+        }
+
+        let skills_root = self.contained_path(SKILLS_ROOT)?;
+        fs::create_dir_all(&skills_root).map_err(|error| GfError::Storage(error.to_string()))?;
+        let lifecycle_root = self.contained_path(SKILLS_LIFECYCLE_ROOT)?;
+        fs::create_dir_all(&lifecycle_root).map_err(|error| GfError::Storage(error.to_string()))?;
+        let stage = self.contained_path(SKILLS_STAGE)?;
+        let backup = self.contained_path(SKILLS_BACKUP)?;
+        for path in [&stage, &backup] {
+            if path.exists() {
+                return Err(validation("stale managed skill transaction path"));
+            }
+        }
+        create_dir_durable(&stage)?;
+        for file in bundle.files {
+            let target = stage.join(file.path);
+            let parent = target
+                .parent()
+                .ok_or_else(|| validation("skill file has no parent"))?;
+            fs::create_dir_all(parent).map_err(|error| GfError::Storage(error.to_string()))?;
+            write_durable(&target, file.bytes)?;
+        }
+        sync_directory(&stage)?;
+        let installed = InstalledSkillManifest {
+            schema_version: expected.schema_version,
+            bundle_version: expected.bundle_version,
+            graphforge_compatibility: expected.graphforge_compatibility,
+            source: "graphforge-packaged-bundle".to_owned(),
+            files: expected.files,
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&installed)
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+        write_durable(
+            &stage.join(".graphforge-managed.json"),
+            &[&manifest_bytes[..], b"\n"].concat(),
+        )?;
+        self.begin_skill_transaction()?;
+        if let Err(error) = create_dir_durable(&backup) {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+
+        let publish = (|| -> Result<(), GfError> {
+            let manifest = self.contained_path(SKILLS_MANIFEST)?;
+            if manifest.exists() {
+                rename_durable(&manifest, &backup.join(".graphforge-managed.json"))?;
+            }
+            for name in MANAGED_SKILL_NAMES {
+                let target = skills_root.join(name);
+                if target.exists() {
+                    rename_durable(&target, &backup.join(name))?;
+                } else {
+                    write_durable(&backup.join(format!(".missing-{name}")), &[])?;
+                }
+                rename_durable(&stage.join(name), &target)?;
+            }
+            rename_durable(&stage.join(".graphforge-managed.json"), &manifest)?;
+            Ok(())
+        })();
+        if let Err(error) = publish {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+        if let Err(error) = remove_file_durable(&self.contained_path(SKILLS_TRANSACTION)?) {
+            self.rollback_skill_transaction()?;
+            return Err(error);
+        }
+        fs::remove_dir_all(&stage).map_err(|error| GfError::Storage(error.to_string()))?;
+        fs::remove_dir_all(&backup).map_err(|error| GfError::Storage(error.to_string()))?;
+        sync_directory(&lifecycle_root)?;
+        Ok(SkillMutationReceipt {
+            changed: true,
+            bundle_version: Some(installed.bundle_version),
+            installed_files: installed.files.len(),
+        })
+    }
+
+    fn reject_skill_symlinks(&self) -> Result<(), GfError> {
+        for relative in [
+            SKILLS_ROOT,
+            SKILLS_MANIFEST,
+            SKILLS_TRANSACTION,
+            SKILLS_LOCK,
+            SKILLS_LIFECYCLE_ROOT,
+            SKILLS_STAGE,
+            SKILLS_BACKUP,
+            ".agents/skills/graphforge-bootstrap",
+            ".agents/skills/graphforge-build-knowledge",
+        ] {
+            reject_symlink_components(&self.root, &self.root.join(relative))?;
+        }
+        Ok(())
+    }
+
+    fn lock_skills(&self) -> Result<fs::File, GfError> {
+        let root = self.contained_path(SKILLS_LIFECYCLE_ROOT)?;
+        fs::create_dir_all(&root).map_err(|error| GfError::Storage(error.to_string()))?;
+        sync_directory(&root)?;
+        sync_directory(
+            root.parent()
+                .ok_or_else(|| validation("skills lifecycle root has no parent"))?,
+        )?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.contained_path(SKILLS_LOCK)?)
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+        FileExt::lock_exclusive(&lock).map_err(|error| GfError::Storage(error.to_string()))?;
+        Ok(lock)
+    }
+
+    fn begin_skill_transaction(&self) -> Result<(), GfError> {
+        let path = self.contained_path(SKILLS_TRANSACTION)?;
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    validation("another managed skill transaction is active")
+                } else {
+                    GfError::Storage(error.to_string())
+                }
+            })?;
+        marker
+            .write_all(b"graphforge-skills/1\n")
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+        marker
+            .sync_all()
+            .map_err(|error| GfError::Storage(error.to_string()))?;
+        sync_directory(
+            path.parent()
+                .ok_or_else(|| validation("transaction marker has no parent"))?,
+        )
+    }
+
+    fn recover_skill_transaction(&self) -> Result<(), GfError> {
+        let transaction = self.contained_path(SKILLS_TRANSACTION)?;
+        if transaction.exists() {
+            self.rollback_skill_transaction()?;
+        } else {
+            for path in [
+                self.contained_path(SKILLS_STAGE)?,
+                self.contained_path(SKILLS_BACKUP)?,
+            ] {
+                if path.exists() {
+                    fs::remove_dir_all(path)
+                        .map_err(|error| GfError::Storage(error.to_string()))?;
+                    sync_directory(&self.contained_path(SKILLS_LIFECYCLE_ROOT)?)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_skill_transaction(&self) -> Result<(), GfError> {
+        let skills_root = self.contained_path(SKILLS_ROOT)?;
+        let backup = self.contained_path(SKILLS_BACKUP)?;
+        for name in MANAGED_SKILL_NAMES {
+            let target = skills_root.join(name);
+            let saved = backup.join(name);
+            if saved.exists() {
+                if target.exists() {
+                    fs::remove_dir_all(&target)
+                        .map_err(|error| GfError::Storage(error.to_string()))?;
+                    sync_directory(&skills_root)?;
+                }
+                rename_durable(&saved, &target)?;
+            } else if backup.join(format!(".missing-{name}")).exists() && target.exists() {
+                fs::remove_dir_all(target).map_err(|error| GfError::Storage(error.to_string()))?;
+                sync_directory(&skills_root)?;
+            }
+        }
+        let saved_manifest = backup.join(".graphforge-managed.json");
+        if saved_manifest.exists() {
+            let manifest = self.contained_path(SKILLS_MANIFEST)?;
+            if manifest.exists() {
+                fs::remove_file(&manifest).map_err(|error| GfError::Storage(error.to_string()))?;
+                sync_directory(&skills_root)?;
+            }
+            rename_durable(&saved_manifest, &manifest)?;
+        }
+        for path in [self.contained_path(SKILLS_STAGE)?, backup] {
+            if path.exists() {
+                fs::remove_dir_all(path).map_err(|error| GfError::Storage(error.to_string()))?;
+                sync_directory(&self.contained_path(SKILLS_LIFECYCLE_ROOT)?)?;
+            }
+        }
+        let transaction = self.contained_path(SKILLS_TRANSACTION)?;
+        if transaction.exists() {
+            remove_file_durable(&transaction)?;
+        }
+        Ok(())
     }
 
     /// Resolve the config to deterministic, secret-free JSON with explicit defaults.
@@ -862,6 +1315,270 @@ fn uri_has_inline_credentials(value: &str) -> bool {
     })
 }
 
+/// One immutable file from a packaged project-skill bundle.
+#[derive(Debug, Clone, Copy)]
+pub struct SkillBundleFile<'a> {
+    /// Slash-separated path relative to the bundle and `.agents/skills/`.
+    pub path: &'a str,
+    /// Exact packaged bytes.
+    pub bytes: &'a [u8],
+}
+
+/// A packaged project-skill bundle supplied by the CLI or a thin binding.
+#[derive(Debug, Clone, Copy)]
+pub struct SkillBundle<'a> {
+    /// Exact canonical `project-skills/manifest.json` bytes.
+    pub manifest: &'a [u8],
+    /// Exact payload files named by the manifest.
+    pub files: &'a [SkillBundleFile<'a>],
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalSkillManifest {
+    schema_version: u32,
+    bundle_version: u32,
+    #[serde(alias = "compatibility")]
+    graphforge_compatibility: String,
+    skills: Vec<String>,
+    files: Vec<SkillFileDigest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SkillFileDigest {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstalledSkillManifest {
+    schema_version: u32,
+    bundle_version: u32,
+    graphforge_compatibility: String,
+    source: String,
+    files: Vec<SkillFileDigest>,
+}
+
+fn validate_skill_bundle(bundle: &SkillBundle<'_>) -> Result<CanonicalSkillManifest, GfError> {
+    let manifest: CanonicalSkillManifest = serde_json::from_slice(bundle.manifest)
+        .map_err(|error| validation(format!("invalid project skill manifest: {error}")))?;
+    if manifest.schema_version != 1 || manifest.bundle_version == 0 {
+        return Err(validation("unsupported project skill manifest version"));
+    }
+    if manifest.graphforge_compatibility != ">=0.5.0 <0.6.0" {
+        return Err(validation(
+            "project skill bundle is incompatible with this GraphForge release",
+        ));
+    }
+    if manifest.skills
+        != MANAGED_SKILL_NAMES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    {
+        return Err(validation(
+            "project skill manifest must name the supported managed directories",
+        ));
+    }
+    if manifest.files.len() != bundle.files.len() || manifest.files.is_empty() {
+        return Err(validation(
+            "project skill manifest does not match packaged files",
+        ));
+    }
+    let mut previous: Option<&str> = None;
+    for (expected, actual) in manifest.files.iter().zip(bundle.files) {
+        validate_skill_path(&expected.path)?;
+        if previous.is_some_and(|value| value >= expected.path.as_str()) {
+            return Err(validation(
+                "project skill manifest files must be unique and sorted",
+            ));
+        }
+        previous = Some(&expected.path);
+        if expected.path != actual.path {
+            return Err(validation(
+                "project skill manifest does not match packaged file paths",
+            ));
+        }
+        digest(&expected.sha256)?;
+        let actual_digest = format!("{:x}", Sha256::digest(actual.bytes));
+        if actual_digest != expected.sha256 {
+            return Err(validation(format!(
+                "packaged project skill digest mismatch: {}",
+                expected.path
+            )));
+        }
+    }
+    for required in [
+        "graphforge-bootstrap/SKILL.md",
+        "graphforge-build-knowledge/SKILL.md",
+    ] {
+        if !manifest.files.iter().any(|file| file.path == required) {
+            return Err(validation(format!(
+                "project skill bundle is missing {required}"
+            )));
+        }
+    }
+    Ok(manifest)
+}
+
+fn validate_skill_path(value: &str) -> Result<(), GfError> {
+    let path = Path::new(value);
+    let mut parts = path.components();
+    let first = parts
+        .next()
+        .ok_or_else(|| validation("project skill file path is empty"))?;
+    let Component::Normal(first) = first else {
+        return Err(validation("project skill file path is not contained"));
+    };
+    let remaining: Vec<_> = parts.collect();
+    if !MANAGED_SKILL_NAMES
+        .iter()
+        .any(|name| first == std::ffi::OsStr::new(name))
+        || value.contains('\\')
+        || remaining.is_empty()
+        || remaining
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(validation("project skill file path is not contained"));
+    }
+    Ok(())
+}
+
+fn read_installed_manifest(path: &Path) -> Result<InstalledSkillManifest, GfError> {
+    let bytes = fs::read(path).map_err(|error| GfError::Storage(error.to_string()))?;
+    let manifest: InstalledSkillManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| validation(format!("invalid managed skill manifest: {error}")))?;
+    if manifest.schema_version != 1 || manifest.bundle_version == 0 {
+        return Err(validation("unsupported managed skill manifest version"));
+    }
+    if manifest.graphforge_compatibility != ">=0.5.0 <0.6.0"
+        || manifest.source != "graphforge-packaged-bundle"
+    {
+        return Err(validation("invalid managed skill provenance"));
+    }
+    if manifest.files.is_empty() {
+        return Err(validation("managed skill manifest files are required"));
+    }
+    let mut previous: Option<&str> = None;
+    for file in &manifest.files {
+        validate_skill_path(&file.path)?;
+        digest(&file.sha256)?;
+        if previous.is_some_and(|value| value >= file.path.as_str()) {
+            return Err(validation(
+                "managed skill manifest files must be unique and sorted",
+            ));
+        }
+        previous = Some(&file.path);
+    }
+    Ok(manifest)
+}
+
+fn verify_installed_files(
+    context: &RepositoryContext,
+    manifest: &InstalledSkillManifest,
+) -> Result<Vec<String>, GfError> {
+    let mut edited = Vec::new();
+    let expected: BTreeSet<_> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    for file in &manifest.files {
+        let path = context.contained_path(Path::new(SKILLS_ROOT).join(&file.path))?;
+        match fs::read(&path) {
+            Ok(bytes) if format!("{:x}", Sha256::digest(&bytes)) == file.sha256 => {}
+            Ok(_) => edited.push(file.path.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                edited.push(file.path.clone());
+            }
+            Err(error) => return Err(GfError::Storage(error.to_string())),
+        }
+    }
+    for name in MANAGED_SKILL_NAMES {
+        let root = context.contained_path(Path::new(SKILLS_ROOT).join(name))?;
+        if !root.exists() {
+            continue;
+        }
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in
+                fs::read_dir(directory).map_err(|error| GfError::Storage(error.to_string()))?
+            {
+                let entry = entry.map_err(|error| GfError::Storage(error.to_string()))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| GfError::Storage(error.to_string()))?;
+                if kind.is_symlink() {
+                    return Err(validation("symlinks are not allowed in managed skills"));
+                }
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    let relative = entry
+                        .path()
+                        .strip_prefix(context.root.join(SKILLS_ROOT))
+                        .map_err(|_| validation("managed skill path escaped its root"))?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if !expected.contains(relative.as_str()) {
+                        edited.push(relative);
+                    }
+                }
+            }
+        }
+    }
+    edited.sort();
+    edited.dedup();
+    Ok(edited)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SkillMutation {
+    Install,
+    Update,
+}
+
+/// Stable project-local skill lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillStatus {
+    /// No managed files or manifest are installed.
+    Missing,
+    /// Installed files match the packaged bundle.
+    Current,
+    /// Installed files are unedited but describe another bundle version.
+    Outdated,
+    /// User-owned or edited files overlap the managed bundle.
+    Conflict,
+}
+
+/// Result of inspecting project-local managed skills.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillStatusReceipt {
+    /// Current lifecycle state.
+    pub status: SkillStatus,
+    /// Installed bundle version, when a valid managed manifest exists.
+    pub bundle_version: Option<u32>,
+    /// Version packaged with this CLI.
+    pub expected_bundle_version: u32,
+    /// Sorted managed paths that no longer match their recorded hashes.
+    pub edited_files: Vec<String>,
+}
+
+/// Result of a project-local skill mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkillMutationReceipt {
+    /// Whether the command changed the repository.
+    pub changed: bool,
+    /// Bundle version affected by the command.
+    pub bundle_version: Option<u32>,
+    /// Number of currently installed managed files.
+    pub installed_files: usize,
+}
+
 /// Bounded repository provenance recorded by sync.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GitProvenance {
@@ -908,7 +1625,33 @@ const DEFAULT_CONFIG: &str = "schema_version: 1\nproject:\n  ontology: .graphfor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use tempfile::tempdir;
+
+    fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
+        let files = [
+            SkillBundleFile {
+                path: "graphforge-bootstrap/SKILL.md",
+                bytes: b"bootstrap",
+            },
+            SkillBundleFile {
+                path: "graphforge-build-knowledge/SKILL.md",
+                bytes: b"knowledge",
+            },
+        ];
+        let manifest = serde_json::to_vec(&json!({
+            "schema_version": 1,
+            "bundle_version": 1,
+            "graphforge_compatibility": ">=0.5.0 <0.6.0",
+            "skills": MANAGED_SKILL_NAMES,
+            "files": files.iter().map(|file| json!({
+                "path": file.path,
+                "sha256": format!("{:x}", Sha256::digest(file.bytes))
+            })).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        (manifest, files)
+    }
 
     #[test]
     fn init_is_idempotent_and_preserves_gitignore() {
@@ -1116,5 +1859,71 @@ mod tests {
             canonical,
             include_str!("../../../docs/contracts/examples/graphforge-resolved-v1.json")
         );
+    }
+
+    #[test]
+    fn status_waits_for_the_writer_lock_and_recovers_before_reading() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        let (manifest, files) = test_skill_manifest();
+        let bundle = SkillBundle {
+            manifest: &manifest,
+            files: &files,
+        };
+        context.skills_install(&bundle, false).unwrap();
+        let writer = context.lock_skills().unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let thread_root = root.path().to_path_buf();
+        let reader = std::thread::spawn(move || {
+            let context = RepositoryContext::discover(thread_root).unwrap();
+            let (manifest, files) = test_skill_manifest();
+            let bundle = SkillBundle {
+                manifest: &manifest,
+                files: &files,
+            };
+            started_tx.send(()).unwrap();
+            let result = context.skills_status(&bundle);
+            finished_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_millis(250)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(writer);
+        assert_eq!(
+            finished_rx.recv().unwrap().unwrap().status,
+            SkillStatus::Current
+        );
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_managed_manifest_is_a_force_resolvable_conflict() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        let (manifest, files) = test_skill_manifest();
+        let bundle = SkillBundle {
+            manifest: &manifest,
+            files: &files,
+        };
+        context.skills_install(&bundle, false).unwrap();
+        fs::write(context.contained_path(SKILLS_MANIFEST).unwrap(), b"{}").unwrap();
+        assert_eq!(
+            context.skills_status(&bundle).unwrap().status,
+            SkillStatus::Conflict
+        );
+        assert!(context.skills_install(&bundle, false).is_err());
+        assert!(context.skills_install(&bundle, true).unwrap().changed);
+        fs::write(context.contained_path(SKILLS_MANIFEST).unwrap(), b"{}").unwrap();
+        assert!(context.skills_remove(false).is_err());
+        assert!(context.skills_remove(true).unwrap().changed);
+    }
+
+    #[test]
+    fn bare_managed_directory_is_not_a_valid_manifest_file() {
+        assert!(validate_skill_path("graphforge-bootstrap").is_err());
+        assert!(validate_skill_path("graphforge-bootstrap/SKILL.md").is_ok());
     }
 }

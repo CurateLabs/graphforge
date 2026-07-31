@@ -15,6 +15,26 @@ Both entry points forward arguments to the Rust CLI and preserve its exact
 stdout, stderr, structured JSON, and exit status. They do not contain Python or
 JavaScript fallback implementations.
 
+`init` installs the compatible project-local GraphForge skills into
+`.agents/skills/` unless `--no-skills` is supplied. The wheel and npm package
+carry byte-identical offline assets generated from the repository's single
+`project-skills/` source. GraphForge owns only the skill files recorded in its
+versioned managed manifest: unrelated skills and user edits are preserved, and
+`skills status` reports conflicts before `skills update` or `skills remove`
+can change them.
+
+```bash
+gf --project-dir . skills install
+gf --project-dir . skills status --json
+gf --project-dir . skills update
+gf --project-dir . skills remove
+```
+
+The installed skills are tracked repository guidance, not graph data. Do not
+blanket-ignore `.agents/skills/`; review and commit the GraphForge skill
+directories and their managed provenance manifest when the team wants the same
+agent experience across clones.
+
 ```bash
 gf --project-dir . init
 gf --project-dir . config validate

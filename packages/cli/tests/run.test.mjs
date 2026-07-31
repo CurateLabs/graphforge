@@ -33,7 +33,13 @@ test("forwards arguments to the native CLI contract", async () => {
   });
 
   assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [["--json", "config", "validate"]]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "--skills-bundle-dir");
+  assert.equal(
+    calls[0][1].replaceAll("\\", "/").endsWith("/project-skills/"),
+    true,
+  );
+  assert.deepEqual(calls[0].slice(2), ["--json", "config", "validate"]);
   assert.equal(stdout.output(), '{"valid":true}\n');
   assert.equal(stderr.output(), "");
 });

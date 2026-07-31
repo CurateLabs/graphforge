@@ -52,12 +52,24 @@ try {
     nativeRoot,
     JSON.parse(npmPack(nativeRoot))[0].filename,
   );
-  const cliTarball = JSON.parse(
+  const cliPack = JSON.parse(
     execFileSync("pnpm", ["pack", "--json", "--pack-destination", fixture], {
       cwd: packageRoot,
       encoding: "utf8",
     }),
-  ).filename;
+  );
+  const cliTarball = cliPack.filename;
+  for (const path of [
+    "project-skills/manifest.json",
+    "project-skills/graphforge-bootstrap/SKILL.md",
+    "project-skills/graphforge-build-knowledge/SKILL.md",
+  ]) {
+    assert.equal(
+      cliPack.files.some((entry) => entry.path === path),
+      true,
+      `packed CLI is missing ${path}`,
+    );
+  }
 
   execFileSync(
     "npm",
@@ -72,6 +84,28 @@ try {
     ],
     { cwd: installRoot, stdio: "pipe" },
   );
+  const installedSkills = join(
+    installRoot,
+    "node_modules",
+    "@graphforge",
+    "cli",
+    "project-skills",
+  );
+  const installedManifest = JSON.parse(
+    readFileSync(join(installedSkills, "manifest.json"), "utf8"),
+  );
+  assert.deepEqual(installedManifest.skills, [
+    "graphforge-bootstrap",
+    "graphforge-build-knowledge",
+  ]);
+  for (const skill of installedManifest.skills) {
+    assert.equal(
+      readFileSync(join(installedSkills, skill, "SKILL.md"), "utf8").includes(
+        `name: ${skill}`,
+      ),
+      true,
+    );
+  }
 
   const executable = join(installRoot, "node_modules", ".bin", "graphforge");
   const success = spawnSync(executable, ["--json", "config", "validate"], {
@@ -79,11 +113,15 @@ try {
     encoding: "utf8",
   });
   assert.equal(success.status, 0, success.stderr);
-  assert.deepEqual(JSON.parse(success.stdout).args, [
-    "--json",
-    "config",
-    "validate",
-  ]);
+  const successArgs = JSON.parse(success.stdout).args;
+  assert.equal(successArgs[0], "--skills-bundle-dir");
+  assert.equal(
+    realpathSync(successArgs[1]),
+    realpathSync(
+      join(installRoot, "node_modules", "@graphforge", "cli", "project-skills"),
+    ),
+  );
+  assert.deepEqual(successArgs.slice(2), ["--json", "config", "validate"]);
   assert.equal(
     realpathSync(JSON.parse(success.stdout).cwd),
     realpathSync(installRoot),
@@ -95,7 +133,10 @@ try {
     { cwd: installRoot, encoding: "utf8" },
   );
   assert.equal(npx.status, 0, npx.stderr);
-  assert.deepEqual(JSON.parse(npx.stdout).args, ["--info"]);
+  const npxArgs = JSON.parse(npx.stdout).args;
+  assert.equal(npxArgs[0], "--skills-bundle-dir");
+  assert.equal(realpathSync(npxArgs[1]), realpathSync(installedSkills));
+  assert.deepEqual(npxArgs.slice(2), ["--info"]);
 
   const failure = spawnSync(executable, ["--fail"], {
     cwd: installRoot,

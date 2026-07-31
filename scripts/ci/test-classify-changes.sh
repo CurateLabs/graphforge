@@ -46,6 +46,7 @@ python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skil
 gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false'
 binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false'
 binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false'
+binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false'
 binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false'
 binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true'
 agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true'
@@ -56,6 +57,8 @@ assert_classification "$binding_rust" crates/gf-api/src/lib.rs public-api-rust
 assert_classification "$binding_python" crates/gf-bindings-py/tests/smoke.py python-binding
 assert_classification "$binding_only" crates/gf-bindings-node/tests/analyze.test.mjs node-binding
 assert_classification "$binding_only" packages/cli/bin/graphforge.js node-cli
+assert_classification "$binding_rust_python" \
+  project-skills/graphforge-bootstrap/SKILL.md project-skill-source
 assert_classification "$binding_only" tests/contracts/repository-cli-parity.json cli-parity-fixture
 assert_classification "$binding_rust" tests/contracts/checkpoint-recovery-matrix.json checkpoint-recovery-fixture
 assert_classification "$gherkin_rust" tests/features/tck/features/query.feature gherkin

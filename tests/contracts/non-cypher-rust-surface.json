@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "7a6ae2cd6d779505cc55246263ec2d9c6557a8da2c2f4499891109f2da1c9196",
+  "public_method_digest": "0a70ef6973c53b43c7dd8fba453edb702c01dd7a57ad2a6f5d7b641325be6db2",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",

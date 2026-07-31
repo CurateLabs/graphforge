@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "bundle_version": 1,
+  "graphforge_compatibility": ">=0.5.0 <0.6.0",
+  "skills": [
+    "graphforge-bootstrap",
+    "graphforge-build-knowledge"
+  ],
+  "files": [
+    {
+      "path": "graphforge-bootstrap/SKILL.md",
+      "sha256": "2a5346c348f1c896483fd8d0fe90dde7db1b6b0acedfabf2554a9abd8a796542"
+    },
+    {
+      "path": "graphforge-build-knowledge/SKILL.md",
+      "sha256": "b53a9380a76761a0e175062c3f3d076d5139fc5cccd789d0eb52c0dd0a257d29"
+    }
+  ]
+}
