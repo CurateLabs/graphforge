@@ -4,6 +4,17 @@ GraphForge uses one `.graphforge/` directory. Definitions in `graphforge.yaml`,
 `ontology/`, `schemas/`, `seeds/`, and `migrations/` are ordinary reviewable Git
 content. Runtime state, imports, and exports are data and must not be committed.
 
+Run the same native lifecycle contract from either published package:
+
+```bash
+uvx graphforge init
+npx @graphforge/cli init
+```
+
+Both entry points forward arguments to the Rust CLI and preserve its exact
+stdout, stderr, structured JSON, and exit status. They do not contain Python or
+JavaScript fallback implementations.
+
 ```bash
 gf --project-dir . init
 gf --project-dir . config validate
@@ -72,3 +83,9 @@ generation; import does not merge into or overwrite an existing project.
 areas, not durable project authority. Both are managed Git ignores, so envelopes
 placed there remain outside the code repository. Keep tracked schemas,
 ontology, migrations, and seed recipes separate from these data files.
+
+This whole-project interchange surface is distinct from ontology-document
+inspection, suggestion, validation, and YAML/JSON export. The Rust-owned
+ontology lifecycle is tracked by #236, with thin Python and Node parity tracked
+by #237. Repository `export` never substitutes for ontology export, and
+ontology export never packages graph data or a project generation.

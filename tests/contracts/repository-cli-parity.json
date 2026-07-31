@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "default guidance",
+      "args": [],
+      "exitCode": 0,
+      "stdout": "GraphForge — use --help for options\n",
+      "stderr": ""
+    },
+    {
+      "name": "structured parse error",
+      "args": ["--json", "unknown-command"],
+      "exitCode": 2,
+      "stdout": "",
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"error: unrecognized subcommand 'unknown-command'\\n\\nUsage: graphforge [OPTIONS] [COMMAND]\\n\\nFor more information, try '--help'.\\n\"}}\n"
+    }
+  ]
+}

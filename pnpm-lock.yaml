@@ -38,6 +38,12 @@ importers:
 
   packages/agent-skills: {}
 
+  packages/cli:
+    dependencies:
+      '@graphforge/node':
+        specifier: workspace:*
+        version: link:../../crates/gf-bindings-node
+
   tests/features/node:
     dependencies:
       '@graphforge/node':

@@ -113,6 +113,15 @@ while IFS= read -r -d '' path; do
       [[ "$path" == *.py ]] && python=true
       ;;
 
+    packages/cli/* | packages/cli/**/* | tests/contracts/repository-cli-parity.json)
+      bindings=true
+      ;;
+
+    tests/contracts/checkpoint-recovery-matrix.json)
+      rust=true
+      bindings=true
+      ;;
+
     crates/*.rs | crates/*/*.rs | crates/*/*/*.rs | crates/*/*/*/*.rs | \
       crates/*/*/*/*/*.rs)
       rust=true

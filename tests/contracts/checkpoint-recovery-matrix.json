@@ -158,9 +158,9 @@
       "expected_errors": ["GF_CHECKPOINT_NOT_FOUND"],
       "tests": [
         {"kind": "rust", "path": "crates/gf-cli/tests/checkpoints.rs", "symbol": "checkpoint_cli_emits_arrow_and_stable_errors"},
-        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "revert_requires_reason_and_idempotency_key"},
-        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "create_and_delete_require_idempotency_keys"},
-        {"kind": "rust", "path": "crates/gf-cli/src/main.rs", "symbol": "diff_disambiguates_current_from_a_checkpoint_named_current"}
+        {"kind": "rust", "path": "crates/gf-cli/src/lib.rs", "symbol": "revert_requires_reason_and_idempotency_key"},
+        {"kind": "rust", "path": "crates/gf-cli/src/lib.rs", "symbol": "create_and_delete_require_idempotency_keys"},
+        {"kind": "rust", "path": "crates/gf-cli/src/lib.rs", "symbol": "diff_disambiguates_current_from_a_checkpoint_named_current"}
       ]
     },
     {

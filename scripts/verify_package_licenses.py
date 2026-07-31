@@ -47,6 +47,7 @@ CARGO_PUBLISH_CRATES = (
 
 NPM_PACKAGES = (
     ROOT / "crates" / "gf-bindings-node",
+    ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
 
@@ -99,6 +100,12 @@ def verify_cargo_crate(name: str) -> list[str]:
 def verify_npm_package(package_dir: Path) -> list[str]:
     """Return errors for one npm package dry-run tarball listing."""
     errors: list[str] = []
+    required_files = ["LICENSE", "NOTICE"]
+    if package_dir in (
+        ROOT / "crates" / "gf-bindings-node",
+        ROOT / "packages" / "cli",
+    ):
+        required_files.append("THIRD_PARTY_NOTICES.md")
     package_json = package_dir / "package.json"
     if not package_json.exists():
         return [f"{package_dir.relative_to(ROOT)}: missing package.json"]
@@ -107,18 +114,26 @@ def verify_npm_package(package_dir: Path) -> list[str]:
         errors.append(f"{package_dir.relative_to(ROOT)}: license is not Apache-2.0")
     files_field = meta.get("files")
     if isinstance(files_field, list):
-        for required in ("LICENSE", "NOTICE"):
+        for required in required_files:
             if required not in files_field:
                 errors.append(
                     f"{package_dir.relative_to(ROOT)}: package.json files[] lacks {required}"
                 )
     with tempfile.TemporaryDirectory(prefix="gf-npm-pack-") as tmp:
-        result = _run(
-            ["npm", "pack", "--dry-run", "--ignore-scripts", "--json"],
-            cwd=package_dir,
+        command = (
+            ["pnpm", "pack", "--json", "--pack-destination", tmp]
+            if package_dir.name == "cli"
+            else ["npm", "pack", "--dry-run", "--ignore-scripts", "--json"]
         )
+        result = _run(command, cwd=package_dir)
         # npm pack --json still prints notices to stderr; stdout should be JSON.
         if result.returncode != 0:
+            if package_dir.name == "cli":
+                errors.append(
+                    f"{package_dir.relative_to(ROOT)}: pnpm pack failed: "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+                return errors
             # Fallback: parse human dry-run listing.
             result = _run(
                 ["npm", "pack", "--dry-run", "--ignore-scripts"],
@@ -131,7 +146,7 @@ def verify_npm_package(package_dir: Path) -> list[str]:
                 )
                 return errors
             listing = result.stderr + "\n" + result.stdout
-            for required in ("LICENSE", "NOTICE"):
+            for required in required_files:
                 if required not in listing:
                     errors.append(
                         f"{package_dir.relative_to(ROOT)}: npm pack listing lacks {required}"
@@ -141,7 +156,7 @@ def verify_npm_package(package_dir: Path) -> list[str]:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
             listing = result.stderr + "\n" + result.stdout
-            for required in ("LICENSE", "NOTICE"):
+            for required in required_files:
                 if required not in listing:
                     errors.append(
                         f"{package_dir.relative_to(ROOT)}: npm pack listing lacks {required}"
@@ -159,13 +174,13 @@ def verify_npm_package(package_dir: Path) -> list[str]:
         # Some npm versions omit files in --json; fall back to stderr notice lines.
         if not paths:
             listing = result.stderr + "\n" + result.stdout
-            for required in ("LICENSE", "NOTICE"):
+            for required in required_files:
                 if required not in listing:
                     errors.append(
                         f"{package_dir.relative_to(ROOT)}: npm pack listing lacks {required}"
                     )
             return errors
-        for required in ("LICENSE", "NOTICE"):
+        for required in required_files:
             if required not in paths:
                 errors.append(f"{package_dir.relative_to(ROOT)}: npm pack tarball lacks {required}")
         _ = tmp  # keep temp dir alive for npm side effects if any

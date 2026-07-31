@@ -1961,6 +1961,29 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Captured output from one Rust-owned CLI invocation.
+#[napi(object)]
+pub struct CliExecutionOutput {
+    /// Process-compatible exit status.
+    pub exit_code: i32,
+    /// Exact standard-output bytes, including binary Arrow IPC results.
+    pub stdout: Buffer,
+    /// Exact standard-error bytes.
+    pub stderr: Buffer,
+}
+
+/// Parse and execute the native GraphForge CLI without terminating Node.js.
+#[napi(js_name = "runCli")]
+#[must_use]
+pub fn run_cli(args: Vec<String>) -> CliExecutionOutput {
+    let execution = gf_cli::execute(std::iter::once("gf".to_owned()).chain(args));
+    CliExecutionOutput {
+        exit_code: execution.exit_code,
+        stdout: execution.stdout.into(),
+        stderr: execution.stderr.into(),
+    }
+}
+
 static WRITER_HOLD_PROBE: LazyLock<Mutex<Option<gf_api::concurrency_test_support::HeldWriter>>> =
     LazyLock::new(|| Mutex::new(None));
 

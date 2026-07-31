@@ -1,0 +1,54 @@
+{
+  "name": "@graphforge/cli",
+  "version": "0.5.0-dev.0",
+  "description": "GraphForge repository lifecycle CLI",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/CurateLabs/graphforge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CurateLabs/graphforge.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/CurateLabs/graphforge/issues"
+  },
+  "keywords": [
+    "graphforge",
+    "graph",
+    "knowledge-graph",
+    "cli",
+    "npx"
+  ],
+  "type": "module",
+  "bin": {
+    "graphforge": "bin/graphforge.js",
+    "gf": "bin/graphforge.js"
+  },
+  "exports": {
+    ".": "./lib/run.mjs"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@graphforge/node": "workspace:*"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:offline": "node tests/offline-pack-smoke.mjs",
+    "pack:local": "npm pack --ignore-scripts",
+    "format:check": "prettier --check package.json README.md bin lib tests"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

@@ -240,6 +240,44 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+  # ---- NPX lifecycle CLI (@graphforge/cli) ----
+  publish-node-cli:
+    name: Publish GraphForge CLI to npm
+    needs: publish-node
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/cli
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Install workspace dependencies
+        run: pnpm install
+        working-directory: .
+
+      - name: Offline pack smoke before publish
+        run: pnpm --filter @graphforge/cli test:offline
+        working-directory: .
+
+      - name: Verify npm publishing identity
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @graphforge/cli
+        run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
   # ---- NPX agent skills (@graphforge/agent-skills) ----
   publish-agent-skills:
     name: Publish agent-skills to npm

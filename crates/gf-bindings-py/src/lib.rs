@@ -5466,6 +5466,20 @@ fn _test_release_writer_hold(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
+/// Execute the Rust-owned CLI without reimplementing parsing or behavior in Python.
+#[pyfunction]
+fn _cli_execute(
+    py: Python<'_>,
+    args: Vec<String>,
+) -> (i32, Bound<'_, PyBytes>, Bound<'_, PyBytes>) {
+    let execution = gf_cli::execute(args);
+    (
+        execution.exit_code,
+        PyBytes::new(py, &execution.stdout),
+        PyBytes::new(py, &execution.stderr),
+    )
+}
+
 /// GraphForge native extension module (`graphforge._graphforge_rs`).
 #[pymodule]
 fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -5478,6 +5492,7 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_test_gil_release_probe_signal, m)?)?;
     m.add_function(wrap_pyfunction!(_test_acquire_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_test_release_writer_hold, m)?)?;
+    m.add_function(wrap_pyfunction!(_cli_execute, m)?)?;
     m.add_class::<GraphForge>()?;
     m.add_class::<PyCheckpointView>()?;
     m.add_class::<PyCancellationToken>()?;

@@ -44,17 +44,20 @@ LICENSE_COPIES = (
     ROOT / "crates" / "gf-bindings-node" / "LICENSE",
     ROOT / "crates" / "gf-bindings-py" / "LICENSE",
     ROOT / "packages" / "agent-skills" / "LICENSE",
+    ROOT / "packages" / "cli" / "LICENSE",
 )
 NOTICE_COPIES = (
     ROOT / "NOTICE",
     *(path / "NOTICE" for path in CARGO_PACKAGE_DIRS),
     ROOT / "packages" / "agent-skills" / "NOTICE",
+    ROOT / "packages" / "cli" / "NOTICE",
 )
 THIRD_PARTY_NOTICE_COPIES = (
     ROOT / "legal" / "THIRD_PARTY_NOTICES.md",
     ROOT / "crates" / "gf-bindings-py" / "THIRD_PARTY_NOTICES.md",
     ROOT / "crates" / "gf-bindings-node" / "THIRD_PARTY_NOTICES.md",
     ROOT / "crates" / "gf-cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFEST_EXPECTATIONS = {
     ROOT / "Cargo.toml": ('license = "Apache-2.0"',),
@@ -74,6 +77,12 @@ MANIFEST_EXPECTATIONS = {
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',
+    ),
+    ROOT / "packages" / "cli" / "package.json": (
+        '"license": "Apache-2.0"',
+        '"LICENSE"',
+        '"NOTICE"',
+        '"THIRD_PARTY_NOTICES.md"',
     ),
     ROOT / "docs-site" / "package.json": ('"license": "Apache-2.0"',),
     ROOT / "tests" / "features" / "node" / "package.json": ('"license": "Apache-2.0"',),
