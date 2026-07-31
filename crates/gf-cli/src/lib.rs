@@ -20,6 +20,7 @@ include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SKILL_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SKILL_BUNDLE_FILES: usize = 256;
 const MAX_SKILL_PATH_BYTES: usize = 1024;
 
 fn project_skill_bundle() -> gf_api::SkillBundle<'static> {
@@ -159,7 +160,7 @@ fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, gf_api::GfError> {
         .ok_or_else(|| {
             gf_api::GfError::Validation("project skill manifest files are required".into())
         })?;
-    if entries.len() > 256 {
+    if entries.len() > MAX_SKILL_BUNDLE_FILES {
         return Err(gf_api::GfError::Validation(
             "project skill bundle exceeds file bound".into(),
         ));
@@ -181,15 +182,22 @@ fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, gf_api::GfError> {
         prepared.push(file);
     }
     let mut files = Vec::with_capacity(prepared.len());
+    let mut read_bytes = 0_u64;
     for (path, canonical, _) in prepared {
-        files.push(OwnedSkillFile {
-            path,
-            bytes: read_bounded_file(
-                &canonical,
-                MAX_SKILL_FILE_BYTES,
-                "packaged project skill exceeds per-file byte bound",
-            )?,
-        });
+        let bytes = read_bounded_file(
+            &canonical,
+            MAX_SKILL_FILE_BYTES,
+            "packaged project skill exceeds per-file byte bound",
+        )?;
+        read_bytes = read_bytes
+            .checked_add(bytes.len() as u64)
+            .filter(|total| *total <= MAX_SKILL_BUNDLE_BYTES)
+            .ok_or_else(|| {
+                gf_api::GfError::Validation(
+                    "packaged project skill bundle exceeds total byte bound".into(),
+                )
+            })?;
+        files.push(OwnedSkillFile { path, bytes });
     }
     Ok(OwnedSkillBundle { manifest, files })
 }

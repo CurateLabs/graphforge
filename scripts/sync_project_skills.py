@@ -25,7 +25,12 @@ def sha256(path: Path) -> str:
 
 
 def payload_paths() -> list[Path]:
-    return [SOURCE / name / "SKILL.md" for name in SKILL_NAMES]
+    return sorted(
+        path
+        for name in SKILL_NAMES
+        for path in (SOURCE / name).rglob("*")
+        if path.is_file()
+    )
 
 
 def expected_manifest() -> dict[str, object]:

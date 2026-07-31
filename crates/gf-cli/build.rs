@@ -6,11 +6,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn collect(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
+    let root_manifest = root.join("manifest.json");
     for entry in fs::read_dir(directory).expect("read canonical project-skills directory") {
         let path = entry.expect("read canonical project-skill entry").path();
         if path.is_dir() {
             collect(root, &path, files);
-        } else if path.file_name().is_some_and(|name| name != "manifest.json") {
+        } else if path != root_manifest {
             path.strip_prefix(root)
                 .expect("project skill remains under canonical root");
             files.push(path);
@@ -33,6 +34,10 @@ fn main() {
         collect(&root, &root.join(name), &mut files);
     }
     files.sort();
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    for path in &files {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let manifest_literal = rust_string(&manifest.to_string_lossy());
     let mut generated =

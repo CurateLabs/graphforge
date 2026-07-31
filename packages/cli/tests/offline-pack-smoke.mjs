@@ -135,6 +135,7 @@ try {
   assert.equal(npx.status, 0, npx.stderr);
   const npxArgs = JSON.parse(npx.stdout).args;
   assert.equal(npxArgs[0], "--skills-bundle-dir");
+  assert.equal(realpathSync(npxArgs[1]), realpathSync(installedSkills));
   assert.deepEqual(npxArgs.slice(2), ["--info"]);
 
   const failure = spawnSync(executable, ["--fail"], {

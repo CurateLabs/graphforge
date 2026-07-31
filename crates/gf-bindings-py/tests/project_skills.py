@@ -23,7 +23,9 @@ for entry in manifest["files"]:
     payload = bundle.joinpath(*entry["path"].split("/")).read_bytes()
     assert hashlib.sha256(payload).hexdigest() == entry["sha256"]
 
-executable = Path(sys.executable).with_name("graphforge")
+executable = Path(sys.executable).with_name(
+    "graphforge.exe" if sys.platform == "win32" else "graphforge"
+)
 assert executable.is_file(), "fresh wheel console entry point is missing"
 
 with tempfile.TemporaryDirectory(prefix="graphforge-wheel-skills-") as temporary:
@@ -63,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="graphforge-wheel-skills-") as temporary
 
     # Recover an interrupted publication where the prior complete bundle was
     # moved aside and partial replacement files became visible.
-    lifecycle = repository / ".graphforge" / "state" / "skills-lifecycle"
+    lifecycle = repository / ".graphforge" / "imports" / "skills-lifecycle"
     backup = lifecycle / "backup"
     backup.mkdir()
     for skill in manifest["skills"]:

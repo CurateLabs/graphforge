@@ -22,19 +22,33 @@ const IGNORE_LINES: [&str; 3] = [
 ];
 const SKILLS_ROOT: &str = ".agents/skills";
 const SKILLS_MANIFEST: &str = ".agents/skills/.graphforge-managed.json";
-const SKILLS_LIFECYCLE_ROOT: &str = ".graphforge/state/skills-lifecycle";
-const SKILLS_TRANSACTION: &str = ".graphforge/state/skills-lifecycle/transaction";
-const SKILLS_LOCK: &str = ".graphforge/state/skills-lifecycle/lock";
-const SKILLS_STAGE: &str = ".graphforge/state/skills-lifecycle/stage";
-const SKILLS_BACKUP: &str = ".graphforge/state/skills-lifecycle/backup";
+const SKILLS_LIFECYCLE_ROOT: &str = ".graphforge/imports/skills-lifecycle";
+const SKILLS_TRANSACTION: &str = ".graphforge/imports/skills-lifecycle/transaction";
+const SKILLS_LOCK: &str = ".graphforge/imports/skills-lifecycle/lock";
+const SKILLS_STAGE: &str = ".graphforge/imports/skills-lifecycle/stage";
+const SKILLS_BACKUP: &str = ".graphforge/imports/skills-lifecycle/backup";
 const MANAGED_SKILL_NAMES: [&str; 2] = ["graphforge-bootstrap", "graphforge-build-knowledge"];
 
 fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
 }
 
+#[cfg(not(windows))]
 fn sync_directory(path: &Path) -> Result<(), GfError> {
     fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| GfError::Storage(error.to_string()))
+}
+
+#[cfg(windows)]
+fn sync_directory(path: &Path) -> Result<(), GfError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| GfError::Storage(error.to_string()))
 }
@@ -1873,7 +1887,10 @@ mod tests {
             finished_tx.send(result).unwrap();
         });
         started_rx.recv().unwrap();
-        assert!(finished_rx.try_recv().is_err());
+        assert!(matches!(
+            finished_rx.recv_timeout(std::time::Duration::from_millis(250)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
         drop(writer);
         assert_eq!(
             finished_rx.recv().unwrap().unwrap().status,

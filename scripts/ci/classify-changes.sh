@@ -117,7 +117,7 @@ while IFS= read -r -d '' path; do
       bindings=true
       ;;
 
-    project-skills/* | project-skills/**/*)
+    project-skills/*)
       rust=true
       python=true
       bindings=true

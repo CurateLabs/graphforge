@@ -101,7 +101,7 @@ try {
   const lifecycle = join(
     repository,
     ".graphforge",
-    "state",
+    "imports",
     "skills-lifecycle",
   );
   const backup = join(lifecycle, "backup");

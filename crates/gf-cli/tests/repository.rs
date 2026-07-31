@@ -248,7 +248,7 @@ fn interrupted_skill_publication_rolls_back_before_the_next_mutation() {
     );
     let skills = root.path().join(".agents/skills");
     let managed = skills.join("graphforge-bootstrap");
-    let lifecycle = root.path().join(".graphforge/state/skills-lifecycle");
+    let lifecycle = root.path().join(".graphforge/imports/skills-lifecycle");
     let backup = lifecycle.join("backup");
     fs::create_dir(&backup).unwrap();
     fs::rename(&managed, backup.join("graphforge-bootstrap")).unwrap();
@@ -295,7 +295,7 @@ fn status_recovers_an_interrupted_remove_before_reporting() {
             .success()
     );
     let skills = root.path().join(".agents/skills");
-    let lifecycle = root.path().join(".graphforge/state/skills-lifecycle");
+    let lifecycle = root.path().join(".graphforge/imports/skills-lifecycle");
     let backup = lifecycle.join("backup");
     fs::create_dir(&backup).unwrap();
     for name in ["graphforge-bootstrap", "graphforge-build-knowledge"] {
