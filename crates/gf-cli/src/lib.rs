@@ -246,6 +246,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Validate provider-neutral infrastructure intent without provisioning.
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommand,
+    },
     /// Manage project-local GraphForge agent skills.
     Skills {
         #[command(subcommand)]
@@ -316,6 +321,19 @@ enum ConfigCommand {
     Validate,
     /// Emit deterministic, secret-free resolved configuration.
     Resolve,
+}
+
+#[derive(Subcommand)]
+enum InfraCommand {
+    /// Validate one named target without network access or mutation.
+    Validate(InfraValidateArgs),
+}
+
+#[derive(Args)]
+struct InfraValidateArgs {
+    /// Stable target identifier from graphforge.yaml.
+    #[arg(long)]
+    target: String,
 }
 
 #[derive(Subcommand)]
@@ -889,6 +907,12 @@ fn run_repository(
         Command::Config {
             command: ConfigCommand::Resolve,
         } => Ok(repository.resolve_config()?),
+        Command::Infra {
+            command: InfraCommand::Validate(args),
+        } => {
+            plain_output = "valid";
+            serde_json::to_value(repository.validate_infra_target(&args.target)?)
+        }
         Command::Skills {
             command: SkillsCommand::Install(args),
         } => serde_json::to_value(repository.skills_install(skill_bundle, args.force)?),
@@ -991,6 +1015,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
             | Command::Sync(_)
             | Command::Remove(_)
             | Command::Config { .. }
+            | Command::Infra { .. }
             | Command::Skills { .. }
     ) {
         return run_repository_with_bundle(

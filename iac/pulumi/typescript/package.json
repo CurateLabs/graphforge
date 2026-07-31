@@ -1,0 +1,32 @@
+{
+  "name": "@graphforge/pulumi-static",
+  "version": "0.5.0-dev.0",
+  "description": "Provider-neutral GraphForge static target validation for Pulumi",
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": [
+    "dist/src/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "format:check": "prettier --check package.json tsconfig.json README.md src test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@pulumi/pulumi": "3.255.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "prettier": "3.9.5",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@pulumi/pulumi": "^3.0.0"
+  }
+}

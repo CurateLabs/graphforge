@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "declaration": true,
+    "esModuleInterop": true,
+    "module": "commonjs",
+    "outDir": "dist",
+    "rootDir": ".",
+    "strict": true,
+    "target": "ES2022"
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graphforge-pulumi-static"
+version = "0.5.0.dev0"
+description = "Provider-neutral GraphForge static target validation for Pulumi"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["pulumi>=3.200,<4"]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9,<10",
+  "ruff==0.16.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/graphforge_pulumi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "N", "PTH", "RUF", "UP"]

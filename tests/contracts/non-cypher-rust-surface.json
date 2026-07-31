@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "35ede905127bf32a6e3048da1f8623f8c8c174bdd3275666164edcbbd1704a02",
+  "public_method_digest": "60a96ded9d55acdfed8c1bc5ae8876564f0e1262a7fea5f2bbc014be5af0a1e8",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -50,6 +50,7 @@
       "GraphForge.show_checkpoint": "designed-only",
       "RepositoryContext.discover": "introspection",
       "RepositoryContext.sync": "release-tested",
+      "RepositoryContext.validate_infra_target": "release-tested",
       "CheckpointView.checkpoint_uuid": "introspection",
       "CheckpointView.generation_uuid": "introspection",
       "OpenRouterProviderSession.new": "introspection",
@@ -88,6 +89,15 @@
     }
   },
   "method_evidence_groups": {
+    "infra-validation": {
+      "ids": [
+        "RepositoryContext.validate_infra_target"
+      ],
+      "test_refs": [
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "checked_in_fixture_resolves_to_the_contract_golden"},
+        {"path": "crates/gf-api/src/repository.rs", "symbol": "target_semantics_fail_closed_before_state_or_secret_materialization"}
+      ]
+    },
     "repository-sync": {
       "ids": [
         "RepositoryContext.sync"

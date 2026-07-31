@@ -482,3 +482,79 @@ fn json_validation_error_has_stable_envelope_and_exit_code() {
     let value: Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(value["error"]["code"], "GF_VALIDATION");
 }
+
+#[test]
+fn infra_validation_is_golden_offline_and_non_mutating() {
+    let root = tempdir().unwrap();
+    fs::create_dir(root.path().join(".graphforge")).unwrap();
+    fs::write(
+        root.path().join(".graphforge/graphforge.yaml"),
+        include_str!("../../../docs/contracts/examples/graphforge-v1.yaml"),
+    )
+    .unwrap();
+    let before = fs::read_dir(root.path().join(".graphforge"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    let output = gf()
+        .args([
+            "--project-dir",
+            root.path().to_str().unwrap(),
+            "--json",
+            "infra",
+            "validate",
+            "--target",
+            "production",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        include_bytes!(
+            "../../../docs/contracts/examples/graphforge-infra-validation-production-v1.json"
+        )
+    );
+    assert!(output.stderr.is_empty());
+    let after = fs::read_dir(root.path().join(".graphforge"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    assert_eq!(after, before);
+    assert!(!root.path().join(".graphforge/state").exists());
+
+    let plain = gf()
+        .args([
+            "--project-dir",
+            root.path().to_str().unwrap(),
+            "infra",
+            "validate",
+            "--target",
+            "local",
+        ])
+        .output()
+        .unwrap();
+    assert!(plain.status.success());
+    assert_eq!(plain.stdout, b"valid\n");
+
+    let missing = gf()
+        .args([
+            "--project-dir",
+            root.path().to_str().unwrap(),
+            "--json",
+            "infra",
+            "validate",
+            "--target",
+            "missing",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    let error: Value = serde_json::from_slice(&missing.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "GF_VALIDATION");
+    assert!(!String::from_utf8_lossy(&missing.stderr).contains("service-token"));
+}

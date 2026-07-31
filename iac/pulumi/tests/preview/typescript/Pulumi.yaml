@@ -1,0 +1,3 @@
+name: graphforge-static-typescript-acceptance
+runtime: nodejs
+description: Provider-free GraphForge TypeScript preview acceptance

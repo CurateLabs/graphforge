@@ -1,0 +1,12 @@
+provider_installation {
+  dev_overrides {
+    "curatelabs/graphforge" = "@PROVIDER_DIRECTORY@"
+  }
+  filesystem_mirror {
+    path    = "@MIRROR_DIRECTORY@"
+    include = ["curatelabs/graphforge"]
+  }
+  direct {
+    exclude = ["curatelabs/graphforge"]
+  }
+}

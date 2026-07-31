@@ -23,10 +23,13 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/gf-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "35ede905127bf32a6e3048da1f8623f8c8c174bdd3275666164edcbbd1704a02"
-EXPECTED_RELEASE_DIGEST = "b294b19c0de90e31aebefac7597f336073d6131758612e0586c8a01ac01ed9d7"
+EXPECTED_RUST_DIGEST = "60a96ded9d55acdfed8c1bc5ae8876564f0e1262a7fea5f2bbc014be5af0a1e8"
+EXPECTED_RELEASE_DIGEST = "9edf1fa64367f2f37132c9fe8c9f4aa388edcfe390c9ef4a21de346c6aa9ed1d"
 
 EVIDENCE = {
+    "infra-validation": {
+        "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
+    },
     "repository-sync": {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
@@ -185,7 +188,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 185
+    assert len(release_methods) == 186
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 

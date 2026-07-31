@@ -21,6 +21,8 @@ jobs:
       gherkin: ${{ steps.filter.outputs.gherkin }}
       bindings: ${{ steps.filter.outputs.bindings }}
       agent_skills: ${{ steps.filter.outputs.agent_skills }}
+      pulumi: ${{ steps.filter.outputs.pulumi }}
+      terraform: ${{ steps.filter.outputs.terraform }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -247,6 +249,92 @@ jobs:
           pnpm test:agent-skills
           pnpm format:agent-skills
           pnpm smoke:agent-skills
+
+  pulumi-static:
+    name: Pulumi Static Validation
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.pulumi == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: iac/pulumi/typescript/package-lock.json
+
+      - name: Test TypeScript component
+        working-directory: iac/pulumi/typescript
+        run: |
+          npm ci
+          npm test
+          npm run format:check
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Test Python component
+        working-directory: iac/pulumi/python
+        run: |
+          uv sync --extra test --locked
+          uv run pytest
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Install Pulumi CLI
+        uses: pulumi/actions@v7
+        with:
+          pulumi-version: 3.254.0
+
+      - name: Preview TypeScript and Python components
+        run: iac/pulumi/tests/preview_acceptance.sh
+
+  terraform-static:
+    name: Terraform Static Validation
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: iac/terraform/provider/go.sum
+
+      - name: Test provider
+        working-directory: iac/terraform/provider
+        run: |
+          gofmt -w .
+          git diff --exit-code -- .
+          go test -race ./...
+          go vet ./...
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.11.4"
+          terraform_wrapper: false
+
+      - name: Validate offline plan
+        env:
+          GO: go
+          TERRAFORM: terraform
+        run: |
+          terraform fmt -check -recursive iac/terraform
+          iac/terraform/tests/plan.sh
 
   rust-lint:
     name: Rust Quality
@@ -650,6 +738,8 @@ jobs:
       - python-quality
       - gherkin-lint
       - agent-skills
+      - pulumi-static
+      - terraform-static
       - rust-lint
       - rust-test
       - python-binding
@@ -668,6 +758,8 @@ jobs:
           "${{ needs.python-quality.result }}"
           "${{ needs.gherkin-lint.result }}"
           "${{ needs.agent-skills.result }}"
+          "${{ needs.pulumi-static.result }}"
+          "${{ needs.terraform-static.result }}"
           "${{ needs.rust-lint.result }}"
           "${{ needs.rust-test.result }}"
           "${{ needs.python-binding.result }}"

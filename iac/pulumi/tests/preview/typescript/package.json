@@ -1,0 +1,7 @@
+{
+  "name": "graphforge-static-typescript-preview",
+  "private": true,
+  "dependencies": {
+    "@pulumi/pulumi": "3.255.0"
+  }
+}

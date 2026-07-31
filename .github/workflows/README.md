@@ -26,8 +26,10 @@ and napi share one build volume instead of a second root-disk tree.
   `gf-storage` `project_generation` lock unit tests on
   `blacksmith-4vcpu-windows-2025` (Linux workspace tests cannot execute those
   `#[cfg(windows)]` cases).
-- Python, Gherkin, and public binding gates run only when their owned surfaces
-  change. Pull requests classify from their base SHA; pushes classify from the
+- Python, Gherkin, public binding, Pulumi static-validation, and Terraform
+  static-validation gates run only when their owned surfaces change. Shared
+  GraphForge configuration and infrastructure contract fixtures run both IaC
+  gates. Pull requests classify from their base SHA; pushes classify from the
   event's prior SHA. Missing Git history fails safe by enabling every gate.
 - Ordinary binding PRs build one same-SHA Linux Python wheel and Node addon.
   They never use committed binaries or binding-side algorithm substitutes.
@@ -46,8 +48,8 @@ and napi share one build volume instead of a second root-disk tree.
 ### `test.yml` — Test Suite
 
 Runs the change classifier, repository policy, and only the applicable Rust,
-Python, Gherkin, or native binding jobs. Pull-request native acceptance is
-Linux-only and uses Cargo's `dev` profile.
+Python, Gherkin, native binding, Pulumi, or Terraform jobs. Pull-request native
+acceptance is Linux-only and uses Cargo's `dev` profile.
 When Rust surfaces change, `Windows gf-storage Locks` runs
 `cargo test -p gf-storage project_generation::tests:: --lib` on
 `blacksmith-4vcpu-windows-2025` so the `#[cfg(windows)]` project-root lock unit

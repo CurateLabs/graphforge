@@ -16,6 +16,7 @@ use uuid::Uuid;
 const CONFIG: &str = ".graphforge/graphforge.yaml";
 const IGNORE_START: &str = "# graphforge: managed data (do not edit)";
 const IGNORE_END: &str = "# graphforge: end managed data";
+const MAX_PORTABLE_INTEGER: u64 = 9_007_199_254_740_991;
 const IGNORE_LINES: [&str; 3] = [
     "/.graphforge/state/",
     "/.graphforge/imports/",
@@ -744,6 +745,91 @@ impl RepositoryContext {
         self.load_config()?.resolve()
     }
 
+    /// Validate one declared infrastructure target without network access or mutation.
+    ///
+    /// This reads only the tracked project configuration. It never opens live
+    /// GraphForge state, resolves secret values, reads definition contents, or
+    /// attempts connectivity/readiness checks.
+    pub fn validate_infra_target(&self, target_id: &str) -> Result<InfraValidationResult, GfError> {
+        stable_id(target_id)?;
+        let resolved = self.resolve_config()?;
+        let encoded = serde_json::to_vec(&resolved)
+            .map_err(|error| validation(format!("cannot encode resolved config: {error}")))?;
+        let resolved_config_sha256 = encode_hex(&Sha256::digest(encoded));
+        let target = resolved
+            .get("targets")
+            .and_then(Value::as_array)
+            .and_then(|targets| {
+                targets
+                    .iter()
+                    .find(|target| target.get("id").and_then(Value::as_str) == Some(target_id))
+            })
+            .cloned()
+            .ok_or_else(|| validation(format!("unknown infrastructure target: {target_id}")))?;
+        let target_object = target
+            .as_object()
+            .ok_or_else(|| validation("resolved target must be an object"))?;
+        let text = |name: &str| {
+            target_object
+                .get(name)
+                .and_then(Value::as_str)
+                .ok_or_else(|| validation(format!("resolved target is missing {name}")))
+        };
+        let topology = target_object
+            .get("topology")
+            .and_then(Value::as_object)
+            .ok_or_else(|| validation("resolved target is missing topology"))?;
+        let topology_text = |name: &str| {
+            topology
+                .get(name)
+                .and_then(Value::as_str)
+                .ok_or_else(|| validation(format!("resolved topology is missing {name}")))
+        };
+        let replicas = topology
+            .get("replicas")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| validation("resolved topology is missing replicas"))?;
+        let artifact = target_object
+            .get("artifact")
+            .cloned()
+            .ok_or_else(|| validation("resolved target is missing artifact"))?;
+        let requirements = target_object
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| validation("resolved target is missing capabilities"))?;
+        let ownership = text("ownership")?.to_owned();
+        let kind = text("kind")?.to_owned();
+        let execution = topology_text("execution")?.to_owned();
+        let scheduling = topology_text("scheduling")?.to_owned();
+        Ok(InfraValidationResult {
+            contract: "graphforge-infra-validation/1",
+            resolved_config_sha256,
+            target,
+            static_validity: InfraStaticValidity { status: "valid" },
+            planned_infrastructure: InfraPlan {
+                status: "validated",
+                mutation: "none",
+                ownership,
+                kind,
+                execution,
+                scheduling,
+                replicas,
+                artifact,
+            },
+            connectivity: InfraNotChecked {
+                status: "not_checked",
+            },
+            readiness: InfraNotChecked {
+                status: "not_checked",
+            },
+            capability_compatibility: InfraCapabilityCompatibility {
+                status: "requirements_declared",
+                requirements,
+            },
+        })
+    }
+
     /// Compare or atomically reconcile the declared repository snapshot.
     ///
     /// Check mode never initializes or mutates project state. Apply mode
@@ -1397,13 +1483,28 @@ impl ProjectConfig {
                     "target reference collection exceeds contract bounds",
                 ));
             }
+            if target.capabilities.len() > 64 {
+                return Err(validation(
+                    "target capability collection exceeds contract bounds",
+                ));
+            }
             if target.source_ids.iter().collect::<BTreeSet<_>>().len() != target.source_ids.len()
                 || target.secret_ids.iter().collect::<BTreeSet<_>>().len()
                     != target.secret_ids.len()
             {
                 return Err(validation("target references must be unique"));
             }
+            let mut capability_ids = BTreeSet::new();
+            for capability in &target.capabilities {
+                stable_id(&capability.id)?;
+                if capability.version == 0 || !capability_ids.insert(&capability.id) {
+                    return Err(validation(
+                        "target capability requirements must have unique ids and positive versions",
+                    ));
+                }
+            }
             target.validate_bounds()?;
+            target.validate_semantics()?;
             if target.source_ids.iter().any(|id| !source_ids.contains(id)) {
                 return Err(validation("target references an unknown source"));
             }
@@ -1428,6 +1529,23 @@ impl ProjectConfig {
                 serde_json::to_value(target).map_err(|error| validation(error.to_string()))?;
             let object = value.as_object_mut().expect("target serializes as object");
             object.insert("id".into(), json!(id));
+            object.insert(
+                "ownership".into(),
+                serde_json::to_value(target.effective_ownership())
+                    .expect("target ownership serializes"),
+            );
+            object.insert(
+                "topology".into(),
+                serde_json::to_value(target.effective_topology())
+                    .expect("target topology serializes"),
+            );
+            let mut capabilities = target.capabilities.clone();
+            capabilities
+                .sort_by(|left, right| (&left.id, left.version).cmp(&(&right.id, right.version)));
+            object.insert(
+                "capabilities".into(),
+                serde_json::to_value(capabilities).expect("target capabilities serialize"),
+            );
             object.entry("resources").or_insert_with(|| json!({}));
             object
                 .entry("network")
@@ -1552,7 +1670,7 @@ struct Artifact {
     version: String,
     sha256: String,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ArtifactKind {
     PythonWheel,
@@ -1564,7 +1682,13 @@ enum ArtifactKind {
 #[serde(deny_unknown_fields)]
 struct Target {
     kind: TargetKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ownership: Option<TargetOwnership>,
     artifact: Artifact,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topology: Option<Topology>,
+    #[serde(default)]
+    capabilities: Vec<CapabilityRequirement>,
     write: WriteConfig,
     storage: StorageConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1595,9 +1719,17 @@ impl Target {
                 .is_some_and(|value| value > 64)
             || self.storage.capacity_bytes == Some(0)
             || self
-                .resources
-                .as_ref()
-                .is_some_and(|value| value.cpu_millis == Some(0) || value.memory_bytes == Some(0))
+                .storage
+                .capacity_bytes
+                .is_some_and(|value| value > MAX_PORTABLE_INTEGER)
+            || self.resources.as_ref().is_some_and(|value| {
+                value
+                    .cpu_millis
+                    .is_some_and(|amount| amount == 0 || amount > MAX_PORTABLE_INTEGER)
+                    || value
+                        .memory_bytes
+                        .is_some_and(|amount| amount == 0 || amount > MAX_PORTABLE_INTEGER)
+            })
             || self
                 .health
                 .as_ref()
@@ -1607,6 +1739,11 @@ impl Target {
                 .as_ref()
                 .and_then(|value| value.retention_count)
                 .is_some_and(|value| value == 0 || value > 1024)
+            || self
+                .topology
+                .as_ref()
+                .and_then(|value| value.replicas)
+                .is_some_and(|value| value == 0 || value > 1024)
         {
             return Err(validation("target value exceeds contract bounds"));
         }
@@ -1615,8 +1752,122 @@ impl Target {
         }
         Ok(())
     }
+
+    fn effective_ownership(&self) -> TargetOwnership {
+        self.ownership.unwrap_or(match self.kind {
+            TargetKind::Embedded => TargetOwnership::Embedded,
+            _ => TargetOwnership::External,
+        })
+    }
+
+    fn effective_topology(&self) -> ResolvedTopology {
+        let topology = self.topology.as_ref();
+        ResolvedTopology {
+            execution: topology.and_then(|value| value.execution).unwrap_or(
+                match (self.kind, self.artifact.kind) {
+                    (TargetKind::Host, _) => ExecutionKind::Host,
+                    (_, ArtifactKind::OciImage) => ExecutionKind::Container,
+                    _ => ExecutionKind::Process,
+                },
+            ),
+            scheduling: topology
+                .and_then(|value| value.scheduling)
+                .unwrap_or(match self.kind {
+                    TargetKind::Job => SchedulingKind::OnDemand,
+                    _ => SchedulingKind::LongRunning,
+                }),
+            replicas: topology.and_then(|value| value.replicas).unwrap_or(1),
+        }
+    }
+
+    fn validate_semantics(&self) -> Result<(), GfError> {
+        let ownership = self.effective_ownership();
+        let topology = self.effective_topology();
+        if (self.kind == TargetKind::Embedded) != (ownership == TargetOwnership::Embedded) {
+            return Err(validation(
+                "embedded ownership is valid only for an embedded target",
+            ));
+        }
+        if self.kind == TargetKind::Embedded
+            && (topology.execution != ExecutionKind::Process
+                || topology.scheduling != SchedulingKind::LongRunning
+                || topology.replicas != 1
+                || self.storage.kind != StorageKind::Local
+                || self
+                    .network
+                    .as_ref()
+                    .and_then(|value| value.exposure)
+                    .is_some_and(|value| value != Exposure::None))
+        {
+            return Err(validation(
+                "embedded targets require one long-running process, local storage, and no network exposure",
+            ));
+        }
+        if self.kind == TargetKind::Host && topology.execution != ExecutionKind::Host {
+            return Err(validation("host targets require host execution"));
+        }
+        if self.kind != TargetKind::Host && topology.execution == ExecutionKind::Host {
+            return Err(validation("host execution requires a host target"));
+        }
+        if (self.kind == TargetKind::Job) != (topology.scheduling == SchedulingKind::OnDemand) {
+            return Err(validation(
+                "job targets are on-demand and other targets are long-running",
+            ));
+        }
+        if self.kind == TargetKind::Service
+            && self.network.as_ref().and_then(|value| value.port).is_none()
+        {
+            return Err(validation("service targets require a network port"));
+        }
+        if self
+            .network
+            .as_ref()
+            .and_then(|value| value.exposure)
+            .is_some_and(|value| value == Exposure::Public)
+            && !self
+                .network
+                .as_ref()
+                .and_then(|value| value.tls_required)
+                .unwrap_or(false)
+        {
+            return Err(validation("public targets require TLS"));
+        }
+        match self.write.mode {
+            WriteMode::Single
+                if self.write.queue_capacity.is_some()
+                    || self.write.max_rebase_attempts.is_some() =>
+            {
+                return Err(validation(
+                    "single_writer does not accept queue or rebase settings",
+                ));
+            }
+            WriteMode::Queued if self.write.queue_capacity.is_none() => {
+                return Err(validation("queued_writer requires queue_capacity"));
+            }
+            WriteMode::OptimisticMulti if self.write.max_rebase_attempts.is_none() => {
+                return Err(validation(
+                    "optimistic_multi_writer requires max_rebase_attempts",
+                ));
+            }
+            _ => {}
+        }
+        if self
+            .backup
+            .as_ref()
+            .and_then(|value| value.retention_count)
+            .is_some()
+            && !self
+                .backup
+                .as_ref()
+                .and_then(|value| value.checkpoints)
+                .unwrap_or(false)
+        {
+            return Err(validation("backup retention requires checkpoint backups"));
+        }
+        Ok(())
+    }
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum TargetKind {
     Embedded,
@@ -1624,6 +1875,54 @@ enum TargetKind {
     Worker,
     Job,
     Host,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TargetOwnership {
+    Embedded,
+    Local,
+    External,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityRequirement {
+    id: String,
+    version: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Topology {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution: Option<ExecutionKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduling: Option<SchedulingKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replicas: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResolvedTopology {
+    execution: ExecutionKind,
+    scheduling: SchedulingKind,
+    replicas: u16,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecutionKind {
+    Process,
+    Container,
+    Host,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SchedulingKind {
+    LongRunning,
+    OnDemand,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1635,7 +1934,7 @@ struct WriteConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_rebase_attempts: Option<u8>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 enum WriteMode {
     #[serde(rename = "single_writer")]
     Single,
@@ -1655,7 +1954,7 @@ struct StorageConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     capacity_bytes: Option<u64>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum StorageKind {
     Local,
@@ -1680,7 +1979,7 @@ struct Network {
     #[serde(skip_serializing_if = "Option::is_none")]
     tls_required: Option<bool>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Exposure {
     None,
@@ -1712,13 +2011,21 @@ struct Backup {
 }
 
 fn stable_id(value: &str) -> Result<(), GfError> {
-    let valid = !value.is_empty()
-        && value.len() <= 64
-        && value.bytes().enumerate().all(|(i, byte)| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit() && i > 0
-                || i > 0 && matches!(byte, b'-' | b'_')
-        });
+    let bytes = value.as_bytes();
+    let valid = bytes.first().is_some_and(u8::is_ascii_lowercase)
+        && bytes.len() <= 64
+        && bytes[1..]
+            .iter()
+            .try_fold(false, |separator, byte| {
+                if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+                    Some(false)
+                } else if matches!(byte, b'-' | b'_') && !separator {
+                    Some(true)
+                } else {
+                    None
+                }
+            })
+            .is_some_and(|trailing_separator| !trailing_separator);
     if valid {
         Ok(())
     } else {
@@ -1750,7 +2057,7 @@ fn uri_has_inline_credentials(value: &str) -> bool {
         remainder
             .split('/')
             .next()
-            .is_some_and(|authority| authority.contains('@'))
+            .is_some_and(|host| host.contains('@'))
     })
 }
 
@@ -2026,6 +2333,72 @@ pub struct GitProvenance {
     /// Whether tracked files differ from the selected commit.
     pub dirty: bool,
 }
+
+/// Versioned, deterministic result of static target validation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InfraValidationResult {
+    /// Frozen receipt contract.
+    pub contract: &'static str,
+    /// SHA-256 of canonical resolved configuration JSON.
+    pub resolved_config_sha256: String,
+    /// Selected resolved target; contains references and requirements, never payloads.
+    pub target: Value,
+    /// Structural and semantic configuration validity.
+    pub static_validity: InfraStaticValidity,
+    /// Provider-neutral infrastructure intent validated without provisioning.
+    pub planned_infrastructure: InfraPlan,
+    /// Live transport state, deliberately not checked by static validation.
+    pub connectivity: InfraNotChecked,
+    /// Live health/readiness state, deliberately not checked by static validation.
+    pub readiness: InfraNotChecked,
+    /// Declared capability requirements; runtime compatibility remains unverified.
+    pub capability_compatibility: InfraCapabilityCompatibility,
+}
+
+/// Static-validity state.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InfraStaticValidity {
+    /// Always `valid` for a successful receipt.
+    pub status: &'static str,
+}
+
+/// Provider-neutral planned infrastructure state.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InfraPlan {
+    /// Always `validated` for a successful receipt.
+    pub status: &'static str,
+    /// Always `none`; this operation never provisions.
+    pub mutation: &'static str,
+    /// Embedded, local, or separately owned external deployment.
+    pub ownership: String,
+    /// Embedded/service/worker/job/host target role.
+    pub kind: String,
+    /// Process/container/host execution topology.
+    pub execution: String,
+    /// Long-running or on-demand scheduling topology.
+    pub scheduling: String,
+    /// Declared provider-neutral replica count.
+    pub replicas: u64,
+    /// Pinned artifact kind, version, and checksum.
+    pub artifact: Value,
+}
+
+/// State that static validation deliberately does not inspect.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InfraNotChecked {
+    /// Always `not_checked`.
+    pub status: &'static str,
+}
+
+/// Declared capability requirements, distinct from live compatibility.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InfraCapabilityCompatibility {
+    /// Always `requirements_declared`.
+    pub status: &'static str,
+    /// Ordered `{id, version}` requirements from resolved configuration.
+    pub requirements: Vec<Value>,
+}
+
 /// Successful initialization output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryInitReceipt {
@@ -2831,6 +3204,95 @@ mod tests {
             canonical,
             include_str!("../../../docs/contracts/examples/graphforge-resolved-v1.json")
         );
+        let validation = context.validate_infra_target("production").unwrap();
+        let canonical_validation =
+            serde_json::to_string(&serde_json::to_value(&validation).unwrap()).unwrap() + "\n";
+        assert_eq!(
+            canonical_validation,
+            include_str!(
+                "../../../docs/contracts/examples/graphforge-infra-validation-production-v1.json"
+            )
+        );
+        assert_eq!(validation.static_validity.status, "valid");
+        assert_eq!(validation.planned_infrastructure.mutation, "none");
+        assert_eq!(validation.connectivity.status, "not_checked");
+        assert_eq!(validation.readiness.status, "not_checked");
+        assert_eq!(
+            validation.capability_compatibility.status,
+            "requirements_declared"
+        );
+        assert!(!root.path().join(".graphforge/state").exists());
+        assert_eq!(
+            validation,
+            context.validate_infra_target("production").unwrap()
+        );
+        assert_eq!(
+            context.validate_infra_target("missing").unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn stable_ids_match_the_published_separator_grammar() {
+        for valid in ["a", "a1", "a-b", "a_b2", "alpha-beta_gamma9"] {
+            stable_id(valid).unwrap();
+        }
+        for invalid in [
+            "", "1a", "A", "a-", "a_", "a--b", "a__b", "a-_b", "a_-b", "a.b",
+        ] {
+            assert_eq!(stable_id(invalid).unwrap_err().code(), "GF_VALIDATION");
+        }
+    }
+
+    #[test]
+    fn target_semantics_fail_closed_before_state_or_secret_materialization() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".graphforge")).unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        let mut config: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        let target = config.targets.get_mut("local").unwrap();
+        target.ownership = Some(TargetOwnership::External);
+        assert_eq!(
+            config.validate(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+
+        let mut config: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        config
+            .targets
+            .get_mut("local")
+            .unwrap()
+            .storage
+            .capacity_bytes = Some(MAX_PORTABLE_INTEGER + 1);
+        assert_eq!(
+            config.validate(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+
+        let mut config: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        config.sources.push(Source {
+            id: "input".into(),
+            uri: "https://user@example.invalid/data.parquet".into(),
+            sha256: "a".repeat(64),
+            media_type: None,
+        });
+        assert_eq!(
+            config.validate(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+
+        let sentinel = ["GRAPHFORGE_SECRET", "SENTINEL_231"].join("_");
+        fs::write(
+            root.path().join(CONFIG),
+            format!(
+                "{DEFAULT_CONFIG}secrets:\n  - id: token\n    source: environment\n    value: {sentinel}\n"
+            ),
+        )
+        .unwrap();
+        let error = context.resolve_config().unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert!(!error.to_string().contains(&sentinel));
+        assert!(!root.path().join(".graphforge/state").exists());
     }
 
     #[test]

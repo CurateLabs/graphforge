@@ -25,10 +25,18 @@
         "state": { "const": ".graphforge/state" },
         "imports": { "const": ".graphforge/imports" },
         "exports": { "const": ".graphforge/exports" },
-        "ontology": { "type": "string" },
-        "schemas": { "type": "string" },
-        "seeds": { "type": "string" },
-        "migrations": { "type": "string" }
+        "ontology": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/relative_path"
+        },
+        "schemas": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/relative_path"
+        },
+        "seeds": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/relative_path"
+        },
+        "migrations": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/relative_path"
+        }
       }
     },
     "sources": {
@@ -55,7 +63,10 @@
         "required": [
           "id",
           "kind",
+          "ownership",
           "artifact",
+          "topology",
+          "capabilities",
           "write",
           "storage",
           "resources",
@@ -71,8 +82,27 @@
             "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
           },
           "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+          "ownership": { "enum": ["embedded", "local", "external"] },
           "artifact": {
             "$ref": "graphforge-project-config-v1.schema.json#/$defs/artifact"
+          },
+          "topology": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["execution", "scheduling", "replicas"],
+            "properties": {
+              "execution": { "enum": ["process", "container", "host"] },
+              "scheduling": { "enum": ["long_running", "on_demand"] },
+              "replicas": { "type": "integer", "minimum": 1, "maximum": 1024 }
+            }
+          },
+          "capabilities": {
+            "type": "array",
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "graphforge-project-config-v1.schema.json#/$defs/capability_requirement"
+            }
           },
           "write": {
             "$ref": "graphforge-project-config-v1.schema.json#/$defs/write"
@@ -97,12 +127,16 @@
           },
           "source_ids": {
             "type": "array",
+            "maxItems": 256,
+            "uniqueItems": true,
             "items": {
               "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
             }
           },
           "secret_ids": {
             "type": "array",
+            "maxItems": 128,
+            "uniqueItems": true,
             "items": {
               "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
             }
