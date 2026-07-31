@@ -99,9 +99,10 @@ pub use portable::{
     PortableSelection,
 };
 pub use repository::{
-    GitProvenance, ProjectConfig, RepositoryContext, RepositoryInitReceipt,
-    RepositoryRemoveReceipt, RepositorySyncReceipt, SkillBundle, SkillBundleFile,
-    SkillMutationReceipt, SkillStatus, SkillStatusReceipt,
+    GitProvenance, ProjectConfig, RepositoryContext, RepositoryDefinitionDigest,
+    RepositoryInitReceipt, RepositoryRemoveReceipt, RepositorySourceDigest, RepositorySyncRequest,
+    RepositorySyncResult, RepositorySyncStatus, SkillBundle, SkillBundleFile, SkillMutationReceipt,
+    SkillStatus, SkillStatusReceipt,
 };
 
 // Re-export the foundational types callers need alongside the facade, so a

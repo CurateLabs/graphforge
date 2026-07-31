@@ -7,10 +7,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use fs4::fs_std::FileExt;
-use gf_core::GfError;
+use gf_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 const CONFIG: &str = ".graphforge/graphforge.yaml";
 const IGNORE_START: &str = "# graphforge: managed data (do not edit)";
@@ -29,8 +30,142 @@ const SKILLS_STAGE: &str = ".graphforge/imports/skills-lifecycle/stage";
 const SKILLS_BACKUP: &str = ".graphforge/imports/skills-lifecycle/backup";
 const MANAGED_SKILL_NAMES: [&str; 2] = ["graphforge-bootstrap", "graphforge-build-knowledge"];
 
+#[cfg(test)]
+#[derive(Clone)]
+struct RepositorySyncTestHook {
+    root: PathBuf,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
+
+#[cfg(test)]
+static REPOSITORY_SYNC_BEFORE_STAGE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<RepositorySyncTestHook>>,
+> = std::sync::OnceLock::new();
+
 fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
+}
+
+fn idempotency_conflict(message: impl Into<String>) -> GfError {
+    GfError::Project {
+        code: ProjectErrorCode::TransactionConflict,
+        message: message.into(),
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn repository_snapshot_to_participant(
+    snapshot: gf_storage::ProjectParticipantSnapshot,
+) -> Result<gf_storage::ProjectParticipant, GfError> {
+    let encoding = match snapshot.encoding.as_str() {
+        "parquet" => gf_storage::ProjectParticipantEncoding::Parquet,
+        "arrow" => gf_storage::ProjectParticipantEncoding::Arrow,
+        "json" => gf_storage::ProjectParticipantEncoding::Json,
+        _ => {
+            return Err(validation("committed participant has unsupported encoding"));
+        }
+    };
+    Ok(gf_storage::ProjectParticipant {
+        capability_id: snapshot.capability_id,
+        capability_version: snapshot.capability_version,
+        record_family_id: snapshot.record_family_id,
+        record_version: snapshot.record_version,
+        encoding,
+        schema_fingerprint: snapshot.schema_fingerprint,
+        row_count: snapshot.row_count,
+        bytes: snapshot.bytes,
+    })
+}
+
+fn repository_sync_generation_uuid(
+    operation_uuid: Uuid,
+    participants: &[gf_storage::ProjectParticipant],
+) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphforge-repository-sync-generation/1");
+    hasher.update(operation_uuid.as_bytes());
+    for participant in participants {
+        hasher.update(participant.capability_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(participant.record_family_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(Sha256::digest(&participant.bytes));
+    }
+    gf_core::canonical::uuid_v8(hasher.finalize().into())
+}
+
+fn validate_repository_snapshot_inventory(
+    participants: &[gf_storage::StagedParticipant],
+    expected_content_sha256: &str,
+) -> Result<(), GfError> {
+    let snapshots = participants
+        .iter()
+        .filter(|participant| {
+            participant.capability_id == gf_storage::WORKSPACE_CAPABILITY_ID
+                && participant.record_family_id == gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY
+        })
+        .collect::<Vec<_>>();
+    if snapshots.len() != 1 {
+        return Err(validation(
+            "workspace generation must contain exactly one repository snapshot",
+        ));
+    }
+    let snapshot = snapshots[0];
+    let expected_schema = encode_hex(&Sha256::digest("workspace/repository_snapshot@1"));
+    if snapshot.capability_version != gf_storage::WORKSPACE_CAPABILITY_VERSION
+        || snapshot.record_version != gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_VERSION
+        || snapshot.encoding != "json"
+        || snapshot.row_count != 1
+        || snapshot.schema_fingerprint != expected_schema
+        || snapshot.content_sha256 != expected_content_sha256
+    {
+        return Err(validation(
+            "workspace repository snapshot metadata is invalid",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesiredRepositorySnapshot {
+    resolved_config_sha256: String,
+    definitions: Vec<gf_storage::WorkspaceRepositoryDefinitionDigest>,
+    sources: Vec<gf_storage::WorkspaceRepositorySourceDigest>,
+    git: gf_storage::WorkspaceRepositoryGitProvenance,
+}
+
+impl DesiredRepositorySnapshot {
+    fn matches(&self, snapshot: &gf_storage::WorkspaceRepositorySnapshot) -> bool {
+        self.resolved_config_sha256 == snapshot.resolved_config_sha256
+            && self.definitions == snapshot.definitions
+            && self.sources == snapshot.sources
+            && self.git == snapshot.git
+    }
+
+    fn into_snapshot(
+        self,
+        operation_uuid: Uuid,
+        actor_uuid: Option<Uuid>,
+    ) -> gf_storage::WorkspaceRepositorySnapshot {
+        gf_storage::WorkspaceRepositorySnapshot {
+            contract_version: gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_VERSION,
+            resolved_config_sha256: self.resolved_config_sha256,
+            definitions: self.definitions,
+            sources: self.sources,
+            git: self.git,
+            operation_uuid,
+            actor_uuid,
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -609,29 +744,266 @@ impl RepositoryContext {
         self.load_config()?.resolve()
     }
 
-    /// Record bounded Git provenance after validating only declared inputs.
-    pub fn sync(&self) -> Result<RepositorySyncReceipt, GfError> {
-        let config = self.load_config()?;
-        let mut definition_digests = BTreeMap::new();
-        for path in config.project.paths() {
-            let resolved = self.contained_path(path)?;
-            if !resolved.is_dir() {
-                return Err(validation(format!(
-                    "declared definition directory is missing: {path}"
-                )));
+    /// Compare or atomically reconcile the declared repository snapshot.
+    ///
+    /// Check mode never initializes or mutates project state. Apply mode
+    /// requires a caller-owned operation UUID only when drift exists.
+    ///
+    /// # Errors
+    /// Returns a structured validation, idempotency, project, or storage error.
+    pub fn sync(&self, request: RepositorySyncRequest) -> Result<RepositorySyncResult, GfError> {
+        let desired = self.desired_repository_snapshot()?;
+        let current = gf_storage::resolve_project_generation(&self.state_path)?;
+        current.validate_complete_participant_inventory()?;
+        let current_snapshot = current
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+            )?
+            .map(|snapshot| {
+                gf_storage::WorkspaceRepositorySnapshot::from_canonical_json(&snapshot.bytes)
+            })
+            .transpose()?;
+        if current_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| desired.matches(snapshot))
+        {
+            if !request.check
+                && let (Some(requested_operation), Some(snapshot)) =
+                    (request.operation_uuid, current_snapshot.as_ref())
+                && requested_operation == snapshot.operation_uuid
+                && request.actor_uuid != snapshot.actor_uuid
+            {
+                return Err(GfError::Project {
+                    code: gf_core::ProjectErrorCode::TransactionConflict,
+                    message:
+                        "repository sync operation UUID was reused with a different actor identity"
+                            .into(),
+                });
             }
-            definition_digests.insert(path.to_owned(), digest_definition_tree(&resolved)?);
+            let idempotent_replay = !request.check
+                && request.operation_uuid.is_some_and(|operation| {
+                    current_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.operation_uuid == operation)
+                });
+            return Ok(RepositorySyncResult {
+                status: RepositorySyncStatus::InSync,
+                prior_generation_uuid: current.generation_uuid(),
+                generation_uuid: current.generation_uuid(),
+                requested_operation_uuid: (!request.check)
+                    .then_some(request.operation_uuid)
+                    .flatten(),
+                snapshot_operation_uuid: current_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.operation_uuid),
+                snapshot_actor_uuid: current_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.actor_uuid),
+                idempotent_replay,
+                resolved_config_sha256: desired.resolved_config_sha256,
+                definitions: desired
+                    .definitions
+                    .into_iter()
+                    .map(RepositoryDefinitionDigest::from)
+                    .collect(),
+                sources: desired
+                    .sources
+                    .into_iter()
+                    .map(RepositorySourceDigest::from)
+                    .collect(),
+                git: desired.git.into(),
+            });
         }
-        let provenance = self.git_provenance()?;
-        Ok(RepositorySyncReceipt {
-            definitions: config.project.paths().map(str::to_owned).collect(),
-            definition_digests,
-            source_digests: config
-                .sources
-                .iter()
-                .map(|source| source.sha256.clone())
+        if request.check {
+            return Ok(RepositorySyncResult {
+                status: RepositorySyncStatus::Drift,
+                prior_generation_uuid: current.generation_uuid(),
+                generation_uuid: current.generation_uuid(),
+                requested_operation_uuid: None,
+                snapshot_operation_uuid: current_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.operation_uuid),
+                snapshot_actor_uuid: current_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.actor_uuid),
+                idempotent_replay: false,
+                resolved_config_sha256: desired.resolved_config_sha256,
+                definitions: desired
+                    .definitions
+                    .into_iter()
+                    .map(RepositoryDefinitionDigest::from)
+                    .collect(),
+                sources: desired
+                    .sources
+                    .into_iter()
+                    .map(RepositorySourceDigest::from)
+                    .collect(),
+                git: desired.git.into(),
+            });
+        }
+        let operation_uuid = request
+            .operation_uuid
+            .ok_or_else(|| validation("sync drift requires an explicit operation UUID"))?;
+        if operation_uuid.is_nil() {
+            return Err(validation("sync operation UUID must not be nil"));
+        }
+        if request.actor_uuid.is_some_and(|actor| actor.is_nil()) {
+            return Err(validation("sync actor UUID must not be nil"));
+        }
+        self.publish_repository_snapshot(&current, desired, operation_uuid, request.actor_uuid)
+    }
+
+    fn publish_repository_snapshot(
+        &self,
+        current: &gf_storage::ResolvedProjectGeneration,
+        desired: DesiredRepositorySnapshot,
+        operation_uuid: Uuid,
+        actor_uuid: Option<Uuid>,
+    ) -> Result<RepositorySyncResult, GfError> {
+        let expected_desired = desired.clone();
+        let snapshot = desired.into_snapshot(operation_uuid, actor_uuid);
+        let mut participants = current
+            .participant_snapshots()?
+            .into_iter()
+            .filter(|participant| {
+                !(participant.capability_id == gf_storage::WORKSPACE_CAPABILITY_ID
+                    && participant.record_family_id
+                        == gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY)
+            })
+            .map(repository_snapshot_to_participant)
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshot_participant = snapshot.to_project_participant()?;
+        let expected_snapshot_sha256 = encode_hex(&Sha256::digest(&snapshot_participant.bytes));
+        participants.push(snapshot_participant);
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let generation_uuid = repository_sync_generation_uuid(operation_uuid, &participants);
+        let publication = gf_storage::ProjectGenerationRequest {
+            transaction_uuid: operation_uuid,
+            generation_uuid,
+            capabilities: current
+                .capabilities()
+                .into_iter()
+                .map(|capability| gf_storage::ProjectCapability {
+                    capability_id: capability.capability_id,
+                    capability_version: capability.capability_version,
+                })
                 .collect(),
-            provenance,
+            participants,
+        };
+        #[cfg(test)]
+        if let Some(hook) = REPOSITORY_SYNC_BEFORE_STAGE_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .expect("repository sync test hook lock poisoned")
+            .as_ref()
+            .filter(|hook| hook.root == self.root)
+            .cloned()
+        {
+            hook.barrier.wait();
+            hook.barrier.wait();
+        }
+        let expected_parent = current.generation_uuid();
+        let receipt = match gf_storage::stage_project_generation(&self.state_path, &publication)? {
+            gf_storage::ProjectStageOutcome::AlreadyPublished(receipt) => {
+                if receipt.generation_uuid != expected_parent {
+                    return Err(idempotency_conflict(
+                        "repository sync operation identifies a generation that is no longer authoritative",
+                    ));
+                }
+                receipt
+            }
+            gf_storage::ProjectStageOutcome::Staged(staged) => staged
+                .validate(
+                    |participants| {
+                        validate_repository_snapshot_inventory(
+                            participants,
+                            &expected_snapshot_sha256,
+                        )
+                    },
+                    |actual_parent, _| {
+                        if actual_parent.generation_uuid() != expected_parent {
+                            return Err(validation(
+                                "project generation changed before repository sync publication",
+                            ));
+                        }
+                        if self.desired_repository_snapshot()? != expected_desired {
+                            return Err(validation("repository definitions changed during sync"));
+                        }
+                        Ok(())
+                    },
+                )?
+                .publish()?,
+        };
+        let evidence = expected_desired;
+        Ok(RepositorySyncResult {
+            status: RepositorySyncStatus::Published,
+            prior_generation_uuid: expected_parent,
+            generation_uuid: receipt.generation_uuid,
+            requested_operation_uuid: Some(operation_uuid),
+            snapshot_operation_uuid: Some(operation_uuid),
+            snapshot_actor_uuid: actor_uuid,
+            idempotent_replay: receipt.idempotent_replay,
+            resolved_config_sha256: evidence.resolved_config_sha256,
+            definitions: evidence
+                .definitions
+                .into_iter()
+                .map(RepositoryDefinitionDigest::from)
+                .collect(),
+            sources: evidence
+                .sources
+                .into_iter()
+                .map(RepositorySourceDigest::from)
+                .collect(),
+            git: evidence.git.into(),
+        })
+    }
+
+    fn desired_repository_snapshot(&self) -> Result<DesiredRepositorySnapshot, GfError> {
+        let config = self.load_config()?;
+        let resolved_config = config.resolve()?;
+        let resolved_config_sha256 = encode_hex(&Sha256::digest(
+            serde_json::to_vec(&resolved_config)
+                .map_err(|error| validation(format!("cannot encode resolved config: {error}")))?,
+        ));
+        let definitions = config
+            .project
+            .entries()
+            .into_iter()
+            .map(|(kind, path)| {
+                let resolved = self.contained_path(path)?;
+                if !resolved.is_dir() {
+                    return Err(validation(format!(
+                        "declared definition directory is missing: {path}"
+                    )));
+                }
+                Ok(gf_storage::WorkspaceRepositoryDefinitionDigest {
+                    definition_id: kind.id().into(),
+                    sha256: digest_definition_tree(&resolved, kind)?,
+                })
+            })
+            .collect::<Result<Vec<_>, GfError>>()?;
+        let mut sources = config
+            .sources
+            .iter()
+            .map(|source| gf_storage::WorkspaceRepositorySourceDigest {
+                source_id: source.id.clone(),
+                sha256: source.sha256.clone(),
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let git = self.git_provenance()?;
+        Ok(DesiredRepositorySnapshot {
+            resolved_config_sha256,
+            definitions,
+            sources,
+            git: gf_storage::WorkspaceRepositoryGitProvenance {
+                commit_sha: git.sha,
+                dirty: git.dirty,
+            },
         })
     }
 
@@ -814,7 +1186,31 @@ impl RepositoryContext {
     }
 }
 
-fn digest_definition_tree(root: &Path) -> Result<String, GfError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefinitionKind {
+    Migrations,
+    Ontology,
+    Schemas,
+    Seeds,
+}
+
+impl DefinitionKind {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Migrations => "migrations",
+            Self::Ontology => "ontology",
+            Self::Schemas => "schemas",
+            Self::Seeds => "seeds",
+        }
+    }
+
+    fn allows_extension(self, extension: &str) -> bool {
+        matches!(extension, "json" | "yaml" | "yml")
+            || matches!(self, Self::Migrations) && matches!(extension, "cypher")
+    }
+}
+
+fn digest_definition_tree(root: &Path, definition_kind: DefinitionKind) -> Result<String, GfError> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
     let mut total = 0_u64;
@@ -848,26 +1244,60 @@ fn digest_definition_tree(root: &Path) -> Result<String, GfError> {
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        if matches!(
-            extension,
-            "arrow" | "parquet" | "db" | "sqlite" | "sqlite3" | "duckdb"
-        ) {
-            return Err(validation(
-                "materialized graph or database data is not a definition",
-            ));
+            .map(str::to_ascii_lowercase)
+            .ok_or_else(|| validation("definition files require a registered extension"))?;
+        if !definition_kind.allows_extension(&extension) {
+            return Err(validation(format!(
+                "{} definitions do not allow .{extension} files",
+                definition_kind.id()
+            )));
         }
         let bytes = fs::read(&path).map_err(|error| GfError::Storage(error.to_string()))?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(validation("definition file exceeds byte bound"));
+        }
         total = total.saturating_add(bytes.len() as u64);
-        if total > 64 * 1024 * 1024 {
+        if total > 16 * 1024 * 1024 {
             return Err(validation("definition tree exceeds byte bound"));
         }
+        validate_definition_document(&bytes, &extension)?;
         hash.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
         hash.update([0]);
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(&bytes);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+fn validate_definition_document(bytes: &[u8], extension: &str) -> Result<(), GfError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| validation("definition file must be canonical UTF-8 text"))?;
+    if text.contains('\0') {
+        return Err(validation("definition file contains binary data"));
+    }
+    match extension {
+        "json" => {
+            let value: Value = serde_json::from_str(text)
+                .map_err(|_| validation("JSON definition is malformed"))?;
+            if !value.is_object() {
+                return Err(validation("JSON definition must be an object"));
+            }
+        }
+        "yaml" | "yml" => {
+            let value: serde_yaml::Value = serde_yaml::from_str(text)
+                .map_err(|_| validation("YAML definition is malformed"))?;
+            if !value.is_mapping() {
+                return Err(validation("YAML definition must be a mapping"));
+            }
+        }
+        "cypher" => {
+            if text.trim().is_empty() {
+                return Err(validation("Cypher migration definition is empty"));
+            }
+        }
+        _ => return Err(validation("unregistered definition file type")),
+    }
+    Ok(())
 }
 
 fn absolute_existing_dir(path: &Path) -> Result<PathBuf, GfError> {
@@ -1072,6 +1502,15 @@ struct DefinitionPaths {
     migrations: String,
 }
 impl DefinitionPaths {
+    fn entries(&self) -> [(DefinitionKind, &str); 4] {
+        [
+            (DefinitionKind::Migrations, &self.migrations),
+            (DefinitionKind::Ontology, &self.ontology),
+            (DefinitionKind::Schemas, &self.schemas),
+            (DefinitionKind::Seeds, &self.seeds),
+        ]
+    }
+
     fn paths(&self) -> impl Iterator<Item = &str> {
         [
             &*self.ontology,
@@ -1599,17 +2038,99 @@ pub struct RepositoryInitReceipt {
     /// Live embedded project location.
     pub state: PathBuf,
 }
-/// Successful sync validation output.
+/// Digest evidence for one declared repository definition family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RepositorySyncReceipt {
-    /// Explicitly declared definition paths that were validated.
-    pub definitions: Vec<String>,
-    /// Canonical SHA-256 digest for each declared definition tree.
-    pub definition_digests: BTreeMap<String, String>,
-    /// Digests of explicitly declared external sources.
-    pub source_digests: Vec<String>,
-    /// Bounded Git provenance; no repository data is scanned.
-    pub provenance: GitProvenance,
+pub struct RepositoryDefinitionDigest {
+    /// Stable definition family identifier; never a repository path.
+    pub definition_id: String,
+    /// Canonical SHA-256 digest of the validated definition tree.
+    pub sha256: String,
+}
+
+impl From<gf_storage::WorkspaceRepositoryDefinitionDigest> for RepositoryDefinitionDigest {
+    fn from(value: gf_storage::WorkspaceRepositoryDefinitionDigest) -> Self {
+        Self {
+            definition_id: value.definition_id,
+            sha256: value.sha256,
+        }
+    }
+}
+
+/// Digest evidence for one explicitly declared external source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositorySourceDigest {
+    /// Stable source identifier; never a source URI or path.
+    pub source_id: String,
+    /// Caller-declared canonical SHA-256 digest.
+    pub sha256: String,
+}
+
+impl From<gf_storage::WorkspaceRepositorySourceDigest> for RepositorySourceDigest {
+    fn from(value: gf_storage::WorkspaceRepositorySourceDigest) -> Self {
+        Self {
+            source_id: value.source_id,
+            sha256: value.sha256,
+        }
+    }
+}
+
+impl From<gf_storage::WorkspaceRepositoryGitProvenance> for GitProvenance {
+    fn from(value: gf_storage::WorkspaceRepositoryGitProvenance) -> Self {
+        Self {
+            sha: value.commit_sha,
+            dirty: value.dirty,
+        }
+    }
+}
+
+/// Repository reconciliation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepositorySyncRequest {
+    /// Validate and compare without publishing.
+    pub check: bool,
+    /// Caller-owned idempotency identity, required only when applying drift.
+    pub operation_uuid: Option<Uuid>,
+    /// Optional caller-owned actor identity.
+    pub actor_uuid: Option<Uuid>,
+}
+
+/// Deterministic repository reconciliation state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepositorySyncStatus {
+    /// Desired and authoritative repository snapshots match.
+    InSync,
+    /// Check mode found a difference and did not mutate state.
+    Drift,
+    /// Apply mode atomically published one complete generation.
+    Published,
+}
+
+/// Repository reconciliation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositorySyncResult {
+    /// Deterministic reconciliation outcome.
+    pub status: RepositorySyncStatus,
+    /// Generation authoritative before this call.
+    pub prior_generation_uuid: Uuid,
+    /// Generation authoritative after this call.
+    pub generation_uuid: Uuid,
+    /// Operation requested for this mutating call; always absent in check mode.
+    pub requested_operation_uuid: Option<Uuid>,
+    /// Operation identity actually recorded in the authoritative snapshot.
+    pub snapshot_operation_uuid: Option<Uuid>,
+    /// Actor identity actually recorded in the authoritative snapshot.
+    pub snapshot_actor_uuid: Option<Uuid>,
+    /// Whether the current desired state was already published by this operation.
+    pub idempotent_replay: bool,
+    /// SHA-256 digest of the canonical, secret-free resolved configuration.
+    pub resolved_config_sha256: String,
+    /// Ordered digest evidence for validated definition families.
+    pub definitions: Vec<RepositoryDefinitionDigest>,
+    /// Ordered identifiers and digests for explicitly declared external sources.
+    pub sources: Vec<RepositorySourceDigest>,
+    /// Bounded Git provenance; never repository contents or unrestricted paths.
+    pub git: GitProvenance,
 }
 /// Successful local-state removal output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1763,10 +2284,461 @@ mod tests {
         );
         let context = RepositoryContext::discover(root.path()).unwrap();
         context.init().unwrap();
-        let receipt = context.sync().unwrap();
-        assert_eq!(receipt.provenance.sha, None);
-        assert!(receipt.provenance.dirty);
-        assert_eq!(receipt.definition_digests.len(), 4);
+        let result = context
+            .sync(RepositorySyncRequest {
+                check: true,
+                operation_uuid: None,
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(result.git.sha, None);
+        assert!(result.git.dirty);
+        assert_eq!(result.definitions.len(), 4);
+    }
+
+    #[test]
+    fn repository_sync_checks_applies_replays_conflicts_and_preserves_authority() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+        let initial = gf_storage::resolve_project_generation(&context.state_path).unwrap();
+        let initial_uuid = initial.generation_uuid();
+        let initial_participants = initial.participant_snapshots().unwrap();
+        let initial_ontology = initial
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_ONTOLOGY_FAMILY,
+            )
+            .unwrap()
+            .unwrap()
+            .bytes;
+        let initial_configuration = initial
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_CONFIGURATION_FAMILY,
+            )
+            .unwrap()
+            .unwrap()
+            .bytes;
+        let generation_count = || {
+            fs::read_dir(context.state_path.join("generations"))
+                .unwrap()
+                .count()
+        };
+        let initial_count = generation_count();
+
+        let check = context
+            .sync(RepositorySyncRequest {
+                check: true,
+                operation_uuid: None,
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(check.status, RepositorySyncStatus::Drift);
+        assert_eq!(check.generation_uuid, initial_uuid);
+        assert_eq!(check.requested_operation_uuid, None);
+        assert_eq!(check.snapshot_operation_uuid, None);
+        assert_eq!(check.resolved_config_sha256.len(), 64);
+        assert_eq!(
+            check
+                .definitions
+                .iter()
+                .map(|definition| definition.definition_id.as_str())
+                .collect::<Vec<_>>(),
+            ["migrations", "ontology", "schemas", "seeds"]
+        );
+        assert!(check.sources.is_empty());
+        assert_eq!(
+            check.git,
+            GitProvenance {
+                sha: None,
+                dirty: false
+            }
+        );
+        assert_eq!(generation_count(), initial_count);
+        assert_eq!(
+            context
+                .sync(RepositorySyncRequest {
+                    check: false,
+                    operation_uuid: None,
+                    actor_uuid: None,
+                })
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(generation_count(), initial_count);
+
+        let operation = Uuid::from_bytes([41; 16]);
+        let actor = Uuid::from_bytes([42; 16]);
+        let applied = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(operation),
+                actor_uuid: Some(actor),
+            })
+            .unwrap();
+        assert_eq!(applied.status, RepositorySyncStatus::Published);
+        assert_eq!(applied.requested_operation_uuid, Some(operation));
+        assert_eq!(applied.snapshot_operation_uuid, Some(operation));
+        assert_eq!(applied.snapshot_actor_uuid, Some(actor));
+        assert_eq!(applied.resolved_config_sha256, check.resolved_config_sha256);
+        assert_eq!(applied.definitions, check.definitions);
+        assert_eq!(applied.sources, check.sources);
+        assert_eq!(applied.git, check.git);
+        assert_ne!(applied.generation_uuid, initial_uuid);
+        assert_eq!(generation_count(), initial_count + 1);
+
+        let published = gf_storage::resolve_project_generation(&context.state_path).unwrap();
+        assert_eq!(published.generation_uuid(), applied.generation_uuid);
+        assert_eq!(
+            published
+                .participant_snapshot(
+                    gf_storage::WORKSPACE_CAPABILITY_ID,
+                    gf_storage::WORKSPACE_ONTOLOGY_FAMILY,
+                )
+                .unwrap()
+                .unwrap()
+                .bytes,
+            initial_ontology
+        );
+        assert_eq!(
+            published
+                .participant_snapshot(
+                    gf_storage::WORKSPACE_CAPABILITY_ID,
+                    gf_storage::WORKSPACE_CONFIGURATION_FAMILY,
+                )
+                .unwrap()
+                .unwrap()
+                .bytes,
+            initial_configuration
+        );
+        let stored_snapshot = published
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+            )
+            .unwrap()
+            .unwrap();
+        let stored_snapshot =
+            gf_storage::WorkspaceRepositorySnapshot::from_canonical_json(&stored_snapshot.bytes)
+                .unwrap();
+        assert_eq!(stored_snapshot.operation_uuid, operation);
+        assert_eq!(stored_snapshot.actor_uuid, Some(actor));
+        let carried = published
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|participant| {
+                participant.record_family_id != gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(carried, initial_participants);
+
+        let replay = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(operation),
+                actor_uuid: Some(actor),
+            })
+            .unwrap();
+        assert_eq!(replay.status, RepositorySyncStatus::InSync);
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.requested_operation_uuid, Some(operation));
+        assert_eq!(replay.snapshot_operation_uuid, Some(operation));
+        assert_eq!(replay.generation_uuid, applied.generation_uuid);
+        assert_eq!(generation_count(), initial_count + 1);
+        let actor_conflict = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(operation),
+                actor_uuid: Some(Uuid::from_bytes([46; 16])),
+            })
+            .unwrap_err();
+        assert_eq!(actor_conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert_eq!(generation_count(), initial_count + 1);
+
+        let unused_operation = Uuid::from_bytes([44; 16]);
+        let unused_actor = Uuid::from_bytes([45; 16]);
+        let no_op = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(unused_operation),
+                actor_uuid: Some(unused_actor),
+            })
+            .unwrap();
+        assert_eq!(no_op.status, RepositorySyncStatus::InSync);
+        assert!(!no_op.idempotent_replay);
+        assert_eq!(no_op.requested_operation_uuid, Some(unused_operation));
+        assert_eq!(no_op.snapshot_operation_uuid, Some(operation));
+        assert_eq!(no_op.snapshot_actor_uuid, Some(actor));
+        assert_eq!(generation_count(), initial_count + 1);
+        let check_with_ignored_identities = context
+            .sync(RepositorySyncRequest {
+                check: true,
+                operation_uuid: Some(unused_operation),
+                actor_uuid: Some(unused_actor),
+            })
+            .unwrap();
+        assert_eq!(
+            check_with_ignored_identities.status,
+            RepositorySyncStatus::InSync
+        );
+        assert_eq!(check_with_ignored_identities.requested_operation_uuid, None);
+        assert!(!check_with_ignored_identities.idempotent_replay);
+        assert_eq!(
+            check_with_ignored_identities.snapshot_operation_uuid,
+            Some(operation)
+        );
+
+        fs::write(
+            root.path()
+                .join(".graphforge/ontology")
+                .join("repository-sync-test.yaml"),
+            "version: 1\n",
+        )
+        .unwrap();
+        let drift = context
+            .sync(RepositorySyncRequest {
+                check: true,
+                operation_uuid: None,
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(drift.status, RepositorySyncStatus::Drift);
+        assert_eq!(generation_count(), initial_count + 1);
+        let conflict = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(operation),
+                actor_uuid: Some(actor),
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert_eq!(
+            gf_storage::resolve_project_generation(&context.state_path)
+                .unwrap()
+                .generation_uuid(),
+            applied.generation_uuid
+        );
+
+        let second = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_bytes([43; 16])),
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(second.status, RepositorySyncStatus::Published);
+        fs::remove_file(
+            root.path()
+                .join(".graphforge/ontology")
+                .join("repository-sync-test.yaml"),
+        )
+        .unwrap();
+        let stale_replay = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(operation),
+                actor_uuid: Some(actor),
+            })
+            .unwrap_err();
+        assert_eq!(stale_replay.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert_eq!(
+            gf_storage::resolve_project_generation(&context.state_path)
+                .unwrap()
+                .generation_uuid(),
+            second.generation_uuid
+        );
+        assert_eq!(
+            context
+                .sync(RepositorySyncRequest {
+                    check: true,
+                    operation_uuid: None,
+                    actor_uuid: None,
+                })
+                .unwrap()
+                .status,
+            RepositorySyncStatus::Drift
+        );
+        fs::write(
+            root.path()
+                .join(".graphforge/ontology")
+                .join("repository-sync-test.yaml"),
+            "version: 1\n",
+        )
+        .unwrap();
+        let reopened = RepositoryContext::discover(root.path()).unwrap();
+        let reopened_check = reopened
+            .sync(RepositorySyncRequest {
+                check: true,
+                operation_uuid: None,
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(reopened_check.status, RepositorySyncStatus::InSync);
+        assert_eq!(reopened_check.generation_uuid, second.generation_uuid);
+    }
+
+    #[test]
+    fn repository_sync_rechecks_definitions_at_publication_boundary() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+        context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_bytes([61; 16])),
+                actor_uuid: None,
+            })
+            .unwrap();
+        let prior = gf_storage::resolve_project_generation(&context.state_path)
+            .unwrap()
+            .generation_uuid();
+        let definition = root.path().join(".graphforge/ontology/concurrent.yaml");
+        fs::write(&definition, "version: 1\n").unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        *REPOSITORY_SYNC_BEFORE_STAGE_HOOK
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some(RepositorySyncTestHook {
+            root: context.root.clone(),
+            barrier: barrier.clone(),
+        });
+        let mutation = std::thread::spawn(move || {
+            barrier.wait();
+            fs::write(definition, "version: 2\n").unwrap();
+            barrier.wait();
+        });
+        let error = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_bytes([62; 16])),
+                actor_uuid: None,
+            })
+            .unwrap_err();
+        mutation.join().unwrap();
+        *REPOSITORY_SYNC_BEFORE_STAGE_HOOK
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap() = None;
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert!(
+            error
+                .to_string()
+                .contains("definitions changed during sync")
+        );
+        assert_eq!(
+            gf_storage::resolve_project_generation(&context.state_path)
+                .unwrap()
+                .generation_uuid(),
+            prior
+        );
+    }
+
+    #[test]
+    fn repository_definitions_reject_data_and_renamed_binary_files() {
+        for (name, bytes) in [
+            ("data.csv", b"id,name\n1,Ada\n".as_slice()),
+            ("data.jsonl", b"{\"id\":1}\n".as_slice()),
+            ("data.ndjson", b"{\"id\":1}\n".as_slice()),
+            ("data.ipc", b"ARROW1binary".as_slice()),
+            ("data.feather", b"FEA1binary".as_slice()),
+            ("data.avro", b"Obj\x01binary".as_slice()),
+            ("renamed.yaml", b"\0\xff\x10binary".as_slice()),
+            ("renamed.json", b"\0\xff\x10binary".as_slice()),
+        ] {
+            let root = tempdir().unwrap();
+            let context = RepositoryContext::discover(root.path()).unwrap();
+            context.init_without_skills().unwrap();
+            let before = fs::read_dir(context.state_path.join("generations"))
+                .unwrap()
+                .count();
+            fs::write(root.path().join(".graphforge/seeds").join(name), bytes).unwrap();
+            let error = context
+                .sync(RepositorySyncRequest {
+                    check: true,
+                    operation_uuid: None,
+                    actor_uuid: None,
+                })
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION", "{name}");
+            assert_eq!(
+                fs::read_dir(context.state_path.join("generations"))
+                    .unwrap()
+                    .count(),
+                before,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_sync_failpoint_child() {
+        let Ok(root) = std::env::var("GRAPHFORGE_REPOSITORY_SYNC_TEST_ROOT") else {
+            return;
+        };
+        let context = RepositoryContext::discover(root).unwrap();
+        context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_bytes([51; 16])),
+                actor_uuid: Some(Uuid::from_bytes([52; 16])),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn repository_sync_failure_boundaries_recover_to_one_authoritative_state() {
+        for (failpoint, expect_published) in [
+            ("project.after_domain_validation", false),
+            ("project.after_current_replace", true),
+        ] {
+            let root = tempdir().unwrap();
+            let context = RepositoryContext::discover(root.path()).unwrap();
+            context.init_without_skills().unwrap();
+            let initial = gf_storage::resolve_project_generation(&context.state_path)
+                .unwrap()
+                .generation_uuid();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "repository::tests::repository_sync_failpoint_child",
+                    "--nocapture",
+                ])
+                .env(
+                    "GRAPHFORGE_REPOSITORY_SYNC_TEST_ROOT",
+                    root.path().as_os_str(),
+                )
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+
+            gf_storage::recover_project_transactions(&context.state_path).unwrap();
+            let current = gf_storage::resolve_project_generation(&context.state_path).unwrap();
+            current.validate_complete_participant_inventory().unwrap();
+            let check = context
+                .sync(RepositorySyncRequest {
+                    check: true,
+                    operation_uuid: None,
+                    actor_uuid: None,
+                })
+                .unwrap();
+            if expect_published {
+                assert_ne!(current.generation_uuid(), initial, "{failpoint}");
+                assert_eq!(check.status, RepositorySyncStatus::InSync, "{failpoint}");
+            } else {
+                assert_eq!(current.generation_uuid(), initial, "{failpoint}");
+                assert_eq!(check.status, RepositorySyncStatus::Drift, "{failpoint}");
+            }
+        }
     }
 
     #[test]

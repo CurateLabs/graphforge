@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 184,
-  "releaseSurfaceDigest": "18028d423dc8968ee8512b3cba2098a2d7d28934b3216416e2b4cd4b72982dc4",
+  "releaseSurfaceCount": 185,
+  "releaseSurfaceDigest": "b294b19c0de90e31aebefac7597f336073d6131758612e0586c8a01ac01ed9d7",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -13,6 +13,7 @@
     "GraphForge.workspace_ontology"
   ],
   "rustEvidenceGroupMap": {
+    "repository-sync": "lifecycleConstruction",
     "ontology-lifecycle": "ontologyLifecycle",
     "lifecycle-construction": "lifecycleConstruction",
     "checkpoint-view": "checkpointView",
@@ -185,7 +186,8 @@
     "notExposedDefaults": {
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
-      "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead."
+      "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
+      "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
     }
   },
   "evidence": {

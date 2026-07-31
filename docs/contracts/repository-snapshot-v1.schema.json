@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.sh/contracts/repository-snapshot-v1.schema.json",
+  "title": "GraphForge repository snapshot participant v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "resolved_config_sha256",
+    "definitions",
+    "sources",
+    "git",
+    "operation_uuid",
+    "actor_uuid"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "resolved_config_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "definitions": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "definition_id",
+          "sha256"
+        ],
+        "properties": {
+          "definition_id": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_id",
+          "sha256"
+        ],
+        "properties": {
+          "source_id": {
+            "$ref": "#/$defs/stableId"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit_sha",
+        "dirty"
+      ],
+      "properties": {
+        "commit_sha": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+            }
+          ]
+        },
+        "dirty": {
+          "type": "boolean"
+        }
+      }
+    },
+    "operation_uuid": {
+      "$ref": "#/$defs/nonNilUuid"
+    },
+    "actor_uuid": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/nonNilUuid"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[a-z][a-z0-9_-]*$"
+    },
+    "nonNilUuid": {
+      "type": "string",
+      "format": "uuid",
+      "not": {
+        "const": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}

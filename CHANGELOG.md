@@ -28,7 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   projects, excluding live pointers, locks, journals, caches, and trash (#229).
 - Add Rust-owned repository lifecycle commands and APIs for safe `.graphforge/`
   initialization, deterministic configuration resolution, declared-input sync,
-  Git provenance, and guarded state-only removal (#228).
+  Git provenance, and guarded state-only removal (#228), including atomic,
+  generation-managed repository snapshots with non-mutating CI drift checks
+  (#244).
 
 Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
 
