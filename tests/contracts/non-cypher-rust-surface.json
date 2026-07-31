@@ -96,6 +96,7 @@
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "equivalent_observation_order_produces_identical_suggestion"},
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "yaml_and_json_exports_are_atomic_valid_documents"},
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "suggested_source_is_canonicalized_before_serialization"},
+        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "export_round_trip_preserves_migration_route_tie_breaking"},
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "validation_and_failed_export_do_not_replace_destination"},
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "loaded_and_adopted_sources_are_explicit_and_leave_authority_unchanged"},
         {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "filesystem_failure_preserves_destination_and_cleans_temporary_file"}

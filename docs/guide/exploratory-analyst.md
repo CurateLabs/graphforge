@@ -110,10 +110,12 @@ forge.load_ontology("ontology.yaml")?; // session-scoped
 ```
 
 `Loaded` and `Adopted` are also explicit export sources. Export validates and
-canonicalizes declaration order before serializing and atomically replacing the
-destination. This applies to caller-supplied `Suggested` documents as well as
-loaded and adopted documents. Export never changes the live mode, loaded
-ontology, project configuration, or durable generation.
+canonicalizes entity, relation, property, and constraint declaration order
+before serializing and atomically replacing the destination. Authored migration
+order is preserved because it breaks ties between equal-length migration routes.
+This applies to caller-supplied `Suggested` documents as well as loaded and
+adopted documents. Export never changes the live mode, loaded ontology, project
+configuration, or durable generation.
 
 ---
 

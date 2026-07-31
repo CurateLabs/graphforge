@@ -105,7 +105,8 @@ RuntimeCatalog
 - Persisted to `topology/runtime_catalog.parquet`
 - Exposed through a deterministic snapshot that omits runtime IDs and timestamps
 - Suggestible as a non-authoritative draft and atomically exportable as YAML/JSON
-- Survives project merges (UUIDs for RuntimeCatalog entries follow the same UUID identity model)
+- Persists within its project generation as `topology/runtime_catalog.parquet`;
+  cross-project merge identity is not defined
 - RuntimeTypeIds are **local** integers (not globally stable like UUID identity) — suitable for query planning within a session, not for cross-project references
 
 Suggestion uses only supported structural evidence: observed labels become

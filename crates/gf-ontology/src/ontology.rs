@@ -36,7 +36,8 @@ pub struct OntologyDoc {
     /// Validation constraints.
     #[serde(default)]
     pub constraints: Vec<ConstraintDef>,
-    /// Versioned upgrade transforms.
+    /// Versioned upgrade transforms. Authored order is semantic: the migration
+    /// planner uses it to break ties between equal-length routes.
     #[serde(default)]
     pub migrations: Vec<MigrationDef>,
 }

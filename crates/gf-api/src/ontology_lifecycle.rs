@@ -92,8 +92,9 @@ pub enum OntologyExportFormat {
 /// Explicit authority source for ontology export.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OntologyExportSource {
-    /// A caller-reviewed or freshly generated draft. Its declaration vectors
-    /// are canonicalized before validation, fingerprinting, and serialization.
+    /// A caller-reviewed or freshly generated draft. Non-migration declaration
+    /// vectors are canonicalized before validation and serialization; authored
+    /// migration order is preserved as a semantic tie-breaker.
     Suggested(OntologyDoc),
     /// The ontology currently loaded in this live facade.
     Loaded,
@@ -210,8 +211,9 @@ impl GraphForge {
 
     /// Atomically export one explicit ontology source as YAML or JSON.
     ///
-    /// All declaration vectors are canonicalized first. Validation and
-    /// serialization complete before the destination is replaced.
+    /// Non-migration declaration vectors are canonicalized first. Authored
+    /// migration order is preserved. Validation and serialization complete
+    /// before the destination is replaced.
     pub fn export_ontology(
         &self,
         source: OntologyExportSource,
@@ -329,22 +331,8 @@ fn canonicalize_document(mut document: OntologyDoc) -> OntologyDoc {
             &right.expr_json,
         ))
     });
-    document.migrations.sort_by(|left, right| {
-        (
-            &left.from_version,
-            &left.to_version,
-            &left.transform_kind,
-            &left.script_ref,
-            &left.checksum,
-        )
-            .cmp(&(
-                &right.from_version,
-                &right.to_version,
-                &right.transform_kind,
-                &right.script_ref,
-                &right.checksum,
-            ))
-    });
+    // Authored migration order is semantic: MigrationEngine's BFS uses it to
+    // break ties between equal-length routes. Never reorder it on round-trip.
     document
 }
 
@@ -592,6 +580,77 @@ mod tests {
                 std::fs::read(reversed_path).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn export_round_trip_preserves_migration_route_tie_breaking() {
+        let graph = GraphForge::new(None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("authored.yaml");
+        let output = directory.path().join("exported.yaml");
+        let authored = OntologyDoc {
+            ontology_id: "migration-order".into(),
+            version: "1".into(),
+            entity_types: vec![],
+            relation_types: vec![],
+            properties: vec![],
+            constraints: vec![],
+            migrations: vec![
+                gf_ontology::MigrationDef {
+                    from_version: "1".into(),
+                    to_version: "3".into(),
+                    transform_kind: "add_type:ViaThree".into(),
+                    script_ref: None,
+                    checksum: None,
+                },
+                gf_ontology::MigrationDef {
+                    from_version: "3".into(),
+                    to_version: "4".into(),
+                    transform_kind: "add_type:TargetThree".into(),
+                    script_ref: None,
+                    checksum: None,
+                },
+                gf_ontology::MigrationDef {
+                    from_version: "1".into(),
+                    to_version: "2".into(),
+                    transform_kind: "add_type:ViaTwo".into(),
+                    script_ref: None,
+                    checksum: None,
+                },
+                gf_ontology::MigrationDef {
+                    from_version: "2".into(),
+                    to_version: "4".into(),
+                    transform_kind: "add_type:TargetTwo".into(),
+                    script_ref: None,
+                    checksum: None,
+                },
+            ],
+        };
+        std::fs::write(&input, serde_yaml::to_string(&authored).unwrap()).unwrap();
+        let mut graph = graph;
+        graph.load_ontology(input.to_str().unwrap()).unwrap();
+        let before = gf_ontology::MigrationEngine::plan("1", "4", &authored.migrations)
+            .unwrap()
+            .into_iter()
+            .map(|step| step.to_version)
+            .collect::<Vec<_>>();
+        assert_eq!(before, vec!["3", "4"]);
+
+        graph
+            .export_ontology(
+                OntologyExportSource::Loaded,
+                &output,
+                OntologyExportFormat::Yaml,
+            )
+            .unwrap();
+        let round_tripped = gf_ontology::OntologyLoader::load_file(&output).unwrap();
+        let after = gf_ontology::MigrationEngine::plan("1", "4", &round_tripped.migrations)
+            .unwrap()
+            .into_iter()
+            .map(|step| step.to_version)
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+        assert_eq!(round_tripped.migrations, authored.migrations);
     }
 
     #[test]
