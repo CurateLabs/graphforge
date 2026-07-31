@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add offline `infra validate --target` with a versioned provider-neutral
+  ontology-neutral receipt, explicit deployment ownership and
+  validity/plan/connectivity/readiness/capability states, and
+  first-party Pulumi TypeScript/Python plus Terraform provider/module plan
+  validation over the same secret-free resolved configuration (#231).
 - Stabilize Rust CLI machine output with repository-relative JSON receipts,
   bounded structured error details, schema-first checkpoint/revert JSON,
   authoritative `checkpoint show`, and non-mutating revert preview with

@@ -80,6 +80,54 @@ try {
 
   const initialized = success("init");
   assert.equal(initialized.skills.changed, true);
+  writeFileSync(
+    join(repository, ".graphforge", "graphforge.yaml"),
+    readFileSync(
+      join(
+        packageRoot,
+        "..",
+        "..",
+        "docs",
+        "contracts",
+        "examples",
+        "graphforge-v1.yaml",
+      ),
+    ),
+  );
+  assert.deepEqual(
+    success("config", "resolve"),
+    JSON.parse(
+      readFileSync(
+        join(
+          packageRoot,
+          "..",
+          "..",
+          "docs",
+          "contracts",
+          "examples",
+          "graphforge-resolved-v1.json",
+        ),
+        "utf8",
+      ),
+    ),
+  );
+  assert.deepEqual(
+    success("infra", "validate", "--target", "production"),
+    JSON.parse(
+      readFileSync(
+        join(
+          packageRoot,
+          "..",
+          "..",
+          "docs",
+          "contracts",
+          "examples",
+          "graphforge-infra-validation-production-v1.json",
+        ),
+        "utf8",
+      ),
+    ),
+  );
   const packaged = join(
     installRoot,
     "node_modules",

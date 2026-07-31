@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 185,
-  "releaseSurfaceDigest": "b294b19c0de90e31aebefac7597f336073d6131758612e0586c8a01ac01ed9d7",
+  "releaseSurfaceCount": 186,
+  "releaseSurfaceDigest": "9edf1fa64367f2f37132c9fe8c9f4aa388edcfe390c9ef4a21de346c6aa9ed1d",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -13,6 +13,7 @@
     "GraphForge.workspace_ontology"
   ],
   "rustEvidenceGroupMap": {
+    "infra-validation": "lifecycleConstruction",
     "repository-sync": "lifecycleConstruction",
     "ontology-lifecycle": "ontologyLifecycle",
     "lifecycle-construction": "lifecycleConstruction",

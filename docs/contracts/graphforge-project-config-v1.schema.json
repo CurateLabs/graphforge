@@ -57,7 +57,12 @@
       "required": ["id", "uri", "sha256"],
       "properties": {
         "id": { "$ref": "#/$defs/stable_id" },
-        "uri": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "uri": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*://[^/]*@).+$"
+        },
         "sha256": { "$ref": "#/$defs/sha256" },
         "media_type": { "type": "string", "minLength": 1, "maxLength": 128 }
       }
@@ -85,6 +90,24 @@
         "sha256": { "$ref": "#/$defs/sha256" }
       }
     },
+    "capability_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/stable_id" },
+        "version": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "execution": { "enum": ["process", "container", "host"] },
+        "scheduling": { "enum": ["long_running", "on_demand"] },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
     "write": {
       "type": "object",
       "additionalProperties": false,
@@ -109,15 +132,27 @@
         "kind": { "enum": ["local", "volume", "object"] },
         "persistent": { "type": "boolean" },
         "class": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "capacity_bytes": { "type": "integer", "minimum": 1 }
+        "capacity_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
       }
     },
     "resources": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cpu_millis": { "type": "integer", "minimum": 1 },
-        "memory_bytes": { "type": "integer", "minimum": 1 }
+        "cpu_millis": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
       }
     },
     "network": {
@@ -160,7 +195,15 @@
       "required": ["kind", "artifact", "write", "storage"],
       "properties": {
         "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+        "ownership": { "enum": ["embedded", "local", "external"] },
         "artifact": { "$ref": "#/$defs/artifact" },
+        "topology": { "$ref": "#/$defs/topology" },
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/capability_requirement" }
+        },
         "write": { "$ref": "#/$defs/write" },
         "storage": { "$ref": "#/$defs/storage" },
         "resources": { "$ref": "#/$defs/resources" },

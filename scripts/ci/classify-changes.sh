@@ -9,6 +9,8 @@ python=false
 gherkin=false
 bindings=false
 agent_skills=false
+pulumi=false
+terraform=false
 
 emit() {
   printf 'rust=%s\n' "$rust"
@@ -16,6 +18,8 @@ emit() {
   printf 'gherkin=%s\n' "$gherkin"
   printf 'bindings=%s\n' "$bindings"
   printf 'agent_skills=%s\n' "$agent_skills"
+  printf 'pulumi=%s\n' "$pulumi"
+  printf 'terraform=%s\n' "$terraform"
 }
 
 enable_all() {
@@ -24,6 +28,8 @@ enable_all() {
   gherkin=true
   bindings=true
   agent_skills=true
+  pulumi=true
+  terraform=true
 }
 
 # Cargo package metadata does not affect compiled behavior. Treat a manifest
@@ -111,6 +117,16 @@ while IFS= read -r -d '' path; do
       bindings=true
       [[ "$path" == *.rs ]] && rust=true
       [[ "$path" == *.py ]] && python=true
+      if [[ "$path" == crates/gf-api/src/repository.rs ]]; then
+        pulumi=true
+        terraform=true
+      fi
+      ;;
+
+    crates/gf-cli/src/lib.rs)
+      rust=true
+      pulumi=true
+      terraform=true
       ;;
 
     packages/cli/* | packages/cli/**/* | tests/contracts/repository-cli-parity.json)
@@ -164,6 +180,30 @@ while IFS= read -r -d '' path; do
 
     packages/agent-skills/* | pnpm-workspace.yaml)
       agent_skills=true
+      ;;
+
+    iac/pulumi/* | iac/pulumi/**/*)
+      pulumi=true
+      ;;
+
+    iac/terraform/* | iac/terraform/**/*)
+      terraform=true
+      ;;
+
+    docs/contracts/graphforge-project-config-*.schema.json | \
+      docs/contracts/graphforge-resolved-config-*.schema.json | \
+      docs/contracts/graphforge-infra-validation-*.schema.json)
+      bindings=true
+      pulumi=true
+      terraform=true
+      ;;
+
+    docs/contracts/examples/graphforge-*.json | \
+      docs/contracts/examples/graphforge-*.yaml)
+      rust=true
+      bindings=true
+      pulumi=true
+      terraform=true
       ;;
   esac
 done <"$changed_files"

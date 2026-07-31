@@ -15,19 +15,86 @@ secrets:
 targets:
   local:
     kind: embedded
+    ownership: embedded
     artifact:
       kind: python_wheel
       version: 0.5.0
       sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    topology: { execution: process, scheduling: long_running, replicas: 1 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
     write: { mode: single_writer }
     storage: { kind: local, persistent: true }
     source_ids: [example-data]
+  local-service:
+    kind: service
+    ownership: local
+    artifact:
+      kind: native_binary
+      version: 0.5.0
+      sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    topology: { execution: process, scheduling: long_running, replicas: 1 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
+    write: { mode: single_writer }
+    storage: { kind: local, persistent: true }
+    network: { exposure: private, port: 7777, tls_required: false }
+    health: { timeout_seconds: 30 }
+  external-worker:
+    kind: worker
+    ownership: external
+    artifact:
+      kind: oci_image
+      version: 0.5.1
+      sha256: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+    topology: { execution: container, scheduling: long_running, replicas: 3 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
+    write: { mode: queued_writer, queue_capacity: 64 }
+    storage: { kind: volume, persistent: true, capacity_bytes: 10737418240 }
+    network: { exposure: private, tls_required: true }
+  external-job:
+    kind: job
+    ownership: external
+    artifact:
+      kind: oci_image
+      version: 0.5.1
+      sha256: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    topology: { execution: container, scheduling: on_demand, replicas: 1 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
+    write: { mode: single_writer }
+    storage: { kind: object, persistent: true, class: standard }
+    network: { exposure: none, tls_required: false }
+  external-host:
+    kind: host
+    ownership: external
+    artifact:
+      kind: native_binary
+      version: 0.5.1
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+    topology: { execution: host, scheduling: long_running, replicas: 2 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
+    write: { mode: optimistic_multi_writer, max_rebase_attempts: 8 }
+    storage: { kind: volume, persistent: true, capacity_bytes: 10737418240 }
+    network: { exposure: private, tls_required: true }
   production:
     kind: service
+    ownership: external
     artifact:
       kind: oci_image
       version: 0.5.1
       sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    topology: { execution: container, scheduling: long_running, replicas: 2 }
+    capabilities:
+      - { id: graph, version: 1 }
+      - { id: workspace, version: 1 }
     write: { mode: queued_writer, queue_capacity: 64 }
     storage: { kind: volume, persistent: true, capacity_bytes: 10737418240 }
     resources: { cpu_millis: 1000, memory_bytes: 2147483648 }

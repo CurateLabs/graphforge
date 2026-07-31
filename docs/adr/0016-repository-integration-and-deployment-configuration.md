@@ -6,7 +6,7 @@
 
 **Build target:** post-v0.5.0
 
-**Contracts:** [`graphforge-project-config/1`](../contracts/graphforge-project-config-v1.schema.json), [`graphforge-resolved-config/1`](../contracts/graphforge-resolved-config-v1.schema.json)
+**Contracts:** [`graphforge-project-config/1`](../contracts/graphforge-project-config-v1.schema.json), [`graphforge-resolved-config/1`](../contracts/graphforge-resolved-config-v1.schema.json), [`graphforge-infra-validation/1`](../contracts/graphforge-infra-validation-v1.schema.json)
 
 **Related:** ADR 0013 (project generations), ADR 0014 (workspace checkpoints), ADR 0015 (embedded write modes), issues #215, #219, and #225
 
@@ -97,6 +97,13 @@ repository-relative `/` paths, sources and targets ordered by ID, and secret
 references without resolving values. Static validity, infrastructure plan,
 connectivity, health, and capability compatibility remain distinct states.
 
+`graphforge-infra-validation/1` selects one resolved target and records only
+provider-neutral intent. A successful static result says `valid` and
+`validated`; connectivity and readiness remain `not_checked`, while capability
+compatibility remains `requirements_declared` until a deployed runtime reports
+its contract. Validation performs no provisioning, provider lookup, network
+request, project-state open, ontology load, or secret resolution.
+
 ### Ownership boundaries
 
 Rust owns repository discovery, validation/resolution, path safety, ignore-file
@@ -113,13 +120,18 @@ change ontology authority.
 Skills have one checked-in source. Python and npm ship parity-checked copies and
 install directly under `.agents/skills/`; Python never shells out to NPX.
 
-GraphForge validates intent and readiness. Pulumi and Terraform own provider
-configuration, preview/plan, provisioning, drift, and teardown. IaC state is
-not project state. Destroy removes only IaC-owned resources and never invokes
-local project removal. Remote apply consumes the checksum-pinned authority
-artifact owned by #215; core gains no server, transport, authentication system,
-or distributed authority. Local state is never uploaded implicitly, and data
+GraphForge statically validates intent; a deployed runtime reports connectivity
+and readiness separately. Pulumi and Terraform own provider configuration,
+preview/plan, provisioning, drift, and teardown. IaC state is not project state.
+Destroy removes only IaC-owned resources and never invokes local project
+removal. Remote apply consumes the checksum-pinned runtime artifact owned by
+#215; core gains no server, transport, authentication system, or distributed
+deployment authority. Local state is never uploaded implicitly, and data
 initialization is a separately authorized external digest-addressed import.
+The first-party static Pulumi components and Terraform validation data source
+materialize no provider resources. Their preview/plan output is a projection of
+the same resolved JSON and static receipt; remote apply/destroy remains owned by
+#227 and cannot be inferred from a successful #231 validation.
 
 ## Consequences
 

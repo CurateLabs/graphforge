@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/contracts/graphforge-infra-validation-v1.schema.json",
+  "title": "GraphForge static infrastructure validation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "resolved_config_sha256",
+    "target",
+    "static_validity",
+    "planned_infrastructure",
+    "connectivity",
+    "readiness",
+    "capability_compatibility"
+  ],
+  "properties": {
+    "contract": { "const": "graphforge-infra-validation/1" },
+    "resolved_config_sha256": {
+      "$ref": "graphforge-project-config-v1.schema.json#/$defs/sha256"
+    },
+    "target": {
+      "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items"
+    },
+    "static_validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "const": "valid" }
+      }
+    },
+    "planned_infrastructure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "mutation",
+        "ownership",
+        "kind",
+        "execution",
+        "scheduling",
+        "replicas",
+        "artifact"
+      ],
+      "properties": {
+        "status": { "const": "validated" },
+        "mutation": { "const": "none" },
+        "ownership": { "enum": ["embedded", "local", "external"] },
+        "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+        "execution": { "enum": ["process", "container", "host"] },
+        "scheduling": { "enum": ["long_running", "on_demand"] },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "artifact": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/artifact"
+        }
+      }
+    },
+    "connectivity": {
+      "$ref": "#/$defs/not_checked"
+    },
+    "readiness": {
+      "$ref": "#/$defs/not_checked"
+    },
+    "capability_compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "requirements"],
+      "properties": {
+        "status": { "const": "requirements_declared" },
+        "requirements": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/capability_requirement"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "not_checked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "const": "not_checked" }
+      }
+    }
+  }
+}

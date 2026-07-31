@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 
@@ -30,14 +31,19 @@ def _objects_are_closed(value: object, path: str = "$") -> None:
 def test_contract_schemas_are_versioned_and_closed() -> None:
     config = json.loads((CONTRACTS / "graphforge-project-config-v1.schema.json").read_text())
     resolved = json.loads((CONTRACTS / "graphforge-resolved-config-v1.schema.json").read_text())
+    infra = json.loads((CONTRACTS / "graphforge-infra-validation-v1.schema.json").read_text())
     assert config["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert resolved["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert infra["$schema"] == "https://json-schema.org/draft/2020-12/schema"
     assert config["properties"]["schema_version"] == {"const": 1}
     assert resolved["properties"]["contract"] == {"const": "graphforge-resolved-config/1"}
+    assert infra["properties"]["contract"] == {"const": "graphforge-infra-validation/1"}
     Draft202012Validator.check_schema(config)
     Draft202012Validator.check_schema(resolved)
+    Draft202012Validator.check_schema(infra)
     _objects_are_closed(config)
     _objects_are_closed(resolved)
+    _objects_are_closed(infra)
 
 
 def test_examples_preserve_data_and_secret_boundaries() -> None:
@@ -47,14 +53,28 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
     resolved_schema = json.loads(
         (CONTRACTS / "graphforge-resolved-config-v1.schema.json").read_text()
     )
+    infra_schema = json.loads(
+        (CONTRACTS / "graphforge-infra-validation-v1.schema.json").read_text()
+    )
+    infra = json.loads(
+        (CONTRACTS / "examples" / "graphforge-infra-validation-production-v1.json").read_text()
+    )
     registry = Registry().with_resources(
         [
             (config_schema["$id"], Resource.from_contents(config_schema)),
             (resolved_schema["$id"], Resource.from_contents(resolved_schema)),
+            (infra_schema["$id"], Resource.from_contents(infra_schema)),
         ]
     )
     Draft202012Validator(config_schema, registry=registry).validate(config)
     Draft202012Validator(resolved_schema, registry=registry).validate(resolved)
+    Draft202012Validator(infra_schema, registry=registry).validate(infra)
+    invalid_uri = deepcopy(config)
+    invalid_uri["sources"][0]["uri"] = "https://user@example.invalid/data.parquet"
+    assert not Draft202012Validator(config_schema, registry=registry).is_valid(invalid_uri)
+    invalid_integer = deepcopy(resolved)
+    invalid_integer["targets"][0]["storage"]["capacity_bytes"] = 9_007_199_254_740_992
+    assert not Draft202012Validator(resolved_schema, registry=registry).is_valid(invalid_integer)
     assert config["schema_version"] == 1
     assert config["project"] == {
         "ontology": ".graphforge/ontology",
@@ -67,10 +87,33 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
         ".graphforge/imports",
         ".graphforge/exports",
     ]
-    assert [target["id"] for target in resolved["targets"]] == ["local", "production"]
+    assert [target["id"] for target in resolved["targets"]] == [
+        "external-host",
+        "external-job",
+        "external-worker",
+        "local",
+        "local-service",
+        "production",
+    ]
+    assert {(target["kind"], target["ownership"]) for target in resolved["targets"]} >= {
+        ("embedded", "embedded"),
+        ("service", "local"),
+        ("service", "external"),
+        ("worker", "external"),
+        ("job", "external"),
+        ("host", "external"),
+    }
     assert resolved["secrets"] == [{"id": "service-token", "source": "secret_manager"}]
     serialized = json.dumps(resolved).lower().replace("service-token", "")
     assert "secret_value" not in serialized and "credential" not in serialized
+    infra_serialized = json.dumps(infra)
+    sentinel = "_".join(("GRAPHFORGE_SECRET", "SENTINEL_231"))
+    assert sentinel not in infra_serialized
+    assert infra["static_validity"] == {"status": "valid"}
+    assert infra["planned_infrastructure"]["mutation"] == "none"
+    assert infra["connectivity"] == {"status": "not_checked"}
+    assert infra["readiness"] == {"status": "not_checked"}
+    assert infra["capability_compatibility"]["status"] == "requirements_declared"
 
 
 def test_resolved_example_has_canonicalizable_ordered_content() -> None:

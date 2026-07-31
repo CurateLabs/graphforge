@@ -99,7 +99,8 @@ pub use portable::{
     PortableSelection,
 };
 pub use repository::{
-    GitProvenance, ProjectConfig, RepositoryContext, RepositoryDefinitionDigest,
+    GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
+    InfraValidationResult, ProjectConfig, RepositoryContext, RepositoryDefinitionDigest,
     RepositoryInitReceipt, RepositoryRemoveReceipt, RepositorySourceDigest, RepositorySyncRequest,
     RepositorySyncResult, RepositorySyncStatus, SkillBundle, SkillBundleFile, SkillMutationReceipt,
     SkillStatus, SkillStatusReceipt,

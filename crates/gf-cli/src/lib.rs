@@ -246,6 +246,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Validate provider-neutral infrastructure intent without provisioning.
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommand,
+    },
     /// Manage project-local GraphForge agent skills.
     Skills {
         #[command(subcommand)]
@@ -316,6 +321,19 @@ enum ConfigCommand {
     Validate,
     /// Emit deterministic, secret-free resolved configuration.
     Resolve,
+}
+
+#[derive(Subcommand)]
+enum InfraCommand {
+    /// Validate one named target without network access or mutation.
+    Validate(InfraValidateArgs),
+}
+
+#[derive(Args)]
+struct InfraValidateArgs {
+    /// Stable target identifier from graphforge.yaml.
+    #[arg(long)]
+    target: String,
 }
 
 #[derive(Subcommand)]
@@ -889,6 +907,12 @@ fn run_repository(
         Command::Config {
             command: ConfigCommand::Resolve,
         } => Ok(repository.resolve_config()?),
+        Command::Infra {
+            command: InfraCommand::Validate(args),
+        } => {
+            plain_output = "valid";
+            serde_json::to_value(repository.validate_infra_target(&args.target)?)
+        }
         Command::Skills {
             command: SkillsCommand::Install(args),
         } => serde_json::to_value(repository.skills_install(skill_bundle, args.force)?),
@@ -974,6 +998,18 @@ fn resolve_project_path(
     }
 }
 
+fn is_repository_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Init(_)
+            | Command::Sync(_)
+            | Command::Remove(_)
+            | Command::Config { .. }
+            | Command::Infra { .. }
+            | Command::Skills { .. }
+    )
+}
+
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -985,14 +1021,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, gf_api::GfError> {
             .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
         return Ok(0);
     };
-    if matches!(
-        &command,
-        Command::Init(_)
-            | Command::Sync(_)
-            | Command::Remove(_)
-            | Command::Config { .. }
-            | Command::Skills { .. }
-    ) {
+    if is_repository_command(&command) {
         return run_repository_with_bundle(
             command,
             cli.project_dir,
