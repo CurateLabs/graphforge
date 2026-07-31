@@ -129,7 +129,9 @@ while IFS= read -r -d '' path; do
       terraform=true
       ;;
 
-    packages/cli/* | packages/cli/**/* | tests/contracts/repository-cli-parity.json)
+    packages/cli/* | packages/cli/**/* | tests/contracts/repository-cli-*.json | \
+      scripts/ci/verify-node-cli-release-package.mjs | \
+      scripts/ci/test-publish-cli-contract.py)
       bindings=true
       ;;
 

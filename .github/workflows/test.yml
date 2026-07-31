@@ -102,6 +102,9 @@ jobs:
       - name: Test clean-environment verification harness
         run: python3 scripts/ci/test-clean-env-verify.py
 
+      - name: Test GraphForge CLI publication contract
+        run: python3 scripts/ci/test-publish-cli-contract.py
+
       - name: Enforce domain dependency directions
         run: |
           scripts/ci/check-domain-dependencies.py
@@ -468,6 +471,8 @@ jobs:
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
           uvx --from "${wheels[0]}" graphforge --version
+          GRAPHFORGE_UVX_WHEEL="${wheels[0]}" \
+            python3 crates/gf-bindings-py/tests/cli_lifecycle.py
           uv venv /tmp/gf-native --python 3.13
           uv pip install --python /tmp/gf-native/bin/python "${wheels[0]}"
           /tmp/gf-native/bin/python - <<'PY'

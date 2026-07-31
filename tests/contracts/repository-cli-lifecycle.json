@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "contract": "graphforge-packed-cli-lifecycle/1",
+  "scope": {
+    "portableInterchange": "complete_project_generation",
+    "ontologyLifecycle": {
+      "owner": "#236",
+      "operations": [
+        "inspect_runtime_catalog",
+        "suggest_ontology",
+        "validate_ontology",
+        "export_ontology"
+      ]
+    },
+    "ontologyBindingParity": {
+      "owner": "#237",
+      "operations": [
+        "inspect_runtime_catalog",
+        "suggest_ontology",
+        "validate_ontology",
+        "export_ontology",
+        "adopt_ontology",
+        "clear_ontology"
+      ]
+    },
+    "forbiddenImplicitOntologyOperations": [
+      "inspect_runtime_catalog",
+      "suggest_ontology",
+      "validate_ontology",
+      "export_ontology",
+      "adopt_ontology",
+      "clear_ontology"
+    ]
+  },
+  "identities": {
+    "syncOperation": "41414141-4141-4141-4141-414141414141",
+    "syncActor": "42424242-4242-4242-4242-424242424242",
+    "checkpointCreateOperation": "43434343-4343-4343-4343-434343434343",
+    "checkpointDeleteOperation": "44444444-4444-4444-4444-444444444444",
+    "revertOperation": "45454545-4545-4545-4545-454545454545",
+    "revertActor": "46464646-4646-4646-4646-464646464646",
+    "importOperation": "47474747-4747-4747-4747-474747474747"
+  },
+  "requiredScenarios": [
+    {
+      "name": "init_and_reopen",
+      "commands": ["init", "init"],
+      "invariants": [
+        "tracked_definition_scaffold_preserved",
+        "ignored_state_imports_exports",
+        "skills_installed_from_package",
+        "second_init_idempotent",
+        "fresh_process_reopens_current"
+      ]
+    },
+    {
+      "name": "configuration_and_static_infra",
+      "commands": ["config validate", "config resolve", "infra validate"],
+      "invariants": [
+        "canonical_secret_free_resolved_json",
+        "static_validation_does_not_open_or_mutate_project_state",
+        "readiness_reported_separately"
+      ]
+    },
+    {
+      "name": "sync_check_apply_and_replay",
+      "commands": ["sync --check", "sync", "sync", "sync --check"],
+      "exitCodes": [4, 0, 0, 0],
+      "statuses": ["drift", "published", "in_sync", "in_sync"],
+      "invariants": [
+        "check_does_not_publish",
+        "caller_operation_and_actor_preserved",
+        "replay_does_not_publish",
+        "only_declared_definition_digests_reconciled"
+      ]
+    },
+    {
+      "name": "checkpoint_and_top_level_revert",
+      "commands": [
+        "checkpoint create",
+        "checkpoint list",
+        "checkpoint show",
+        "checkpoint diff",
+        "revert --preview",
+        "revert without --yes",
+        "revert --yes",
+        "revert --yes replay",
+        "checkpoint delete"
+      ],
+      "exitCodes": [0, 0, 0, 0, 0, 2, 0, 0, 0],
+      "invariants": [
+        "checkpoint_pins_complete_generation",
+        "preview_and_refusal_do_not_change_current",
+        "revert_publishes_new_complete_generation",
+        "revert_replay_does_not_publish",
+        "fresh_process_reopens_reverted_state"
+      ]
+    },
+    {
+      "name": "portable_export_import_and_reopen",
+      "commands": ["export --current", "import", "checkpoint list"],
+      "invariants": [
+        "envelope_is_deterministic_and_checksum_verified",
+        "envelope_contains_complete_generation_not_ontology_document",
+        "import_stages_all_participants_before_publication",
+        "fresh_process_reopens_imported_current"
+      ]
+    },
+    {
+      "name": "remove_refusal_and_confirmation",
+      "commands": ["remove", "remove --yes"],
+      "exitCodes": [2, 0],
+      "invariants": [
+        "refusal_does_not_change_state",
+        "only_state_removed",
+        "tracked_definitions_imports_exports_and_skills_preserved"
+      ]
+    },
+    {
+      "name": "git_data_boundary",
+      "commands": ["git add --all", "git diff --cached --name-only"],
+      "invariants": [
+        "tracked_config_ontology_schemas_migrations_seed_recipes_allowed",
+        "state_imports_exports_materialized_seeds_snapshots_graph_and_source_data_absent"
+      ]
+    }
+  ]
+}
