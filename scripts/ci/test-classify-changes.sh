@@ -57,6 +57,7 @@ assert_classification "$binding_python" crates/gf-bindings-py/tests/smoke.py pyt
 assert_classification "$binding_only" crates/gf-bindings-node/tests/analyze.test.mjs node-binding
 assert_classification "$binding_only" packages/cli/bin/graphforge.js node-cli
 assert_classification "$binding_only" tests/contracts/repository-cli-parity.json cli-parity-fixture
+assert_classification "$binding_rust" tests/contracts/checkpoint-recovery-matrix.json checkpoint-recovery-fixture
 assert_classification "$gherkin_rust" tests/features/tck/features/query.feature gherkin
 assert_classification "$binding_python" tests/unit/kernel_test.py python-test
 assert_classification "$python_only" scripts/some_tool.py python-only

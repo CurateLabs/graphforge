@@ -117,6 +117,11 @@ while IFS= read -r -d '' path; do
       bindings=true
       ;;
 
+    tests/contracts/checkpoint-recovery-matrix.json)
+      rust=true
+      bindings=true
+      ;;
+
     crates/*.rs | crates/*/*.rs | crates/*/*/*.rs | crates/*/*/*/*.rs | \
       crates/*/*/*/*/*.rs)
       rust=true
