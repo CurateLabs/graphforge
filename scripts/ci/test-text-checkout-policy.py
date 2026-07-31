@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 
@@ -18,22 +19,27 @@ def tracked_paths() -> list[str]:
         check=True,
         capture_output=True,
     )
-    return [value.decode() for value in result.stdout.rstrip(b"\0").split(b"\0")]
+    if not result.stdout:
+        return []
+    return [os.fsdecode(value) for value in result.stdout.rstrip(b"\0").split(b"\0")]
 
 
 def resolved_attributes(paths: list[str]) -> dict[str, dict[str, str]]:
     result = subprocess.run(
         ["git", "check-attr", "-z", "--stdin", "text", "eol"],
         cwd=ROOT,
-        input=b"\0".join(path.encode() for path in paths) + b"\0",
+        input=b"\0".join(os.fsencode(path) for path in paths) + b"\0",
         check=True,
         capture_output=True,
     )
     fields = result.stdout.rstrip(b"\0").split(b"\0")
-    assert len(fields) % 3 == 0, "git check-attr returned a malformed response"
+    if len(fields) % 3 != 0:
+        raise RuntimeError("git check-attr returned a malformed response")
     resolved: dict[str, dict[str, str]] = {}
     for index in range(0, len(fields), 3):
-        path, attribute, value = (field.decode() for field in fields[index : index + 3])
+        path = os.fsdecode(fields[index])
+        attribute = fields[index + 1].decode("ascii")
+        value = fields[index + 2].decode("ascii")
         resolved.setdefault(path, {})[attribute] = value
     return resolved
 
@@ -44,18 +50,22 @@ def main() -> None:
         for line in ATTRIBUTES.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    assert active and active[0] == POLICY, "global LF text policy is missing or shadowed"
+    if not active or active[0] != POLICY:
+        raise RuntimeError("global LF text policy is missing or shadowed")
 
     paths = tracked_paths()
-    assert paths, "repository has no tracked files"
+    if not paths:
+        raise RuntimeError("repository has no tracked files")
     resolved = resolved_attributes(paths)
-    assert set(resolved) == set(paths), "Git attributes did not resolve every tracked path"
+    if set(resolved) != set(paths):
+        raise RuntimeError("Git attributes did not resolve every tracked path")
     invalid = {
         path: values
         for path, values in resolved.items()
         if values.get("text") not in {"auto", "set", "unset"} or values.get("eol") != "lf"
     }
-    assert not invalid, f"tracked paths violate LF checkout policy: {invalid}"
+    if invalid:
+        raise RuntimeError(f"tracked paths violate LF checkout policy: {invalid}")
     print(f"text checkout policy passed: {len(paths)} tracked paths resolve to LF")
 
 
