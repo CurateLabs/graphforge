@@ -20,9 +20,7 @@ def console_script() -> Path:
 def main() -> None:
     script = console_script()
     root = Path(__file__).resolve().parents[3]
-    fixtures = json.loads(
-        (root / "tests/contracts/repository-cli-parity.json").read_text()
-    )
+    fixtures = json.loads((root / "tests/contracts/repository-cli-parity.json").read_text())
 
     for case in fixtures["cases"]:
         completed = subprocess.run(
