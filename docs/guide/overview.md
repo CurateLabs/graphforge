@@ -12,8 +12,15 @@ trees.
 | [Installation](installation.md) | Install via pip or uv |
 | [Quick Start](quickstart.md) | First graph in five minutes |
 | [Tutorial](tutorial.md) | Step-by-step walkthrough |
+| [VS Code extension](vscode-extension/) | Explore projects, run Cypher, and pair with coding agents inside your editor |
 
 ## Everyday workflows
+
+### [Use GraphForge in VS Code](vscode-extension/)
+The optional GraphForge extension adds project exploration, Cypher execution, analyst verbs,
+ontology views, result graphs, and structured command interop to VS Code-compatible editors.
+It uses the native Node or Python binding; graph behavior remains owned by the Rust engine.
+See the synchronized extension guide for setup, runtime selection, and the complete command map.
 
 ### [Cypher Query Language](cypher-guide.md)
 Learn the openCypher query language — GraphForge's primary interface for working with graphs.
@@ -99,5 +106,6 @@ df = table.to_pandas()
 
 - [Cypher Guide](cypher-guide.md) — complete query language reference
 - [Graph Construction](graph-construction.md) — build graphs with Python
+- [VS Code extension](vscode-extension/) — use GraphForge from your editor or coding agent
 - [Book](../book/README.md) — architecture, research, and deeper usage
 - [Architecture Overview](../book/architecture/overview.md) — Rust core design

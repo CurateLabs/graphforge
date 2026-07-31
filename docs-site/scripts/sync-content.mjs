@@ -2,6 +2,7 @@
 /** Sync allowlisted docs into Starlight content collection. */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -9,6 +10,7 @@ const siteRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(siteRoot, '..');
 const contentRoot = path.join(siteRoot, 'src/content/docs');
 const docsRoot = path.join(repoRoot, 'docs');
+const externalManifest = JSON.parse(fs.readFileSync(path.join(siteRoot, 'external-docs.json'), 'utf8'));
 
 const GH_DOCS_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main/docs';
 const GH_REPO_BLOB = 'https://github.com/CurateLabs/graphforge/blob/main';
@@ -17,6 +19,7 @@ const GH_DOCS_TREE = 'https://github.com/CurateLabs/graphforge/tree/main/docs';
 /** Directory hrefs with no published index → concrete allowlisted page (docs-relative). */
 const DIRECTORY_DEFAULTS = {
   guide: 'guide/overview.md',
+  'guide/vscode-extension': 'guide/vscode-extension/index.md',
   'guide/datasets': 'guide/datasets/overview.md',
   'book/architecture': 'book/architecture/overview.md',
   'book/use-cases': 'book/use-cases/knowledge-graph-construction.md',
@@ -224,6 +227,9 @@ function sourcePathToSlug(sourceRel) {
     }
     const ext = path.extname(part);
     const stem = path.basename(part, ext);
+    if (stem.toLowerCase() === 'index') {
+      return out.join('/');
+    }
     if (stem.toLowerCase() === 'readme') {
       if (i === 0) return 'documentation';
       return out.join('/');
@@ -337,7 +343,7 @@ function resolveDocsTarget(fromRel, hrefPath) {
  */
 function rewriteMarkdownLinks(md, fromRel) {
   const fromSlug = sourcePathToSlug(fromRel);
-  const allowlist = new Set(PAGES);
+  const allowlist = new Set([...PAGES, ...externalManifest.pages.map((page) => page.destination)]);
 
   // Protect fenced code blocks from link rewriting.
   const fences = [];
@@ -398,6 +404,117 @@ function rewriteMarkdownLinks(md, fromRel) {
   return rewritten.replace(/\0FENCE(\d+)\0/g, (_m, i) => fences[Number(i)]);
 }
 
+function validateExternalManifest(manifest) {
+  if (!/^[0-9a-f]{40}$/.test(manifest.revision)) {
+    throw new Error('External docs revision must be an immutable full commit SHA');
+  }
+  if (manifest.sourceDirectory !== 'docs/published') {
+    throw new Error('External docs may only be imported from docs/published');
+  }
+  if (!/^[\w.-]+\/[\w.-]+$/.test(manifest.repository)) {
+    throw new Error(`Invalid external docs repository: ${manifest.repository}`);
+  }
+  const expected = new Set(['overview.md', 'install.md', 'commands.md', 'agent-interop.md']);
+  const sources = new Set(manifest.pages.map((page) => page.source));
+  if (
+    manifest.pages.length !== expected.size ||
+    sources.size !== expected.size ||
+    [...expected].some((source) => !sources.has(source))
+  ) {
+    throw new Error(`External docs allowlist must be exactly: ${[...expected].join(', ')}`);
+  }
+  const destinations = new Set(manifest.pages.map((page) => page.destination));
+  if (destinations.size !== manifest.pages.length) {
+    throw new Error('External docs destinations must be unique');
+  }
+  for (const page of manifest.pages) {
+    if (page.source.includes('/') || page.source.includes('..')) {
+      throw new Error(`External docs source escapes docs/published: ${page.source}`);
+    }
+    if (!/^guide\/vscode-extension\/[a-z0-9-]+\.md$/.test(page.destination)) {
+      throw new Error(`Invalid external docs destination: ${page.destination}`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(page.sha256)) {
+      throw new Error(`Invalid SHA-256 for external docs page: ${page.source}`);
+    }
+  }
+}
+
+function rewriteExternalMarkdownLinks(md, page, manifest) {
+  const mapping = new Map(manifest.pages.map((item) => [item.source, item.destination]));
+  const fromSlug = sourcePathToSlug(page.destination);
+  const sourceBase = `https://github.com/${manifest.repository}/blob/${manifest.revision}/${manifest.sourceDirectory}`;
+  const fences = [];
+  const withoutFences = md.replace(/```[\s\S]*?```/g, (block) => {
+    const token = `\0EXTERNAL_FENCE${fences.length}\0`;
+    fences.push(block);
+    return token;
+  });
+
+  const rewriteHref = (text, href, wrap) => {
+    if (/^(https?:|mailto:|tel:|#)/i.test(href)) return null;
+    const [hrefPath, hashPart] = href.split('#', 2);
+    const normalized = path.posix.normalize(path.posix.join(path.posix.dirname(page.source), hrefPath));
+    const hash = hashPart ? `#${hashPart}` : '';
+    const destination = mapping.get(normalized);
+    if (destination) {
+      return wrap(text, siteHrefForSlug(fromSlug, sourcePathToSlug(destination), hash));
+    }
+    return wrap(text, `${sourceBase}/${normalized}${hash}`);
+  };
+
+  let rewritten = withoutFences.replace(
+    /\[(!\[[^\]]*\]\([^)\s]+\))\]\(([^)\s]+)\)/g,
+    (full, imageMd, href) => {
+      const out = rewriteHref(imageMd, href, (text, next) => `[${text}](${next})`);
+      return out ?? full;
+    },
+  );
+
+  rewritten = rewritten.replace(/\[([^\]]*)\]\(([^)\s]+)\)/g, (full, text, href) => {
+    const out = rewriteHref(text, href, (label, next) => `[${label}](${next})`);
+    return out ?? full;
+  });
+  return rewritten.replace(/\0EXTERNAL_FENCE(\d+)\0/g, (_match, index) => fences[Number(index)]);
+}
+
+function addExternalSourceMetadata(md, page, manifest) {
+  const sourceUrl = `https://github.com/${manifest.repository}/blob/${manifest.revision}/${manifest.sourceDirectory}/${page.source}`;
+  md = md.replace(/^---\n/, `---\neditUrl: ${JSON.stringify(sourceUrl)}\n`);
+  return md.replace(
+    /\n---\n\n/,
+    `\n---\n\n> This page is synchronized from [\`${manifest.repository}\`](${sourceUrl}) at revision [\`${manifest.revision.slice(0, 12)}\`](https://github.com/${manifest.repository}/commit/${manifest.revision}).\n\n`,
+  );
+}
+
+async function syncExternalDocs(manifest) {
+  validateExternalManifest(manifest);
+  let imported = 0;
+  for (const page of manifest.pages) {
+    const snapshot = path.join(siteRoot, 'external', 'graphforge-vscode', page.source);
+    if (!fs.existsSync(snapshot)) {
+      throw new Error(`Missing external docs snapshot: ${snapshot}`);
+    }
+    let md = fs.readFileSync(snapshot, 'utf8');
+    const actualSha = crypto.createHash('sha256').update(md).digest('hex');
+    if (actualSha !== page.sha256) {
+      throw new Error(`External docs checksum mismatch for ${page.source}: expected ${page.sha256}, got ${actualSha}`);
+    }
+    const title = titleFromMarkdown(md, path.basename(page.source, '.md'));
+    md = upsertFrontmatter(md, title);
+    md = rewriteExternalMarkdownLinks(md, page, manifest);
+    md = addExternalSourceMetadata(md, page, manifest);
+    const destination = path.join(contentRoot, page.destination);
+    ensureDir(path.dirname(destination));
+    fs.writeFileSync(destination, md);
+    imported += 1;
+  }
+  console.log(
+    `Imported ${imported} extension pages from the verified ${manifest.repository}@${manifest.revision} snapshot`,
+  );
+  return imported;
+}
+
 rimrafContent(contentRoot);
 ensureDir(contentRoot);
 
@@ -421,5 +538,7 @@ for (const rel of PAGES) {
   fs.writeFileSync(dest, md);
   count += 1;
 }
+
+count += await syncExternalDocs(externalManifest);
 
 console.log(`Synced ${count} pages into Starlight content collection`);

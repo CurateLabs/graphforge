@@ -7,7 +7,7 @@
   "scripts": {
     "sync": "node ./scripts/sync-content.mjs",
     "dev": "node ./scripts/sync-content.mjs && astro dev",
-    "build": "node ./scripts/sync-content.mjs && astro build",
+    "build": "node ./scripts/test-extension-docs.mjs && node ./scripts/sync-content.mjs && astro build",
     "check-links": "node ./scripts/check-links.mjs",
     "preview": "astro preview",
     "astro": "astro"

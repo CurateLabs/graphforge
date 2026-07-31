@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Integrate the GraphForge VS Code extension into the public guide by mechanically importing
+  its curated `docs/published/` pages from an immutable, checksummed revision (#252).
 - Add a runtime- and provider-agnostic deployment specification for Pulumi
   TypeScript/Python and Terraform, projecting digest-pinned core artifacts,
   service/worker/job/host intent, external source/secret references, and

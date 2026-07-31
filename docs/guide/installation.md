@@ -5,6 +5,10 @@ GraphForge **v0.5.0** ships as thin native bindings over a Rust core
 for normal use, or build from source on `main` when developing the engine or
 bindings.
 
+Prefer an editor workflow? The optional [GraphForge VS Code extension](vscode-extension/install.md)
+detects Node- and Python-first workspaces, helps configure the appropriate native binding, and
+uses the same Rust-owned engine described below.
+
 > **Name collision:** PyPI currently lists an unrelated pure-Python package
 > named `graphforge` at **0.4.0** (~279 KB). CurateLabs GraphForge
 > **0.5.0** is the native engine (Rust `.so` / `.node`). Until CurateLabs
@@ -144,6 +148,7 @@ make pre-push
 
 ## Next steps
 
+- [VS Code extension](vscode-extension/install.md) — configure GraphForge inside your editor
 - [Quick Start](quickstart.md) — build your first graph in five minutes
 - [Tutorial](tutorial.md) — step-by-step guided walkthrough
 - [Architecture Overview](../book/architecture/overview.md) — Rust core design

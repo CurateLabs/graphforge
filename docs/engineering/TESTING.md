@@ -96,7 +96,11 @@ as product milestones.
 
 Docs changes run `.github/workflows/docs.yml`: `pnpm docs:build` syncs
 allowlisted `docs/**` into the Starlight site and fails the PR if the site does
-not build. Locally, prefer `pnpm docs:build` and `pnpm docs:check-links` before
+not build. The same command imports only the pinned, checksummed public snapshot declared in
+`docs-site/external-docs.json` from `graphforge-vscode/docs/published/`; mutable revisions,
+missing sources, and checksum drift fail closed without requiring network access. The snapshot
+is refreshed explicitly with `pnpm docs:update-extension <full-commit-sha>`. Locally, prefer
+`pnpm docs:test-extension`, `pnpm docs:build`, and `pnpm docs:check-links` before
 push when editing published pages. Docs green is part of merge readiness for
 docs surfaces; it does not prove runtime behavior.
 
