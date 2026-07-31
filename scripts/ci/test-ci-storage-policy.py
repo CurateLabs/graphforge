@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce Blacksmith-only, consumer-driven CI transfer storage."""
+"""Enforce bounded, consumer-driven CI transfer storage."""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
-FORBIDDEN = ("actions/upload-artifact@", "actions/download-artifact@", "retention-days:")
+EXPECTED_ARTIFACT_UPLOADS = Counter(
+    {
+        "binding-rc-report-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
+    }
+)
+EXPECTED_ARTIFACT_DOWNLOADS = Counter({"binding-rc-report-${{ github.run_id }}-*": 1})
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 7,
@@ -30,8 +36,6 @@ EXPECTED_STICKY_DELETES = Counter(
 )
 EXPECTED_SAVES = Counter(
     {
-        "binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}": 1,
-        "binding-rc-transfer-${{ github.run_id }}-${{ matrix.report_target }}": 1,
         "binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
@@ -51,14 +55,6 @@ EXPECTED_SAVES = Counter(
 )
 EXPECTED_RESTORES = Counter(
     {
-        "binding-rc-transfer-${{ github.run_id }}-python-ubuntu": 1,
-        "binding-rc-transfer-${{ github.run_id }}-python-macos": 1,
-        "binding-rc-transfer-${{ github.run_id }}-python-windows": 1,
-        "binding-rc-transfer-${{ github.run_id }}-node-x86_64-apple-darwin": 1,
-        "binding-rc-transfer-${{ github.run_id }}-node-aarch64-apple-darwin": 1,
-        "binding-rc-transfer-${{ github.run_id }}-node-x86_64-unknown-linux-gnu": 1,
-        "binding-rc-transfer-${{ github.run_id }}-node-aarch64-unknown-linux-gnu": 1,
-        "binding-rc-transfer-${{ github.run_id }}-node-x86_64-pc-windows-msvc": 1,
         "binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
@@ -122,11 +118,44 @@ def cache_steps(text: str) -> list[list[str]]:
 
 
 def field(step: list[str], name: str) -> str | None:
-    for line in step:
+    for line in reversed(step):
         stripped = line.strip().removeprefix("- ")
         if stripped.startswith(name + ":"):
             return stripped.split(":", 1)[1].strip().strip("'\"")
     return None
+
+
+def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
+    uploaded: list[str] = []
+    downloaded: list[str] = []
+    for step in action_steps(text, "actions/upload-artifact@"):
+        uses = field(step, "uses")
+        assert uses == "actions/upload-artifact@v7", f"unapproved artifact action: {uses}"
+        name = field(step, "name")
+        assert name is not None, "artifact upload has no exact name"
+        assert field(step, "if-no-files-found") == "error", (
+            f"artifact upload is not fail-closed: {name}"
+        )
+        assert field(step, "retention-days") == "1", f"artifact retention is not one day: {name}"
+        path = field(step, "path")
+        assert path in {
+            "binding-rc-reports/${{ matrix.target }}.json",
+            "binding-rc-reports/${{ matrix.report_target }}.json",
+        }, f"artifact upload contains unapproved bytes: {path}"
+        uploaded.append(name)
+    for step in action_steps(text, "actions/download-artifact@"):
+        uses = field(step, "uses")
+        assert uses == "actions/download-artifact@v8", f"unapproved artifact action: {uses}"
+        pattern = field(step, "pattern")
+        assert pattern is not None, "artifact download has no exact-run pattern"
+        assert field(step, "path") == "binding-rc-reports", (
+            f"artifact download path drift: {pattern}"
+        )
+        assert field(step, "merge-multiple") == "true", (
+            f"artifact reports are not merged: {pattern}"
+        )
+        downloaded.append(pattern)
+    return uploaded, downloaded
 
 
 def cache_contracts(text: str) -> tuple[list[str], list[str]]:
@@ -207,16 +236,18 @@ def validate_test_suite_trigger(text: str) -> None:
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
     validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
-    for path, text in texts.items():
-        for forbidden in FORBIDDEN:
-            assert forbidden not in text, f"{path.relative_to(ROOT)} uses {forbidden}"
 
+    artifact_uploads: list[str] = []
+    artifact_downloads: list[str] = []
     saved: list[str] = []
     restored: list[str] = []
     dependency_keys: list[str] = []
     sticky_keys: list[str] = []
     sticky_deletes: list[str] = []
     for text in texts.values():
+        file_uploads, file_downloads = artifact_contracts(text)
+        artifact_uploads.extend(file_uploads)
+        artifact_downloads.extend(file_downloads)
         file_saves, file_restores = cache_contracts(text)
         saved.extend(file_saves)
         restored.extend(file_restores)
@@ -225,15 +256,23 @@ def main() -> None:
         sticky_keys.extend(file_sticky)
         sticky_deletes.extend(file_deletes)
         validate_maturin_storage(text)
+    assert Counter(artifact_uploads) == EXPECTED_ARTIFACT_UPLOADS, (
+        "CI artifact producer contract drift"
+    )
+    assert Counter(artifact_downloads) == EXPECTED_ARTIFACT_DOWNLOADS, (
+        "CI artifact consumer contract drift"
+    )
     assert Counter(saved) == EXPECTED_SAVES, "CI transfer producer contract drift"
     assert Counter(restored) == EXPECTED_RESTORES, "CI transfer consumer contract drift"
     assert Counter(dependency_keys) == EXPECTED_DEPENDENCY_KEYS, "dependency cache contract drift"
     assert Counter(sticky_keys) == EXPECTED_STICKY_KEYS, "sticky-disk contract drift"
     assert Counter(sticky_deletes) == EXPECTED_STICKY_DELETES, "sticky-disk cleanup contract drift"
     print(
-        f"CI storage policy passed: {len(saved)} transfer producers, {len(restored)} consumers, "
+        f"CI storage policy passed: {len(artifact_uploads)} bounded artifact producers, "
+        f"{len(artifact_downloads)} consumer, {len(saved)} cache transfer producers, "
+        f"{len(restored)} consumers, "
         f"{len(dependency_keys)} dependency caches, {len(sticky_keys)} bounded sticky disks, "
-        "zero retained GitHub artifacts"
+        "one-day binding-report artifact retention"
     )
 
 

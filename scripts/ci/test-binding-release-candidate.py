@@ -132,7 +132,7 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     native_step = "Clean-install and execute native contract"
     write_step = "Write target evidence"
     stage_step = "Stage Python report for aggregate job"
-    transfer_step = "uses: actions/cache/save@v6"
+    transfer_step = "uses: actions/upload-artifact@v7"
     assert workflow_text.count(prepare_step) == 1
     python_job = required_section(workflow_text, "  python:\n", "  node:\n")
     assert (
@@ -195,8 +195,10 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     assert_active_lines(
         transfer,
         transfer_step,
-        "path: binding-rc-reports",
-        "key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}",
+        "name: binding-rc-report-${{ github.run_id }}-${{ matrix.target }}",
+        "path: binding-rc-reports/${{ matrix.target }}.json",
+        "if-no-files-found: error",
+        "retention-days: 1",
     )
     for forbidden in ("chmod", "chown", "continue-on-error", "|| true", "retry"):
         assert forbidden not in post_maturin.lower()
@@ -231,11 +233,14 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
 
     assert "actions/cache@v6" not in node_job
     assert "actions/cache/restore@v6" not in node_job
-    assert node_job.count("actions/cache/save@v6") == 1
+    assert "actions/cache/save@v6" not in node_job
+    assert node_job.count("actions/upload-artifact@v7") == 1
     assert_active_lines(
         node_job,
-        "path: binding-rc-reports",
-        "key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.report_target }}",
+        "name: binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}",
+        "path: binding-rc-reports/${{ matrix.report_target }}.json",
+        "if-no-files-found: error",
+        "retention-days: 1",
     )
     assert "Restore Windows Node Cargo build state" not in node_job
     assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(
@@ -266,6 +271,10 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(
         aggregate,
+        "uses: actions/download-artifact@v8",
+        "pattern: binding-rc-report-${{ github.run_id }}-*",
+        "path: binding-rc-reports",
+        "merge-multiple: true",
         "python3 scripts/ci/validate-binding-release-candidate.py",
     )
     assert "continue-on-error" not in aggregate.lower()
@@ -435,7 +444,7 @@ def main() -> None:
     prepare_marker = "Prepare writable Python RC evidence directory"
     native_marker = "Clean-install and execute native contract"
     write_marker = "Write target evidence"
-    transfer_marker = "uses: actions/cache/save@v6"
+    transfer_marker = "uses: actions/upload-artifact@v7"
     for marker, active_line in (
         (
             prepare_marker,
@@ -470,7 +479,7 @@ def main() -> None:
         (write_marker, '--output "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json"'),
         (
             transfer_marker,
-            "path: binding-rc-reports",
+            "path: binding-rc-reports/${{ matrix.target }}.json",
         ),
     ):
         prefix, marker_found, remainder = rc_workflow_text.partition(marker)
@@ -490,7 +499,7 @@ def main() -> None:
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",
         "Write target evidence",
-        "uses: actions/cache/save@v6",
+        "uses: actions/upload-artifact@v7",
     ):
         rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
     wrapper_step = "Prepare Rust compiler wrapper for native contracts"

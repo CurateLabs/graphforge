@@ -82,6 +82,9 @@ _Nothing yet._
 - Remove unconsumed CI artifacts and move required cross-job transfers to
   Blacksmith-backed cache storage, eliminating GitHub artifact-quota failures
   from the required CI Gate (#205).
+- Use one-day GitHub artifacts only for cross-OS binding release-candidate JSON
+  reports after colocated caches proved unreliable across runner platforms;
+  ordinary CI artifacts and publication bytes remain prohibited (#260).
 - Restore local multi-surface coverage via `make coverage`: Rust (`cargo llvm-cov` →
   `build/coverage-rust/`), Python wrapper (`pytest-cov` on
   `crates/gf-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`
