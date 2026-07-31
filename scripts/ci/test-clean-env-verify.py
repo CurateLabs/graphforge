@@ -114,6 +114,8 @@ def test_preflight_ok_when_published() -> None:
             return 200, json.dumps({"info": {"version": "0.5.0"}}).encode(), {}
         if "registry.npmjs.org/@graphforge/node/0.5.0" in url:
             return 200, b"{}", {}
+        if "registry.npmjs.org/@graphforge/cli/0.5.0" in url:
+            return 200, b"{}", {}
         if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
             return 200, b"{}", {}
         if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
@@ -189,6 +191,19 @@ def test_checksums_match_release_record() -> None:
                 ).encode(),
                 {},
             )
+        if "registry.npmjs.org/@graphforge/cli/0.5.0" in url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "dist": {
+                            "tarball": "https://example.test/graphforge-cli-0.5.0.tgz",
+                            "integrity": "sha256-cli",
+                        }
+                    }
+                ).encode(),
+                {},
+            )
         if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
             return (
                 200,
@@ -226,6 +241,39 @@ def test_checksums_match_release_record() -> None:
         assert "graphforge-0.5.0-py3-none-any.whl" in " ".join(result.artifacts["matched"])
 
 
+def test_cli_lane_installs_and_executes_published_package() -> None:
+    commands: list[list[str]] = []
+
+    def run(
+        argv: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        stdout = "graphforge 0.5.0\n" if argv[0] == "npx" else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=lambda _url: (200, b"{}", {}),
+            run_cmd=run,
+        )
+        result = cev.lane_cli(ctx)
+        assert result.ok is True, result.error
+        assert ["npm", "install", "@graphforge/cli@0.5.0"] in commands
+        assert [
+            "npx",
+            "--offline",
+            "--no-install",
+            "graphforge",
+            "--version",
+        ] in commands
+
+
 def test_cli_validate_release_record() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "record.json"
@@ -259,6 +307,7 @@ def main() -> None:
     test_preflight_ok_when_published()
     test_urls_lane_reports_failures()
     test_checksums_match_release_record()
+    test_cli_lane_installs_and_executes_published_package()
     test_cli_validate_release_record()
     test_cli_run_refuses_without_lanes()
     print("clean-env-verify tests passed")

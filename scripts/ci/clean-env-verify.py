@@ -34,6 +34,7 @@ DEFAULT_CRATES = ("gf-api",)
 LANE_ISSUES = {
     "pip": 2809,
     "npm": 2810,
+    "cli": 226,
     "skills": 2811,
     "cargo": 2812,
     "reopen": 2813,
@@ -191,6 +192,8 @@ def registry_urls(version: str, crates: tuple[str, ...], docs_base: str) -> dict
         "pypi_project": f"https://pypi.org/project/graphforge/{version}/",
         "npm_node": f"https://registry.npmjs.org/@graphforge/node/{version}",
         "npm_node_page": f"https://www.npmjs.com/package/@graphforge/node/v/{version}",
+        "npm_cli": f"https://registry.npmjs.org/@graphforge/cli/{version}",
+        "npm_cli_page": f"https://www.npmjs.com/package/@graphforge/cli/v/{version}",
         "npm_skills": f"https://registry.npmjs.org/@graphforge/agent-skills/{version}",
         "npm_skills_page": f"https://www.npmjs.com/package/@graphforge/agent-skills/v/{version}",
         "docs_quickstart": f"{docs}/guide/quickstart/",
@@ -216,7 +219,7 @@ def probe_published(ctx: Context) -> dict[str, Any]:
     urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base)
     probes: dict[str, Any] = {}
     missing: list[str] = []
-    for key in ("pypi_json", "npm_node", "npm_skills"):
+    for key in ("pypi_json", "npm_node", "npm_cli", "npm_skills"):
         status, body, _ = ctx.fetch(urls[key])
         probes[key] = {"url": urls[key], "status": status}
         if status != 200:
@@ -258,7 +261,8 @@ def run_preflight(ctx: Context) -> LaneResult:
         return result
     result.ok = True
     result.notes.append(
-        "PyPI, npm (@graphforge/node, @graphforge/agent-skills), and crates probes OK"
+        "PyPI, npm (@graphforge/node, @graphforge/cli, "
+        "@graphforge/agent-skills), and crates probes OK"
     )
     return result
 
@@ -412,6 +416,37 @@ console.log("npm-smoke-ok", reported);
     return result
 
 
+def lane_cli(ctx: Context) -> LaneResult:
+    """Install the published CLI and execute it without workspace resolution."""
+    result = LaneResult(name="cli", issue=LANE_ISSUES["cli"], ok=False)
+    if not ctx.allow_network_install:
+        result.error = "network installs disabled"
+        return result
+    work = ctx.work_root / "cli"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    result.commands.append("npm init -y")
+    _run(ctx, ["npm", "init", "-y"], cwd=work)
+    package = f"@graphforge/cli@{ctx.version}"
+    result.commands.append(f"npm install {package}")
+    _run(ctx, ["npm", "install", package], cwd=work)
+    result.commands.append("npx --offline --no-install graphforge --version")
+    out = _run(
+        ctx,
+        ["npx", "--offline", "--no-install", "graphforge", "--version"],
+        cwd=work,
+    )
+    reported = out.strip()
+    if ctx.version not in reported:
+        raise VerifyError(
+            f"@graphforge/cli version mismatch: expected {ctx.version!r} in {reported!r}"
+        )
+    result.notes.append(f"published CLI executable ok: {reported}")
+    result.ok = True
+    return result
+
+
 def lane_skills(ctx: Context) -> LaneResult:
     result = LaneResult(name="skills", issue=LANE_ISSUES["skills"], ok=False)
     if not ctx.allow_network_install:
@@ -495,6 +530,7 @@ def lane_urls(ctx: Context) -> LaneResult:
         "docs_installation",
         "pypi_project",
         "npm_node_page",
+        "npm_cli_page",
         "npm_skills_page",
         "github_release",
         *[f"crates_page_{crate}" for crate in ctx.crates],
@@ -600,6 +636,7 @@ def lane_checksums(ctx: Context) -> LaneResult:
     observed["pypi"] = _pypi_file_digests(ctx)
     for package, surface_key in (
         ("@graphforge/node", "npm"),
+        ("@graphforge/cli", "npm"),
         ("@graphforge/agent-skills", "npm"),
     ):
         filename, digest = _npm_dist_digest(ctx, package)
@@ -669,6 +706,7 @@ def lane_checksums(ctx: Context) -> LaneResult:
 LANE_RUNNERS: dict[str, Callable[[Context], LaneResult]] = {
     "pip": lane_pip,
     "npm": lane_npm,
+    "cli": lane_cli,
     "skills": lane_skills,
     "cargo": lane_cargo,
     "reopen": lane_reopen,

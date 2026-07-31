@@ -185,11 +185,12 @@ areas, not durable project authority. Both are managed Git ignores, so envelopes
 placed there remain outside the code repository. Keep tracked schemas,
 ontology, migrations, and seed recipes separate from these data files.
 
-This whole-project interchange surface is distinct from ontology-document
-inspection, suggestion, validation, and YAML/JSON export. #236 delivered the
-Rust-owned ontology lifecycle, and #237 delivered thin Python and Node parity
-including durable ontology adoption and clear. Repository `export` never
-substitutes for ontology export, and ontology export never packages graph data
-or a project generation. Repository initialization and synchronization preserve
-that authority boundary: they never suggest, adopt, clear, or export an
+This whole-project interchange surface is distinct from runtime-catalog
+inspection, ontology suggestion and non-mutating validation, and explicit
+YAML/JSON ontology-document export. #236 delivered those Rust-owned operations;
+#237 delivered thin Python and Node parity plus durable ontology adoption and
+clear. Repository `export` never substitutes for ontology export, and ontology
+export never packages graph data or a project generation. Repository
+initialization and synchronization preserve that authority boundary: they never
+inspect a runtime catalog or suggest, validate, adopt, clear, or export an
 ontology implicitly.

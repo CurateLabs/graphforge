@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required explicit `--yes` confirmation (#243).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
-  output, and exit codes (#226).
+  output, and exit codes, with packed clean-install `uvx`/offline `npx`
+  acceptance for the complete repository lifecycle. Project `export`/`import`
+  remains whole-generation portable interchange; #236 owns Rust runtime-catalog
+  inspection, ontology suggestion/validation, and document export, while #237
+  owns thin binding parity plus durable adopt/clear behavior (#226).
 - Add deterministic portable export of the current generation or a named
   checkpoint and validate-before-mutation atomic import into new or empty
   projects, excluding live pointers, locks, journals, caches, and trash (#229).

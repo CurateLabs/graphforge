@@ -243,7 +243,7 @@ jobs:
   # ---- NPX lifecycle CLI (@graphforge/cli) ----
   publish-node-cli:
     name: Publish GraphForge CLI to npm
-    needs: publish-node
+    needs: [publish, publish-node]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -266,6 +266,10 @@ jobs:
 
       - name: Offline pack smoke before publish
         run: pnpm --filter @graphforge/cli test:offline
+        working-directory: .
+
+      - name: Verify clean install against published native package
+        run: node scripts/ci/verify-node-cli-release-package.mjs
         working-directory: .
 
       - name: Verify npm publishing identity

@@ -47,7 +47,7 @@ must remove only resources recorded by the IaC engine; it must never call
 
 The ontology paths in resolved configuration are bounded repository references
 only. Infrastructure validation never inspects a runtime catalog or suggests,
-validates, exports, loads, adopts, or clears an ontology. It cannot change the
-committed workspace ontology authority delivered by #236 and #237, and it never
-contains ontology documents, observed property values, runtime catalog IDs, or
-graph data.
+validates, exports, loads, adopts, or clears an ontology. It cannot invoke the
+#236 Rust inspection/suggestion/validation/export surface or the #237 thin
+binding parity and durable adopt/clear surface. It never contains ontology
+documents, observed property values, runtime catalog IDs, or graph data.

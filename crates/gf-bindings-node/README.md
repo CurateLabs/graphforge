@@ -54,6 +54,20 @@ The stable mode names are `single_writer` (default), `queued_writer`, and
 attempts to 0–32. Optimistic replay applies only to composite transactions.
 GraphForge remains embedded; remote transports are separate extensions.
 
+## Ontology lifecycle
+
+The native binding exposes the Rust-owned #236 operations through
+`inspectRuntimeCatalog()`, `suggestOntology()`, `validateOntology()`, and
+`exportOntology()`. These inspect or derive explicit artifacts without changing
+durable project authority. Issue #237 supplies the same thin Python/Node parity
+and adds durable `workspaceOntology()`, `adoptOntology()`, and
+`clearOntology()` operations.
+
+These APIs are distinct from the repository CLI's `export` and `import`
+commands, which move one complete portable project generation. Repository
+interchange never implicitly inspects, suggests, validates, exports, adopts, or
+clears an ontology.
+
 ## Documentation and support
 
 - [Documentation](https://github.com/CurateLabs/graphforge/tree/main/docs)

@@ -5,6 +5,7 @@ Surfaces:
 - Cargo workspace ``[workspace.package].version``
 - Python ``crates/gf-bindings-py/pyproject.toml`` (PEP 440)
 - Node ``crates/gf-bindings-node/package.json``
+- NPX lifecycle CLI ``packages/cli/package.json``
 - NPX skills ``packages/agent-skills/package.json``
 
 Usage:
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CARGO_TOML = ROOT / "Cargo.toml"
 PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
 NODE_PACKAGE = ROOT / "crates" / "gf-bindings-node" / "package.json"
+CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
 
 
@@ -69,6 +71,7 @@ def read_current() -> dict[str, str]:
         PYPROJECT.read_text(encoding="utf-8"),
     )
     node = json.loads(NODE_PACKAGE.read_text(encoding="utf-8"))["version"]
+    cli = json.loads(CLI_PACKAGE.read_text(encoding="utf-8"))["version"]
     skills = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))["version"]
     if not cargo or not py:
         raise ValueError("could not read Cargo or Python version")
@@ -76,6 +79,7 @@ def read_current() -> dict[str, str]:
         "cargo": cargo.group(1),
         "python": py.group(1),
         "node": node,
+        "cli": cli,
         "skills": skills,
     }
 
@@ -85,6 +89,7 @@ def expected_for(base: str, *, dev: bool) -> dict[str, str]:
         "cargo": cargo_version(base, dev=dev),
         "python": python_version(base, dev=dev),
         "node": npm_version(base, dev=dev),
+        "cli": npm_version(base, dev=dev),
         "skills": npm_version(base, dev=dev),
     }
 
@@ -132,7 +137,11 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
         raise ValueError("failed to update Python pyproject version")
     PYPROJECT.write_text(py_text, encoding="utf-8")
 
-    for path, key in ((NODE_PACKAGE, "node"), (SKILLS_PACKAGE, "skills")):
+    for path, key in (
+        (NODE_PACKAGE, "node"),
+        (CLI_PACKAGE, "cli"),
+        (SKILLS_PACKAGE, "skills"),
+    ):
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected[key]
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
