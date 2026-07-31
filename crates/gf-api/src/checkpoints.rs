@@ -36,6 +36,13 @@ pub struct ListCheckpointsRequest {
     pub page: PageRequest,
 }
 
+/// Show-checkpoint request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShowCheckpointRequest {
+    /// Exact active checkpoint name.
+    pub name: String,
+}
+
 /// Delete-checkpoint request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteCheckpointRequest {
@@ -58,6 +65,26 @@ pub struct RevertCheckpointRequest {
     pub idempotency_key: OperationId,
     /// Optional actor identity.
     pub actor_uuid: Option<Uuid>,
+}
+
+/// Non-mutating checkpoint-revert preview request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreviewRevertCheckpointRequest {
+    /// Exact active checkpoint name.
+    pub name: String,
+}
+
+/// Identities a caller must inspect before authorizing a checkpoint revert.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevertCheckpointPreview {
+    /// Stable checkpoint identity.
+    pub checkpoint_uuid: Uuid,
+    /// Complete generation pinned by the checkpoint.
+    pub source_generation_uuid: Uuid,
+    /// SHA-256 of the pinned generation's canonical manifest.
+    pub source_manifest_sha256: String,
+    /// Generation that is current at preview time.
+    pub current_generation_uuid: Uuid,
 }
 
 /// Named checkpoint or the current committed generation.
@@ -641,6 +668,35 @@ impl GraphForge {
         // short list still surfaces GF_CANCELLED instead of a late success.
         cancellation(&page)?;
         Ok(result)
+    }
+
+    /// Show the authoritative metadata for one active named checkpoint.
+    pub fn show_checkpoint(
+        &self,
+        request: ShowCheckpointRequest,
+    ) -> Result<ExecutionResult, GfError> {
+        let ShowCheckpointRequest { name } = request;
+        let (checkpoint, _) = gf_storage::open_checkpoint_generation(
+            self.resolved_generation.container_root(),
+            &name,
+        )?;
+        checkpoint_rows(std::slice::from_ref(&checkpoint), None)
+    }
+
+    /// Inspect checkpoint and current-generation identities without mutation.
+    pub fn preview_revert_to_checkpoint(
+        path: impl AsRef<std::path::Path>,
+        request: PreviewRevertCheckpointRequest,
+    ) -> Result<RevertCheckpointPreview, GfError> {
+        let PreviewRevertCheckpointRequest { name } = request;
+        let current = gf_storage::resolve_project_generation(path.as_ref())?;
+        let (checkpoint, _) = gf_storage::open_checkpoint_generation(path.as_ref(), &name)?;
+        Ok(RevertCheckpointPreview {
+            checkpoint_uuid: checkpoint.checkpoint_uuid,
+            source_generation_uuid: checkpoint.generation_uuid,
+            source_manifest_sha256: checkpoint.generation_manifest_sha256,
+            current_generation_uuid: current.generation_uuid(),
+        })
     }
 
     /// Open an immutable view pinned to the named checkpoint generation.
@@ -1731,6 +1787,13 @@ fn receipt_result(row: &gf_storage::CheckpointReceipt) -> ExecutionResult {
     source
         .append_value(row.source_generation_uuid.as_bytes())
         .expect("UUID width is fixed by the checkpoint receipt contract");
+    let mut prior_current = FixedSizeBinaryBuilder::with_capacity(1, 16);
+    match row.prior_current_generation_uuid {
+        Some(value) => prior_current
+            .append_value(value.as_bytes())
+            .expect("UUID width is fixed by the checkpoint receipt contract"),
+        None => prior_current.append_null(),
+    }
     let mut result = FixedSizeBinaryBuilder::with_capacity(1, 16);
     match row.result_generation_uuid {
         Some(value) => result
@@ -1751,6 +1814,11 @@ fn receipt_result(row: &gf_storage::CheckpointReceipt) -> ExecutionResult {
             "source_generation_uuid",
             DataType::FixedSizeBinary(16),
             false,
+        ),
+        Field::new(
+            "prior_current_generation_uuid",
+            DataType::FixedSizeBinary(16),
+            true,
         ),
         Field::new(
             "result_generation_uuid",
@@ -1774,6 +1842,7 @@ fn receipt_result(row: &gf_storage::CheckpointReceipt) -> ExecutionResult {
                 Arc::new(checkpoint.finish()),
                 Arc::new(name.finish()),
                 Arc::new(source.finish()),
+                Arc::new(prior_current.finish()),
                 Arc::new(result.finish()),
                 Arc::new(revision.finish()),
                 Arc::new(at.finish()),
@@ -2081,6 +2150,81 @@ mod tests {
 
         assert_eq!(error.code(), "GF_VALIDATION");
         assert!(error.to_string().contains("dangling confidence assertion"));
+    }
+
+    #[test]
+    fn revert_preview_is_non_mutating_and_receipt_identifies_prior_current() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let mut graph = GraphForge::new(Some(path)).unwrap();
+        graph
+            .execute("CREATE (:State {value: 'checkpoint'})")
+            .unwrap();
+        graph
+            .checkpoint(CheckpointRequest {
+                name: "Before".into(),
+                description: Some("preview target".into()),
+                idempotency_key: operation(140),
+                actor_uuid: None,
+            })
+            .unwrap();
+        let (checkpoint, _) =
+            gf_storage::open_checkpoint_generation(directory.path(), "Before").unwrap();
+        graph.execute("CREATE (:State {value: 'current'})").unwrap();
+        let current_before = graph.generation_for_read().unwrap().generation_uuid();
+        let generations_before = std::fs::read_dir(directory.path().join("generations"))
+            .unwrap()
+            .count();
+
+        let preview = GraphForge::preview_revert_to_checkpoint(
+            directory.path(),
+            PreviewRevertCheckpointRequest {
+                name: "Before".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(preview.checkpoint_uuid, checkpoint.checkpoint_uuid);
+        assert_eq!(preview.source_generation_uuid, checkpoint.generation_uuid);
+        assert_eq!(
+            preview.source_manifest_sha256,
+            checkpoint.generation_manifest_sha256
+        );
+        assert_eq!(preview.current_generation_uuid, current_before);
+        assert_eq!(
+            graph.generation_for_read().unwrap().generation_uuid(),
+            current_before
+        );
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("generations"))
+                .unwrap()
+                .count(),
+            generations_before
+        );
+
+        let missing = GraphForge::preview_revert_to_checkpoint(
+            directory.path(),
+            PreviewRevertCheckpointRequest {
+                name: "Missing".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(missing.code(), "GF_CHECKPOINT_NOT_FOUND");
+
+        let receipt = graph
+            .revert_to_checkpoint(RevertCheckpointRequest {
+                name: "Before".into(),
+                reason: "previewed identities".into(),
+                idempotency_key: operation(141),
+                actor_uuid: None,
+            })
+            .unwrap();
+        let prior_current = receipt.batches[0]
+            .column_by_name("prior_current_generation_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(prior_current.value(0), current_before.as_bytes());
     }
 
     #[test]
@@ -2535,6 +2679,41 @@ mod tests {
                 .code(),
             "GF_PAGE_SNAPSHOT_GONE"
         );
+    }
+
+    #[test]
+    fn show_checkpoint_returns_the_exact_list_metadata_row_and_rejects_unknown_names() {
+        let directory = tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let actor_uuid = Uuid::from_u128(91);
+        graph
+            .checkpoint(CheckpointRequest {
+                name: "Release".into(),
+                description: Some("ready to publish".into()),
+                idempotency_key: operation(90),
+                actor_uuid: Some(actor_uuid),
+            })
+            .unwrap();
+
+        let listed = graph
+            .list_checkpoints(ListCheckpointsRequest::default())
+            .unwrap();
+        let shown = graph
+            .show_checkpoint(ShowCheckpointRequest {
+                name: "Release".into(),
+            })
+            .unwrap();
+
+        assert_eq!(shown.schema, listed.schema);
+        assert_eq!(shown.batches, listed.batches);
+        assert_eq!(shown.batches[0].num_rows(), 1);
+
+        let error = graph
+            .show_checkpoint(ShowCheckpointRequest {
+                name: "release".into(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_CHECKPOINT_NOT_FOUND");
     }
 
     #[test]

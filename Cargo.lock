@@ -2043,6 +2043,7 @@ dependencies = [
  "arrow",
  "clap",
  "gf-api",
+ "serde",
  "serde_json",
  "tempfile",
  "uuid",

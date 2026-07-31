@@ -132,9 +132,22 @@
       "request": ["limit", "after", "cancellation"],
       "result_schema": "checkpoint@1"
     },
+    "show_checkpoint": {
+      "request": ["name"],
+      "result_schema": "checkpoint@1"
+    },
     "open_checkpoint": {
       "request": ["name"],
       "result": "CheckpointView"
+    },
+    "preview_revert_to_checkpoint": {
+      "request": ["project_path", "name"],
+      "result": [
+        "checkpoint_uuid",
+        "source_generation_uuid",
+        "source_manifest_sha256",
+        "current_generation_uuid"
+      ]
     },
     "revert_to_checkpoint": {
       "request": ["name", "reason", "idempotency_key", "actor_uuid"],
@@ -162,6 +175,7 @@
         ["checkpoint_uuid", "FixedSizeBinary(16)", false],
         ["name", "Utf8", false],
         ["source_generation_uuid", "FixedSizeBinary(16)", false],
+        ["prior_current_generation_uuid", "FixedSizeBinary(16)", true],
         ["result_generation_uuid", "FixedSizeBinary(16)", true],
         ["registry_revision", "UInt64", false],
         ["committed_at", "Timestamp(Microsecond, UTC)", false]

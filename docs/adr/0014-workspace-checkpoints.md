@@ -484,10 +484,14 @@ Arrow records through the existing output formatter. Bindings accept the same
 canonical UUIDs, names, limits, cursors, cancellation, and idempotency inputs.
 They do not implement registry, diff, revert, validation, or schema logic.
 
-CLI commands are `gf checkpoint create|list|open|delete|diff|revert`.
-`open` accepts a read command after `--`; it does not start a mutable shell.
-Destructive revert requires `--reason` but no interactive prompt at the engine
-layer. Automation and embedded callers therefore remain deterministic.
+CLI commands are `gf checkpoint create|list|show|open|delete|diff` plus
+top-level `gf revert` (`gf checkpoint revert` follows the same Rust path).
+`show` returns the authoritative named metadata record. `open` accepts a read
+command after `--`; it remains the query surface and does not start a mutable
+shell. `revert --preview` resolves the source and current generation without
+mutation. Destructive CLI revert requires `--reason`, an idempotency key, and
+explicit `--yes`; omission fails closed instead of prompting. Embedded callers
+remain deterministic and use the typed engine request directly.
 
 Graph-only and Cypher reads through a view retain ADR 0012 isolation: they open
 only graph participants. analyst-verb/find opens graph plus their registered primary

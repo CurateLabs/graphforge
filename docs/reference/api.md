@@ -3611,11 +3611,15 @@ checkpoint binding contract described below.
 
 ### Named checkpoints
 
-`GraphForge.checkpoint`, `list_checkpoints`, `open_checkpoint`,
-`diff_checkpoints`, `revert_to_checkpoint`, and `delete_checkpoint` expose the
-Rust-owned [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json)
-contract in Python and Node. Python returns `pyarrow.Table`; Node returns Arrow
-IPC buffers. `open_checkpoint(name)` returns a pinned, read-only
+`gf-api` exposes `GraphForge.checkpoint`, `list_checkpoints`,
+`show_checkpoint`, `open_checkpoint`, `diff_checkpoints`,
+`revert_to_checkpoint`, and `delete_checkpoint` as the Rust-owned
+[`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json) contract.
+Existing thin Python and Node checkpoint projections return `pyarrow.Table`
+and Arrow IPC buffers, respectively. `show_checkpoint(name)` resolves and
+verifies one authoritative active checkpoint record and returns the exact
+one-row metadata schema used by `list_checkpoints`.
+`open_checkpoint(name)` remains the query surface: it returns a pinned, read-only
 `CheckpointView` with `checkpoint_uuid`, `generation_uuid`, `execute`, and
 `project_capabilities`. It intentionally exposes no mutation methods.
 
@@ -3631,15 +3635,26 @@ The CLI mirrors these operations and writes Arrow IPC to stdout:
 ```text
 gf --project PATH checkpoint create NAME --idempotency-key UUID [--description TEXT]
 gf --project PATH checkpoint list [--limit N] [--after TOKEN]
+gf --project PATH checkpoint show NAME
 gf --project PATH checkpoint open NAME -- MATCH (n) RETURN n
 gf --project PATH checkpoint diff --from NAME --to-current --scope graph --detail records
-gf --project PATH checkpoint revert NAME --reason TEXT --idempotency-key UUID
+gf --project PATH --json revert NAME --preview
+gf --project PATH revert NAME --reason TEXT --idempotency-key UUID --yes
 gf --project PATH checkpoint delete NAME --idempotency-key UUID
 ```
 
-The CLI accepts checkpoint names, never generation paths. `open` runs one
-read-only query and does not create a mutable shell. Failures write the stable
-GraphForge error code to stderr and exit nonzero.
+The CLI accepts checkpoint names, never generation paths. `show` inspects
+metadata; `open` runs one read-only query and does not create a mutable shell.
+Revert preview is non-mutating. An actual revert fails closed unless `--yes`
+explicitly authorizes it, and its success/replay receipt includes the prior
+current generation.
+
+The default native result surface is Arrow IPC. Global `--json` emits
+`graphforge-cli-result/1`, with schema-first `columns` (`name`, Arrow
+`data_type`, and `nullable`), followed by metadata and positional rows.
+Structured JSON failures contain stable `code`, `message`, and bounded safe
+`details`; they never expose credentials, raw project data, descriptions,
+reasons, or unrestricted filesystem paths. Exit codes remain stable.
 
 ---
 

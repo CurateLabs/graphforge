@@ -4,6 +4,7 @@
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use arrow::datatypes::DataType;
 use arrow::ipc::writer::StreamWriter;
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use gf_api::{
@@ -11,7 +12,8 @@ use gf_api::{
     DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
     ListCheckpointsRequest, OperationId, PageRequest, PageToken, PortableExportRequest,
     PortableExportResult, PortableImportRequest, PortableImportResult, PortableSelection,
-    RepositoryContext, RevertCheckpointRequest,
+    PreviewRevertCheckpointRequest, RepositoryContext, RevertCheckpointPreview,
+    RevertCheckpointRequest, ShowCheckpointRequest,
 };
 use uuid::Uuid;
 
@@ -218,7 +220,7 @@ struct Cli {
     #[arg(long, global = true)]
     project_dir: Option<PathBuf>,
 
-    /// Emit the stable JSON result for repository lifecycle commands.
+    /// Emit the stable machine-readable JSON result when supported.
     #[arg(long, global = true)]
     json: bool,
 
@@ -308,6 +310,8 @@ enum CheckpointCommand {
     Create(CreateArgs),
     /// List active checkpoints in canonical order.
     List(PageArgs),
+    /// Show authoritative metadata for one active checkpoint.
+    Show(ShowArgs),
     /// Execute one read-only Cypher query against a checkpoint.
     Open(OpenArgs),
     /// Delete an active checkpoint reference.
@@ -335,6 +339,11 @@ struct PageArgs {
     limit: u32,
     #[arg(long)]
     after: Option<String>,
+}
+
+#[derive(Args)]
+struct ShowArgs {
+    name: String,
 }
 
 #[derive(Args)]
@@ -399,13 +408,19 @@ struct DiffArgs {
 struct RevertArgs {
     name: String,
     /// Required bounded audit reason.
-    #[arg(long)]
-    reason: String,
+    #[arg(long, required_unless_present = "preview")]
+    reason: Option<String>,
     /// Required canonical UUID used for idempotent replay.
-    #[arg(long)]
-    idempotency_key: String,
+    #[arg(long, required_unless_present = "preview")]
+    idempotency_key: Option<String>,
     #[arg(long)]
     actor_uuid: Option<String>,
+    /// Explicitly authorize this destructive operation in automation.
+    #[arg(long, conflicts_with = "preview")]
+    yes: bool,
+    /// Inspect the checkpoint and current generation without mutation.
+    #[arg(long)]
+    preview: bool,
 }
 
 #[derive(Args)]
@@ -488,6 +503,108 @@ fn write_result(result: &ExecutionResult, output: &mut dyn Write) -> Result<(), 
     output
         .flush()
         .map_err(|error| gf_api::GfError::Execution(error.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct JsonResultColumn<'a> {
+    name: &'a str,
+    data_type: String,
+    nullable: bool,
+}
+
+#[derive(serde::Serialize)]
+struct JsonExecutionResult<'a> {
+    contract: &'static str,
+    columns: Vec<JsonResultColumn<'a>>,
+    metadata: std::collections::BTreeMap<&'a str, &'a str>,
+    rows: Vec<Vec<serde_json::Value>>,
+}
+
+fn canonical_json_value(
+    value: serde_json::Value,
+    data_type: &DataType,
+) -> Result<serde_json::Value, gf_api::GfError> {
+    match (value, data_type) {
+        (serde_json::Value::String(hex), DataType::FixedSizeBinary(16)) => {
+            if hex.len() != 32 {
+                return Err(gf_api::GfError::Execution(
+                    "invalid 16-byte JSON result value".into(),
+                ));
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+            Ok(serde_json::Value::String(
+                Uuid::from_slice(&bytes)
+                    .map_err(|error| gf_api::GfError::Execution(error.to_string()))?
+                    .hyphenated()
+                    .to_string(),
+            ))
+        }
+        (value, _) => Ok(value),
+    }
+}
+
+fn write_json_result(
+    result: &ExecutionResult,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    let mut encoded = arrow::json::ArrayWriter::new(Vec::new());
+    let batches = result.batches.iter().collect::<Vec<_>>();
+    encoded
+        .write_batches(&batches)
+        .and_then(|()| encoded.finish())
+        .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    let objects: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_slice(&encoded.into_inner())
+            .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    let fields = result.schema.fields();
+    let mut rows = Vec::with_capacity(objects.len());
+    for mut object in objects {
+        let mut row = Vec::with_capacity(fields.len());
+        for field in fields {
+            let value = object
+                .remove(field.name())
+                .unwrap_or(serde_json::Value::Null);
+            row.push(canonical_json_value(value, field.data_type())?);
+        }
+        rows.push(row);
+    }
+    let value = JsonExecutionResult {
+        contract: "graphforge-cli-result/1",
+        columns: fields
+            .iter()
+            .map(|field| JsonResultColumn {
+                name: field.name(),
+                data_type: field.data_type().to_string(),
+                nullable: field.is_nullable(),
+            })
+            .collect(),
+        metadata: result
+            .schema
+            .metadata()
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect(),
+        rows,
+    };
+    serde_json::to_writer(&mut *output, &value)
+        .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    writeln!(output).map_err(|error| gf_api::GfError::Execution(error.to_string()))
+}
+
+fn write_execution_result(
+    result: &ExecutionResult,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    if json {
+        write_json_result(result, output)
+    } else {
+        write_result(result, output)
+    }
 }
 
 fn write_export_result(
@@ -582,6 +699,111 @@ fn run_export(
     write_export_result(&result, json, output)
 }
 
+#[derive(serde::Serialize)]
+struct JsonRevertPreview<'a> {
+    contract: &'static str,
+    checkpoint_uuid: Uuid,
+    source_generation_uuid: Uuid,
+    source_manifest_sha256: &'a str,
+    current_generation_uuid: Uuid,
+}
+
+fn write_revert_preview(
+    preview: &RevertCheckpointPreview,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    if json {
+        serde_json::to_writer(
+            &mut *output,
+            &JsonRevertPreview {
+                contract: "graphforge-revert-preview/1",
+                checkpoint_uuid: preview.checkpoint_uuid,
+                source_generation_uuid: preview.source_generation_uuid,
+                source_manifest_sha256: &preview.source_manifest_sha256,
+                current_generation_uuid: preview.current_generation_uuid,
+            },
+        )
+        .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+        writeln!(output).map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    } else {
+        writeln!(
+            output,
+            "checkpoint {} pins generation {} (sha256 {}); current generation is {}",
+            preview.checkpoint_uuid,
+            preview.source_generation_uuid,
+            preview.source_manifest_sha256,
+            preview.current_generation_uuid
+        )
+        .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn run_revert_preview(
+    path: &Path,
+    name: String,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    let preview =
+        GraphForge::preview_revert_to_checkpoint(path, PreviewRevertCheckpointRequest { name })?;
+    write_revert_preview(&preview, json, output)
+}
+
+fn run_revert(
+    graph: &mut GraphForge,
+    args: RevertArgs,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    debug_assert!(args.yes && !args.preview);
+    let result = graph.revert_to_checkpoint(RevertCheckpointRequest {
+        name: args.name,
+        reason: args
+            .reason
+            .expect("clap requires --reason unless --preview is present"),
+        idempotency_key: OperationId(canonical_uuid(
+            args.idempotency_key
+                .as_deref()
+                .expect("clap requires --idempotency-key unless --preview is present"),
+        )?),
+        actor_uuid: actor(args.actor_uuid.as_deref())?,
+    })?;
+    write_execution_result(&result, json, output)
+}
+
+fn revert_args(command: &Command) -> Option<&RevertArgs> {
+    match command {
+        Command::Revert(args)
+        | Command::Checkpoint {
+            command: CheckpointCommand::Revert(args),
+        } => Some(args),
+        _ => None,
+    }
+}
+
+fn handle_revert_before_open(
+    command: &Command,
+    path: &Path,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<bool, gf_api::GfError> {
+    let Some(args) = revert_args(command) else {
+        return Ok(false);
+    };
+    if args.preview {
+        run_revert_preview(path, args.name.clone(), json, output)?;
+        return Ok(true);
+    }
+    if !args.yes {
+        return Err(gf_api::GfError::Validation(
+            "revert requires explicit confirmation with --yes".into(),
+        ));
+    }
+    Ok(false)
+}
+
 fn run_repository(
     command: Command,
     project_dir: Option<PathBuf>,
@@ -608,15 +830,21 @@ fn run_repository(
                 Some(repository.skills_install(skill_bundle, false)?)
             };
             serde_json::to_value(serde_json::json!({
-                "root": init.root,
+                "root": ".",
                 "created_config": init.created_config,
                 "ignore_changed": init.ignore_changed,
-                "state": init.state,
+                "state": ".graphforge/state",
                 "skills": skills
             }))
         }
         Command::Sync => serde_json::to_value(repository.sync()?),
-        Command::Remove(args) => serde_json::to_value(repository.remove(args.yes)?),
+        Command::Remove(args) => {
+            let receipt = repository.remove(args.yes)?;
+            serde_json::to_value(serde_json::json!({
+                "target": ".graphforge/state",
+                "removed": receipt.removed
+            }))
+        }
         Command::Config {
             command: ConfigCommand::Validate,
         } => {
@@ -742,21 +970,25 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
         Command::Import(args) => return run_import(args, &path, cli.json, output),
         command => command,
     };
-    let path = path
+    if handle_revert_before_open(&command, &path, cli.json, output)? {
+        return Ok(());
+    }
+    let path_text = path
         .to_str()
         .ok_or_else(|| gf_api::GfError::Validation("--project must be valid UTF-8".into()))?;
-    let mut graph = GraphForge::new(Some(path))?;
+    let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
         Command::Export(args) => return run_export(&graph, args, cli.json, output),
         command => command,
     };
+    let command = match command {
+        Command::Revert(args)
+        | Command::Checkpoint {
+            command: CheckpointCommand::Revert(args),
+        } => return run_revert(&mut graph, args, cli.json, output),
+        command => command,
+    };
     let result = match command {
-        Command::Revert(args) => graph.revert_to_checkpoint(RevertCheckpointRequest {
-            name: args.name,
-            reason: args.reason,
-            idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
-            actor_uuid: actor(args.actor_uuid.as_deref())?,
-        })?,
         Command::Checkpoint { command } => match command {
             CheckpointCommand::Create(args) => graph.checkpoint(CheckpointRequest {
                 name: args.name,
@@ -766,6 +998,9 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
             })?,
             CheckpointCommand::List(args) => {
                 graph.list_checkpoints(ListCheckpointsRequest { page: page(&args)? })?
+            }
+            CheckpointCommand::Show(args) => {
+                graph.show_checkpoint(ShowCheckpointRequest { name: args.name })?
             }
             CheckpointCommand::Open(args) => {
                 let view = graph.open_checkpoint(&args.name)?;
@@ -798,18 +1033,11 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
                 },
                 page: page(&args.page)?,
             })?,
-            CheckpointCommand::Revert(args) => {
-                graph.revert_to_checkpoint(RevertCheckpointRequest {
-                    name: args.name,
-                    reason: args.reason,
-                    idempotency_key: OperationId(canonical_uuid(&args.idempotency_key)?),
-                    actor_uuid: actor(args.actor_uuid.as_deref())?,
-                })?
-            }
+            CheckpointCommand::Revert(_) => unreachable!("revert handled before result dispatch"),
         },
         _ => unreachable!(),
     };
-    write_result(&result, output)
+    write_execution_result(&result, cli.json, output)
 }
 
 /// Captured result of one Rust-owned CLI invocation.
@@ -848,10 +1076,14 @@ where
             ) {
                 stdout = error.to_string().into_bytes();
             } else if json {
-                writeln!(
-                    stderr,
-                    "{}",
-                    serde_json::json!({"error":{"code":"GF_VALIDATION","message":error.to_string()}})
+                write_json_error(
+                    &mut stderr,
+                    "GF_VALIDATION",
+                    &error.to_string(),
+                    JsonErrorDetails {
+                        source: "argument_parser",
+                        kind: clap_error_kind(error.kind()),
+                    },
                 )
                 .expect("writing to Vec cannot fail");
             } else {
@@ -880,13 +1112,94 @@ where
 
 fn write_error(error: &gf_api::GfError, json: bool, output: &mut dyn Write) -> io::Result<()> {
     if json {
-        writeln!(
+        write_json_error(
             output,
-            "{}",
-            serde_json::json!({"error":{"code":error.code(),"message":error.to_string()}})
+            error.code(),
+            &error.to_string(),
+            JsonErrorDetails {
+                source: "runtime",
+                kind: runtime_error_kind(error),
+            },
         )
     } else {
         writeln!(output, "{}: {error}", error.code())
+    }
+}
+
+#[derive(serde::Serialize)]
+struct JsonErrorDetails {
+    source: &'static str,
+    kind: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct JsonErrorBody<'a> {
+    code: &'static str,
+    message: &'a str,
+    details: JsonErrorDetails,
+}
+
+#[derive(serde::Serialize)]
+struct JsonErrorEnvelope<'a> {
+    error: JsonErrorBody<'a>,
+}
+
+fn write_json_error(
+    output: &mut dyn Write,
+    code: &'static str,
+    message: &str,
+    details: JsonErrorDetails,
+) -> io::Result<()> {
+    serde_json::to_writer(
+        &mut *output,
+        &JsonErrorEnvelope {
+            error: JsonErrorBody {
+                code,
+                message,
+                details,
+            },
+        },
+    )
+    .map_err(io::Error::other)?;
+    output.write_all(b"\n")
+}
+
+const fn clap_error_kind(kind: ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::InvalidValue => "invalid_value",
+        ErrorKind::UnknownArgument => "unknown_argument",
+        ErrorKind::InvalidSubcommand => "invalid_subcommand",
+        ErrorKind::NoEquals => "missing_equals",
+        ErrorKind::ValueValidation => "value_validation",
+        ErrorKind::TooManyValues => "too_many_values",
+        ErrorKind::TooFewValues => "too_few_values",
+        ErrorKind::WrongNumberOfValues => "wrong_number_of_values",
+        ErrorKind::ArgumentConflict => "argument_conflict",
+        ErrorKind::MissingRequiredArgument => "missing_required_argument",
+        ErrorKind::MissingSubcommand => "missing_subcommand",
+        ErrorKind::DisplayHelp => "display_help",
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => "display_help_on_missing_input",
+        ErrorKind::DisplayVersion => "display_version",
+        ErrorKind::Io => "io",
+        ErrorKind::Format => "format",
+        _ => "other",
+    }
+}
+
+const fn runtime_error_kind(error: &gf_api::GfError) -> &'static str {
+    match error {
+        gf_api::GfError::NotImplemented(_) => "not_implemented",
+        gf_api::GfError::Parse { .. } => "parse",
+        gf_api::GfError::Bind { .. } => "bind",
+        gf_api::GfError::Plan(_) => "plan",
+        gf_api::GfError::Execution(_) => "execution",
+        gf_api::GfError::Provider { .. } => "provider",
+        gf_api::GfError::Storage(_) => "storage",
+        gf_api::GfError::Project { .. } => "project",
+        gf_api::GfError::Api { .. } => "api",
+        gf_api::GfError::Lifecycle(_) => "lifecycle",
+        gf_api::GfError::Validation(_) => "validation",
+        gf_api::GfError::Ontology(_) => "ontology",
     }
 }
 
@@ -945,12 +1258,62 @@ mod tests {
         let error: serde_json::Value =
             serde_json::from_slice(&invalid.stderr).expect("structured CLI error");
         assert_eq!(error["error"]["code"], "GF_VALIDATION");
+        assert_eq!(
+            error["error"]["details"],
+            serde_json::json!({
+                "source": "argument_parser",
+                "kind": "invalid_subcommand"
+            })
+        );
+        assert!(
+            String::from_utf8(invalid.stderr.clone())
+                .unwrap()
+                .starts_with("{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":")
+        );
         assert!(
             error["error"]["message"]
                 .as_str()
                 .expect("error message")
                 .contains("Usage: graphforge")
         );
+    }
+
+    #[test]
+    fn runtime_json_errors_include_stable_safe_details_without_changing_message() {
+        let cases = [
+            (
+                gf_api::GfError::Validation("invalid repository input".into()),
+                "GF_VALIDATION",
+                "validation",
+                2,
+            ),
+            (
+                gf_api::GfError::Storage("unavailable".into()),
+                "GF_IO",
+                "storage",
+                3,
+            ),
+        ];
+        for (error, code, kind, exit_code) in cases {
+            let message = error.to_string();
+            let mut output = Vec::new();
+            write_error(&error, true, &mut output).unwrap();
+            let serialized = String::from_utf8(output.clone()).unwrap();
+            assert!(
+                serialized.starts_with(&format!("{{\"error\":{{\"code\":\"{code}\",\"message\":"))
+            );
+            assert!(
+                serialized.find("\"message\":").unwrap() < serialized.find("\"details\":").unwrap()
+            );
+            let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["error"]["message"], message);
+            assert_eq!(
+                value["error"]["details"],
+                serde_json::json!({"source": "runtime", "kind": kind})
+            );
+            assert_eq!(error_exit_code(&error), exit_code);
+        }
     }
 
     #[test]
@@ -978,6 +1341,20 @@ mod tests {
             "undo invalid import",
         ]);
         assert!(missing_key.is_err());
+
+        let preview = Cli::try_parse_from([
+            "gf",
+            "--project",
+            "/tmp/project",
+            "revert",
+            "before-change",
+            "--preview",
+        ])
+        .expect("preview does not require mutation identity");
+        assert!(matches!(
+            preview.command,
+            Some(Command::Revert(RevertArgs { preview: true, .. }))
+        ));
     }
 
     #[test]
@@ -1040,6 +1417,25 @@ mod tests {
         };
         assert_eq!(args.name, "before-change");
         assert_eq!(args.query.join(" "), "MATCH (n) RETURN n");
+    }
+
+    #[test]
+    fn show_accepts_exactly_one_checkpoint_name() {
+        let cli = Cli::try_parse_from([
+            "gf",
+            "--project",
+            "/tmp/project",
+            "checkpoint",
+            "show",
+            "before-change",
+        ])
+        .expect("valid checkpoint show command");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Checkpoint {
+                command: CheckpointCommand::Show(ShowArgs { name })
+            }) if name == "before-change"
+        ));
     }
 
     #[test]
