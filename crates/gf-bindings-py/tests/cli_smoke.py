@@ -39,8 +39,9 @@ def main() -> None:
     assert invalid.returncode == 3, invalid
     error = json.loads(invalid.stderr)
     assert list(error) == ["error"]
-    assert list(error["error"]) == ["code", "message"]
+    assert list(error["error"]) == ["code", "message", "details"]
     assert error["error"]["code"] == "GF_IO"
+    assert error["error"]["details"] == {"source": "runtime", "kind": "storage"}
     assert invalid.stdout == ""
 
 

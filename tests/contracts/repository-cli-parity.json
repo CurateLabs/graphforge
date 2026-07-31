@@ -13,7 +13,7 @@
       "args": ["--json", "unknown-command"],
       "exitCode": 2,
       "stdout": "",
-      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"error: unrecognized subcommand 'unknown-command'\\n\\nUsage: graphforge [OPTIONS] [COMMAND]\\n\\nFor more information, try '--help'.\\n\"}}\n"
+      "stderr": "{\"error\":{\"code\":\"GF_VALIDATION\",\"message\":\"error: unrecognized subcommand 'unknown-command'\\n\\nUsage: graphforge [OPTIONS] [COMMAND]\\n\\nFor more information, try '--help'.\\n\",\"details\":{\"source\":\"argument_parser\",\"kind\":\"invalid_subcommand\"}}}\n"
     }
   ]
 }
