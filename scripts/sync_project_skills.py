@@ -26,10 +26,7 @@ def sha256(path: Path) -> str:
 
 def payload_paths() -> list[Path]:
     return sorted(
-        path
-        for name in SKILL_NAMES
-        for path in (SOURCE / name).rglob("*")
-        if path.is_file()
+        path for name in SKILL_NAMES for path in (SOURCE / name).rglob("*") if path.is_file()
     )
 
 
