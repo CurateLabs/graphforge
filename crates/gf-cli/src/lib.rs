@@ -602,6 +602,7 @@ pub fn run_process() {
     let stdout = io::stdout();
     let mut output = stdout.lock();
     if let Err(error) = run(cli, &mut output) {
+        let _ = output.flush();
         let stderr = io::stderr();
         write_error(&error, json, &mut stderr.lock()).expect("write CLI stderr");
         std::process::exit(error_exit_code(&error));
