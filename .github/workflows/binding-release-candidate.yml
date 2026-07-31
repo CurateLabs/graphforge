@@ -161,11 +161,12 @@ jobs:
           cp "$PYTHON_RC_EVIDENCE_DIR/${{ matrix.target }}.json" binding-rc-reports/
 
       - name: Save Python report for aggregate job
-        uses: actions/cache/save@v6
+        uses: actions/upload-artifact@v7
         with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.target }}
-          enableCrossOsArchive: true
+          name: binding-rc-report-${{ github.run_id }}-${{ matrix.target }}
+          path: binding-rc-reports/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   node:
     name: Node RC (${{ matrix.target }})
@@ -331,11 +332,12 @@ jobs:
           cp "crates/gf-bindings-node/${{ matrix.report_target }}.json" binding-rc-reports/
 
       - name: Save Node report for aggregate job
-        uses: actions/cache/save@v6
+        uses: actions/upload-artifact@v7
         with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-${{ matrix.report_target }}
-          enableCrossOsArchive: true
+          name: binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}
+          path: binding-rc-reports/${{ matrix.report_target }}.json
+          if-no-files-found: error
+          retention-days: 1
 
   aggregate:
     name: Aggregate binding RC evidence
@@ -350,62 +352,12 @@ jobs:
         with:
           ref: ${{ needs.validate_source.outputs.evidence_sha }}
 
-      - name: Restore Python Ubuntu report
-        uses: actions/cache/restore@v6
+      - name: Download exact-run target reports
+        uses: actions/download-artifact@v8
         with:
+          pattern: binding-rc-report-${{ github.run_id }}-*
           path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-python-ubuntu
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Python macOS report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-python-macos
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Python Windows report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-python-windows
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Node x86_64 macOS report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-apple-darwin
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Node aarch64 macOS report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-node-aarch64-apple-darwin
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Node x86_64 Linux report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-unknown-linux-gnu
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Node aarch64 Linux report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-node-aarch64-unknown-linux-gnu
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Node Windows report
-        uses: actions/cache/restore@v6
-        with:
-          path: binding-rc-reports
-          key: binding-rc-transfer-${{ github.run_id }}-node-x86_64-pc-windows-msvc
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
+          merge-multiple: true
 
       - name: Validate and aggregate
         run: >-
