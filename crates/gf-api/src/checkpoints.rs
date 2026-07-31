@@ -1049,6 +1049,9 @@ fn logical_records(
                 gf_storage::WORKSPACE_CONFIGURATION_FAMILY => {
                     gf_storage::WorkspaceConfiguration::from_canonical_json(&snapshot.bytes)?;
                 }
+                gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY => {
+                    gf_storage::WorkspaceRepositorySnapshot::from_canonical_json(&snapshot.bytes)?;
+                }
                 _ => {
                     return Err(GfError::Api {
                         code: ApiErrorCode::SchemaMismatch,
