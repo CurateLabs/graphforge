@@ -1126,6 +1126,7 @@ fn write_error(error: &gf_api::GfError, json: bool, output: &mut dyn Write) -> i
     }
 }
 
+#[derive(Clone, Copy)]
 struct JsonErrorDetails {
     source: &'static str,
     kind: &'static str,

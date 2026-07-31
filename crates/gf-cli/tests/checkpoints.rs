@@ -69,7 +69,7 @@ fn checkpoint_cli_emits_arrow_and_stable_errors() {
     assert_eq!(
         create_batches
             .iter()
-            .map(|batch| batch.num_rows())
+            .map(arrow::array::RecordBatch::num_rows)
             .sum::<usize>(),
         1
     );
@@ -98,7 +98,7 @@ fn checkpoint_cli_emits_arrow_and_stable_errors() {
     assert_eq!(
         list_batches
             .iter()
-            .map(|batch| batch.num_rows())
+            .map(arrow::array::RecordBatch::num_rows)
             .sum::<usize>(),
         1
     );
