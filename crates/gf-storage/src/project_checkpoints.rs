@@ -133,7 +133,7 @@ struct CheckpointTombstone {
 /// Stable mutation receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointReceipt {
-    /// Operation name (`checkpoint` or `delete_checkpoint`).
+    /// Operation name (`checkpoint`, `delete_checkpoint`, or `revert_to_checkpoint`).
     pub operation: &'static str,
     /// Idempotency UUID.
     pub operation_uuid: Uuid,
@@ -143,6 +143,8 @@ pub struct CheckpointReceipt {
     pub name: String,
     /// Pinned generation UUID.
     pub source_generation_uuid: Uuid,
+    /// Generation that was current immediately before a revert; absent for registry-only operations.
+    pub prior_current_generation_uuid: Option<Uuid>,
     /// Newly published generation for revert; absent for registry-only operations.
     pub result_generation_uuid: Option<Uuid>,
     /// Resulting registry revision.
@@ -710,6 +712,7 @@ where
             checkpoint_uuid: checkpoint.checkpoint_uuid,
             name: requested_name,
             source_generation_uuid: source.generation_uuid(),
+            prior_current_generation_uuid: Some(original_prior_uuid),
             result_generation_uuid: Some(receipt.generation_uuid),
             registry_revision,
             committed_at: restored_at,
@@ -771,6 +774,7 @@ fn revert_receipt(
         checkpoint_uuid: parse_uuid(&extension.checkpoint_uuid)?,
         name: name.to_owned(),
         source_generation_uuid: parse_uuid(&extension.source_generation_uuid)?,
+        prior_current_generation_uuid: Some(parse_uuid(&extension.prior_current_generation_uuid)?),
         result_generation_uuid: Some(result_generation_uuid),
         registry_revision: extension.registry_revision,
         committed_at: extension.restored_at,
@@ -817,6 +821,7 @@ fn create_receipt(row: &CheckpointRecord) -> CheckpointReceipt {
         checkpoint_uuid: row.checkpoint_uuid,
         name: row.name.clone(),
         source_generation_uuid: row.generation_uuid,
+        prior_current_generation_uuid: None,
         result_generation_uuid: None,
         registry_revision: row.created_revision,
         committed_at: row.created_at,
@@ -830,6 +835,7 @@ fn create_tombstone_receipt(row: &CheckpointTombstone) -> CheckpointReceipt {
         checkpoint_uuid: row.checkpoint_uuid,
         name: row.name.clone(),
         source_generation_uuid: row.generation_uuid,
+        prior_current_generation_uuid: None,
         result_generation_uuid: None,
         registry_revision: row.created_revision,
         committed_at: row.created_at,
@@ -843,6 +849,7 @@ fn delete_receipt(row: &CheckpointTombstone) -> CheckpointReceipt {
         checkpoint_uuid: row.checkpoint_uuid,
         name: row.name.clone(),
         source_generation_uuid: row.generation_uuid,
+        prior_current_generation_uuid: None,
         result_generation_uuid: None,
         registry_revision: row.deleted_revision,
         committed_at: row.deleted_at,
@@ -2059,6 +2066,7 @@ mod tests {
         .unwrap();
         assert_eq!(restored.parent_generation_uuid(), Some(prior_current));
         assert_eq!(receipt.source_generation_uuid, source.generation_uuid());
+        assert_eq!(receipt.prior_current_generation_uuid, Some(prior_current));
         assert_eq!(receipt.registry_revision, created.registry_revision);
         assert_eq!(list_checkpoints(directory.path()).unwrap().len(), 1);
         let restoration_count = restored
@@ -2086,6 +2094,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replay, receipt);
+        assert_eq!(replay.prior_current_generation_uuid, Some(prior_current));
         assert_eq!(
             replayed_generation.generation_uuid(),
             restored.generation_uuid()

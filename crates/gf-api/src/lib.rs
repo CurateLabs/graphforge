@@ -151,7 +151,8 @@ pub use capabilities::{
 pub use checkpoints::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
     CheckpointView, DeleteCheckpointRequest, DiffCheckpointsRequest, ListCheckpointsRequest,
-    RevertCheckpointRequest,
+    PreviewRevertCheckpointRequest, RevertCheckpointPreview, RevertCheckpointRequest,
+    ShowCheckpointRequest,
 };
 pub use composite_receipt::{
     authorize_composite_transaction, composite_generation_uuid, composite_receipt_schema,

@@ -54,6 +54,58 @@ credentials alone.
 
 The stable machine interface is selected with global `--json`. Configuration
 resolution always emits canonical compact JSON and never resolves secret values.
+Repository lifecycle receipts identify files and directories relative to the
+discovered repository root, using `/` separators. They never expose a checkout,
+home-directory, or other machine-private absolute path.
+
+Successful Arrow-backed commands use the versioned
+`graphforge-cli-result/1` JSON envelope when `--json` is selected. The envelope
+is schema-first: `columns` declares each name, Arrow data type, and nullability
+before `metadata` and positional `rows`. UUID and binary values use canonical
+portable text encodings. The default output remains Arrow IPC.
+
+JSON failures use a stable `error` object with ordered `code`, `message`, and
+bounded safe `details`. Details may identify the operation or a
+repository-relative path, but never include credentials, raw data, unrestricted
+paths, descriptions, or revert reasons. Parse failures and runtime failures
+retain their established nonzero exit codes.
+
+## Checkpoint inspection and revert
+
+Checkpoint metadata inspection and checkpoint queries are separate:
+
+```bash
+gf --project-dir . checkpoint show before-change
+gf --project-dir . checkpoint open before-change -- \
+  "MATCH (n) RETURN n"
+```
+
+`checkpoint show` resolves and verifies the authoritative active checkpoint
+record, then returns the same one-row metadata schema used by `checkpoint
+list`. `checkpoint open` remains the read-only query surface and never creates
+a mutable shell. Global `--json` selects the schema-first JSON result for
+checkpoint commands; without it, the native result is Arrow IPC.
+
+Revert is fail-closed. Preview resolves the checkpoint and current generation
+without publishing anything and does not require mutation identity:
+
+```bash
+gf --project-dir . --json revert before-change --preview
+```
+
+An actual revert requires `--reason`, `--idempotency-key`, and explicit
+non-interactive confirmation with `--yes`:
+
+```bash
+gf --project-dir . revert before-change \
+  --reason "restore known state" \
+  --idempotency-key 4f6a9b78-887d-4b8e-872b-a8b59059f777 \
+  --yes
+```
+
+Omitting `--yes` refuses the mutation. Successful and idempotently replayed
+receipts identify the prior current generation so automation can relate the
+previewed state to the published result.
 
 ## Portable export and import
 
@@ -105,7 +157,10 @@ placed there remain outside the code repository. Keep tracked schemas,
 ontology, migrations, and seed recipes separate from these data files.
 
 This whole-project interchange surface is distinct from ontology-document
-inspection, suggestion, validation, and YAML/JSON export. The Rust-owned
-ontology lifecycle is tracked by #236, with thin Python and Node parity tracked
-by #237. Repository `export` never substitutes for ontology export, and
-ontology export never packages graph data or a project generation.
+inspection, suggestion, validation, and YAML/JSON export. #236 delivered the
+Rust-owned ontology lifecycle, and #237 delivered thin Python and Node parity
+including durable ontology adoption and clear. Repository `export` never
+substitutes for ontology export, and ontology export never packages graph data
+or a project generation. Repository initialization and synchronization preserve
+that authority boundary: they never suggest, adopt, clear, or export an
+ontology implicitly.

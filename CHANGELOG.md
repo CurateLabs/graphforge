@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Stabilize Rust CLI machine output with repository-relative JSON receipts,
+  bounded structured error details, schema-first checkpoint/revert JSON,
+  authoritative `checkpoint show`, and non-mutating revert preview with
+  required explicit `--yes` confirmation (#243).
 - Package host-discoverable project-local GraphForge skills from one canonical
   source in both the `graphforge` wheel and `@graphforge/cli`, with
   deterministic compatibility metadata and byte-parity checks (#230).

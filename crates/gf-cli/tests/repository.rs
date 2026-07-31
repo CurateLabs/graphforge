@@ -37,6 +37,9 @@ fn repository_lifecycle_emits_stable_json_and_keeps_data_out_of_git() {
         String::from_utf8_lossy(&init.stderr)
     );
     let value: Value = serde_json::from_slice(&init.stdout).unwrap();
+    assert_eq!(value["root"], ".");
+    assert_eq!(value["state"], ".graphforge/state");
+    assert!(!String::from_utf8_lossy(&init.stdout).contains(root.path().to_str().unwrap()));
     assert_eq!(value["created_config"], true);
     assert_eq!(value["skills"]["changed"], true);
     assert!(
@@ -103,8 +106,38 @@ fn repository_lifecycle_emits_stable_json_and_keeps_data_out_of_git() {
         .output()
         .unwrap();
     assert!(remove.status.success());
+    let value: Value = serde_json::from_slice(&remove.stdout).unwrap();
+    assert_eq!(value["target"], ".graphforge/state");
+    assert!(!String::from_utf8_lossy(&remove.stdout).contains(root.path().to_str().unwrap()));
     assert!(root.path().join(".graphforge/ontology/keep.yaml").exists());
     assert!(!root.path().join(".graphforge/state").exists());
+}
+
+#[test]
+fn repository_receipts_are_byte_identical_across_private_absolute_roots() {
+    let roots = [tempdir().unwrap(), tempdir().unwrap()];
+    let mut receipts = Vec::new();
+    for root in &roots {
+        let output = gf()
+            .args([
+                "--project-dir",
+                root.path().to_str().unwrap(),
+                "--json",
+                "init",
+                "--no-skills",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(root.path().to_str().unwrap()));
+        let _: Value = serde_json::from_slice(&output.stdout).unwrap();
+        receipts.push(output.stdout);
+    }
+    assert_eq!(receipts[0], receipts[1]);
 }
 
 #[test]
