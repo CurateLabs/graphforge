@@ -192,9 +192,16 @@ while IFS= read -r -d '' path; do
 
     docs/contracts/graphforge-project-config-*.schema.json | \
       docs/contracts/graphforge-resolved-config-*.schema.json | \
-      docs/contracts/graphforge-infra-validation-*.schema.json | \
-      docs/contracts/examples/graphforge-*.json | \
+      docs/contracts/graphforge-infra-validation-*.schema.json)
+      bindings=true
+      pulumi=true
+      terraform=true
+      ;;
+
+    docs/contracts/examples/graphforge-*.json | \
       docs/contracts/examples/graphforge-*.yaml)
+      rust=true
+      bindings=true
       pulumi=true
       terraform=true
       ;;

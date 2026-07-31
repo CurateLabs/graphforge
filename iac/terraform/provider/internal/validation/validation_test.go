@@ -3,10 +3,61 @@ package validation
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 )
+
+func withoutRequiredField(t *testing.T, resolved string, path ...string) string {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal([]byte(resolved), &document); err != nil {
+		t.Fatal(err)
+	}
+	var current any = document
+	for _, component := range path[:len(path)-1] {
+		switch value := current.(type) {
+		case map[string]any:
+			current = value[component]
+		case []any:
+			current = value[0]
+		default:
+			t.Fatalf("cannot traverse %q through %T", component, current)
+		}
+	}
+	delete(current.(map[string]any), path[len(path)-1])
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
+
+func withNullRequiredField(t *testing.T, resolved string, path ...string) string {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal([]byte(resolved), &document); err != nil {
+		t.Fatal(err)
+	}
+	var current any = document
+	for _, component := range path[:len(path)-1] {
+		switch value := current.(type) {
+		case map[string]any:
+			current = value[component]
+		case []any:
+			current = value[0]
+		default:
+			t.Fatalf("cannot traverse %q through %T", component, current)
+		}
+	}
+	current.(map[string]any)[path[len(path)-1]] = nil
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}
 
 func fixture(t *testing.T) string {
 	t.Helper()
@@ -105,6 +156,40 @@ func TestValidateRejectsUnknownAndSemanticallyInvalidTargets(t *testing.T) {
 	withUnknown := strings.Replace(resolved, `"ownership":"external"`, `"ownership":"external","credential":"forbidden"`, 1)
 	if _, err := Validate(withUnknown, "production"); err == nil {
 		t.Fatal("unknown target field accepted")
+	}
+}
+
+func TestValidateRejectsMissingRequiredResolvedFields(t *testing.T) {
+	resolved := fixture(t)
+	for name, path := range map[string][]string{
+		"root sources":      {"sources"},
+		"project schemas":   {"project", "schemas"},
+		"target resources":  {"targets", "0", "resources"},
+		"target source ids": {"targets", "0", "source_ids"},
+		"topology replicas": {"targets", "0", "topology", "replicas"},
+		"health timeout":    {"targets", "0", "health", "timeout_seconds"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Validate(withoutRequiredField(t, resolved, path...), "production"); err == nil {
+				t.Fatal("resolved document with a missing required field was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsNullRequiredResolvedFields(t *testing.T) {
+	resolved := fixture(t)
+	for name, path := range map[string][]string{
+		"root sources":        {"sources"},
+		"target capabilities": {"targets", "0", "capabilities"},
+		"target resources":    {"targets", "0", "resources"},
+		"target source ids":   {"targets", "0", "source_ids"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Validate(withNullRequiredField(t, resolved, path...), "production"); err == nil {
+				t.Fatal("resolved document with a null required field was accepted")
+			}
+		})
 	}
 }
 

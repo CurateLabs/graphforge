@@ -19,14 +19,11 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@pulumi/pulumi": "3.255.0"
+    "@pulumi/pulumi": "^3.255.0"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
     "prettier": "3.9.5",
     "typescript": "5.9.3"
-  },
-  "peerDependencies": {
-    "@pulumi/pulumi": "^3.0.0"
   }
 }

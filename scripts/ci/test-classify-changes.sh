@@ -52,7 +52,7 @@ binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\na
 agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false'
 pulumi_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false'
 terraform_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true'
-iac_both=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true'
+binding_iac=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true'
 rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true'
 rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true'
 all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true'
@@ -83,10 +83,16 @@ assert_classification "$terraform_only" \
   iac/terraform/provider/internal/validation/validation.go terraform-provider-validation
 assert_classification "$terraform_only" \
   iac/terraform/modules/static-validation/main.tf terraform-module-validation
-assert_classification "$iac_both" \
+assert_classification "$binding_iac" \
+  docs/contracts/graphforge-project-config-v1.schema.json shared-project-config-contract
+assert_classification "$binding_iac" \
   docs/contracts/graphforge-resolved-config-v1.schema.json shared-iac-contract
-assert_classification "$iac_both" \
+assert_classification "$binding_iac" \
+  docs/contracts/graphforge-infra-validation-v1.schema.json shared-infra-contract
+assert_classification "$rust_binding_iac" \
   docs/contracts/examples/graphforge-infra-validation-production-v1.json shared-iac-fixture
+assert_classification "$rust_binding_iac" \
+  docs/contracts/examples/graphforge-project-config-v1.yaml shared-project-config-fixture
 assert_classification "$rust_binding_iac" \
   crates/gf-api/src/repository.rs rust-owned-iac-contract
 assert_classification "$rust_iac" crates/gf-cli/src/lib.rs rust-owned-iac-cli

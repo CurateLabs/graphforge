@@ -180,6 +180,9 @@ func Validate(resolvedJSON, targetID string) (Result, error) {
 	if err := decodeStrict([]byte(resolvedJSON), &config); err != nil {
 		return Result{}, errors.New("resolved_json is not a closed graphforge-resolved-config/1 document")
 	}
+	if err := validateRequiredFields([]byte(resolvedJSON)); err != nil {
+		return Result{}, errors.New("resolved_json is missing required graphforge-resolved-config/1 fields")
+	}
 	if config.Contract != resolvedContract {
 		return Result{}, errors.New("resolved_json uses an unsupported contract")
 	}
@@ -253,6 +256,110 @@ func Validate(resolvedJSON, targetID string) (Result, error) {
 		CapabilityCompatibility: compatibility,
 		JSON:                    string(receiptJSON),
 	}, nil
+}
+
+func validateRequiredFields(document []byte) error {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(document, &root); err != nil {
+		return err
+	}
+	if err := requireKeys(root, "contract", "project", "sources", "secrets", "targets"); err != nil {
+		return err
+	}
+
+	var projectValue map[string]json.RawMessage
+	if err := json.Unmarshal(root["project"], &projectValue); err != nil {
+		return err
+	}
+	if err := requireKeys(
+		projectValue,
+		"integration_root",
+		"state",
+		"imports",
+		"exports",
+		"ontology",
+		"schemas",
+		"seeds",
+		"migrations",
+	); err != nil {
+		return err
+	}
+
+	if err := requireArrayObjectKeys(root["sources"], "id", "uri", "sha256"); err != nil {
+		return err
+	}
+	if err := requireArrayObjectKeys(root["secrets"], "id", "source"); err != nil {
+		return err
+	}
+
+	var targets []map[string]json.RawMessage
+	if err := json.Unmarshal(root["targets"], &targets); err != nil {
+		return err
+	}
+	for _, targetValue := range targets {
+		if err := requireKeys(
+			targetValue,
+			"id",
+			"kind",
+			"ownership",
+			"artifact",
+			"topology",
+			"capabilities",
+			"write",
+			"storage",
+			"resources",
+			"network",
+			"health",
+			"observability",
+			"backup",
+			"source_ids",
+			"secret_ids",
+		); err != nil {
+			return err
+		}
+		for field, keys := range map[string][]string{
+			"artifact": {"kind", "version", "sha256"},
+			"topology": {"execution", "scheduling", "replicas"},
+			"write":    {"mode"},
+			"storage":  {"kind"},
+			"health":   {"timeout_seconds"},
+		} {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(targetValue[field], &object); err != nil {
+				return err
+			}
+			if err := requireKeys(object, keys...); err != nil {
+				return err
+			}
+		}
+		if err := requireArrayObjectKeys(targetValue["capabilities"], "id", "version"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requireKeys(object map[string]json.RawMessage, keys ...string) error {
+	for _, key := range keys {
+		value, present := object[key]
+		if !present || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return errors.New("required field is absent")
+		}
+	}
+	return nil
+}
+
+func requireArrayObjectKeys(value json.RawMessage, keys ...string) error {
+	var objects []map[string]json.RawMessage
+	if err := json.Unmarshal(value, &objects); err != nil {
+		return err
+	}
+	for _, object := range objects {
+		if err := requireKeys(object, keys...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeStrict(data []byte, destination any) error {
@@ -471,7 +578,8 @@ func validStableID(value string) bool {
 }
 
 func validRelativePath(value string) bool {
-	if value == "" || len(value) > 1024 || strings.HasPrefix(value, "/") {
+	if value == "" || len(value) > 1024 || strings.HasPrefix(value, "/") ||
+		strings.Contains(value, `\`) {
 		return false
 	}
 	for _, part := range strings.Split(value, "/") {

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-pulumi_bin="${PULUMI:-$(command -v pulumi)}"
+pulumi_bin="${PULUMI:-$(command -v pulumi || true)}"
+if [[ -z "$pulumi_bin" || ! -x "$pulumi_bin" ]]; then
+  echo "pulumi CLI not found; set PULUMI to an executable path" >&2
+  exit 1
+fi
 typescript_package="$repo_root/iac/pulumi/typescript"
 python_package="$repo_root/iac/pulumi/python"
 test_root="$repo_root/iac/pulumi/tests"
@@ -15,8 +19,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test -x "$pulumi_bin"
 mkdir -p "$temporary_root/backend" "$temporary_root/pulumi-home"
+npm --prefix "$typescript_package" ci >/dev/null
 npm --prefix "$typescript_package" run build >/dev/null
 uv venv --seed "$temporary_root/python-env" >/dev/null
 uv pip install --python "$temporary_root/python-env/bin/python" "$python_package" >/dev/null
