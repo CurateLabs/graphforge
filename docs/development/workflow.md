@@ -27,7 +27,7 @@ This document describes GraphForge's development workflow, CI/CD pipeline, and b
 
 ```bash
 # Clone the repository
-git clone https://github.com/CurateLabs/graphforge-legecy.git
+git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
 
 # Install uv (if not already installed)
@@ -402,11 +402,11 @@ Triggered on GitHub release publication.
 Add to README.md:
 
 ```markdown
-![Tests](https://github.com/CurateLabs/graphforge-legecy/workflows/Test%20Suite/badge.svg)
-![Coverage](https://codecov.io/gh/CurateLabs/graphforge-legecy/branch/main/graph/badge.svg)
+![Tests](https://github.com/CurateLabs/graphforge/workflows/Test%20Suite/badge.svg)
+![Coverage](https://codecov.io/gh/CurateLabs/graphforge/branch/main/graph/badge.svg)
 ![Python](https://img.shields.io/pypi/pyversions/graphforge)
 ![PyPI](https://img.shields.io/pypi/v/graphforge)
-![License](https://img.shields.io/github/license/CurateLabs/graphforge-legecy)
+![License](https://img.shields.io/github/license/CurateLabs/graphforge)
 ```
 
 ---
@@ -522,7 +522,7 @@ uv run pytest -v --tb=long --showlocals
 **Setup:**
 
 1. Install CodeRabbit app from [GitHub Marketplace](https://github.com/marketplace/coderabbitai)
-2. Authorize for the CurateLabs/graphforge-legecy repository
+2. Authorize for the CurateLabs/graphforge repository
 3. Configuration is in `.coderabbit.yaml`
 
 **Features:**
@@ -898,4 +898,4 @@ git rebase --continue
 
 **Last Updated:** January 31, 2026
 
-For questions about the development workflow, open a [discussion](https://github.com/CurateLabs/graphforge-legecy/discussions) or create an issue.
+For questions about the development workflow, open a [discussion](https://github.com/CurateLabs/graphforge/discussions) or create an issue.

@@ -195,5 +195,5 @@ All 153 integration tests verify this behavior.
 ## See Also
 
 - CHANGELOG.md (in repository root) - Version history and changes
-- [CHANGELOG.md](https://github.com/CurateLabs/graphforge-legecy/blob/main/CHANGELOG.md) - Version history
+- [CHANGELOG.md](https://github.com/CurateLabs/graphforge/blob/main/CHANGELOG.md) - Version history
 - [tck-compliance.md](tck-compliance.md) - openCypher TCK compliance documentation

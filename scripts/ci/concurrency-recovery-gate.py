@@ -16,6 +16,7 @@ import time
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY = "CurateLabs/graphforge"
 MATRIX_PATH = ROOT / "tests/contracts/concurrency-recovery-matrix.json"
 REQUIRED_SLICES = {
     "same-process": 2541,
@@ -549,11 +550,7 @@ def resolve_ci_evidence(value: object, sha: str, api_get: Any = github_json) -> 
     repository = value["repository"]
     run_id = value["run_id"]
     job_id = value["job_id"]
-    if (
-        repository != "CurateLabs/graphforge-legecy"
-        or not isinstance(run_id, int)
-        or not isinstance(job_id, int)
-    ):
+    if repository != REPOSITORY or not isinstance(run_id, int) or not isinstance(job_id, int):
         raise GateError("CI evidence repository or immutable IDs are invalid")
     run = api_get(f"repos/{repository}/actions/runs/{run_id}")
     if (

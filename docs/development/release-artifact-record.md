@@ -18,7 +18,7 @@ commits under the same version.
 
 1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #2796).
 2. Build or collect artifacts for that SHA into a directory (wheels, sdists, npm
-   tarballs, crates, SBOM/provenance if emitted).
+   tarballs, SBOM/provenance if emitted). v0.5.0 has no crates.io artifacts.
 3. Run:
 
 ```bash
@@ -31,6 +31,14 @@ python3 scripts/record_release_artifacts.py \
 
 4. Attach the JSON (or its checksums table) to the GitHub Release at §6 (#2794).
 5. §7 clean-env verification matches `sha256` values from this record.
+
+The generated document uses the same `graphforge-release-record-v1` schema
+consumed by `clean-env-verify.py`. Validate it before attaching:
+
+```bash
+python3 scripts/ci/clean-env-verify.py validate-release-record \
+  docs/releases/records/v0.5.0-artifacts.json
+```
 
 Template-only (no files yet):
 

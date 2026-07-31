@@ -1,9 +1,9 @@
 {
   "name": "@graphforge/cli",
-  "version": "0.5.0-dev.0",
+  "version": "0.5.0",
   "description": "GraphForge repository lifecycle CLI",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/CurateLabs/graphforge",
+  "homepage": "https://docs.graphforge.sh/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CurateLabs/graphforge.git",

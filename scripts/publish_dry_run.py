@@ -15,7 +15,7 @@ present; otherwise uses a conservative fallback that excludes bindings/CLI.
 
 Usage:
     python3 scripts/publish_dry_run.py --surface npm,docs --report /tmp/dry-run.json
-    python3 scripts/publish_dry_run.py --surface cargo-package,python,npm,docs
+    python3 scripts/publish_dry_run.py --surface python,npm,docs
     make publish-dry-run
 """
 
@@ -165,7 +165,9 @@ def dry_run_cargo_publish() -> list[dict[str, Any]]:
 def dry_run_npm() -> list[dict[str, Any]]:
     # Prerelease versions (e.g. 0.5.0-dev.0) require an explicit --tag; dry-run
     # never publishes, so a disposable tag keeps the check green before freeze.
-    steps = []
+    steps = [_run(["pnpm", "install", "--frozen-lockfile"])]
+    if not steps[0]["ok"]:
+        return steps
     for package_dir in NPM_PACKAGES:
         if package_dir.name == "cli":
             command = [
@@ -216,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--surface",
-        default="npm,docs,cargo-package,python",
+        default="npm,docs,python",
         help="Comma list: npm,docs,cargo-package,cargo-publish,python,all",
     )
     parser.add_argument(
@@ -229,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
 
     surfaces = {part.strip() for part in args.surface.split(",") if part.strip()}
     if "all" in surfaces:
-        surfaces = {"npm", "docs", "cargo-package", "python"}
+        surfaces = {"npm", "docs", "python"}
         if not args.skip_cargo_publish:
             surfaces.add("cargo-publish")
 

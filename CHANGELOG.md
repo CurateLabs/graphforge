@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.5.0] - 2026-07-31
+
+- Freeze Cargo, Python, Node, CLI, and agent-skills release metadata at
+  `0.5.0`; fail closed before registry writes on SHA/version/changelog/npm
+  drift; align publication, release-record, certification, and clean-environment
+  tooling with the current repository and approved no-crates disposition (#192).
 - Align the published homepage and root README with the v0.5 development line, remove legacy
   PyPI v0.4 badges/install claims, and route readers to current Python, Node, CLI, and VS Code
   workflows (#255).
@@ -55,8 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation-managed repository snapshots with non-mutating CI drift checks
   (#244).
 
-Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
-
 - Define the `.graphforge/` repository integration and deployment configuration
   boundary, including closed versioned contracts, ignored data surfaces,
   secret-free IaC resolution, and cross-ecosystem ownership (#225).
@@ -96,8 +102,6 @@ Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below
   (#2792).
 - Realign root `CONTRIBUTING.md` with the Rust-owned workspace and Apache-2.0
   inbound contribution terms (#218).
-
-## [0.5.0]
 
 First public **Rust-core** GraphForge line: openCypher over DataFusion, Arrow
 results, Parquet-backed project generations, thin Python (PyO3) and Node
@@ -3448,8 +3452,8 @@ None. All changes maintain backward compatibility with v0.2.0 and v0.2.1.
 - 81% code coverage
 - Multi-OS, multi-Python CI/CD (3 OS × 4 Python versions)
 
-[Unreleased]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.4.0...v0.5.0
+[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.3.10...v0.4.0
 [0.3.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.2.0...v0.2.1

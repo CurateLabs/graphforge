@@ -118,7 +118,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
 
 # 2. Clone
-git clone https://github.com/CurateLabs/graphforge-legecy.git
+git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
 
 # 3. Install Python dev dependencies

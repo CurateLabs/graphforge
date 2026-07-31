@@ -28,18 +28,17 @@ ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SCHEMA = "graphforge-clean-env-evidence-v1"
 RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
 DEFAULT_VERSION = "0.5.0"
-DEFAULT_DOCS_BASE = "https://curatelabs.github.io/graphforge-legecy"
-DEFAULT_CRATES = ("gf-api",)
+DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
+DEFAULT_CRATES: tuple[str, ...] = ()
 
 LANE_ISSUES = {
-    "pip": 2809,
-    "npm": 2810,
-    "cli": 226,
-    "skills": 2811,
-    "cargo": 2812,
-    "reopen": 2813,
-    "urls": 2814,
-    "checksums": 2815,
+    "pip": 180,
+    "npm": 183,
+    "cli": 183,
+    "skills": 182,
+    "reopen": 184,
+    "urls": 186,
+    "checksums": 187,
 }
 ALL_LANES = tuple(LANE_ISSUES)
 
@@ -198,9 +197,7 @@ def registry_urls(version: str, crates: tuple[str, ...], docs_base: str) -> dict
         "npm_skills_page": f"https://www.npmjs.com/package/@graphforge/agent-skills/v/{version}",
         "docs_quickstart": f"{docs}/guide/quickstart/",
         "docs_installation": f"{docs}/guide/installation/",
-        "github_release": (
-            f"https://github.com/CurateLabs/graphforge-legecy/releases/tag/v{version}"
-        ),
+        "github_release": (f"https://github.com/CurateLabs/graphforge/releases/tag/v{version}"),
     }
     for crate in crates:
         urls[f"crates_{crate}"] = f"https://crates.io/api/v1/crates/{crate}/{version}"
@@ -254,7 +251,7 @@ def run_preflight(ctx: Context) -> LaneResult:
         result.error = (
             "public v"
             + ctx.version
-            + " artifacts not available; blocked on #742 section 6 publication (#2794). "
+            + " artifacts not available; blocked on #192 publication (#195/#198). "
             "missing: " + ", ".join(probe["missing"])
         )
         result.notes.append("do not fake green checkoffs against unpublished packages")
@@ -262,7 +259,7 @@ def run_preflight(ctx: Context) -> LaneResult:
     result.ok = True
     result.notes.append(
         "PyPI, npm (@graphforge/node, @graphforge/cli, "
-        "@graphforge/agent-skills), and crates probes OK"
+        "and @graphforge/agent-skills) probes OK; v0.5.0 has no crates.io surface"
     )
     return result
 
@@ -695,7 +692,7 @@ def lane_checksums(ctx: Context) -> LaneResult:
     if not matched:
         result.error = (
             "release record had no overlapping sha256 artifacts with observed "
-            "PyPI/crates digests; update the record filenames/surfaces"
+            "PyPI digests; update the record filenames/surfaces"
         )
         return result
     result.ok = True
@@ -708,7 +705,6 @@ LANE_RUNNERS: dict[str, Callable[[Context], LaneResult]] = {
     "npm": lane_npm,
     "cli": lane_cli,
     "skills": lane_skills,
-    "cargo": lane_cargo,
     "reopen": lane_reopen,
     "urls": lane_urls,
     "checksums": lane_checksums,
@@ -749,8 +745,8 @@ def build_evidence(
         "ok": ok,
         "lanes": lanes,
         "issue_map": dict(LANE_ISSUES),
-        "tracker": 2795,
-        "umbrella": 742,
+        "tracker": 167,
+        "umbrella": 192,
     }
 
 

@@ -1,7 +1,7 @@
 # Code of Conduct
 
 This page summarizes the canonical
-[`CODE_OF_CONDUCT.md`](https://github.com/CurateLabs/graphforge-legecy/blob/main/CODE_OF_CONDUCT.md)
+[`CODE_OF_CONDUCT.md`](https://github.com/CurateLabs/graphforge/blob/main/CODE_OF_CONDUCT.md)
 in the repository root. Where the two differ, the repository-root document
 controls.
 

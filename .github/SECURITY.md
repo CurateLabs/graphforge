@@ -23,7 +23,7 @@ Please do not report security vulnerabilities through public GitHub issues.
 
 Use GitHub's private vulnerability reporting:
 
-1. Go to the [Security tab](https://github.com/CurateLabs/graphforge-legecy/security)
+1. Go to the [Security tab](https://github.com/CurateLabs/graphforge/security)
 2. Click "Report a vulnerability"
 3. Fill out the form with details
 

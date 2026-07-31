@@ -113,6 +113,9 @@ jobs:
       - name: Test crates.io publish plan helper
         run: python3 scripts/ci/test-crate-publish-plan.py
 
+      - name: Test release publication preflight
+        run: python3 scripts/ci/test-release-publish-preflight.py
+
       - name: Test CI storage policy
         run: python3 scripts/ci/test-ci-storage-policy.py
 

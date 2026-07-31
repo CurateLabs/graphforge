@@ -465,5 +465,5 @@ Focus: Native social network analysis (SNA) algorithms exposed as CALL procedure
 
 - OpenCypher Specification: https://opencypher.org/resources/
 - OpenCypher TCK: https://github.com/opencypher/openCypher/tree/master/tck
-- GraphForge Repository: https://github.com/CurateLabs/graphforge-legecy
+- GraphForge Repository: https://github.com/CurateLabs/graphforge
 - GQL Standard (ISO/IEC 39075): https://www.iso.org/standard/76120.html

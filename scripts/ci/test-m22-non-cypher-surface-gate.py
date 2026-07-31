@@ -39,8 +39,8 @@ class M22SurfaceGateTests(unittest.TestCase):
             "head_sha": SHA,
             "event": "workflow_dispatch",
             "path": ".github/workflows/non-cypher-surface-gate.yml",
-            "repository": {"full_name": "CurateLabs/graphforge-legecy"},
-            "html_url": "https://github.com/CurateLabs/graphforge-legecy/actions/runs/101",
+            "repository": {"full_name": "CurateLabs/graphforge"},
+            "html_url": "https://github.com/CurateLabs/graphforge/actions/runs/101",
         }
         self.binding_run = {
             "id": 102,
@@ -50,8 +50,8 @@ class M22SurfaceGateTests(unittest.TestCase):
             "head_sha": SHA,
             "event": "workflow_dispatch",
             "path": ".github/workflows/binding-release-candidate.yml",
-            "repository": {"full_name": "CurateLabs/graphforge-legecy"},
-            "html_url": "https://github.com/CurateLabs/graphforge-legecy/actions/runs/102",
+            "repository": {"full_name": "CurateLabs/graphforge"},
+            "html_url": "https://github.com/CurateLabs/graphforge/actions/runs/102",
         }
 
     def rejected_runs(self, expected: str, **changes) -> None:

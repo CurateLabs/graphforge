@@ -266,7 +266,7 @@ fn cited<'a, 'b>() {
         ci_path.write_text(
             json.dumps(
                 {
-                    "repository": "CurateLabs/graphforge-legecy",
+                    "repository": "CurateLabs/graphforge",
                     "run_id": 101,
                     "job_id": 202,
                 }
@@ -278,8 +278,8 @@ fn cited<'a, 'b>() {
             "head_sha": sha,
             "name": "Test Suite",
             "conclusion": "success",
-            "html_url": "https://github.com/CurateLabs/graphforge-legecy/actions/runs/101",
-            "repository": {"full_name": "CurateLabs/graphforge-legecy"},
+            "html_url": "https://github.com/CurateLabs/graphforge/actions/runs/101",
+            "repository": {"full_name": "CurateLabs/graphforge"},
         }
         jobs_payload = {
             "jobs": [
@@ -288,7 +288,7 @@ fn cited<'a, 'b>() {
                     "name": "CI Gate",
                     "conclusion": "success",
                     "html_url": (
-                        "https://github.com/CurateLabs/graphforge-legecy/actions/runs/101/job/202"
+                        "https://github.com/CurateLabs/graphforge/actions/runs/101/job/202"
                     ),
                 }
             ]
@@ -431,14 +431,14 @@ fn cited<'a, 'b>() {
         ci_path.write_text(
             json.dumps(
                 {
-                    "repository": "CurateLabs/graphforge-legecy",
+                    "repository": "CurateLabs/graphforge",
                     "run_id": 101,
                     "job_id": 202,
                 }
             ),
             encoding="utf-8",
         )
-        wrong_run = {"repository": "CurateLabs/graphforge-legecy", "run_id": 999, "job_id": 202}
+        wrong_run = {"repository": "CurateLabs/graphforge", "run_id": 999, "job_id": 202}
         ci_path.write_text(json.dumps(wrong_run), encoding="utf-8")
         try:
             GATE.build_report(sha, fragments, ci_path, output, fake_api)
@@ -446,7 +446,7 @@ fn cited<'a, 'b>() {
             pass
         else:
             raise AssertionError("report accepted a mismatched immutable run ID")
-        wrong_job = {"repository": "CurateLabs/graphforge-legecy", "run_id": 101, "job_id": 999}
+        wrong_job = {"repository": "CurateLabs/graphforge", "run_id": 101, "job_id": 999}
         ci_path.write_text(json.dumps(wrong_job), encoding="utf-8")
         try:
             GATE.build_report(sha, fragments, ci_path, output, fake_api)
@@ -457,7 +457,7 @@ fn cited<'a, 'b>() {
         ci_path.write_text(
             json.dumps(
                 {
-                    "repository": "CurateLabs/graphforge-legecy",
+                    "repository": "CurateLabs/graphforge",
                     "run_id": 101,
                     "job_id": 202,
                 }

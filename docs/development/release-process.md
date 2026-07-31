@@ -332,7 +332,7 @@ EOF
 ```
 
 Or use the GitHub web interface:
-1. Go to https://github.com/CurateLabs/graphforge-legecy/releases
+1. Go to https://github.com/CurateLabs/graphforge/releases
 2. Click "Draft a new release"
 3. Choose tag: `v0.2.0`
 4. Release title: `GraphForge v0.2.0`

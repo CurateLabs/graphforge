@@ -9,13 +9,41 @@ permissions:
 
 jobs:
   license-compliance:
-    name: License Compliance
+    name: Release publication preflight
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require the certified current main commit and release versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
+          python3 scripts/ci/release-publish-preflight.py \
+            --tag "$RELEASE_TAG" \
+            --expected-sha "$RELEASE_SHA"
 
       - name: Verify release license policy
         run: python3 scripts/license_check.py --report license-compliance-report.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # This runs before any PyPI or npm write. A missing/invalid token therefore
+      # fails the release without leaving only the Python surface published.
+      - name: Verify npm publication identity
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # Build the native abi3 wheel per OS. abi3-py310 → one wheel per OS covers
   # CPython 3.10+; the binding's pyproject is the canonical `graphforge` dist.
@@ -285,7 +313,7 @@ jobs:
   # ---- NPX agent skills (@graphforge/agent-skills) ----
   publish-agent-skills:
     name: Publish agent-skills to npm
-    needs: publish-node
+    needs: publish-node-cli
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read

@@ -1,6 +1,6 @@
 name: Clean Environment Verify
 
-# Post-publication only. Proves #742 section 7 / #2795 lanes against public registries.
+# Post-publication only. Proves #167 lanes against public registries.
 # Do not treat missing packages as success.
 
 on:
@@ -21,12 +21,6 @@ on:
         required: false
         type: string
         default: ""
-      crate:
-        description: crates.io crate for cargo smoke (default gf-api)
-        required: false
-        type: string
-        default: "gf-api"
-
 permissions:
   contents: read
 
@@ -63,7 +57,6 @@ jobs:
           set -euo pipefail
           python3 scripts/ci/clean-env-verify.py preflight \
             --version "${{ inputs.version }}" \
-            --crate "${{ inputs.crate }}" \
             --output clean-env-preflight.json
 
       - name: Run clean-environment lanes
@@ -71,17 +64,16 @@ jobs:
           VERSION: ${{ inputs.version }}
           LANES: ${{ inputs.lanes }}
           RECORD: ${{ inputs.release_record_path }}
-          CRATE: ${{ inputs.crate }}
         run: |
           set -euo pipefail
-          args=(--version "$VERSION" --crate "$CRATE" --output clean-env-evidence.json --work "$RUNNER_TEMP/gf-clean-env")
+          args=(--version "$VERSION" --output clean-env-evidence.json --work "$RUNNER_TEMP/gf-clean-env")
           if [[ -n "$RECORD" ]]; then
             args+=(--release-record "$RECORD")
           fi
           if [[ "$LANES" == "all" ]]; then
             if [[ -z "$RECORD" ]]; then
               # checksums requires a release record; run every other lane when absent
-              for lane in pip npm cli skills cargo reopen urls; do
+              for lane in pip npm cli skills reopen urls; do
                 args+=(--lane "$lane")
               done
             else

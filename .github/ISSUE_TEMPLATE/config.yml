@@ -1,20 +1,20 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 GitHub Discussions
-    url: https://github.com/CurateLabs/graphforge-legecy/discussions
+    url: https://github.com/CurateLabs/graphforge/discussions
     about: Ask questions, share ideas, and discuss GraphForge with the community
   - name: 📚 Documentation
-    url: https://curatelabs.github.io/graphforge-legecy/
+    url: https://docs.graphforge.sh/
     about: Browse the complete documentation including API reference and Cypher guide
   - name: 📖 Contributing Guide
-    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CONTRIBUTING.md
+    url: https://github.com/CurateLabs/graphforge/blob/main/CONTRIBUTING.md
     about: Learn how to contribute to GraphForge under Apache-2.0
   - name: ⚖️ Licensing
-    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/LICENSE
+    url: https://github.com/CurateLabs/graphforge/blob/main/LICENSE
     about: Apache License 2.0 terms and third-party attribution
   - name: 🤝 Code of Conduct
-    url: https://github.com/CurateLabs/graphforge-legecy/blob/main/CODE_OF_CONDUCT.md
+    url: https://github.com/CurateLabs/graphforge/blob/main/CODE_OF_CONDUCT.md
     about: Community standards and how to report unacceptable behavior
   - name: 🔒 Security Vulnerability
-    url: https://github.com/CurateLabs/graphforge-legecy/security/advisories/new
+    url: https://github.com/CurateLabs/graphforge/security/advisories/new
     about: Report security vulnerabilities privately

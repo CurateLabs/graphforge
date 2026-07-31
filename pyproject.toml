@@ -51,9 +51,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://curatelabs.github.io/graphforge-legecy/"
-Repository = "https://github.com/CurateLabs/graphforge-legecy"
-Issues = "https://github.com/CurateLabs/graphforge-legecy/issues"
+Homepage = "https://docs.graphforge.sh/"
+Repository = "https://github.com/CurateLabs/graphforge"
+Issues = "https://github.com/CurateLabs/graphforge/issues"
 
 [build-system]
 requires = ["hatchling"]

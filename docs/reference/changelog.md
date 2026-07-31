@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.5.0] - 2026-07-31
+
+- Freeze Cargo, Python, Node, CLI, and agent-skills release metadata at
+  `0.5.0`; fail closed before registry writes on SHA/version/changelog/npm
+  drift; align publication, release-record, certification, and clean-environment
+  tooling with the current repository and approved no-crates disposition (#192).
 - Align the published homepage and root README with the v0.5 development line, remove legacy
   PyPI v0.4 badges/install claims, and route readers to current Python, Node, CLI, and VS Code
   workflows (#255).
@@ -29,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded structured error details, schema-first checkpoint/revert JSON,
   authoritative `checkpoint show`, and non-mutating revert preview with
   required explicit `--yes` confirmation (#243).
+- Package host-discoverable project-local GraphForge skills from one canonical
+  source in both the `graphforge` wheel and `@graphforge/cli`, with
+  deterministic compatibility metadata and byte-parity checks (#230).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes, with packed clean-install `uvx`/offline `npx`
@@ -36,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains whole-generation portable interchange; #236 owns Rust runtime-catalog
   inspection, ontology suggestion/validation, and document export, while #237
   owns thin binding parity plus durable adopt/clear behavior (#226).
+- Add Rust-owned deterministic runtime-catalog inspection, conservative ontology
+  drafts, structured non-mutating validation, and explicit-source atomic
+  YAML/JSON ontology export (#236).
+- Expose the #236 Rust-owned runtime-catalog inspection, ontology suggestion,
+  non-mutating validation, and explicit document export consistently in Python
+  and Node, plus durable workspace inspection, adoption, and clear, while
+  keeping session loads explicitly non-durable (#237).
 - Add deterministic portable export of the current generation or a named
   checkpoint and validate-before-mutation atomic import into new or empty
   projects, excluding live pointers, locks, journals, caches, and trash (#229).
@@ -45,12 +63,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation-managed repository snapshots with non-mutating CI drift checks
   (#244).
 
-Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below.
-
 - Define the `.graphforge/` repository integration and deployment configuration
   boundary, including closed versioned contracts, ignored data surfaces,
   secret-free IaC resolution, and cross-ecosystem ownership (#225).
+- Publish the GitHub Pages documentation at `https://docs.graphforge.sh`, with
+  root-relative site URLs and current `CurateLabs/graphforge` source links (#223).
 
+- Stop rerunning the full Test Suite after an already-green pull request is
+  squash-merged; exact-head pull-request CI remains the required merge gate
+  ([#209](https://github.com/CurateLabs/graphforge/issues/209)).
+
+- Minimize Blacksmith CI storage by removing speculative caches from infrequent
+  gates, sharing dependency caches by lockfile identity, and deleting the
+  one-run M22 build disk after certification (#207).
+- Remove unconsumed CI artifacts and move required cross-job transfers to
+  Blacksmith-backed cache storage, eliminating GitHub artifact-quota failures
+  from the required CI Gate (#205).
 - Restore local multi-surface coverage via `make coverage`: Rust (`cargo llvm-cov` →
   `build/coverage-rust/`), Python wrapper (`pytest-cov` on
   `crates/gf-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`
@@ -74,8 +102,6 @@ Post-v0.5.0 work lands here. The v0.5.0 publication cut is under `[0.5.0]` below
   (#2792).
 - Realign root `CONTRIBUTING.md` with the Rust-owned workspace and Apache-2.0
   inbound contribution terms (#218).
-
-## [0.5.0]
 
 First public **Rust-core** GraphForge line: openCypher over DataFusion, Arrow
 results, Parquet-backed project generations, thin Python (PyO3) and Node
@@ -136,6 +162,10 @@ the authoritative runnable corpus enforced by the BDD gate.
   Node constructor options, thread explicit selections through agent workflows,
   and verify compatible multi-agent publication, reopen, identity preservation,
   and conflict atomicity across the native concurrency matrix (#214).
+
+- Add transaction-addressed optimistic project staging with OS-backed attempt
+  leases, exact-base commit comparison, atomic generation promotion, and
+  recovery that preserves live attempts while removing abandoned ones (#212).
 
 - Add `scripts/record_release_artifacts.py` and
   `docs/development/release-artifact-record.md` for RC checksum/SBOM/contents
@@ -3422,8 +3452,8 @@ None. All changes maintain backward compatibility with v0.2.0 and v0.2.1.
 - 81% code coverage
 - Multi-OS, multi-Python CI/CD (3 OS × 4 Python versions)
 
-[Unreleased]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.4.0...v0.5.0
+[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.3.10...v0.4.0
 [0.3.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.2.0...v0.2.1
