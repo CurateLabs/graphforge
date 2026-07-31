@@ -2954,6 +2954,121 @@ mod tests {
     }
 
     #[test]
+    fn repository_snapshot_checkpoint_revert_reopens_and_replays() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+
+        let first_operation = Uuid::from_bytes([71; 16]);
+        let first = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(first_operation),
+                actor_uuid: Some(Uuid::from_bytes([72; 16])),
+            })
+            .unwrap();
+        assert_eq!(first.status, RepositorySyncStatus::Published);
+
+        let graph = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        graph
+            .checkpoint(crate::CheckpointRequest {
+                name: "Before definition change".into(),
+                description: None,
+                idempotency_key: crate::OperationId(Uuid::from_bytes([73; 16])),
+                actor_uuid: None,
+            })
+            .unwrap();
+        drop(graph);
+
+        fs::write(
+            root.path().join(".graphforge/ontology/changed.yaml"),
+            "version: 1\n",
+        )
+        .unwrap();
+        let second = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_bytes([74; 16])),
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(second.status, RepositorySyncStatus::Published);
+        assert_ne!(second.generation_uuid, first.generation_uuid);
+
+        let mut graph = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        let diff = graph
+            .diff_checkpoints(crate::DiffCheckpointsRequest {
+                from: crate::CheckpointSelector::Named("Before definition change".into()),
+                to: crate::CheckpointSelector::Current,
+                scope: crate::CheckpointDiffScope::All,
+                detail: crate::CheckpointDiffDetail::Records,
+                page: crate::PageRequest::default(),
+            })
+            .unwrap();
+        assert_eq!(diff.batches[0].num_rows(), 1);
+
+        let preview = crate::GraphForge::preview_revert_to_checkpoint(
+            &context.state_path,
+            crate::PreviewRevertCheckpointRequest {
+                name: "Before definition change".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(preview.source_generation_uuid, first.generation_uuid);
+        assert_eq!(preview.current_generation_uuid, second.generation_uuid);
+
+        let generation_count = || {
+            fs::read_dir(context.state_path.join("generations"))
+                .unwrap()
+                .count()
+        };
+        let before_revert_count = generation_count();
+        let request = crate::RevertCheckpointRequest {
+            name: "Before definition change".into(),
+            reason: "restore repository snapshot".into(),
+            idempotency_key: crate::OperationId(Uuid::from_bytes([75; 16])),
+            actor_uuid: Some(Uuid::from_bytes([76; 16])),
+        };
+        let first_receipt = graph.revert_to_checkpoint(request.clone()).unwrap();
+        let reverted = gf_storage::resolve_project_generation(&context.state_path).unwrap();
+        assert_ne!(reverted.generation_uuid(), second.generation_uuid);
+        assert_eq!(generation_count(), before_revert_count + 1);
+        let snapshot = reverted
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+            )
+            .unwrap()
+            .unwrap();
+        let snapshot =
+            gf_storage::WorkspaceRepositorySnapshot::from_canonical_json(&snapshot.bytes).unwrap();
+        assert_eq!(snapshot.operation_uuid, first_operation);
+
+        let replay_receipt = graph.revert_to_checkpoint(request).unwrap();
+        assert_eq!(replay_receipt.schema, first_receipt.schema);
+        assert_eq!(replay_receipt.batches[0].num_rows(), 1);
+        assert_eq!(generation_count(), before_revert_count + 1);
+        drop(graph);
+
+        let reopened = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        let checkpoints = reopened
+            .list_checkpoints(crate::ListCheckpointsRequest::default())
+            .unwrap();
+        assert_eq!(checkpoints.batches[0].num_rows(), 1);
+        let reopened_snapshot = reopened
+            .generation_for_read()
+            .unwrap()
+            .participant_snapshot(
+                gf_storage::WORKSPACE_CAPABILITY_ID,
+                gf_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+            )
+            .unwrap()
+            .unwrap();
+        gf_storage::WorkspaceRepositorySnapshot::from_canonical_json(&reopened_snapshot.bytes)
+            .unwrap();
+    }
+
+    #[test]
     fn repository_sync_rechecks_definitions_at_publication_boundary() {
         let root = tempdir().unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();
