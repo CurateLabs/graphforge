@@ -24,6 +24,9 @@ def test_classify_and_hash(tmp_path: Path) -> None:
     assert record["tag"] == "v0.5.0"
     assert len(record["commit_sha"]) == 40
     assert record["licenses"]["first_party_spdx"] == "Apache-2.0"
+    assert record["licenses"]["related_issues"] == ["#218", "#200"]
+    assert record["links"]["parent_tracker"] == "#192"
+    assert record["links"]["execution_tracker"] == "#194"
     assert record["contents_summary"]["total_artifacts"] == 1
     assert record["artifacts"][0]["class"] == "python-wheel"
     assert record["artifacts"][0]["surface"] == "pypi"
@@ -32,6 +35,9 @@ def test_classify_and_hash(tmp_path: Path) -> None:
     assert record["artifacts"][0]["filename"] == wheel.name
     assert len(record["artifacts"][0]["sha256"]) == 64
     assert "same_tagged_commit_policy" in record
+    serialized = json.dumps(record)
+    for retired_tracker in ("#742", "#2783", "#2793", "#2794", "#2799"):
+        assert retired_tracker not in serialized
 
 
 def test_cli_writes_json(tmp_path: Path) -> None:

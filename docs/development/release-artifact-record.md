@@ -2,12 +2,12 @@
 
 This page is the §5 checklist home for **checksums, SBOM/provenance, licenses, and
 contents** of v0.5.0 release-candidate artifacts
-([#2798](https://github.com/CurateLabs/graphforge-legecy/issues/2798)).
+([M1 #192](https://github.com/CurateLabs/graphforge/issues/192)).
 
 It does **not** replace the authoritative publication order / stop conditions in
-[`publication-order.md`](publication-order.md) ([#2801](https://github.com/CurateLabs/graphforge-legecy/issues/2801) / [#2820](https://github.com/CurateLabs/graphforge-legecy/pull/2820)).
+[`publication-order.md`](publication-order.md).
 
-## Same-tagged-commit rule ([#2797](https://github.com/CurateLabs/graphforge-legecy/issues/2797))
+## Same-tagged-commit rule
 
 Every first-party publishable artifact for version `0.5.0` must be built from one
 verified commit (the eventual `v0.5.0` tag target) or have an explicit reproducible
@@ -16,7 +16,7 @@ commits under the same version.
 
 ## How to record
 
-1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #2796).
+1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #192).
 2. Build or collect artifacts for that SHA into a directory (wheels, sdists, npm
    tarballs, SBOM/provenance if emitted). v0.5.0 has no crates.io artifacts.
 3. Run:
@@ -29,8 +29,8 @@ python3 scripts/record_release_artifacts.py \
   --notes "RC sha=<40-char> built via <workflow/run>"
 ```
 
-4. Attach the JSON (or its checksums table) to the GitHub Release at §6 (#2794).
-5. §7 clean-env verification matches `sha256` values from this record.
+4. Attach the JSON (or its checksums table) to the GitHub Release (#194).
+5. Post-release clean-env verification (#167) matches `sha256` values from this record.
 
 The generated document uses the same `graphforge-release-record-v1` schema
 consumed by `clean-env-verify.py`. Validate it before attaching:
@@ -53,8 +53,7 @@ python3 scripts/record_release_artifacts.py \
 ## License / third-party pointers
 
 - First-party: `Apache-2.0`, shipped `LICENSE` + `NOTICE` (`make package-license-verify` / #218).
-- Third-party inventory: [`legal/THIRD_PARTY_NOTICES.md`](../../legal/THIRD_PARTY_NOTICES.md) (#2783).
-- Do not duplicate counsel work on #2434 / #2726 here.
+- Third-party inventory: [`legal/THIRD_PARTY_NOTICES.md`](../../legal/THIRD_PARTY_NOTICES.md) (#218).
 
 ## SBOM / provenance
 

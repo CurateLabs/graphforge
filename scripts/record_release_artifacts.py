@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Record checksums and a contents inventory for release-candidate artifacts.
 
-Builds a JSON record suitable for GitHub Release notes (#742 §6) and clean-env
-checksum matching (#742 §7). Does not create the GitHub Release.
+Builds a JSON record suitable for the M1 release close (#192), the GitHub
+Release outcome (#194), and post-release clean-env checksum matching (#167).
+Does not create the GitHub Release.
 
 Usage:
     python3 scripts/record_release_artifacts.py \\
@@ -133,7 +134,7 @@ def build_record(
             "first_party_spdx": "Apache-2.0",
             "license_files": ["LICENSE", "NOTICE"],
             "third_party_notices": "legal/THIRD_PARTY_NOTICES.md",
-            "related_issues": ["#2783", "#2799"],
+            "related_issues": ["#218", "#200"],
         },
         "artifacts": artifacts,
         "contents_summary": {
@@ -151,8 +152,8 @@ def build_record(
         "links": {
             "publishing": "docs/engineering/PUBLISHING.md",
             "third_party": "legal/THIRD_PARTY_NOTICES.md",
-            "parent_tracker": "#2793",
-            "execution_tracker": "#2794",
+            "parent_tracker": "#192",
+            "execution_tracker": "#194",
         },
     }
 
