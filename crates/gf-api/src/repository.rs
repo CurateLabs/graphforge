@@ -2954,6 +2954,85 @@ mod tests {
     }
 
     #[test]
+    fn repository_sync_tracks_ontology_definitions_without_changing_authority() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+        let ontology_path = root.path().join(".graphforge/ontology/authority.yaml");
+        fs::write(
+            &ontology_path,
+            "ontology_id: repository-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n",
+        )
+        .unwrap();
+        let mut graph = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        graph
+            .adopt_ontology(crate::AdoptOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: crate::OperationId(Uuid::from_u128(101)),
+                    actor_uuid: None,
+                },
+                path: ontology_path.clone(),
+                mode: gf_core::OntologyMode::Strict,
+            })
+            .unwrap();
+        let authoritative = graph.workspace_ontology().unwrap();
+        drop(graph);
+
+        fs::write(
+            &ontology_path,
+            "ontology_id: repository-authority\nversion: \"2\"\nentity_types:\n  - name: Organization\n    abstract: false\nrelation_types: []\n",
+        )
+        .unwrap();
+        let synced = context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_u128(102)),
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(synced.status, RepositorySyncStatus::Published);
+        assert!(
+            synced
+                .definitions
+                .iter()
+                .any(|definition| definition.definition_id == "ontology")
+        );
+
+        let reopened = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        assert_eq!(reopened.ontology_mode(), gf_core::OntologyMode::Strict);
+        assert_eq!(reopened.workspace_ontology().unwrap(), authoritative);
+
+        drop(reopened);
+        let mut graph = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        graph
+            .clear_ontology(crate::ClearOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: crate::OperationId(Uuid::from_u128(103)),
+                    actor_uuid: None,
+                },
+            })
+            .unwrap();
+        let cleared = graph.workspace_ontology().unwrap();
+        drop(graph);
+        fs::write(&ontology_path, "not: an ontology\n").unwrap();
+        context
+            .sync(RepositorySyncRequest {
+                check: false,
+                operation_uuid: Some(Uuid::from_u128(104)),
+                actor_uuid: None,
+            })
+            .unwrap();
+
+        let reopened_clear =
+            crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            reopened_clear.ontology_mode(),
+            gf_core::OntologyMode::Exploratory
+        );
+        assert_eq!(reopened_clear.workspace_ontology().unwrap(), cleared);
+    }
+
+    #[test]
     fn repository_snapshot_checkpoint_revert_reopens_and_replays() {
         let root = tempdir().unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();
