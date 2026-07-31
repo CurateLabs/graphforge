@@ -147,3 +147,5 @@ if grep -q "$sentinel" "$temporary_directory/invalid-plan.log"; then
   echo "secret sentinel entered Terraform diagnostics" >&2
   exit 1
 fi
+
+"$terraform_root/tests/deployment-spec-plan.sh"

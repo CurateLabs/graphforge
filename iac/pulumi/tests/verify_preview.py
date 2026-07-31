@@ -9,6 +9,7 @@ from typing import Any
 
 ALLOWED_TYPES = {
     "pulumi:pulumi:Stack",
+    "graphforge:deployment:DeploymentSpec",
     "graphforge:static:TargetValidation",
 }
 GOLDEN_DIGEST = "eb9bd7c49ae277c62892b028d2c93e8328c24dd3e3fd5ecbabb4f2c94637e9e7"
@@ -23,8 +24,8 @@ def main() -> None:
     expected_failure = len(sys.argv) == 3 and sys.argv[2] == "--expected-failure"
     raw = preview_path.read_text()
     sentinel = "_".join(("GRAPHFORGE_SECRET", "SENTINEL"))
-    if sentinel in raw or "service-token" in raw:
-        raise AssertionError("preview leaked a secret sentinel or secret reference ID")
+    if sentinel in raw:
+        raise AssertionError("preview leaked a secret sentinel")
     preview: dict[str, Any] = json.loads(raw)
     steps = preview.get("steps", [])
     if not isinstance(steps, list):
@@ -53,12 +54,14 @@ def main() -> None:
     if not steps:
         raise AssertionError(f"preview did not report resource steps: {preview!r}")
     summary = preview.get("changeSummary")
-    if summary != {"create": 2}:
+    if summary != {"create": 3}:
         raise AssertionError(f"unexpected preview change summary: {summary!r}")
     if errors:
         raise AssertionError("preview reported an error diagnostic")
     if GOLDEN_DIGEST not in raw or "GraphForge golden receipt" not in raw:
         raise AssertionError("preview did not prove the shared golden receipt")
+    if "GraphForge golden deployment spec" not in raw:
+        raise AssertionError("preview did not prove the shared deployment specification")
 
 
 if __name__ == "__main__":

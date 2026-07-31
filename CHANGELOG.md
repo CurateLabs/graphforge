@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a runtime- and provider-agnostic deployment specification for Pulumi
+  TypeScript/Python and Terraform, projecting digest-pinned core artifacts,
+  service/worker/job/host intent, external source/secret references, and
+  distinct infrastructure/runtime states without creating a service or
+  depending on #215 (#227).
 - Register generation-managed repository snapshots with complete-workspace
   checkpoint diff/revert validation so checkpoints created after repository
   sync can be restored and reopened deterministically (#248).

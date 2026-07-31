@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.dev/contracts/graphforge-deployment-spec-v1.schema.json",
+  "title": "GraphForge portable deployment specification v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "resolved_config_sha256",
+    "target_id",
+    "artifact",
+    "topology",
+    "requirements",
+    "bindings",
+    "ownership",
+    "infrastructure",
+    "connectivity",
+    "readiness",
+    "capability_compatibility"
+  ],
+  "properties": {
+    "contract": { "const": "graphforge-deployment-spec/1" },
+    "resolved_config_sha256": {
+      "$ref": "graphforge-project-config-v1.schema.json#/$defs/sha256"
+    },
+    "target_id": {
+      "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "locator", "sha256", "version"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "python_wheel",
+            "node_package",
+            "native_binary",
+            "oci_image"
+          ]
+        },
+        "locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u0020\\u007f]+$"
+        },
+        "sha256": {
+          "$ref": "graphforge-project-config-v1.schema.json#/$defs/sha256"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution",
+        "kind",
+        "ownership",
+        "replicas",
+        "scheduling"
+      ],
+      "properties": {
+        "execution": { "enum": ["process", "container", "host"] },
+        "kind": { "enum": ["embedded", "service", "worker", "job", "host"] },
+        "ownership": { "enum": ["embedded", "local", "external"] },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "scheduling": { "enum": ["long_running", "on_demand"] }
+      }
+    },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backup",
+        "health",
+        "network",
+        "observability",
+        "resources",
+        "storage",
+        "write"
+      ],
+      "properties": {
+        "backup": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/backup"
+        },
+        "health": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/health"
+        },
+        "network": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/network"
+        },
+        "observability": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/observability"
+        },
+        "resources": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/resources"
+        },
+        "storage": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/storage"
+        },
+        "write": {
+          "$ref": "graphforge-resolved-config-v1.schema.json#/properties/targets/items/properties/write"
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secret_ids", "source_ids"],
+      "properties": {
+        "secret_ids": { "$ref": "#/$defs/stable_ids" },
+        "source_ids": { "$ref": "#/$defs/stable_ids" }
+      }
+    },
+    "ownership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data", "infrastructure", "runtime", "specification"],
+      "properties": {
+        "data": { "const": "external" },
+        "infrastructure": { "const": "caller_owned" },
+        "runtime": { "const": "caller_owned" },
+        "specification": { "const": "graphforge" }
+      }
+    },
+    "infrastructure": { "$ref": "#/$defs/caller_owned" },
+    "connectivity": { "$ref": "#/$defs/not_checked" },
+    "readiness": { "$ref": "#/$defs/not_checked" },
+    "capability_compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirements", "status"],
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "graphforge-project-config-v1.schema.json#/$defs/capability_requirement"
+          }
+        },
+        "status": { "const": "requirements_declared" }
+      }
+    }
+  },
+  "$defs": {
+    "stable_ids": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "graphforge-project-config-v1.schema.json#/$defs/stable_id"
+      }
+    },
+    "caller_owned": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mutation", "status"],
+      "properties": {
+        "mutation": { "const": "none" },
+        "status": { "const": "caller_owned" }
+      }
+    },
+    "not_checked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "const": "not_checked" }
+      }
+    }
+  }
+}

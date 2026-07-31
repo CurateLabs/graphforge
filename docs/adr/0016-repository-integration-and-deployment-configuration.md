@@ -6,9 +6,9 @@
 
 **Build target:** post-v0.5.0
 
-**Contracts:** [`graphforge-project-config/1`](../contracts/graphforge-project-config-v1.schema.json), [`graphforge-resolved-config/1`](../contracts/graphforge-resolved-config-v1.schema.json), [`graphforge-infra-validation/1`](../contracts/graphforge-infra-validation-v1.schema.json)
+**Contracts:** [`graphforge-project-config/1`](../contracts/graphforge-project-config-v1.schema.json), [`graphforge-resolved-config/1`](../contracts/graphforge-resolved-config-v1.schema.json), [`graphforge-infra-validation/1`](../contracts/graphforge-infra-validation-v1.schema.json), [`graphforge-deployment-spec/1`](../contracts/graphforge-deployment-spec-v1.schema.json)
 
-**Related:** ADR 0013 (project generations), ADR 0014 (workspace checkpoints), ADR 0015 (embedded write modes), issues #215, #219, and #225
+**Related:** ADR 0013 (project generations), ADR 0014 (workspace checkpoints), ADR 0015 (embedded write modes), issues #219, #225, and #227
 
 ## Context
 
@@ -121,17 +121,28 @@ Skills have one checked-in source. Python and npm ship parity-checked copies and
 install directly under `.agents/skills/`; Python never shells out to NPX.
 
 GraphForge statically validates intent; a deployed runtime reports connectivity
-and readiness separately. Pulumi and Terraform own provider configuration,
-preview/plan, provisioning, drift, and teardown. IaC state is not project state.
-Destroy removes only IaC-owned resources and never invokes local project
-removal. Remote apply consumes the checksum-pinned runtime artifact owned by
-#215; core gains no server, transport, authentication system, or distributed
-deployment authority. Local state is never uploaded implicitly, and data
-initialization is a separately authorized external digest-addressed import.
-The first-party static Pulumi components and Terraform validation data source
-materialize no provider resources. Their preview/plan output is a projection of
-the same resolved JSON and static receipt; remote apply/destroy remains owned by
-#227 and cannot be inferred from a successful #231 validation.
+and application readiness separately. Pulumi and Terraform own provider
+configuration, preview/plan, provisioning, infrastructure readiness, drift,
+rollout, rollback, and teardown. IaC state is not project state. Destroy removes
+only IaC-owned resources and never invokes local project removal.
+
+IaC consumes an immutable caller-supplied artifact declared by version and
+digest; it does not build, publish, or own the runtime, and core gains no server,
+transport, authentication system, or distributed deployment authority.
+Provider configuration, compute, process/container orchestration, credentials,
+secret values, service identities, networks, DNS, certificates, and storage
+resources remain caller-owned IaC inputs or resources. Local state is never
+uploaded implicitly, and data initialization is a separately authorized
+external digest-addressed import. Issue #215 may provide one optional runtime,
+but neither #227 nor this decision depends on it.
+
+The first-party Pulumi components and Terraform modules materialize no provider
+resources. Static validation and the portable deployment specification are
+deterministic projections of the same resolved JSON. Caller-owned IaC consumes
+the specification to configure its chosen local or remote process, container,
+service, worker, job, or host. Rendering the specification never implies
+infrastructure application, runtime connectivity, health, or capability
+compatibility.
 
 ## Consequences
 
@@ -147,7 +158,8 @@ the same resolved JSON and static receipt; remote apply/destroy remains owned by
 - Selective ignores require more care than ignoring `.graphforge/` wholesale.
 - Python and npm must ship parity-checked generated schema and skill assets.
 - Provider settings remain separate, so deployment needs IaC stack config.
-- Remote provisioning cannot finish until a compatible #215 artifact exists.
+- Deployment requires a caller-supplied immutable artifact and caller-owned IaC
+  resources, so GraphForge cannot certify the infrastructure or runtime.
 
 ### Compatibility and follow-up
 
@@ -156,6 +168,6 @@ Using `.graphforge/state/` is additive; raw historical directories are not
 portable imports. Schema changes are explicit and fail closed while pre-v1.
 
 Issue #219 remains the close gate. Its native sub-issues implement lifecycle,
-interchange, binding CLIs, skills, static IaC validation, and #215-dependent
-remote provisioning. Direct contract and clean-environment evidence is required
-before the canonical tracker closes.
+interchange, binding CLIs, skills, static IaC validation, and a runtime-agnostic
+portable deployment specification. Direct contract and clean-environment
+evidence is required before the canonical tracker closes.

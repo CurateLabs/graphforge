@@ -1,7 +1,9 @@
-# GraphForge Terraform static validation
+# GraphForge Terraform integration
 
-This subtree provides a first-party, offline Terraform surface for
-`graphforge-infra-validation/1`.
+This subtree provides two first-party, provider-neutral Terraform surfaces:
+
+- offline `graphforge-infra-validation/1` validation; and
+- resource-free `graphforge-deployment-spec/1` rendering for caller-owned IaC.
 
 - The `graphforge_infra_validation` data source accepts canonical
   `graphforge-resolved-config/1` JSON and one named target.
@@ -44,3 +46,26 @@ A successful plan reports:
 
 These values do not claim that a service is reachable, ready, or compatible.
 Remote provisioning remains separately owned and is outside this provider.
+
+## Provider-neutral deployment specification
+
+`modules/deployment-spec` consumes canonical `resolved_json`, one target ID, and
+an immutable artifact locator. It emits canonical JSON describing the pinned
+artifact, target topology and requirements, bounded source/secret IDs, and
+explicit ownership. Connectivity and readiness remain `not_checked`; capability
+compatibility remains `requirements_declared`.
+
+The module creates zero provider resources. It never configures a provider,
+builds a service, creates infrastructure, resolves secret values, uploads local
+state/data, or reads `.graphforge/`. Caller IaC owns runtime and infrastructure;
+GraphForge owns only the specification. A destroy plan therefore contains no
+GraphForge-owned provider resource and cannot delete caller infrastructure or
+external data.
+
+OCI locators must be `registry/repository@sha256:<configured digest>`. Other
+artifact kinds require credential-free HTTPS. Mutable tags, digest mismatch,
+userinfo credentials, queries/fragments, whitespace/control characters, and
+local filesystem paths fail closed.
+
+See [`examples/deployment-spec`](examples/deployment-spec) and the module
+[`README`](modules/deployment-spec/README.md).

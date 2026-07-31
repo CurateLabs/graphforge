@@ -37,9 +37,28 @@ Pulumi TypeScript and Python components and the Terraform GraphForge validation
 data source/module consume the same canonical resolved JSON during
 preview/plan. Their outputs contain references and checksums, never secret
 values or graph/source data. A successful static result does not authorize
-apply. Remote provisioning belongs to #227 and remains blocked on #215's
-checksum-pinned runtime artifact, transport, health, authentication, and
-lifecycle contracts.
+apply.
+
+The portable deployment components consume a selected target and a
+caller-supplied artifact locator. They render canonical
+`graphforge-deployment-spec/1` JSON containing the configured artifact kind,
+version, and SHA-256; execution and scheduling intent; storage, resource,
+network, health, observability, and backup requirements; bounded source and
+secret IDs; and declared capabilities. Locators with inline credentials fail
+closed, and OCI locators must be digest-pinned rather than mutable tags.
+
+The specification supports the core artifact kinds and topology roles already
+present in resolved configuration. It does not translate them into Kubernetes,
+a cloud resource, a VM, a system service, or a transport. Caller-owned Pulumi or
+Terraform code chooses and owns those resources. This keeps the basics of
+GraphForge core portable without turning the IaC packages into a service build.
+
+Rendering reports infrastructure as `caller_owned`, connectivity and runtime
+readiness as `not_checked`, and capability compatibility as
+`requirements_declared`. Preview, plan, apply, drift, and destroy therefore
+change only the component or module projection in IaC state. They do not rewrite
+GraphForge generations, upload repository data, create provider resources, or
+claim that a caller runtime is healthy.
 
 IaC state never owns repository definitions or local GraphForge state. Destroy
 must remove only resources recorded by the IaC engine; it must never call

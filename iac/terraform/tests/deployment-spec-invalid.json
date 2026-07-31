@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "name": "mutable-oci-tag",
+      "locator": "registry.example/graphforge/authority:latest",
+      "jq": "."
+    },
+    {
+      "name": "digest-mismatch",
+      "locator": "registry.example/graphforge/authority@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "jq": "."
+    },
+    {
+      "name": "credential-bearing-locator",
+      "locator": "https://user:token@example.invalid/authority.tar.gz",
+      "jq": "(.targets[] | select(.id == \"production\") | .artifact.kind) = \"native_binary\""
+    },
+    {
+      "name": "local-locator",
+      "locator": "../authority.tar.gz",
+      "jq": "(.targets[] | select(.id == \"production\") | .artifact.kind) = \"native_binary\""
+    },
+    {
+      "name": "unsupported-ownership",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .ownership) = \"shared\""
+    },
+    {
+      "name": "unknown-secret-reference",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .secret_ids) = [\"missing-secret\"]"
+    },
+    {
+      "name": "credential-bearing-source",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": ".sources[0].uri = \"https://user:token@example.invalid/data.parquet\""
+    },
+    {
+      "name": "invalid-replica-count",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .topology.replicas) = 0"
+    }
+  ]
+}
