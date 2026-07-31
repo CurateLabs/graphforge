@@ -38,13 +38,6 @@ def sample_record(version: str = "0.5.0") -> dict[str, Any]:
                 "filename": f"graphforge-{version}-py3-none-any.whl",
                 "sha256": "b" * 64,
             },
-            {
-                "surface": "crates",
-                "name": "gf-api",
-                "version": version,
-                "filename": f"gf-api-{version}.crate",
-                "sha256": "c" * 64,
-            },
         ],
     }
 
@@ -76,14 +69,14 @@ def test_validate_evidence_ok() -> None:
     evidence = cev.build_evidence(
         "0.5.0",
         [
-            cev.LaneResult(name="pip", issue=2809, ok=True),
-            cev.LaneResult(name="urls", issue=2814, ok=True),
+            cev.LaneResult(name="pip", issue=180, ok=True),
+            cev.LaneResult(name="urls", issue=186, ok=True),
         ],
         preflight=cev.LaneResult(name="preflight", issue=None, ok=True),
     )
     cev.validate_evidence(evidence)
     assert evidence["ok"] is True
-    assert evidence["issue_map"]["pip"] == 2809
+    assert evidence["issue_map"]["pip"] == 180
 
 
 def test_preflight_fails_closed_when_unpublished() -> None:
@@ -95,7 +88,7 @@ def test_preflight_fails_closed_when_unpublished() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=(),
             release_record=None,
             fetch=fetch,
             run_cmd=cev.run_subprocess,
@@ -104,7 +97,7 @@ def test_preflight_fails_closed_when_unpublished() -> None:
         result = cev.run_preflight(ctx)
         assert result.ok is False
         assert result.error is not None
-        assert "#2794" in result.error
+        assert "#192" in result.error
         assert "unpublished" in " ".join(result.notes)
 
 
@@ -127,7 +120,7 @@ def test_preflight_ok_when_published() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=(),
             release_record=None,
             fetch=fetch,
             run_cmd=cev.run_subprocess,
@@ -135,6 +128,27 @@ def test_preflight_ok_when_published() -> None:
         )
         result = cev.run_preflight(ctx)
         assert result.ok is True, result.error
+        assert result.notes == [
+            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills); "
+            "no crates.io packages configured; probes OK for v0.5.0"
+        ]
+
+        crate_ctx = cev.Context(
+            version="0.5.0",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("gf-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        crate_result = cev.run_preflight(crate_ctx)
+        assert crate_result.ok is True, crate_result.error
+        assert crate_result.notes == [
+            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills), "
+            "plus crates.io (gf-api); probes OK for v0.5.0"
+        ]
 
 
 def test_urls_lane_reports_failures() -> None:
@@ -148,7 +162,7 @@ def test_urls_lane_reports_failures() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=(),
             release_record=None,
             fetch=fetch,
             run_cmd=cev.run_subprocess,
@@ -217,12 +231,6 @@ def test_checksums_match_release_record() -> None:
                 ).encode(),
                 {},
             )
-        if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
-            return (
-                200,
-                json.dumps({"version": {"checksum": "c" * 64}}).encode(),
-                {},
-            )
         return 404, b"", {}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -230,7 +238,7 @@ def test_checksums_match_release_record() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=(),
             release_record=record,
             fetch=fetch,
             run_cmd=cev.run_subprocess,
@@ -257,7 +265,7 @@ def test_cli_lane_installs_and_executes_published_package() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=(),
             release_record=None,
             fetch=lambda _url: (200, b"{}", {}),
             run_cmd=run,

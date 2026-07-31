@@ -1,16 +1,16 @@
 {
   "name": "@graphforge/agent-skills",
-  "version": "0.5.0-dev.0",
+  "version": "0.5.0",
   "description": "NPX-distributed agent skills and adapters for GraphForge",
   "license": "Apache-2.0",
-  "homepage": "https://curatelabs.github.io/graphforge-legecy/",
+  "homepage": "https://docs.graphforge.sh/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CurateLabs/graphforge-x.git",
+    "url": "git+https://github.com/CurateLabs/graphforge.git",
     "directory": "packages/agent-skills"
   },
   "bugs": {
-    "url": "https://github.com/CurateLabs/graphforge-x/issues"
+    "url": "https://github.com/CurateLabs/graphforge/issues"
   },
   "keywords": [
     "graphforge",

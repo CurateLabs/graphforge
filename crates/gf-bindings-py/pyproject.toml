@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "graphforge"
 description = "GraphForge native graph engine, bindings, and repository lifecycle CLI"
-version = "0.5.0.dev0"
+version = "0.5.0"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -26,8 +26,8 @@ dependencies = ["pyarrow>=14"]
 graphforge = "graphforge.cli:main"
 
 [project.urls]
-Homepage = "https://curatelabs.github.io/graphforge/"
-Documentation = "https://curatelabs.github.io/graphforge/"
+Homepage = "https://docs.graphforge.sh/"
+Documentation = "https://docs.graphforge.sh/"
 Repository = "https://github.com/CurateLabs/graphforge"
 Issues = "https://github.com/CurateLabs/graphforge/issues"
 

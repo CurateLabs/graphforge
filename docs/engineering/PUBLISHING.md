@@ -16,6 +16,7 @@ multi-tenant service. Operational detail:
 | Rust crates | No crates.io publication for v0.5.0; future surface requires a separate naming decision | SemVer / git tag | Maintainers |
 | Python package (wheels/sdist) | PyPI | Same release version | Maintainers |
 | Node binding package | npm | Same release version | Maintainers |
+| Lifecycle CLI package | npm (`@graphforge/cli`) | Same release version | Maintainers |
 | Agent skills package | npm (`npx` skills) | Same release line | Maintainers |
 | Source archive / GitHub Release | GitHub | Annotated tag | Maintainers |
 | Documentation site | Astro Starlight (`docs-site/`; CI via `docs.yml`) | Commit / release | Maintainers |
@@ -30,7 +31,7 @@ multi-tenant service. Operational detail:
 - Commit messages follow Conventional Commit–style scopes used in the repo history; do not
   add new enforcement without maintainer agreement.
 - Release close-out for v0.5.0 is human-authorized on
-  [#742](https://github.com/CurateLabs/graphforge-legecy/issues/742);
+  [#192](https://github.com/CurateLabs/graphforge/issues/192);
   docs/legal trackers stay open until manual approval.
 
 ## Build and continuous delivery
@@ -50,8 +51,13 @@ pnpm docs:build
 python3 scripts/ci/crate-publish-plan.py check
 # v0.5.0: check intentionally fails closed and no cargo publish is run.
 # Python: maturin / TestPyPI clean-install checks
-# Node / skills: npm publish --dry-run
+# Node / CLI / skills: npm publish --dry-run
 ```
+
+The release-event workflow runs `release-publish-preflight.py` and `npm whoami`
+before any registry write. The release tag must resolve to the current certified
+`main` SHA; Cargo, Python, Node, CLI, and skills versions must match the tag;
+the dated CHANGELOG section must be cut; and the npm token must authenticate.
 
 Required TESTING.md gates (TCK, contract gates applicable to the release, binding RC evidence)
 must be green on the **same SHA** that is tagged for publication.
@@ -61,9 +67,9 @@ must be green on the **same SHA** that is tagged for publication.
 | From | To | Required evidence / approval |
 | --- | --- | --- |
 | PR branch | `main` | Focused PR, green CI Gate, clean review threads |
-| `main` SHA | Release candidate | Milestone gates for the release issue (#742 for v0.5.0) |
+| `main` SHA | Release candidate | Milestone gates for the release issue (#192 for v0.5.0) |
 | Release candidate | Registries + GitHub Release | Dry-runs, checksums/SBOM where configured, human release execution |
-| Published artifacts | Clean-install verification | Fresh env smokes for pip/npm/cargo paths |
+| Published artifacts | Clean-install verification | Fresh env smokes for pip/npm paths; no crates.io surface in v0.5.0 |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
 
 ## Deployment verification
@@ -72,7 +78,7 @@ must be green on the **same SHA** that is tagged for publication.
   Book + allowlisted lifecycle pages.
 - **Packages:** clean-environment quickstart / smoke from public registries only
   ([`../development/clean-environment-verification.md`](../development/clean-environment-verification.md),
-  tracker [#2795](https://github.com/CurateLabs/graphforge-legecy/issues/2795) / #742 §7).
+  tracker [#167](https://github.com/CurateLabs/graphforge/issues/167)).
   Fail closed when the requested version is unpublished — never check off against missing
   artifacts.
 - **Skills:** packed artifact hashes and offline compatibility check
@@ -91,7 +97,7 @@ Authoritative stop/rollback table:
   new patch version if needed.
 - **Docs site:** redeploy last known-good commit from `main` / hosting history.
 - Authority: maintainers executing the release plan; agents assemble evidence but do not
-  authorize final #742 closure.
+  authorize final #192 closure.
 
 ## Official references
 

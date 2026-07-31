@@ -48,7 +48,7 @@ flowchart LR
 - **Results** — Arrow tables/batches as the cross-language contract.
 - **On disk** — Parquet for graph data; JSON for metadata and contracts.
 
-Schemas and frozen inventories also live under [`../contracts/`](https://github.com/CurateLabs/graphforge-legecy/tree/main/docs/contracts) and
+Schemas and frozen inventories also live under [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) and
 architecture deep-dives in [`../book/architecture/`](../book/architecture/overview.md).
 
 ## Problem model and terminology

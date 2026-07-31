@@ -21,11 +21,11 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0-dev"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 license-file = "LICENSE"
-repository = "https://github.com/CurateLabs/graphforge-legecy"
+repository = "https://github.com/CurateLabs/graphforge"
 
 [workspace.dependencies]
 # Error handling

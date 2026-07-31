@@ -819,5 +819,5 @@ Congratulations! You've learned the fundamentals of GraphForge.
 
 ### Join the Community
 
-- Report issues on [GitHub](https://github.com/CurateLabs/graphforge-legecy/issues)
+- Report issues on [GitHub](https://github.com/CurateLabs/graphforge/issues)
 - Continue in the [Book](../book/README.md) for architecture and deeper usage

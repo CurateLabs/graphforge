@@ -1971,7 +1971,7 @@ dependencies = [
 
 [[package]]
 name = "gf-api"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "cucumber",
@@ -2001,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "gf-ast"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "gf-core",
  "serde",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "gf-bindings-node"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-api",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "gf-bindings-py"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "futures",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "gf-cli"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "clap",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "gf-core"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_yaml_ng",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "gf-cypher"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "gf-ast",
  "gf-core",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "gf-exec"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "gf-io"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "gf-core",
  "gf-storage",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "gf-ir"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-ast",
@@ -2123,7 +2123,7 @@ dependencies = [
 
 [[package]]
 name = "gf-knowledge"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-core",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "gf-ontology"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-core",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "gf-plan"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "datafusion",
  "gf-core",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "gf-provenance"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-core",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "gf-rel"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow-data",
  "chrono",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "gf-search"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "gf-core",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "gf-storage"
-version = "0.5.0-dev"
+version = "0.5.0"
 dependencies = [
  "arrow",
  "async-trait",

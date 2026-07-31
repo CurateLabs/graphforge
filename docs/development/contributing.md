@@ -20,7 +20,7 @@ product work targets `main`.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
 
-git clone https://github.com/CurateLabs/graphforge-legecy.git
+git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
 
 # Install Python dev dependencies
@@ -269,8 +269,8 @@ See [release-process.md](release-process.md) for the full release procedure and
 
 ## Getting Help
 
-- **Questions:** [GitHub Discussions](https://github.com/CurateLabs/graphforge-legecy/discussions)
-- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge-legecy/issues)
+- **Questions:** [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions)
+- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge/issues)
 
 ## License
 

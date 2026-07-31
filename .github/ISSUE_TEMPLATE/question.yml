@@ -8,7 +8,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Have a question about GraphForge? Ask away! Consider using [GitHub Discussions](https://github.com/CurateLabs/graphforge-legecy/discussions) for open-ended discussions.
+        Have a question about GraphForge? Ask away! Consider using [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions) for open-ended discussions.
 
   - type: textarea
     id: question

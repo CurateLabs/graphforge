@@ -55,7 +55,7 @@ GF_LIVEJOURNAL_PROJECT=/path/to/cached/project \
   make bench-fixed-hop-livejournal
 ```
 
-See [Traversal Scaling](https://github.com/CurateLabs/graphforge-legecy/blob/main/benchmarks/traversal_scaling.md)
+See [Traversal Scaling](https://github.com/CurateLabs/graphforge/blob/main/benchmarks/traversal_scaling.md)
 for the fixed-hop and variable-length benchmark methodology.
 
 ---
@@ -134,5 +134,5 @@ artifact. Until then that page stays an explicit pending placeholder.
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
 - [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce
-- [CHANGELOG.md](https://github.com/CurateLabs/graphforge-legecy/blob/main/CHANGELOG.md) — release notes
+- [CHANGELOG.md](https://github.com/CurateLabs/graphforge/blob/main/CHANGELOG.md) — release notes
 - [Architecture Overview](../book/architecture/overview.md) — Rust core design and DataFusion execution model

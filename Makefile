@@ -30,8 +30,8 @@ release-version-check:  ## Verify Cargo/Python/Node/skills versions align
 package-license-verify:  ## Verify packaged Cargo/npm/Python artifacts include LICENSE+NOTICE
 	python3 scripts/verify_package_licenses.py
 
-publish-dry-run:  ## Local publish dry-runs (npm/docs/cargo-package/python); never prod registries
-	python3 scripts/publish_dry_run.py --surface npm,docs,cargo-package,python --report target/publish-dry-run/evidence.json
+publish-dry-run:  ## Local v0.5 publish dry-runs (npm/docs/python); never prod registries
+	python3 scripts/publish_dry_run.py --surface npm,docs,python --report target/publish-dry-run/evidence.json
 publish-dry-run-npm:  ## npm publish --dry-run for Node binding + agent-skills
 	python3 scripts/publish_dry_run.py --surface npm
 publish-dry-run-docs:  ## Docs preview build (pnpm docs:build)
@@ -273,14 +273,12 @@ clean-env-verify-check:  ## Unit-test the post-publication clean-env harness (#2
 clean-env-verify-preflight:  ## Probe public registries for VERSION (fails closed if unpublished)
 	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
 	python3 scripts/ci/clean-env-verify.py preflight --version "$(VERSION)" \
-		$(if $(CRATE),--crate "$(CRATE)",) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",)
 
 clean-env-verify:  ## Run clean-env lanes against public registries (post-§6 only)
 	@test -n "$(VERSION)" || (echo "VERSION is required (e.g. VERSION=0.5.0)" && exit 2)
 	python3 scripts/ci/clean-env-verify.py run --version "$(VERSION)" \
-		$(if $(CRATE),--crate "$(CRATE)",--crate gf-api) \
-		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--lane pip --lane npm --lane skills --lane cargo --lane reopen --lane urls) \
+		$(if $(RELEASE_RECORD),--release-record "$(RELEASE_RECORD)" --all,--lane pip --lane npm --lane cli --lane skills --lane reopen --lane urls) \
 		$(if $(OUTPUT),--output "$(OUTPUT)",) \
 		$(if $(WORK),--work "$(WORK)",)
 

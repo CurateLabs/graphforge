@@ -141,8 +141,8 @@ not repeat that certification.
 ### `clean-env-verify.yml`
 
 Maintainer `workflow_dispatch` after section 6 publication. Installs from **public**
-PyPI/npm/crates.io only and runs the #742 section 7 / #2795 lanes (pip quickstart, npm
-smoke, NPX skills compatibility, cargo add smoke, create/close/reopen Arrow
+PyPI/npm only and runs the #167 lanes (pip quickstart, npm
+smoke, NPX CLI and skills compatibility, create/close/reopen Arrow
 rows, docs/package URL resolve, optional checksum match against a
 `graphforge-release-record-v1` file). Preflight fails closed when the requested
 version is unpublished. Ordinary PRs run only the harness unit tests via

@@ -1,6 +1,6 @@
 # Clean-environment verification
 
-Post-publication proof for **#742 section 7** / tracker **#2795**: from new clean
+Post-publication proof for release tracker **#192** / follow-up tracker **#167**: from new clean
 environments, using only public registries, install and exercise GraphForge
 release artifacts.
 
@@ -13,27 +13,24 @@ artifacts.
 
 | Lane | Child | Outcome |
 | --- | --- | --- |
-| `pip` | #2809 | `pip install graphforge==<version>` + documented quickstart E2E |
-| `npm` | #2810 | Install `@graphforge/node@<version>` + smoke execute/Arrow decode |
-| `skills` | #2811 | Install `@graphforge/agent-skills@<version>` + offline `compatibility --json` |
-| `cargo` | #2812 | `cargo add <crate>@<version>` + `cargo check` (default crate: `gf-api`) |
-| `reopen` | #2813 | Create/close/reopen project; Arrow rows survive reopen |
-| `urls` | #2814 | Published docs + package/registry URLs resolve |
-| `checksums` | #2815 | Registry digests match `graphforge-release-record-v1` from #2798 + #2803 |
+| `pip` | #180 | `pip install graphforge==<version>` + documented quickstart E2E |
+| `npm` / `cli` | #183 | Install `@graphforge/node@<version>` and `@graphforge/cli@<version>` + smoke execution |
+| `skills` | #182 | Install `@graphforge/agent-skills@<version>` + offline `compatibility --json` |
+| `reopen` | #184 | Create/close/reopen project; Arrow rows survive reopen |
+| `urls` | #186 | Published docs + package/registry URLs resolve |
+| `checksums` | #187 | Registry digests match `graphforge-release-record-v1` |
 
 Close each child only with commands + outcomes (or an explicit disposition). The
-tracker (#2795) blocks #742 until children complete; it does **not** auto-close
-#742.
+tracker (#167) is intentionally post-release and does not block or auto-close #192.
 
 ## Upstream blockers
 
 | Child | Wait on |
 | --- | --- |
-| #2809, #2813 | PyPI publish (#2805) under #2794 |
-| #2810, #2811 | npm publish (#2806) under #2794 |
-| #2812 | crates.io publish (#2804) under #2794 |
-| #2814 | docs deploy (#2807) + registry metadata (#2808) |
-| #2815 | release record (#2798) + GitHub Release checksums (#2803) |
+| #180, #184 | PyPI publish (#195) |
+| #182, #183 | npm publish (#198) |
+| #186 | docs deploy (#197) + registry metadata (#199) |
+| #187 | release record + published package checksums |
 
 ## Harness
 
@@ -57,9 +54,13 @@ python3 scripts/ci/clean-env-verify.py run \
 ```
 
 CI: workflow_dispatch **Clean Environment Verify**
-(`.github/workflows/clean-env-verify.yml`). Inputs: `version`, `lanes`, optional
-`release_record_path`, `crate`. Upload the evidence artifact to the matching
-child issues.
+(`.github/workflows/clean-env-verify.yml`). Inputs: `version`, `lanes`, and optional
+`release_record_path`. Upload the evidence artifact to the matching child issues.
+
+GraphForge v0.5.0 intentionally has no crates.io publication surface; the
+approved disposition is recorded in #196 and post-release child #185 is not
+applicable. The harness therefore
+does not probe crates.io or run a Cargo clean-install lane for this release.
 
 ## Release record schema
 
@@ -83,7 +84,7 @@ child issues.
 }
 ```
 
-Surfaces: `pypi`, `npm`, `crates`, `github`. Produced under #2798 and attached to
+Surfaces: `pypi`, `npm`, and `github`. Produced under #2798 and attached to
 the GitHub Release (#2803). Validate with:
 
 ```bash
@@ -103,5 +104,5 @@ python3 scripts/ci/clean-env-verify.py validate-evidence build/clean-env-evidenc
 
 - [`PUBLISHING.md`](../engineering/PUBLISHING.md) — promotion to clean-install verification
 - [`release-process.md`](release-process.md) — release checklist
-- Umbrella: [#742](https://github.com/CurateLabs/graphforge-legecy/issues/742) section 7
-- Tracker: [#2795](https://github.com/CurateLabs/graphforge-legecy/issues/2795)
+- Release tracker: [#192](https://github.com/CurateLabs/graphforge/issues/192)
+- Post-release tracker: [#167](https://github.com/CurateLabs/graphforge/issues/167)

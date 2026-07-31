@@ -579,7 +579,7 @@ fetches additional structured metadata. Results stay in the canonical Arrow/UUID
 
 ### Run the Native Notebook
 
-The [e-commerce agent notebook](https://github.com/CurateLabs/graphforge-legecy/blob/main/examples/agent_grounding/ecommerce_agent.ipynb)
+The [e-commerce agent notebook](https://github.com/CurateLabs/graphforge/blob/main/examples/agent_grounding/ecommerce_agent.ipynb)
 is the executable version of this workflow. After building a wheel into `dist/`, run the same
 two-clean-run gate used by CI:
 
@@ -611,7 +611,7 @@ compares bounded evidence from two independent temporary projects and kernels.
 - [GraphForge Documentation](../../index.md)
 - [openCypher Tutorial](../../guide/tutorial.md)
 - [API Reference](../../reference/api.md)
-- [Example: E-commerce Agent](https://github.com/CurateLabs/graphforge-legecy/blob/main/examples/agent_grounding/ecommerce_agent.ipynb)
+- [Example: E-commerce Agent](https://github.com/CurateLabs/graphforge/blob/main/examples/agent_grounding/ecommerce_agent.ipynb)
 
 ## Conclusion
 

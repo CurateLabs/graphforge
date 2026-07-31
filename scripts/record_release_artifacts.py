@@ -26,6 +26,7 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
 
 
 def _git_sha() -> str:
@@ -66,7 +67,21 @@ def classify(path: Path) -> str:
     return "other"
 
 
-def scan_dist(dist_dir: Path) -> list[dict[str, Any]]:
+def artifact_identity(path: Path, artifact_class: str, version: str) -> tuple[str, str]:
+    """Return the public registry surface and package name for an artifact."""
+    if artifact_class in {"python-wheel", "python-sdist"}:
+        return "pypi", "graphforge"
+    if artifact_class == "npm-tarball":
+        suffix = f"-{version}.tgz"
+        normalized = path.name
+        if normalized.startswith("graphforge-") and normalized.endswith(suffix):
+            package = normalized[len("graphforge-") : -len(suffix)]
+            return "npm", f"@graphforge/{package}"
+        return "npm", path.stem
+    return "github", path.name
+
+
+def scan_dist(dist_dir: Path, version: str) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     if not dist_dir.exists():
         return artifacts
@@ -76,10 +91,16 @@ def scan_dist(dist_dir: Path) -> list[dict[str, Any]]:
         if path.name.startswith("."):
             continue
         rel = str(path.relative_to(dist_dir))
+        artifact_class = classify(path)
+        surface, name = artifact_identity(path, artifact_class, version)
         artifacts.append(
             {
                 "path": rel,
-                "class": classify(path),
+                "class": artifact_class,
+                "surface": surface,
+                "name": name,
+                "version": version,
+                "filename": path.name,
                 "bytes": path.stat().st_size,
                 "sha256": sha256_file(path),
             }
@@ -93,16 +114,19 @@ def build_record(
     dist_dir: Path,
     notes: str | None,
 ) -> dict[str, Any]:
-    artifacts = scan_dist(dist_dir)
+    artifacts = scan_dist(dist_dir, version)
+    commit_sha = _git_sha()
     return {
-        "schema_version": 1,
+        "schema": RELEASE_RECORD_SCHEMA,
         "version": version,
-        "git_sha": _git_sha(),
+        "tag": f"v{version}",
+        "commit_sha": commit_sha,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "dist_dir": str(dist_dir),
         "same_tagged_commit_policy": (
             "Every first-party publishable artifact for this version must be built "
-            f"from git_sha (the eventual v{version} tag target) or have an explicit "
+            f"from commit_sha {commit_sha} (the eventual v{version} tag target) "
+            "or have an explicit "
             "reproducible link recorded in notes/links."
         ),
         "licenses": {

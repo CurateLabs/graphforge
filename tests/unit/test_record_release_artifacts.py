@@ -19,10 +19,17 @@ def test_classify_and_hash(tmp_path: Path) -> None:
         dist_dir=tmp_path,
         notes="test",
     )
+    assert record["schema"] == "graphforge-release-record-v1"
     assert record["version"] == "0.5.0"
+    assert record["tag"] == "v0.5.0"
+    assert len(record["commit_sha"]) == 40
     assert record["licenses"]["first_party_spdx"] == "Apache-2.0"
     assert record["contents_summary"]["total_artifacts"] == 1
     assert record["artifacts"][0]["class"] == "python-wheel"
+    assert record["artifacts"][0]["surface"] == "pypi"
+    assert record["artifacts"][0]["name"] == "graphforge"
+    assert record["artifacts"][0]["version"] == "0.5.0"
+    assert record["artifacts"][0]["filename"] == wheel.name
     assert len(record["artifacts"][0]["sha256"]) == 64
     assert "same_tagged_commit_policy" in record
 
@@ -40,3 +47,4 @@ def test_cli_writes_json(tmp_path: Path) -> None:
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["artifacts"][0]["class"] == "npm-tarball"
+    assert payload["artifacts"][0]["surface"] == "npm"

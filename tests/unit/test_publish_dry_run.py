@@ -21,5 +21,6 @@ def test_cargo_order_skips_gf_core_conflict() -> None:
 
 def test_npm_dry_run_surfaces_ok() -> None:
     steps = publish_dry_run.dry_run_npm()
-    assert len(steps) == 3
+    assert len(steps) == 4
+    assert steps[0]["cmd"] == ["pnpm", "install", "--frozen-lockfile"]
     assert all(step["ok"] for step in steps)

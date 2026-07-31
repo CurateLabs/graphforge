@@ -3,10 +3,12 @@
 
 Surfaces:
 - Cargo workspace ``[workspace.package].version``
+- Cargo lockfile entries for workspace packages
 - Python ``crates/gf-bindings-py/pyproject.toml`` (PEP 440)
 - Node ``crates/gf-bindings-node/package.json``
 - NPX lifecycle CLI ``packages/cli/package.json``
 - NPX skills ``packages/agent-skills/package.json``
+- NPX skills ``packages/agent-skills/compatibility.json``
 
 Usage:
     python3 scripts/set_release_version.py --check
@@ -29,10 +31,18 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 CARGO_TOML = ROOT / "Cargo.toml"
+CARGO_LOCK = ROOT / "Cargo.lock"
 PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
 NODE_PACKAGE = ROOT / "crates" / "gf-bindings-node" / "package.json"
 CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
+SKILLS_COMPATIBILITY = ROOT / "packages" / "agent-skills" / "compatibility.json"
+
+
+def cargo_lock_versions() -> dict[str, str]:
+    """Return versions for local gf-* packages recorded in Cargo.lock."""
+    text = CARGO_LOCK.read_text(encoding="utf-8")
+    return dict(re.findall(r'(?m)^name = "(gf-[^"]+)"\nversion = "([^"]+)"$', text))
 
 
 def parse_base(version: str) -> tuple[str, bool]:
@@ -107,6 +117,16 @@ def check_aligned() -> list[str]:
         got = current[key]
         if got != want:
             errors.append(f"{key}: got {got!r}, expected {want!r} for cargo base {base} dev={dev}")
+    lock_versions = cargo_lock_versions()
+    for package, got in sorted(lock_versions.items()):
+        if got != expected["cargo"]:
+            errors.append(f"Cargo.lock {package}: got {got!r}, expected {expected['cargo']!r}")
+    compatibility = json.loads(SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
+    if compatibility.get("package_version") != expected["skills"]:
+        errors.append(
+            "skills compatibility package_version: got "
+            f"{compatibility.get('package_version')!r}, expected {expected['skills']!r}"
+        )
     return errors
 
 
@@ -125,6 +145,20 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     if n != 1:
         raise ValueError("failed to update Cargo.toml workspace version")
     CARGO_TOML.write_text(cargo_text, encoding="utf-8")
+
+    lock_text = CARGO_LOCK.read_text(encoding="utf-8")
+
+    def update_lock(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{expected['cargo']}{match.group(2)}"
+
+    lock_text, lock_count = re.subn(
+        r'(?m)^(name = "gf-[^"]+"\nversion = ")[^"]+(")$',
+        update_lock,
+        lock_text,
+    )
+    if lock_count == 0:
+        raise ValueError("failed to update Cargo.lock workspace package versions")
+    CARGO_LOCK.write_text(lock_text, encoding="utf-8")
 
     py_text = PYPROJECT.read_text(encoding="utf-8")
     py_text, n = re.subn(
@@ -145,6 +179,10 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected[key]
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    compatibility = json.loads(SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
+    compatibility["package_version"] = expected["skills"]
+    SKILLS_COMPATIBILITY.write_text(json.dumps(compatibility, indent=2) + "\n", encoding="utf-8")
 
     return expected
 

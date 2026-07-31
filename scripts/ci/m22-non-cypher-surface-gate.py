@@ -17,6 +17,7 @@ SURFACE = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 LOAD_TAXONOMY = ROOT / "tests/contracts/load-dataset-taxonomy.json"
 LOAD_MATRIX = ROOT / "tests/contracts/load-workload-matrix.json"
 BINDING_TARGETS = ROOT / "tests/contracts/binding-release-candidate-targets.json"
+REPOSITORY = "CurateLabs/graphforge"
 
 SCHEMA = "graphforge-m22-non-cypher-surface-gate/1"
 RUST_SCHEMA = "graphforge-rust-non-cypher-evidence/1"
@@ -90,9 +91,9 @@ def validate_component_runs(
             raise ValueError(f"{owner}: referenced run was not manually dispatched")
         if run.get("path") != workflow_path:
             raise ValueError(f"{owner}: unexpected workflow path")
-        if run.get("repository", {}).get("full_name") != "CurateLabs/graphforge-legecy":
+        if run.get("repository", {}).get("full_name") != REPOSITORY:
             raise ValueError(f"{owner}: unexpected source repository")
-        expected_url = "https://github.com/CurateLabs/graphforge-legecy/actions/runs/" + str(run_id)
+        expected_url = f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"
         if run.get("html_url") != expected_url:
             raise ValueError(f"{owner}: unexpected run URL")
         if (
@@ -330,7 +331,7 @@ def aggregate(
             raise ValueError(f"{name}: component-run field ledger mismatch")
         run_id = _run_id(component["run_id"], f"{name} run")
         run_attempt = _run_id(component["run_attempt"], f"{name} attempt")
-        expected_url = "https://github.com/CurateLabs/graphforge-legecy/actions/runs/" + str(run_id)
+        expected_url = f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"
         expected_cache = {
             "rust": "rust-non-cypher-" + expected_sha,
             "binding": "binding-release-candidate-" + expected_sha,

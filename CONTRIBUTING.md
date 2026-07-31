@@ -33,8 +33,8 @@ make pre-push
 
 ## Getting help
 
-- **Questions:** [GitHub Discussions](https://github.com/CurateLabs/graphforge-legecy/discussions)
-- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge-legecy/issues)
+- **Questions:** [GitHub Discussions](https://github.com/CurateLabs/graphforge/discussions)
+- **Bugs:** [GitHub Issues](https://github.com/CurateLabs/graphforge/issues)
 - **Security:** report privately via [SECURITY.md](.github/SECURITY.md)
 - **Conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
