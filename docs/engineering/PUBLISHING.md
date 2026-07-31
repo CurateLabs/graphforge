@@ -102,5 +102,3 @@ Authoritative stop/rollback table:
 - [`../development/release-process.md`](../development/release-process.md)
 - [`../development/release-workflows.md`](../development/release-workflows.md)
 - `.github/workflows/publish.yaml`
-- Strategy summary (private):
-  [`strategy/roadmap.md`](https://github.com/CurateLabs/graphforge-nextjs/blob/main/docs/strategy/roadmap.md)

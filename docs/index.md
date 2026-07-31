@@ -1,140 +1,137 @@
 # GraphForge
 
-**An embedded, openCypher-compatible graph database for Python, Node, Swift, and Kotlin**
+**Composable graph tooling for analysis, construction, and refinement**
 
-[![PyPI](https://img.shields.io/pypi/v/graphforge.svg)](https://pypi.org/project/graphforge/)
-[![Python](https://img.shields.io/pypi/pyversions/graphforge.svg)](https://pypi.org/project/graphforge/)
-[![Docs](https://img.shields.io/badge/docs-online-0A66C2.svg)](https://docs.graphforge.sh/)
+[![Version](https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg)](guide/installation.md)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](guide/installation.md)
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white)](guide/installation.md)
+[![Rust](https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white)](development/contributing.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI&logo=github)](https://github.com/CurateLabs/graphforge/actions/workflows/test.yml)
 [![openCypher TCK](https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg)](reference/tck-compliance.md)
 [![Apache License 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../LICENSE)
 
-GraphForge lets you write openCypher queries against an in-memory or Parquet-backed graph
-with no external services. The v0.5.0 release passes **all 3,897 openCypher TCK scenarios**
-and provides seven analyst-intent methods — all returning Apache Arrow Tables.
+GraphForge is an embedded, local-first graph execution environment with a Rust core, Arrow
+results, and Parquet persistence. It brings openCypher and analyst-intent verbs to notebooks,
+scripts, repositories, and editor workflows without requiring a database server. The v0.5
+development line passes all **3,897 openCypher TCK scenarios**.
+
+> **Registry status:** GraphForge v0.5 packages are not published yet. PyPI currently serves
+> the legacy `graphforge` v0.4.0 line, while `@graphforge/node` and `@graphforge/cli` are not yet
+> available from npm. Follow the [installation guide](guide/installation.md) to build the
+> current Rust-owned engine from source.
 
 ```python
 from graphforge import GraphForge
 
-forge = GraphForge()                    # in-memory
-# forge = GraphForge("path/to/graph/") # or Parquet-backed (directory must exist)
-
+forge = GraphForge()
 alice = forge.add_node("Person", name="Alice", age=30)
-bob   = forge.add_node("Person", name="Bob",   age=25)
+bob = forge.add_node("Person", name="Bob", age=25)
 forge.add_edge(alice, "KNOWS", bob, since=2020)
 
-# openCypher — returns an Arrow Table
 table = forge.execute("""
     MATCH (p:Person)-[:KNOWS]->(friend)
     RETURN p.name AS person, friend.name AS friend
 """)
 
-# Consume with pandas, Polars, or iterate directly
-df = table.to_pandas()
-print(df)
-#   person friend
-# 0  Alice    Bob
+print(table.to_pandas())
 ```
+
+Every query and analyst verb returns an Apache Arrow Table. Python and Node are thin bindings;
+they never replace or fall back from the Rust engine.
 
 ---
 
 ## Get started
 
-| | |
+| Page | Job |
 |---|---|
-| [Installation](guide/installation.md) | Install via pip or uv |
-| [Quick Start](guide/quickstart.md) | Your first graph in five minutes |
-| [Tutorial](guide/tutorial.md) | Step-by-step guided walkthrough |
+| [Installation](guide/installation.md) | Check registry status and build Python or Node from source |
+| [Quick Start](guide/quickstart.md) | Create, query, and persist your first graph |
+| [Tutorial](guide/tutorial.md) | Work through a complete citation-network example |
+| [CLI and repository integration](guides/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
+| [VS Code extension](guide/vscode-extension/) | Explore projects, run Cypher, and pair with coding agents in your editor |
+
+---
+
+## Why GraphForge?
+
+Modern research and investigation produce graph-shaped data: entity relationships extracted by
+LLMs, citation networks, dependency graphs, social connections, and evolving knowledge bases.
+GraphForge makes those graphs portable and inspectable without turning them into an application
+database or requiring a long-running service.
+
+| | NetworkX | **GraphForge** | Neo4j / Memgraph |
+|:---|:---|:---|:---|
+| **Setup** | Python package | Embedded package | Run a server |
+| **Query language** | Python API | **Full openCypher** | Full Cypher |
+| **Persistence** | Manual | **Parquet project directory** | Native |
+| **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
+| **Notebook-friendly** | ✓ | ✓ | Requires connection |
+| **Primary role** | In-memory graph library | Local knowledge-analysis workbench | Operational graph database |
+
+Use GraphForge for knowledge graphs, citation networks, LLM output storage, repository-aware
+analysis, and social-network research. Use an operational database for high-throughput,
+multi-user application workloads or graphs beyond the documented
+[scale limits](reference/scale-limits.md).
 
 ---
 
 ## Use every day
 
-| | |
+| Page | Job |
 |---|---|
-| [Guide overview](guide/overview.md) | Everyday workflows index |
-| [Cypher Reference](guide/cypher-guide.md) | Full openCypher language guide |
-| [Graph Construction](guide/graph-construction.md) | Build graphs with Python API and Cypher |
-| [Analytics Integration](guide/analytics-integration.md) | Arrow, pandas, Polars, rank, cluster, find |
-
----
-
-## Understand
-
-| | |
-|---|---|
-| [Book map](book/README.md) | Architecture, research, and deeper usage index |
-| [Architecture Overview](book/architecture/overview.md) | Pipeline, storage, execution model |
-| [Algorithm Catalog](book/architecture/algorithms.md) | All algorithms across rank/cluster/paths/analyze/similar |
-| [Knowledge Graph Construction](book/use-cases/knowledge-graph-construction.md) | Extract entities, build and refine ontologies |
-| [Network Analysis](book/use-cases/network-analysis.md) | Degree, paths, communities — in notebooks |
-| [LLM-Powered Workflows](book/use-cases/llm-workflows.md) | Store LLM extractions, build retrieval context |
-| [AI Agent Tool Recall](book/use-cases/agent-tool-recall.md) | Graph-structured tool libraries for LLM agents |
-| [Agent Grounding](book/use-cases/agent-grounding.md) | Ground agents in domain ontologies |
-
----
-
-## Reference
-
-| | |
-|---|---|
-| [API Reference](reference/api.md) | Full method reference — all seven verbs |
-| [OpenCypher Compatibility](reference/opencypher-compatibility.md) | Feature matrix — v0.5.0 (100%) |
-| [TCK Compliance](reference/tck-compliance.md) | 3,897 / 3,897 passing |
-| [Datasets (backlog)](guide/datasets/overview.md) | Planned open-dataset catalogs — not shipped in v0.5.0 |
-| [Changelog](reference/changelog.md) | Keep a Changelog notes |
-
----
-
-## Design Principles
-
-1. **Correctness over performance** — openCypher semantics verified against the full TCK
-2. **Zero configuration** — `pip install graphforge`, no servers, no connection strings
-3. **Inspectable** — `explain` at every compiler stage; structured errors with source spans
-4. **Arrow-first results** — every method returns an Apache Arrow Table
-
----
-
-## Contribute & operate
-
-| | |
-|---|---|
-| [Documentation map](README.md) | Public docs map and site tooling |
-| [Contributing](development/contributing.md) | How to develop and send changes |
-| [Testing strategy](engineering/TESTING.md) | How we prove correctness |
-| [Release process](development/release-process.md) | How verified artifacts ship |
-| [Product roadmap](releases/roadmap.md) | Near-term product direction |
-
----
-
-## Engineering
-
-| | |
-|---|---|
-| [Engineering overview](engineering/README.md) | Lifecycle: architecture → test → publish → observe |
-| [Architecture Decision Records](adr/README.md) | Engineering decisions for the v0.5.0 keepers (nav: Engineering) |
-| [ADR decision log](engineering/adrs/README.md) | Index linking the `docs/adr/` bodies |
-
-Private product & strategy DocSlime docs live in
-[`graphforge-nextjs`](https://github.com/CurateLabs/graphforge-nextjs) (not on this site).
+| [Guide overview](guide/overview.md) | Navigate everyday GraphForge workflows |
+| [Cypher guide](guide/cypher-guide.md) | Query and mutate graphs with openCypher |
+| [Graph construction](guide/graph-construction.md) | Build graphs through Rust-owned APIs and Cypher |
+| [Analytics integration](guide/analytics-integration.md) | Work with Arrow, pandas, Polars, and analyst verbs |
+| [VS Code commands](guide/vscode-extension/commands.md) | Run GraphForge from VS Code or a compatible editor |
+| [Agent interop](guide/vscode-extension/agent-interop.md) | Drive structured extension commands from coding agents |
 
 ---
 
 ## Architecture at a glance
 
-GraphForge exposes seven analyst-intent methods that share a single Parquet-backed storage layer.
+GraphForge exposes one Rust-owned engine through Cypher, analyst-intent APIs, and repository
+lifecycle commands:
 
+```text
+Python (PyO3, thin) ─┐
+Node (N-API, thin) ──┼──> gf-api ──> Arrow results
+CLI (thin launcher) ─┘
+
+Cypher: gf-cypher ──> gf-ir ──> gf-rel ──> gf-exec
+                                                   └──> gf-storage (Parquet + JSON metadata)
+Analyst verbs bypass the Cypher parser and dispatch through Rust-owned typed handlers.
 ```
-forge.execute("MATCH …")         →  Cypher path     (parser → binder → Graph IR → DataFusion)
-forge.rank("Person", by=…)       →  Algorithm path  (centrality / structural scoring)
-forge.cluster("Person", by=…)    →  Algorithm path  (community detection, components)
-forge.paths(alice, bob, by=…)    →  Algorithm path  (shortest paths, flow, reachability)
-forge.analyze(by=…)              →  Algorithm path  (DAG, coloring, spanning trees, embeddings)
-forge.similar("Person", by=…)    →  Algorithm path  (pairwise node similarity)
-forge.find("query", …)           →  Search path     (text + vector hybrid search)
-```
 
-The Rust core uses a hand-written recursive-descent + Pratt expression parser, DataFusion-backed
-query execution, and Parquet storage. First-class bindings for Python (PyO3/maturin),
-Node (napi-rs), Swift (UniFFI), and Kotlin (UniFFI) all return Arrow results.
+Python, Node, the CLI, and the VS Code extension project the same engine behavior. Swift and
+Kotlin bindings are planned rather than shipped. See the
+[architecture overview](book/architecture/overview.md) for storage, execution, ontology,
+knowledge, checkpoint, and compatibility contracts.
 
-See [Architecture Overview](book/architecture/overview.md).
+---
+
+## Understand and reference
+
+| Page | Job |
+|---|---|
+| [Book](book/README.md) | Explore architecture, research, and deeper usage narratives |
+| [API reference](reference/api.md) | Look up engine, lifecycle, and analyst surfaces |
+| [Algorithm catalog](book/architecture/algorithms.md) | Choose rank, cluster, paths, analyze, or similar algorithms |
+| [OpenCypher compatibility](reference/opencypher-compatibility.md) | Inspect supported language behavior |
+| [TCK compliance](reference/tck-compliance.md) | Review the 3,897 / 3,897 language gate |
+| [Changelog](reference/changelog.md) | Track current behavior changes |
+
+---
+
+## Contribute and operate
+
+| Page | Job |
+|---|---|
+| [Documentation map](README.md) | Understand the public information architecture |
+| [Contributing](development/contributing.md) | Develop and send focused changes |
+| [Testing](engineering/TESTING.md) | See how GraphForge proves behavior |
+| [Publishing](engineering/PUBLISHING.md) | Follow package and release boundaries |
+| [Roadmap](releases/roadmap.md) | Review current and planned product surfaces |
+
+GraphForge is open source under the [Apache License 2.0](legal/licensing.md).

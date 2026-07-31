@@ -1,20 +1,16 @@
 # Engineering
 
-Engineering begins with the shared requirements contract and follows it through design,
-pre-release evidence, continuous delivery, and production learning.
+Engineering follows public behavior through design, pre-release evidence, continuous
+delivery, and production learning.
 
 ```mermaid
 flowchart LR
-    Req["REQUIREMENTS.md"] --> Arch["ARCHITECTURE.md"]
+    Issue["Bounded issue"] --> Arch["ARCHITECTURE.md"]
     Arch --> Test["TESTING.md"]
     Test --> Pub["PUBLISHING.md"]
     Pub --> Obs["OBSERVABILITY.md"]
-    Obs -. "experience / requirements" .-> Req
+    Obs -. "validated feedback" .-> Issue
 ```
-
-Private product planning (`REQUIREMENTS.md`, experience journeys) lives in
-[`graphforge-nextjs`](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs);
-the engineering pages below stay public for contributors.
 
 ## Lifecycle
 
@@ -34,9 +30,6 @@ the engineering pages below stay public for contributors.
 | [`../development/`](../development/contributing.md) | Contributor workflow, testing detail, release process |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge-legecy/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
-| [Private experience journeys](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/experience) | Journeys that requirements and tests must cover |
-| [Private strategy](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/strategy) | Positioning and roadmap summary |
-
 | Root `AGENTS.md` | Agent workflow and validation gates |
 
 ## Decision records

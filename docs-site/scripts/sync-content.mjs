@@ -32,12 +32,12 @@ const DIRECTORY_DEFAULTS = {
 /**
  * Public site pages (allowlist). Published left nav is reader-journey ordered in
  * `astro.config.mjs`; paths here keep the Guide / Book / Reference / engineering
- * on-disk layout so URLs stay stable. Product/strategy DocSlime content lives in
- * private `graphforge-nextjs` and is not published here.
+ * on-disk layout so URLs stay stable. Only explicitly allowlisted public sources
+ * are eligible for publication.
  */
 const PAGES = [
   'index.md',
-  // Public documentation map (product/strategy DocSlime lives in private graphforge-nextjs)
+  // Public documentation map
   'README.md',
   // Public contributor engineering lifecycle (ADRs under Engineering per #2771)
   'engineering/README.md',
@@ -55,6 +55,7 @@ const PAGES = [
   'guide/graph-construction.md',
   'guide/analytics-integration.md',
   'guide/exploratory-analyst.md',
+  'guides/repository-integration.md',
   'guide/datasets/overview.md',
   'guide/datasets/ldbc.md',
   'guide/datasets/neo4j-examples.md',

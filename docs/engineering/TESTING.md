@@ -148,18 +148,14 @@ weakened assertions (`AGENTS.md`).
 | NFR-1 TCK | Given the authoritative corpus, when BDD runs, then runnable scenarios pass | `make test-tck` (3897 scenarios) |
 | NFR-7 Surface inventory | Given public non-Cypher methods, when gate runs, then all classified | `tests/contracts/non-cypher-rust-surface.json` + gate script |
 
-Journeys (private):
-[experience/](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/experience).
-
 ## Traceability contract
 
 | Link | Evidence |
 | --- | --- |
-| Product goal → experience | Private [`PRODUCT.md`](https://github.com/CurateLabs/graphforge-nextjs/blob/main/docs/PRODUCT.md), [experience/](https://github.com/CurateLabs/graphforge-nextjs/tree/main/docs/experience) |
-| Experience → requirement | IDs in private [`REQUIREMENTS.md`](https://github.com/CurateLabs/graphforge-nextjs/blob/main/docs/REQUIREMENTS.md) |
-| Requirement → BDD / scenario | Behavior trace in REQUIREMENTS.md; TCK scenarios for Cypher |
+| Public behavior → architecture / ADR | [`ARCHITECTURE.md`](ARCHITECTURE.md), [`../adr/`](../adr/) |
+| Behavior → BDD / scenario | TCK scenarios for Cypher; documented behavior tables for other surfaces |
 | Scenario → test | Paths above; contract manifests under `tests/contracts/` |
-| Model → architecture / ADR | [`ARCHITECTURE.md`](ARCHITECTURE.md), [`../adr/`](../adr/) |
+| Public API → contract inventory | Versioned manifests under `tests/contracts/` and their gate scripts |
 
 ## Evaluation against product goals
 
