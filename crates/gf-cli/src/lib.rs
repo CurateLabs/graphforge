@@ -1,7 +1,7 @@
 //! Reusable GraphForge command-line interface.
 #![forbid(unsafe_code)]
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use arrow::ipc::writer::StreamWriter;
@@ -14,6 +14,185 @@ use gf_api::{
     RepositoryContext, RevertCheckpointRequest,
 };
 use uuid::Uuid;
+
+include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
+
+const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_SKILL_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SKILL_PATH_BYTES: usize = 1024;
+
+fn project_skill_bundle() -> gf_api::SkillBundle<'static> {
+    gf_api::SkillBundle {
+        manifest: PROJECT_SKILL_MANIFEST,
+        files: PROJECT_SKILL_FILES,
+    }
+}
+
+struct OwnedSkillFile {
+    path: String,
+    bytes: Vec<u8>,
+}
+
+struct OwnedSkillBundle {
+    manifest: Vec<u8>,
+    files: Vec<OwnedSkillFile>,
+}
+
+fn read_bounded_file(
+    path: &Path,
+    maximum: u64,
+    message: &'static str,
+) -> Result<Vec<u8>, gf_api::GfError> {
+    let file =
+        std::fs::File::open(path).map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err(gf_api::GfError::Validation(message.into()));
+    }
+    let capacity =
+        usize::try_from(metadata.len()).map_err(|_| gf_api::GfError::Validation(message.into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(maximum + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if bytes.len() as u64 > maximum {
+        return Err(gf_api::GfError::Validation(message.into()));
+    }
+    Ok(bytes)
+}
+
+fn load_skill_file(
+    root: &Path,
+    entry: &serde_json::Value,
+) -> Result<(String, PathBuf, u64), gf_api::GfError> {
+    let path = entry
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| gf_api::GfError::Validation("project skill file path is required".into()))?;
+    if path.is_empty() || path.len() > MAX_SKILL_PATH_BYTES {
+        return Err(gf_api::GfError::Validation(
+            "project skill file path exceeds byte bound".into(),
+        ));
+    }
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(gf_api::GfError::Validation(
+            "project skill file path is not contained".into(),
+        ));
+    }
+    let mut candidate = root.to_path_buf();
+    for component in relative.components() {
+        candidate.push(component);
+        let component_metadata = std::fs::symlink_metadata(&candidate)
+            .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+        if component_metadata.file_type().is_symlink() {
+            return Err(gf_api::GfError::Validation(
+                "packaged project skill paths must not contain symlinks".into(),
+            ));
+        }
+    }
+    let file_metadata = std::fs::symlink_metadata(&candidate)
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
+        return Err(gf_api::GfError::Validation(
+            "packaged project skill must be a real file".into(),
+        ));
+    }
+    if file_metadata.len() > MAX_SKILL_FILE_BYTES {
+        return Err(gf_api::GfError::Validation(
+            "packaged project skill exceeds per-file byte bound".into(),
+        ));
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if !canonical.starts_with(root) {
+        return Err(gf_api::GfError::Validation(
+            "project skill file path escaped its bundle".into(),
+        ));
+    }
+    Ok((path.to_owned(), canonical, file_metadata.len()))
+}
+
+fn load_skill_bundle(root: &Path) -> Result<OwnedSkillBundle, gf_api::GfError> {
+    let metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(gf_api::GfError::Validation(
+            "packaged skill bundle root must be a real directory".into(),
+        ));
+    }
+    let root = root
+        .canonicalize()
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    let manifest_path = root.join("manifest.json");
+    let manifest_metadata = std::fs::symlink_metadata(&manifest_path)
+        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?;
+    if manifest_metadata.file_type().is_symlink() || !manifest_metadata.is_file() {
+        return Err(gf_api::GfError::Validation(
+            "packaged skill manifest must be a real file".into(),
+        ));
+    }
+    if manifest_metadata.len() > MAX_SKILL_MANIFEST_BYTES {
+        return Err(gf_api::GfError::Validation(
+            "packaged skill manifest exceeds byte bound".into(),
+        ));
+    }
+    let manifest = read_bounded_file(
+        &manifest_path,
+        MAX_SKILL_MANIFEST_BYTES,
+        "packaged skill manifest exceeds byte bound",
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&manifest).map_err(|error| {
+        gf_api::GfError::Validation(format!("invalid project skill manifest: {error}"))
+    })?;
+    let entries = value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            gf_api::GfError::Validation("project skill manifest files are required".into())
+        })?;
+    if entries.len() > 256 {
+        return Err(gf_api::GfError::Validation(
+            "project skill bundle exceeds file bound".into(),
+        ));
+    }
+    let mut prepared = Vec::with_capacity(entries.len());
+    let mut total_bytes = 0_u64;
+    for entry in entries {
+        let file = load_skill_file(&root, entry)?;
+        total_bytes = total_bytes.checked_add(file.2).ok_or_else(|| {
+            gf_api::GfError::Validation(
+                "packaged project skill bundle exceeds total byte bound".into(),
+            )
+        })?;
+        if total_bytes > MAX_SKILL_BUNDLE_BYTES {
+            return Err(gf_api::GfError::Validation(
+                "packaged project skill bundle exceeds total byte bound".into(),
+            ));
+        }
+        prepared.push(file);
+    }
+    let mut files = Vec::with_capacity(prepared.len());
+    for (path, canonical, _) in prepared {
+        files.push(OwnedSkillFile {
+            path,
+            bytes: read_bounded_file(
+                &canonical,
+                MAX_SKILL_FILE_BYTES,
+                "packaged project skill exceeds per-file byte bound",
+            )?,
+        });
+    }
+    Ok(OwnedSkillBundle { manifest, files })
+}
 
 /// GraphForge command-line interface.
 #[derive(Parser)]
@@ -35,6 +214,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Internal packaged project-skill asset root used by distribution wrappers.
+    #[arg(long, global = true, hide = true)]
+    skills_bundle_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -42,7 +225,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize repository-local GraphForge definitions and state.
-    Init,
+    Init(InitArgs),
     /// Validate declared definitions and source digests without ingesting data.
     Sync,
     /// Remove only repository-local runtime state.
@@ -51,6 +234,11 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    /// Manage project-local GraphForge agent skills.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
     },
     /// Restore the complete workspace from a checkpoint.
     Revert(RevertArgs),
@@ -63,6 +251,32 @@ enum Command {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// Do not install missing project-local GraphForge agent skills.
+    #[arg(long)]
+    no_skills: bool,
+}
+
+#[derive(Subcommand)]
+enum SkillsCommand {
+    /// Install the packaged project-local skills.
+    Install(SkillMutationArgs),
+    /// Inspect managed skill provenance and user edits.
+    Status,
+    /// Update managed skills to the packaged bundle.
+    Update(SkillMutationArgs),
+    /// Remove only managed project-local skills.
+    Remove(SkillMutationArgs),
+}
+
+#[derive(Args)]
+struct SkillMutationArgs {
+    /// Explicitly resolve conflicts by replacing edited managed files.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -364,6 +578,7 @@ fn run_repository(
     command: Command,
     project_dir: Option<PathBuf>,
     json: bool,
+    skill_bundle: &gf_api::SkillBundle<'_>,
     output: &mut dyn Write,
 ) -> Result<(), gf_api::GfError> {
     let start = project_dir.unwrap_or(
@@ -377,7 +592,21 @@ fn run_repository(
         }
     );
     let value = match command {
-        Command::Init => serde_json::to_value(repository.init()?),
+        Command::Init(args) => {
+            let init = repository.init_without_skills()?;
+            let skills = if args.no_skills {
+                None
+            } else {
+                Some(repository.skills_install(skill_bundle, false)?)
+            };
+            serde_json::to_value(serde_json::json!({
+                "root": init.root,
+                "created_config": init.created_config,
+                "ignore_changed": init.ignore_changed,
+                "state": init.state,
+                "skills": skills
+            }))
+        }
         Command::Sync => serde_json::to_value(repository.sync()?),
         Command::Remove(args) => serde_json::to_value(repository.remove(args.yes)?),
         Command::Config {
@@ -389,6 +618,18 @@ fn run_repository(
         Command::Config {
             command: ConfigCommand::Resolve,
         } => Ok(repository.resolve_config()?),
+        Command::Skills {
+            command: SkillsCommand::Install(args),
+        } => serde_json::to_value(repository.skills_install(skill_bundle, args.force)?),
+        Command::Skills {
+            command: SkillsCommand::Status,
+        } => serde_json::to_value(repository.skills_status(skill_bundle)?),
+        Command::Skills {
+            command: SkillsCommand::Update(args),
+        } => serde_json::to_value(repository.skills_update(skill_bundle, args.force)?),
+        Command::Skills {
+            command: SkillsCommand::Remove(args),
+        } => serde_json::to_value(repository.skills_remove(args.force)?),
         _ => unreachable!(),
     }
     .map_err(|error| gf_api::GfError::Execution(error.to_string()))?;
@@ -406,6 +647,61 @@ fn run_repository(
     Ok(())
 }
 
+fn run_repository_with_bundle(
+    command: Command,
+    project_dir: Option<PathBuf>,
+    json: bool,
+    bundle_dir: Option<&Path>,
+    output: &mut dyn Write,
+) -> Result<(), gf_api::GfError> {
+    let needs_packaged_bundle = matches!(&command, Command::Init(args) if !args.no_skills)
+        || matches!(
+            &command,
+            Command::Skills {
+                command: SkillsCommand::Install(_)
+                    | SkillsCommand::Status
+                    | SkillsCommand::Update(_)
+            }
+        );
+    if !needs_packaged_bundle {
+        return run_repository(command, project_dir, json, &project_skill_bundle(), output);
+    }
+    let owned_bundle = bundle_dir.map(load_skill_bundle).transpose()?;
+    let owned_files = owned_bundle.as_ref().map(|bundle| {
+        bundle
+            .files
+            .iter()
+            .map(|file| gf_api::SkillBundleFile {
+                path: &file.path,
+                bytes: &file.bytes,
+            })
+            .collect::<Vec<_>>()
+    });
+    let embedded = project_skill_bundle();
+    let skill_bundle =
+        owned_bundle
+            .as_ref()
+            .zip(owned_files.as_ref())
+            .map_or(embedded, |(bundle, files)| gf_api::SkillBundle {
+                manifest: &bundle.manifest,
+                files,
+            });
+    run_repository(command, project_dir, json, &skill_bundle, output)
+}
+
+fn resolve_project_path(
+    project: Option<PathBuf>,
+    project_dir: Option<PathBuf>,
+) -> Result<PathBuf, gf_api::GfError> {
+    match project {
+        Some(path) => Ok(path),
+        None => Ok(RepositoryContext::discover(project_dir.unwrap_or(
+            std::env::current_dir().map_err(|error| gf_api::GfError::Storage(error.to_string()))?,
+        ))?
+        .state_path),
+    }
+}
+
 fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -419,22 +715,21 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<(), gf_api::GfError> {
     };
     if matches!(
         &command,
-        Command::Init | Command::Sync | Command::Remove(_) | Command::Config { .. }
+        Command::Init(_)
+            | Command::Sync
+            | Command::Remove(_)
+            | Command::Config { .. }
+            | Command::Skills { .. }
     ) {
-        return run_repository(command, cli.project_dir, cli.json, output);
+        return run_repository_with_bundle(
+            command,
+            cli.project_dir,
+            cli.json,
+            cli.skills_bundle_dir.as_deref(),
+            output,
+        );
     }
-    let path = match cli.project {
-        Some(path) => path,
-        None => {
-            RepositoryContext::discover(
-                cli.project_dir.unwrap_or(
-                    std::env::current_dir()
-                        .map_err(|error| gf_api::GfError::Storage(error.to_string()))?,
-                ),
-            )?
-            .state_path
-        }
-    };
+    let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
         Command::Import(args) => return run_import(args, &path, cli.json, output),
         command => command,
@@ -612,6 +907,19 @@ pub fn run_process() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn write_loader_manifest(root: &Path, paths: &[String]) {
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "files": paths.iter().map(|path| serde_json::json!({"path": path})).collect::<Vec<_>>()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
 
     #[test]
     fn reusable_execution_normalizes_identity_and_captures_structured_errors() {
@@ -772,6 +1080,150 @@ mod tests {
                 "/tmp/out.gfportable",
             ]))
             .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn packaged_skill_loader_rejects_a_manifest_symlink() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("real-manifest.json"), br#"{"files":[]}"#).unwrap();
+        std::os::unix::fs::symlink(
+            root.path().join("real-manifest.json"),
+            root.path().join("manifest.json"),
+        )
+        .unwrap();
+        let error = load_skill_bundle(root.path()).err().unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("packaged skill manifest must be a real file")
+        );
+    }
+
+    #[test]
+    fn packaged_skill_loader_rejects_non_file_and_oversized_manifests() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("manifest.json")).unwrap();
+        assert!(
+            load_skill_bundle(root.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("packaged skill manifest must be a real file")
+        );
+
+        let root = tempdir().unwrap();
+        let manifest = fs::File::create(root.path().join("manifest.json")).unwrap();
+        manifest.set_len(MAX_SKILL_MANIFEST_BYTES + 1).unwrap();
+        assert!(
+            load_skill_bundle(root.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("packaged skill manifest exceeds byte bound")
+        );
+    }
+
+    #[test]
+    fn packaged_skill_loader_bounds_paths_files_and_total_payload() {
+        let root = tempdir().unwrap();
+        write_loader_manifest(root.path(), &["x".repeat(MAX_SKILL_PATH_BYTES + 1)]);
+        assert!(
+            load_skill_bundle(root.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("project skill file path exceeds byte bound")
+        );
+
+        let root = tempdir().unwrap();
+        let path = "graphforge-bootstrap/large.md".to_owned();
+        fs::create_dir(root.path().join("graphforge-bootstrap")).unwrap();
+        fs::File::create(root.path().join(&path))
+            .unwrap()
+            .set_len(MAX_SKILL_FILE_BYTES + 1)
+            .unwrap();
+        write_loader_manifest(root.path(), std::slice::from_ref(&path));
+        assert!(
+            load_skill_bundle(root.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("packaged project skill exceeds per-file byte bound")
+        );
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("graphforge-bootstrap")).unwrap();
+        let paths = (0..3)
+            .map(|index| format!("graphforge-bootstrap/{index}.md"))
+            .collect::<Vec<_>>();
+        for path in &paths {
+            fs::File::create(root.path().join(path))
+                .unwrap()
+                .set_len(3 * 1024 * 1024)
+                .unwrap();
+        }
+        write_loader_manifest(root.path(), &paths);
+        assert!(
+            load_skill_bundle(root.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("packaged project skill bundle exceeds total byte bound")
+        );
+    }
+
+    #[test]
+    fn no_skills_init_does_not_load_the_distribution_bundle() {
+        let project = tempdir().unwrap();
+        let missing_bundle = project.path().join("missing-bundle");
+        let result = execute([
+            "graphforge".to_owned(),
+            "--project-dir".to_owned(),
+            project.path().to_string_lossy().into_owned(),
+            "--skills-bundle-dir".to_owned(),
+            missing_bundle.to_string_lossy().into_owned(),
+            "init".to_owned(),
+            "--no-skills".to_owned(),
+        ]);
+        assert_eq!(
+            result.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!project.path().join(".agents").exists());
+        let validate = execute([
+            "graphforge".to_owned(),
+            "--project-dir".to_owned(),
+            project.path().to_string_lossy().into_owned(),
+            "--skills-bundle-dir".to_owned(),
+            missing_bundle.to_string_lossy().into_owned(),
+            "config".to_owned(),
+            "validate".to_owned(),
+        ]);
+        assert_eq!(
+            validate.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&validate.stderr)
+        );
+
+        let remove = execute([
+            "graphforge".to_owned(),
+            "--project-dir".to_owned(),
+            project.path().to_string_lossy().into_owned(),
+            "--skills-bundle-dir".to_owned(),
+            missing_bundle.to_string_lossy().into_owned(),
+            "skills".to_owned(),
+            "remove".to_owned(),
+        ]);
+        assert_eq!(
+            remove.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&remove.stderr)
         );
     }
 }

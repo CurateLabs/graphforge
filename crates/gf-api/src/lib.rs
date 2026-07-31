@@ -100,7 +100,8 @@ pub use portable::{
 };
 pub use repository::{
     GitProvenance, ProjectConfig, RepositoryContext, RepositoryInitReceipt,
-    RepositoryRemoveReceipt, RepositorySyncReceipt,
+    RepositoryRemoveReceipt, RepositorySyncReceipt, SkillBundle, SkillBundleFile,
+    SkillMutationReceipt, SkillStatus, SkillStatusReceipt,
 };
 
 // Re-export the foundational types callers need alongside the facade, so a

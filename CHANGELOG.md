@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Package host-discoverable project-local GraphForge skills from one canonical
+  source in both the `graphforge` wheel and `@graphforge/cli`, with
+  deterministic compatibility metadata and byte-parity checks (#230).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes (#226).

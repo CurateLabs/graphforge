@@ -1,3 +1,9 @@
+import { fileURLToPath } from "node:url";
+
+const packagedSkills = fileURLToPath(
+  new URL("../project-skills/", import.meta.url),
+);
+
 /**
  * Forward one invocation to the Rust-owned CLI contract.
  *
@@ -17,7 +23,11 @@ export async function run(
     throw new TypeError("@graphforge/node does not expose the runCli contract");
   }
 
-  const result = await binding.runCli(args);
+  const result = await binding.runCli([
+    "--skills-bundle-dir",
+    packagedSkills,
+    ...args,
+  ]);
   const exitCode = result.exitCode ?? result.exit_code;
   if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) {
     throw new TypeError("@graphforge/node returned an invalid CLI exit code");

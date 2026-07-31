@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import sys
 from unittest.mock import patch
 
@@ -29,7 +30,11 @@ def test_main_forwards_arguments_bytes_and_exit_code() -> None:
         patch.object(sys, "stderr", stderr),
     ):
         assert cli.main(["graphforge", "--json", "sync"]) == 3
-    assert seen == [["graphforge", "--json", "sync"]]
+    assert len(seen) == 1
+    assert seen[0][0] == "graphforge"
+    assert seen[0][1] == "--skills-bundle-dir"
+    assert Path(seen[0][2]).name == "_project_skills"
+    assert seen[0][3:] == ["--json", "sync"]
     assert stdout.buffer.getvalue() == b'{"ok":true}\n'
     assert stderr.buffer.getvalue() == b'{"error":{"code":"GF_STORAGE"}}\n'
 
@@ -46,7 +51,11 @@ def test_main_uses_process_arguments() -> None:
         patch.object(sys, "argv", ["graphforge", "--version"]),
     ):
         assert cli.main() == 0
-    assert seen == [["graphforge", "--version"]]
+    assert len(seen) == 1
+    assert seen[0][0] == "graphforge"
+    assert seen[0][1] == "--skills-bundle-dir"
+    assert Path(seen[0][2]).name == "_project_skills"
+    assert seen[0][3:] == ["--version"]
 
 
 if __name__ == "__main__":

@@ -504,6 +504,7 @@ jobs:
           pnpm test:node-cli
           pnpm format:node-cli
           pnpm smoke:node-cli
+          pnpm --filter @graphforge/cli test:lifecycle
 
       - name: Run Node BDD suite
         working-directory: tests/features/node

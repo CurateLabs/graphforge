@@ -1976,6 +1976,7 @@ dependencies = [
  "arrow",
  "cucumber",
  "datafusion",
+ "fs4",
  "futures",
  "gf-core",
  "gf-cypher",
