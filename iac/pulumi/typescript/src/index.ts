@@ -474,16 +474,27 @@ function validateResolvedConfig(resolvedConfig: JsonObject): JsonObject[] {
   return targets;
 }
 
-function canonicalJson(value: JsonValue): string {
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function encodeJsonScalar(value: JsonPrimitive): string {
+  return JSON.stringify(value).replace(
+    /[<>&\u2028\u2029]/gu,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+export function canonicalJson(value: JsonValue): string {
   if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
+    return encodeJsonScalar(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(",")}]`;
   }
-  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+  const entries = Object.entries(value).sort(([left], [right]) => compareCodeUnits(left, right));
   return `{${entries
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+    .map(([key, item]) => `${encodeJsonScalar(key)}:${canonicalJson(item)}`)
     .join(",")}}`;
 }
 

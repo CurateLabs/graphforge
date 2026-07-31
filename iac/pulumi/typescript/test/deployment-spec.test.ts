@@ -9,6 +9,7 @@ import {
   DeploymentSpec,
   DeploymentSpecDocument,
   JsonValue,
+  canonicalJson,
   renderDeploymentSpec,
   renderDeploymentSpecJson,
 } from "../src/index";
@@ -20,7 +21,12 @@ const fixturePath = resolve(
 const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
   [key: string]: JsonValue;
 };
-const productionLocator = "registry.example/graphforge/runtime@sha256:" + "c".repeat(64);
+const goldenPath = resolve(
+  __dirname,
+  "../../../../../docs/contracts/examples/graphforge-deployment-spec-production-v1.json",
+);
+const golden = JSON.parse(readFileSync(goldenPath, "utf8")) as DeploymentSpecDocument;
+const productionLocator = "registry.example.com/graphforge/core@sha256:" + "c".repeat(64);
 
 function cloneFixture(): { [key: string]: JsonValue } {
   return JSON.parse(JSON.stringify(fixture)) as { [key: string]: JsonValue };
@@ -34,11 +40,16 @@ function target(config: { [key: string]: JsonValue }, id: string): Record<string
 }
 
 function canonical(value: JsonValue): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value).replace(
+      /[<>&\u2028\u2029]/gu,
+      (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    );
+  }
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   return `{${Object.entries(value)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .map(([key, item]) => `${canonical(key)}:${canonical(item)}`)
     .join(",")}}`;
 }
 
@@ -96,12 +107,45 @@ test("renderer emits the frozen provider-neutral deployment shape", () => {
       status: "requirements_declared",
     },
   });
+  assert.deepEqual(spec, golden);
   assert.equal(
     renderDeploymentSpecJson(fixture, "production", productionLocator),
     `${canonical(spec)}\n`,
   );
   assert.doesNotMatch(JSON.stringify(spec), /example\.invalid\/graphforge\/example\.parquet/);
   assert.doesNotMatch(JSON.stringify(spec), /\.graphforge\/state/);
+});
+
+test("canonical JSON orders punctuation and case by UTF-16 code units", () => {
+  const mixed: JsonValue = {
+    a: 1,
+    A: 2,
+    _: 3,
+    "-": 4,
+    é: 5,
+    Z: 6,
+    aa: 7,
+    a_: 8,
+    $: 9,
+  };
+  const expected = '{"$":9,"-":4,"A":2,"Z":6,"_":3,"a":1,"a_":8,"aa":7,"é":5}';
+  assert.equal(canonicalJson(mixed), expected);
+  assert.equal(canonical(mixed), expected);
+});
+
+test("canonical JSON uses Terraform-compatible escaping for permitted text", () => {
+  const escaped = cloneFixture();
+  const artifact = target(escaped, "production").artifact as Record<string, JsonValue>;
+  artifact.version = "v<>&\u2028\u2029";
+  const encoded = renderDeploymentSpecJson(escaped, "production", productionLocator);
+
+  assert.match(encoded, /"version":"v\\u003c\\u003e\\u0026\\u2028\\u2029"/);
+  assert.equal(encoded.includes("<"), false);
+  assert.equal(encoded.includes(">"), false);
+  assert.equal(encoded.includes("&"), false);
+  assert.equal(encoded.includes("\u2028"), false);
+  assert.equal(encoded.includes("\u2029"), false);
+  assert.equal(encoded, `${canonical(JSON.parse(encoded) as JsonValue)}\n`);
 });
 
 test("renderer supports every configured artifact kind without choosing a provider", () => {

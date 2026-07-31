@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 
 import pulumi
 
+from ._canonical import canonical_json_text
 from .validation import JsonObject, validate_target
 
 _CONTROL_OR_SPACE = re.compile(r"[\x00-\x20\x7f]")
@@ -21,7 +21,7 @@ _OCI_REPOSITORY = re.compile(
 )
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise ValueError(f"invalid graphforge-deployment-spec/1: {message}")
 
 
@@ -105,8 +105,8 @@ def render_deployment_spec(
             "write": target["write"],
         },
         "bindings": {
-            "secret_ids": target["secret_ids"],
-            "source_ids": target["source_ids"],
+            "secret_ids": list(target["secret_ids"]),
+            "source_ids": list(target["source_ids"]),
         },
         "ownership": {
             "data": "external",
@@ -124,22 +124,17 @@ def render_deployment_spec(
     }
 
 
+def _canonical_text(spec: JsonObject) -> str:
+    return canonical_json_text(spec) + "\n"
+
+
 def render_deployment_spec_json(
     resolved_config: Mapping[str, Any],
     target_id: str,
     artifact_locator: str,
 ) -> str:
     """Return canonical UTF-8 JSON text with a single trailing newline."""
-    spec = render_deployment_spec(resolved_config, target_id, artifact_locator)
-    return (
-        json.dumps(
-            spec,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    )
+    return _canonical_text(render_deployment_spec(resolved_config, target_id, artifact_locator))
 
 
 class DeploymentSpec(pulumi.ComponentResource):
@@ -158,15 +153,7 @@ class DeploymentSpec(pulumi.ComponentResource):
         opts: pulumi.ResourceOptions | None = None,
     ) -> None:
         spec = render_deployment_spec(resolved_config, target_id, artifact_locator)
-        canonical_json = (
-            json.dumps(
-                spec,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            + "\n"
-        )
+        canonical_json = _canonical_text(spec)
         # The complete resolved config is deliberately omitted from component
         # inputs and state. The closed projection contains bounded IDs only.
         super().__init__("graphforge:deployment:DeploymentSpec", resource_name, {}, opts)

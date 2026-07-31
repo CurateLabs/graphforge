@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import unittest
 from copy import deepcopy
@@ -95,6 +96,21 @@ def test_renderer_matches_the_shared_pretty_golden_as_an_object() -> None:
     locator = expected["artifact"]["locator"]
     encoded = render_deployment_spec_json(RESOLVED, "production", locator)
     assert json.loads(encoded) == expected
+    assert hashlib.sha256(encoded.encode()).hexdigest() == (
+        "4c0d0f6e75decabea08be4333413b2b4bad8b8d1fea5ba282afc10b708e89445"
+    )
+
+
+def test_canonical_renderer_matches_terraform_legacy_escaping() -> None:
+    resolved = deepcopy(RESOLVED)
+    production = next(item for item in resolved["targets"] if item["id"] == "production")
+    special = "0.5.1<>&\u2028\u2029"
+    production["artifact"]["version"] = special
+    encoded = render_deployment_spec_json(resolved, "production", PRODUCTION_LOCATOR)
+    assert "<" not in encoded and ">" not in encoded and "&" not in encoded
+    for escape in (r"\u003c", r"\u003e", r"\u0026", r"\u2028", r"\u2029"):
+        assert escape in encoded
+    assert json.loads(encoded)["artifact"]["version"] == special
 
 
 @pytest.mark.parametrize("kind", ["python_wheel", "node_package", "native_binary"])
@@ -171,17 +187,26 @@ def test_oci_locator_rejections_are_bounded(locator: str, message: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "locator",
+    ("locator", "message"),
     [
-        "http://artifacts.example/runtime.whl",
-        "https://user:token@artifacts.example/runtime.whl",
-        "https://artifacts.example/runtime.whl?token=secret",
-        "https://artifacts.example/runtime.whl#sha256",
-        "../runtime.whl",
+        ("http://artifacts.example/runtime.whl", "must be an https URL"),
+        (
+            "https://user:token@artifacts.example/runtime.whl",
+            "must not contain inline credentials",
+        ),
+        (
+            "https://artifacts.example/runtime.whl?token=secret",
+            "must not contain a query or fragment",
+        ),
+        (
+            "https://artifacts.example/runtime.whl#sha256",
+            "must not contain a query or fragment",
+        ),
+        ("../runtime.whl", "must not be a local path"),
     ],
 )
-def test_non_oci_locator_rejects_mutable_or_sensitive_forms(locator: str) -> None:
-    with pytest.raises(ValueError):
+def test_non_oci_locator_rejects_mutable_or_sensitive_forms(locator: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
         render_deployment_spec(RESOLVED, "local", locator)
 
 
@@ -234,6 +259,18 @@ def test_secret_and_source_values_never_enter_projection() -> None:
     assert ".graphforge/state" not in encoded
     assert '"secret_ids":["service-token"]' in encoded
     assert '"source_ids":["example-data"]' in encoded
+
+
+def test_projection_copies_caller_owned_binding_lists() -> None:
+    resolved = deepcopy(RESOLVED)
+    spec = render_deployment_spec(resolved, "production", PRODUCTION_LOCATOR)
+    production = next(item for item in resolved["targets"] if item["id"] == "production")
+    production["secret_ids"].append("later-secret")
+    production["source_ids"].append("later-source")
+    assert spec["bindings"] == {
+        "secret_ids": ["service-token"],
+        "source_ids": ["example-data"],
+    }
 
 
 class RecordingMocks(Mocks):

@@ -26,14 +26,18 @@ locals {
   ]
   selected = try(one(local.selected_targets), {})
 
-  artifact      = try(local.selected.artifact, {})
-  artifact_kind = try(local.artifact.kind, "")
-  artifact_sha  = try(local.artifact.sha256, "")
-  topology      = try(local.selected.topology, {})
-  target_kind   = try(local.selected.kind, "")
-  source_ids    = try(local.selected.source_ids, [])
-  secret_ids    = try(local.selected.secret_ids, [])
-  capabilities  = try(local.selected.capabilities, [])
+  artifact           = try(local.selected.artifact, {})
+  artifact_kind      = try(local.artifact.kind, "")
+  artifact_sha       = try(local.artifact.sha256, "")
+  artifact_sha_valid = can(regex("^[0-9a-f]{64}$", local.artifact_sha))
+  # Never interpolate an unvalidated value into a regular expression. The
+  # sentinel is deliberately valid-shaped but cannot match an invalid pin.
+  artifact_sha_pattern = local.artifact_sha_valid ? local.artifact_sha : "0000000000000000000000000000000000000000000000000000000000000000"
+  topology             = try(local.selected.topology, {})
+  target_kind          = try(local.selected.kind, "")
+  source_ids           = try(local.selected.source_ids, [])
+  secret_ids           = try(local.selected.secret_ids, [])
+  capabilities         = try(local.selected.capabilities, [])
 
   known_source_ids = [for source in try(local.decoded.sources, []) : try(source.id, "")]
   known_secret_ids = [for secret in try(local.decoded.secrets, []) : try(secret.id, "")]
@@ -48,7 +52,7 @@ locals {
     alltrue([for id in local.source_ids : can(regex("^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$", id)) && length(id) <= 64])
   )
   stable_secret_ids = (
-    length(local.secret_ids) <= 256 &&
+    length(local.secret_ids) <= 128 &&
     length(distinct(local.secret_ids)) == length(local.secret_ids) &&
     alltrue([for id in local.secret_ids : can(regex("^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$", id)) && length(id) <= 64])
   )
@@ -84,10 +88,10 @@ locals {
     contains(["python_wheel", "node_package", "native_binary", "oci_image"], local.artifact_kind) &&
     try(length(local.artifact.version), 0) >= 1 &&
     try(length(local.artifact.version), 0) <= 128 &&
-    can(regex("^[0-9a-f]{64}$", local.artifact_sha))
+    local.artifact_sha_valid
   )
   locator_safe = local.artifact_kind == "oci_image" ? (
-    can(regex("^[a-z0-9][a-z0-9.-]*(:[1-9][0-9]{0,4})?/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*@sha256:${local.artifact_sha}$", local.artifact_locator))
+    can(regex("^[a-z0-9][a-z0-9.-]*(:[1-9][0-9]{0,4})?/[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)*@sha256:${local.artifact_sha_pattern}$", local.artifact_locator))
     ) : (
     startswith(local.artifact_locator, "https://") &&
     can(regex("^https://[^/@]+(/|$)", local.artifact_locator)) &&

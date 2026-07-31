@@ -2,43 +2,93 @@
   "cases": [
     {
       "name": "mutable-oci-tag",
+      "diagnostic": "artifact_locator does not match the resolved artifact pin or is mutable",
       "locator": "registry.example/graphforge/authority:latest",
       "jq": "."
     },
     {
       "name": "digest-mismatch",
+      "diagnostic": "artifact_locator does not match the resolved artifact pin or is mutable",
       "locator": "registry.example/graphforge/authority@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "jq": "."
     },
     {
       "name": "credential-bearing-locator",
+      "diagnostic": "artifact_locator must be a bounded credential-free remote locator",
       "locator": "https://user:token@example.invalid/authority.tar.gz",
       "jq": "(.targets[] | select(.id == \"production\") | .artifact.kind) = \"native_binary\""
     },
     {
       "name": "local-locator",
+      "diagnostic": "artifact_locator must be a bounded credential-free remote locator",
       "locator": "../authority.tar.gz",
       "jq": "(.targets[] | select(.id == \"production\") | .artifact.kind) = \"native_binary\""
     },
     {
       "name": "unsupported-ownership",
+      "diagnostic": "selected target topology contains a value outside",
       "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "jq": "(.targets[] | select(.id == \"production\") | .ownership) = \"shared\""
     },
     {
       "name": "unknown-secret-reference",
+      "diagnostic": "must reference declarations",
       "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "jq": "(.targets[] | select(.id == \"production\") | .secret_ids) = [\"missing-secret\"]"
     },
     {
       "name": "credential-bearing-source",
+      "diagnostic": "resolved references must contain secret references only",
       "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "jq": ".sources[0].uri = \"https://user:token@example.invalid/data.parquet\""
     },
     {
       "name": "invalid-replica-count",
+      "diagnostic": "selected target topology contains a value outside",
       "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "jq": "(.targets[] | select(.id == \"production\") | .topology.replicas) = 0"
+    },
+    {
+      "name": "wrong-contract",
+      "diagnostic": "resolved_json must be graphforge-resolved-config/1",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": ".contract = \"graphforge-resolved-config/2\""
+    },
+    {
+      "name": "missing-target",
+      "diagnostic": "must contain exactly one target matching target",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": ".targets |= map(select(.id != \"production\"))"
+    },
+    {
+      "name": "unsupported-artifact",
+      "diagnostic": "target artifact must have a supported kind",
+      "locator": "https://artifacts.example.invalid/core",
+      "jq": "(.targets[] | select(.id == \"production\") | .artifact.kind) = \"archive\""
+    },
+    {
+      "name": "malformed-artifact-sha",
+      "diagnostic": "target artifact must have a supported kind",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .artifact.sha256) = \"[invalid\""
+    },
+    {
+      "name": "duplicate-source-id",
+      "diagnostic": "target source_ids and secret_ids must be bounded, unique stable IDs",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .source_ids) = [\"example-data\", \"example-data\"]"
+    },
+    {
+      "name": "too-many-secret-ids",
+      "diagnostic": "target source_ids and secret_ids must be bounded, unique stable IDs",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": "(.targets[] | select(.id == \"production\") | .secret_ids) = [range(129) | \"secret-\" + tostring]"
+    },
+    {
+      "name": "secret-value-in-contract",
+      "diagnostic": "resolved references must contain secret references only",
+      "locator": "registry.example/graphforge/authority@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "jq": ".secrets[0].value = \"must-not-enter-iac\""
     }
   ]
 }

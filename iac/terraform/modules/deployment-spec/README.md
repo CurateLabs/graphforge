@@ -27,3 +27,10 @@ source/secret IDs. Secret values,
 source URIs, repository paths, graph state, and local data are never emitted.
 OCI artifacts require a matching digest locator; mutable tags, local paths,
 userinfo credentials, URL queries, and fragments fail before apply.
+
+Canonical object keys use Terraform `jsonencode` ordering. For byte parity with
+the Python and TypeScript renderers, the JSON string escapes `<`, `>`, `&`,
+U+2028, and U+2029 as `\u003c`, `\u003e`, `\u0026`, `\u2028`, and
+`\u2029`; arrays retain resolved-config order. The output has exactly one
+trailing LF. Golden tests compare the complete bytes and derive their length
+from the checked-in golden rather than freezing a separate size constant.

@@ -132,6 +132,12 @@ def test_examples_preserve_data_and_secret_boundaries() -> None:
     assert deployment["connectivity"] == {"status": "not_checked"}
     assert deployment["readiness"] == {"status": "not_checked"}
     assert deployment["artifact"]["sha256"] in deployment["artifact"]["locator"]
+    assert deployment["capability_compatibility"]["status"] == "requirements_declared"
+    invalid_deployment = deepcopy(deployment)
+    invalid_deployment["infrastructure"]["status"] = "graphforge_owned"
+    assert not Draft202012Validator(deployment_schema, registry=registry).is_valid(
+        invalid_deployment
+    )
     assert infra["capability_compatibility"]["status"] == "requirements_declared"
 
 
