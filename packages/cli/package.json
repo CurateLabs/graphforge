@@ -32,7 +32,8 @@
     "lib/",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "engines": {
     "node": ">=20"

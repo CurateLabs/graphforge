@@ -10,7 +10,9 @@ third-party material distributed under its own Apache License 2.0 and NOTICE.
 Dependencies and other third-party materials remain under their respective
 licenses and are not relicensed as part of GraphForge.
 
-This package is a JavaScript launcher and contains no Rust binary. Its native
-`@graphforge/node` dependency carries the machine-generated third-party Rust
-dependency notices required for that binary redistribution. Rust dependency
-SPDX allowlisting is enforced with `cargo deny check licenses` using deny.toml.
+A machine-generated inventory of third-party Rust dependency license texts for
+binary redistributions (Python wheels, native Node addons, and the CLI) is in
+legal/THIRD_PARTY_NOTICES.md. Published binary packages include a copy of that
+file. Regenerate it with `make third-party-notices` after dependency changes.
+Rust dependency SPDX allowlisting is enforced with `cargo deny check licenses`
+using deny.toml.
