@@ -104,8 +104,11 @@ editing, project lifecycle, portable interchange, checkpoint revert, and
 destructive-operation guards. The Rust `gf` CLI is the reference behavior;
 Python and Node expose thin `uvx graphforge` and `npx @graphforge/cli` surfaces.
 Portable interchange packages one complete project generation; it does not
-define the ontology-document inspection, suggestion, validation, or export
-contract owned by #236, nor the thin binding parity owned by #237.
+redefine the ontology-document inspection, suggestion, validation, or export
+contract delivered by #236, nor the thin binding parity and durable
+adopt/clear behavior delivered by #237. Repository and IaC surfaces consume
+only bounded ontology references and digests where needed; they do not infer or
+change ontology authority.
 
 Skills have one checked-in source. Python and npm ship parity-checked copies and
 install directly under `.agents/skills/`; Python never shells out to NPX.

@@ -157,7 +157,10 @@ placed there remain outside the code repository. Keep tracked schemas,
 ontology, migrations, and seed recipes separate from these data files.
 
 This whole-project interchange surface is distinct from ontology-document
-inspection, suggestion, validation, and YAML/JSON export. The Rust-owned
-ontology lifecycle is tracked by #236, with thin Python and Node parity tracked
-by #237. Repository `export` never substitutes for ontology export, and
-ontology export never packages graph data or a project generation.
+inspection, suggestion, validation, and YAML/JSON export. #236 delivered the
+Rust-owned ontology lifecycle, and #237 delivered thin Python and Node parity
+including durable ontology adoption and clear. Repository `export` never
+substitutes for ontology export, and ontology export never packages graph data
+or a project generation. Repository initialization and synchronization preserve
+that authority boundary: they never suggest, adopt, clear, or export an
+ontology implicitly.

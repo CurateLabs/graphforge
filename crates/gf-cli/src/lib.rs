@@ -1126,22 +1126,9 @@ fn write_error(error: &gf_api::GfError, json: bool, output: &mut dyn Write) -> i
     }
 }
 
-#[derive(serde::Serialize)]
 struct JsonErrorDetails {
     source: &'static str,
     kind: &'static str,
-}
-
-#[derive(serde::Serialize)]
-struct JsonErrorBody<'a> {
-    code: &'static str,
-    message: &'a str,
-    details: JsonErrorDetails,
-}
-
-#[derive(serde::Serialize)]
-struct JsonErrorEnvelope<'a> {
-    error: JsonErrorBody<'a>,
 }
 
 fn write_json_error(
@@ -1150,18 +1137,14 @@ fn write_json_error(
     message: &str,
     details: JsonErrorDetails,
 ) -> io::Result<()> {
-    serde_json::to_writer(
-        &mut *output,
-        &JsonErrorEnvelope {
-            error: JsonErrorBody {
-                code,
-                message,
-                details,
-            },
-        },
+    let code = serde_json::to_string(code).map_err(io::Error::other)?;
+    let message = serde_json::to_string(message).map_err(io::Error::other)?;
+    let source = serde_json::to_string(details.source).map_err(io::Error::other)?;
+    let kind = serde_json::to_string(details.kind).map_err(io::Error::other)?;
+    writeln!(
+        output,
+        "{{\"error\":{{\"code\":{code},\"message\":{message},\"details\":{{\"source\":{source},\"kind\":{kind}}}}}}}"
     )
-    .map_err(io::Error::other)?;
-    output.write_all(b"\n")
 }
 
 const fn clap_error_kind(kind: ErrorKind) -> &'static str {
