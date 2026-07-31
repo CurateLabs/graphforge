@@ -56,9 +56,9 @@ GraphForge remains embedded; remote transports are separate extensions.
 
 ## Documentation and support
 
-- [Documentation](https://curatelabs.github.io/graphforge-legecy/)
-- [Issue tracker](https://github.com/CurateLabs/graphforge-x/issues)
-- [Source](https://github.com/CurateLabs/graphforge-x/tree/main/crates/gf-bindings-node)
+- [Documentation](https://github.com/CurateLabs/graphforge/tree/main/docs)
+- [Issue tracker](https://github.com/CurateLabs/graphforge/issues)
+- [Source](https://github.com/CurateLabs/graphforge/tree/main/crates/gf-bindings-node)
 
 ## License
 

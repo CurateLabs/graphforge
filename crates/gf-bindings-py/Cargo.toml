@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 gf-api = { path = "../gf-api" }
+gf-cli = { path = "../gf-cli" }
 # `StreamExt::next` drives the facade's async streaming query one batch per pull
 # in the synchronous RecordBatchReader adapter (execute_stream, #587).
 futures = { workspace = true }

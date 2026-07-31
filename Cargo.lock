@@ -2014,6 +2014,7 @@ version = "0.5.0-dev"
 dependencies = [
  "arrow",
  "gf-api",
+ "gf-cli",
  "napi",
  "napi-build",
  "napi-derive",
@@ -2028,6 +2029,7 @@ dependencies = [
  "arrow",
  "futures",
  "gf-api",
+ "gf-cli",
  "pyo3",
  "serde_json",
  "uuid",

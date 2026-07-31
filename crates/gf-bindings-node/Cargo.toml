@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 gf-api = { path = "../gf-api" }
+gf-cli = { path = "../gf-cli" }
 # `ipc` (default in arrow 58) serializes execute() results to an Arrow IPC
 # stream Buffer for the JS side to decode with apache-arrow.
 arrow = { workspace = true }

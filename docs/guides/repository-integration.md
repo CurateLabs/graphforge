@@ -4,6 +4,17 @@ GraphForge uses one `.graphforge/` directory. Definitions in `graphforge.yaml`,
 `ontology/`, `schemas/`, `seeds/`, and `migrations/` are ordinary reviewable Git
 content. Runtime state, imports, and exports are data and must not be committed.
 
+Run the same native lifecycle contract from either published package:
+
+```bash
+uvx graphforge init
+npx @graphforge/cli init
+```
+
+Both entry points forward arguments to the Rust CLI and preserve its exact
+stdout, stderr, structured JSON, and exit status. They do not contain Python or
+JavaScript fallback implementations.
+
 ```bash
 gf --project-dir . init
 gf --project-dir . config validate

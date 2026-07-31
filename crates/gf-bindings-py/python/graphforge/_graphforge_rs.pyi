@@ -13,6 +13,7 @@ import pyarrow
 
 __version__: str
 
+def _cli_execute(args: list[str]) -> tuple[int, bytes, bytes]: ...
 def version() -> str: ...
 def composite_provenance_uuid(
     operation_uuid: str,

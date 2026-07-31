@@ -4,7 +4,7 @@
 Surfaces:
 - cargo-package: ``cargo package --list --no-verify`` per crates.io plan order
 - cargo-publish: ``cargo publish --dry-run`` (heavy; optional)
-- npm: ``npm publish --dry-run`` for Node binding and agent-skills
+- npm: ``npm publish --dry-run`` for Node binding, CLI, and agent-skills
 - docs: ``pnpm docs:build``
 - python: ``maturin sdist`` (local packaging; TestPyPI upload is separate/manual)
 
@@ -53,6 +53,7 @@ FALLBACK_CARGO_ORDER = (
 
 NPM_PACKAGES = (
     ROOT / "crates" / "gf-bindings-node",
+    ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
 
@@ -164,20 +165,28 @@ def dry_run_cargo_publish() -> list[dict[str, Any]]:
 def dry_run_npm() -> list[dict[str, Any]]:
     # Prerelease versions (e.g. 0.5.0-dev.0) require an explicit --tag; dry-run
     # never publishes, so a disposable tag keeps the check green before freeze.
-    return [
-        _run(
-            [
+    steps = []
+    for package_dir in NPM_PACKAGES:
+        if package_dir.name == "cli":
+            command = [
+                "pnpm",
+                "publish",
+                "--dry-run",
+                "--no-git-checks",
+                "--tag",
+                "dry-run",
+            ]
+        else:
+            command = [
                 "npm",
                 "publish",
                 "--dry-run",
                 "--ignore-scripts",
                 "--tag",
                 "dry-run",
-            ],
-            cwd=package_dir,
-        )
-        for package_dir in NPM_PACKAGES
-    ]
+            ]
+        steps.append(_run(command, cwd=package_dir))
+    return steps
 
 
 def dry_run_docs() -> list[dict[str, Any]]:

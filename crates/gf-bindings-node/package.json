@@ -3,14 +3,14 @@
   "version": "0.5.0-dev.0",
   "description": "Native Node.js bindings for the GraphForge embedded graph engine",
   "license": "Apache-2.0",
-  "homepage": "https://curatelabs.github.io/graphforge-legecy/",
+  "homepage": "https://github.com/CurateLabs/graphforge",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CurateLabs/graphforge-x.git",
+    "url": "git+https://github.com/CurateLabs/graphforge.git",
     "directory": "crates/gf-bindings-node"
   },
   "bugs": {
-    "url": "https://github.com/CurateLabs/graphforge-x/issues"
+    "url": "https://github.com/CurateLabs/graphforge/issues"
   },
   "keywords": [
     "graph",

@@ -222,3 +222,5 @@ target-py-cov/
 # Keep @graphforge/node first-party JS (root lib/ ignore is for Python venvs)
 !crates/gf-bindings-node/lib/
 !crates/gf-bindings-node/lib/**
+!packages/cli/lib/
+!packages/cli/lib/**

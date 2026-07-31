@@ -1,5 +1,6 @@
 packages:
   - crates/gf-bindings-node
+  - packages/cli
   - packages/agent-skills
   - tests/features/node
   - docs-site

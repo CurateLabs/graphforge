@@ -47,6 +47,7 @@ CARGO_PUBLISH_CRATES = (
 
 NPM_PACKAGES = (
     ROOT / "crates" / "gf-bindings-node",
+    ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
 
@@ -113,12 +114,20 @@ def verify_npm_package(package_dir: Path) -> list[str]:
                     f"{package_dir.relative_to(ROOT)}: package.json files[] lacks {required}"
                 )
     with tempfile.TemporaryDirectory(prefix="gf-npm-pack-") as tmp:
-        result = _run(
-            ["npm", "pack", "--dry-run", "--ignore-scripts", "--json"],
-            cwd=package_dir,
+        command = (
+            ["pnpm", "pack", "--json", "--pack-destination", tmp]
+            if package_dir.name == "cli"
+            else ["npm", "pack", "--dry-run", "--ignore-scripts", "--json"]
         )
+        result = _run(command, cwd=package_dir)
         # npm pack --json still prints notices to stderr; stdout should be JSON.
         if result.returncode != 0:
+            if package_dir.name == "cli":
+                errors.append(
+                    f"{package_dir.relative_to(ROOT)}: pnpm pack failed: "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+                return errors
             # Fallback: parse human dry-run listing.
             result = _run(
                 ["npm", "pack", "--dry-run", "--ignore-scripts"],

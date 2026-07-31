@@ -368,6 +368,7 @@ jobs:
         run: |
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
+          uvx --from "${wheels[0]}" graphforge --version
           uv venv /tmp/gf-native --python 3.13
           uv pip install --python /tmp/gf-native/bin/python "${wheels[0]}"
           /tmp/gf-native/bin/python - <<'PY'
@@ -489,6 +490,9 @@ jobs:
           pnpm --filter @graphforge/node test:smoke
           pnpm --filter @graphforge/node test
           pnpm --filter @graphforge/node format:check
+          pnpm test:node-cli
+          pnpm format:node-cli
+          pnpm smoke:node-cli
 
       - name: Run Node BDD suite
         working-directory: tests/features/node
