@@ -37,6 +37,16 @@ export default defineConfig({
           label: 'Use every day',
           items: [
             { label: 'Overview', slug: 'guide/overview' },
+            {
+              label: 'VS Code extension',
+              collapsed: false,
+              items: [
+                { label: 'Overview', slug: 'guide/vscode-extension' },
+                { label: 'Install and choose a runtime', slug: 'guide/vscode-extension/install' },
+                { label: 'Commands', slug: 'guide/vscode-extension/commands' },
+                { label: 'Agent interop', slug: 'guide/vscode-extension/agent-interop' },
+              ],
+            },
             { label: 'Cypher Query Language', slug: 'guide/cypher-guide' },
             { label: 'Graph Construction', slug: 'guide/graph-construction' },
             { label: 'Analytics Integration', slug: 'guide/analytics-integration' },

@@ -18,6 +18,8 @@
     "docs:dev": "pnpm --filter @graphforge/docs-site dev",
     "docs:build": "pnpm --filter @graphforge/docs-site build",
     "docs:check-links": "pnpm --filter @graphforge/docs-site check-links",
+    "docs:test-extension": "node docs-site/scripts/test-extension-docs.mjs",
+    "docs:update-extension": "node docs-site/scripts/update-extension-docs.mjs",
     "docs:preview": "pnpm --filter @graphforge/docs-site preview"
   },
   "engines": {

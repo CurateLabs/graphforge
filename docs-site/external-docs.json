@@ -1,0 +1,27 @@
+{
+  "repository": "CurateLabs/graphforge-vscode",
+  "revision": "7da03dd6690808c22a5b23b0e71e5810b67904c3",
+  "sourceDirectory": "docs/published",
+  "pages": [
+    {
+      "source": "overview.md",
+      "destination": "guide/vscode-extension/index.md",
+      "sha256": "207980122331d69c59d2294515f62927a572cb76f83b27e576014a6530e76962"
+    },
+    {
+      "source": "install.md",
+      "destination": "guide/vscode-extension/install.md",
+      "sha256": "46987901769db65fdb0642b88c21cdfbb765428a3aae0d206c2473f05bce4899"
+    },
+    {
+      "source": "commands.md",
+      "destination": "guide/vscode-extension/commands.md",
+      "sha256": "bea4c3d8336e4475fc9eae72e2acc75256251a4a582be707a00209b62caff892"
+    },
+    {
+      "source": "agent-interop.md",
+      "destination": "guide/vscode-extension/agent-interop.md",
+      "sha256": "5f7ec827d6c906be49a9be119b763ae8593585086b07223ad2f30bc80cea8575"
+    }
+  ]
+}

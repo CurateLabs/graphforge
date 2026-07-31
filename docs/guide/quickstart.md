@@ -5,6 +5,7 @@ verb returns an Apache Arrow `Table`. Node and edge handles use stable `.uuid`
 identity (no numeric storage ids).
 
 For full install options, see [Installation](installation.md).
+To run the same engine from your editor, see the [VS Code extension guide](vscode-extension/).
 
 ---
 

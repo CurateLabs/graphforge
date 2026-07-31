@@ -35,7 +35,12 @@ pnpm docs:preview      # serve the build output
 Makefile shortcuts: `make docs-serve`, `make docs-build`, `make docs-clean`.
 
 Markdown sources stay in `docs/`; `docs-site/scripts/sync-content.mjs` copies the
-allowlist into the Starlight content collection before `dev` / `build`.
+allowlist into the Starlight content collection before `dev` / `build`. It also imports the
+four public extension pages from a checked-in snapshot of
+`CurateLabs/graphforge-vscode/docs/published/`. The authenticated
+`pnpm docs:update-extension <full-commit-sha>` command refreshes that snapshot; normal builds
+verify the immutable revision and checksums recorded in `docs-site/external-docs.json`. No other
+extension documents are eligible for publication.
 
 ## Published reader map
 
