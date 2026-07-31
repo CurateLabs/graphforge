@@ -341,6 +341,14 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install pnpm for cross-package publication tests
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node for cross-package publication tests
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
       - name: Mount Cargo build disk
         uses: useblacksmith/stickydisk@v1
         with:
