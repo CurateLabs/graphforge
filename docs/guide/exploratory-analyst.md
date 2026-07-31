@@ -121,7 +121,8 @@ configuration, or durable generation.
 
 ## GraphForge Exploratory Mode Features
 
-When no ontology is present (or `ontology_mode: exploratory` is set in `graphforge.yaml`):
+When the committed workspace records explicit ontology absence (at project
+initialization or after `clear_ontology`):
 
 - **No ontology required** — start immediately with `forge.add_node()` / `forge.add_edge()`
 - **Arbitrary labels** — any string is a valid label
