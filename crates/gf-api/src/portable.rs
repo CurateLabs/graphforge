@@ -173,6 +173,17 @@ fn hex(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AdoptOntologyRequest, ClearOntologyRequest, WriteContext};
+    use gf_core::OntologyMode;
+
+    const ONTOLOGY: &str = "ontology_id: portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
+
+    fn write_context(seed: u128) -> WriteContext {
+        WriteContext {
+            operation_uuid: OperationId(Uuid::from_u128(seed)),
+            actor_uuid: None,
+        }
+    }
 
     #[test]
     fn public_facade_round_trips_current_generation_and_reopens_import() {
@@ -238,5 +249,120 @@ mod tests {
 
         assert!(error.to_string().contains("must be empty"));
         assert_eq!(std::fs::read(sentinel).unwrap(), b"preserve me");
+    }
+
+    #[test]
+    fn portable_interchange_preserves_durable_ontology_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("source");
+        std::fs::create_dir(&source_path).unwrap();
+        let ontology_path = root.path().join("authority.yaml");
+        std::fs::write(&ontology_path, ONTOLOGY).unwrap();
+        let mut source = GraphForge::new(source_path.to_str()).unwrap();
+        source
+            .adopt_ontology(AdoptOntologyRequest {
+                context: write_context(1),
+                path: ontology_path,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+        let expected = source.workspace_ontology().unwrap();
+        let envelope = root.path().join("adopted.gfportable");
+        source
+            .export_portable(PortableExportRequest {
+                selection: PortableSelection::Current,
+                output: envelope.clone(),
+            })
+            .unwrap();
+
+        let target_path = root.path().join("imported-adopted");
+        GraphForge::import_portable(
+            &target_path,
+            &PortableImportRequest {
+                input: envelope,
+                operation_id: OperationId(Uuid::from_u128(2)),
+            },
+        )
+        .unwrap();
+        let imported = GraphForge::new(target_path.to_str()).unwrap();
+
+        assert_eq!(imported.ontology_mode(), OntologyMode::Strict);
+        assert_eq!(imported.workspace_ontology().unwrap(), expected);
+    }
+
+    #[test]
+    fn portable_interchange_excludes_session_load_and_preserves_durable_clear() {
+        let root = tempfile::tempdir().unwrap();
+        let source_path = root.path().join("source");
+        std::fs::create_dir(&source_path).unwrap();
+        let ontology_path = root.path().join("session.yaml");
+        std::fs::write(&ontology_path, ONTOLOGY).unwrap();
+        let mut source = GraphForge::new(source_path.to_str()).unwrap();
+        source
+            .load_ontology(ontology_path.to_str().unwrap())
+            .unwrap();
+        assert_eq!(source.ontology_mode(), OntologyMode::Advisory);
+        let session_envelope = root.path().join("session.gfportable");
+        source
+            .export_portable(PortableExportRequest {
+                selection: PortableSelection::Current,
+                output: session_envelope.clone(),
+            })
+            .unwrap();
+
+        let session_target = root.path().join("imported-session");
+        GraphForge::import_portable(
+            &session_target,
+            &PortableImportRequest {
+                input: session_envelope,
+                operation_id: OperationId(Uuid::from_u128(3)),
+            },
+        )
+        .unwrap();
+        let imported_session = GraphForge::new(session_target.to_str()).unwrap();
+        assert_eq!(imported_session.ontology_mode(), OntologyMode::Exploratory);
+        assert!(
+            imported_session
+                .workspace_ontology()
+                .unwrap()
+                .canonical_ontology
+                .is_none()
+        );
+
+        source
+            .adopt_ontology(AdoptOntologyRequest {
+                context: write_context(4),
+                path: ontology_path,
+                mode: OntologyMode::Advisory,
+            })
+            .unwrap();
+        source
+            .clear_ontology(ClearOntologyRequest {
+                context: write_context(5),
+            })
+            .unwrap();
+        let cleared_envelope = root.path().join("cleared.gfportable");
+        source
+            .export_portable(PortableExportRequest {
+                selection: PortableSelection::Current,
+                output: cleared_envelope.clone(),
+            })
+            .unwrap();
+
+        let cleared_target = root.path().join("imported-cleared");
+        GraphForge::import_portable(
+            &cleared_target,
+            &PortableImportRequest {
+                input: cleared_envelope,
+                operation_id: OperationId(Uuid::from_u128(6)),
+            },
+        )
+        .unwrap();
+        let imported_clear = GraphForge::new(cleared_target.to_str()).unwrap();
+        assert_eq!(imported_clear.ontology_mode(), OntologyMode::Exploratory);
+        assert_eq!(
+            imported_clear.workspace_ontology().unwrap(),
+            source.workspace_ontology().unwrap()
+        );
     }
 }
