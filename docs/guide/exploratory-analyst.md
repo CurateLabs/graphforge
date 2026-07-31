@@ -67,7 +67,9 @@ for entry in catalog.entries {
 ```
 
 The snapshot deliberately excludes mutable catalog handles, runtime IDs, and
-first/last-seen timestamps. Python and Node parity is tracked separately.
+first/last-seen timestamps. The same Rust-owned contract is available as
+`forge.inspect_runtime_catalog()` in Python and
+`forge.inspectRuntimeCatalog()` in Node.
 
 ### Phase 3: Refinement — structure emerges
 
@@ -90,6 +92,23 @@ No constraints, inheritance, cardinality, semantic flags, or property value
 types are guessed. Observed relationship names are reported in
 `omitted_relation_types` because the runtime catalog does not retain endpoint
 evidence sufficient to create a valid relation declaration.
+
+Python uses the same Rust implementation:
+
+```python
+suggestion = forge.suggest_ontology("analyst-draft", "0.1.0")
+assert suggestion["draft"]
+assert forge.validate_ontology(suggestion["document"])["valid"]
+forge.export_ontology(
+    "suggested",
+    "ontology.yaml",
+    "yaml",
+    document=suggestion["document"],
+)
+```
+
+The Node names are `suggestOntology`, `validateOntology`, and `exportOntology`;
+the result fields use the normal JavaScript camel-case convention.
 
 ### Phase 4: Formalisation — optional structure
 
@@ -116,6 +135,29 @@ order is preserved because it breaks ties between equal-length migration routes.
 This applies to caller-supplied `Suggested` documents as well as loaded and
 adopted documents. Export never changes the live mode, loaded ontology, project
 configuration, or durable generation.
+
+Session load and project adoption are intentionally separate in every binding:
+
+```python
+forge.load_ontology("ontology.yaml")  # only this live facade
+
+forge.adopt_ontology(
+    "ontology.yaml",
+    "strict",
+    operation_uuid="018f5f0d-65dd-7a88-b6ef-0123456789ab",
+)
+assert forge.workspace_ontology()["mode"] == "strict"
+
+forge.clear_ontology(
+    operation_uuid="018f5f0d-65dd-7a88-b6ef-0123456789ac",
+)
+```
+
+Reopening a project discards a session load, but observes adopted ontology or
+explicit durable absence from the committed workspace generation. Retrying an
+adopt or clear with the same operation UUID is idempotent. There is deliberately
+no standalone ontology-mode setter: authority and enforcement mode change
+together through load, adopt, or clear.
 
 ---
 

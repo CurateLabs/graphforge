@@ -377,6 +377,66 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     }
 }
 
+fn json_value_to_python(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
+    Ok(match value {
+        serde_json::Value::Null => py.None(),
+        serde_json::Value::Bool(value) => value.into_pyobject(py)?.to_owned().unbind().into_any(),
+        serde_json::Value::Number(value) if value.is_i64() => value
+            .as_i64()
+            .expect("checked")
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        serde_json::Value::Number(value) if value.is_u64() => value
+            .as_u64()
+            .expect("checked")
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        serde_json::Value::Number(value) => value
+            .as_f64()
+            .expect("JSON number")
+            .into_pyobject(py)?
+            .into_any()
+            .unbind(),
+        serde_json::Value::String(value) => value.into_pyobject(py)?.into_any().unbind(),
+        serde_json::Value::Array(values) => {
+            let list = PyList::empty(py);
+            for value in values {
+                list.append(json_value_to_python(py, value)?)?;
+            }
+            list.into_any().unbind()
+        }
+        serde_json::Value::Object(values) => {
+            let dict = PyDict::new(py);
+            for (key, value) in values {
+                dict.set_item(key, json_value_to_python(py, value)?)?;
+            }
+            dict.into_any().unbind()
+        }
+    })
+}
+
+fn ontology_mode(value: &str) -> Result<gf_api::OntologyMode, GfError> {
+    match value {
+        "advisory" => Ok(gf_api::OntologyMode::Advisory),
+        "strict" => Ok(gf_api::OntologyMode::Strict),
+        _ => Err(GfError::Validation(
+            "ontology mode must be advisory or strict".into(),
+        )),
+    }
+}
+
+fn ontology_export_format(value: &str) -> Result<gf_api::OntologyExportFormat, GfError> {
+    match value {
+        "yaml" | "yml" => Ok(gf_api::OntologyExportFormat::Yaml),
+        "json" => Ok(gf_api::OntologyExportFormat::Json),
+        _ => Err(GfError::Validation(
+            "ontology export format must be yaml or json".into(),
+        )),
+    }
+}
+
 fn json_map(values: Option<&Bound<'_, PyDict>>) -> PyResult<BTreeMap<String, serde_json::Value>> {
     let mut mapped = BTreeMap::new();
     if let Some(values) = values {
@@ -3990,6 +4050,175 @@ impl GraphForge {
         let path = path.to_owned();
         py.detach(|| self.inner.load_ontology(&path))
             .map_err(|e| to_pyerr(py, &e))
+    }
+
+    /// Return the stable, deterministically ordered runtime-catalog contract.
+    fn inspect_runtime_catalog(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let snapshot = py
+            .detach(|| self.inner.inspect_runtime_catalog())
+            .map_err(|error| to_pyerr(py, &error))?;
+        let value = serde_json::to_value(snapshot)
+            .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
+        json_value_to_python(py, &value)
+    }
+
+    /// Suggest a conservative, explicitly non-authoritative ontology draft.
+    fn suggest_ontology(
+        &self,
+        py: Python<'_>,
+        ontology_id: &str,
+        version: &str,
+    ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let suggestion = py
+            .detach(|| {
+                self.inner
+                    .suggest_ontology(gf_api::OntologySuggestionOptions {
+                        ontology_id: ontology_id.to_owned(),
+                        version: version.to_owned(),
+                    })
+            })
+            .map_err(|error| to_pyerr(py, &error))?;
+        let value = serde_json::json!({
+            "draft": suggestion.draft,
+            "document": suggestion.document,
+            "fingerprint_sha256": suggestion.fingerprint_sha256,
+            "omitted_relation_types": suggestion.omitted_relation_types,
+        });
+        json_value_to_python(py, &value)
+    }
+
+    /// Validate an ontology document without changing live or durable state.
+    fn validate_ontology(
+        &self,
+        py: Python<'_>,
+        document: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let document: gf_api::OntologyDoc = serde_json::from_value(py_to_json_value(document)?)
+            .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
+        let report = py.detach(|| self.inner.validate_ontology(&document));
+        let diagnostics = report
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| {
+                serde_json::json!({
+                    "kind": diagnostic.kind.to_string(),
+                    "location": diagnostic.location,
+                    "message": diagnostic.message,
+                })
+            })
+            .collect::<Vec<_>>();
+        json_value_to_python(
+            py,
+            &serde_json::json!({ "valid": report.valid, "diagnostics": diagnostics }),
+        )
+    }
+
+    /// Atomically export an explicit ontology source as YAML or JSON.
+    #[pyo3(signature = (source, destination, format, *, document=None))]
+    fn export_ontology(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        destination: &str,
+        format: &str,
+        document: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.ensure_open()?;
+        let source = match source {
+            "loaded" => gf_api::OntologyExportSource::Loaded,
+            "adopted" => gf_api::OntologyExportSource::Adopted,
+            "suggested" => {
+                let document = document.ok_or_else(|| {
+                    to_pyerr(
+                        py,
+                        &GfError::Validation(
+                            "document is required for suggested ontology export".into(),
+                        ),
+                    )
+                })?;
+                let document = serde_json::from_value(py_to_json_value(document)?)
+                    .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
+                gf_api::OntologyExportSource::Suggested(document)
+            }
+            _ => {
+                return Err(to_pyerr(
+                    py,
+                    &GfError::Validation(
+                        "ontology export source must be suggested, loaded, or adopted".into(),
+                    ),
+                ));
+            }
+        };
+        let format = ontology_export_format(format).map_err(|error| to_pyerr(py, &error))?;
+        let destination = std::path::PathBuf::from(destination);
+        py.detach(|| self.inner.export_ontology(source, &destination, format))
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
+    /// Inspect the generation-managed authoritative ontology record.
+    fn workspace_ontology(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let record = py
+            .detach(|| self.inner.workspace_ontology())
+            .map_err(|error| to_pyerr(py, &error))?;
+        let value = serde_json::to_value(record)
+            .map_err(|error| to_pyerr(py, &GfError::Validation(error.to_string())))?;
+        json_value_to_python(py, &value)
+    }
+
+    /// Adopt an ontology as durable project authority.
+    #[pyo3(signature = (path, mode, *, operation_uuid, actor_uuid=None))]
+    fn adopt_ontology(
+        &mut self,
+        py: Python<'_>,
+        path: &str,
+        mode: &str,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+    ) -> PyResult<()> {
+        self.ensure_open()?;
+        let request = gf_api::AdoptOntologyRequest {
+            context: WriteContext {
+                operation_uuid: canonical_operation_id(operation_uuid)
+                    .map_err(|error| to_pyerr(py, &error))?,
+                actor_uuid: actor_uuid
+                    .map(canonical_operation_id)
+                    .transpose()
+                    .map_err(|error| to_pyerr(py, &error))?
+                    .map(|operation| operation.0),
+            },
+            path: path.into(),
+            mode: ontology_mode(mode).map_err(|error| to_pyerr(py, &error))?,
+        };
+        py.detach(|| self.inner.adopt_ontology(request))
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
+    /// Publish explicit durable ontology absence.
+    #[pyo3(signature = (*, operation_uuid, actor_uuid=None))]
+    fn clear_ontology(
+        &mut self,
+        py: Python<'_>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+    ) -> PyResult<()> {
+        self.ensure_open()?;
+        let request = gf_api::ClearOntologyRequest {
+            context: WriteContext {
+                operation_uuid: canonical_operation_id(operation_uuid)
+                    .map_err(|error| to_pyerr(py, &error))?,
+                actor_uuid: actor_uuid
+                    .map(canonical_operation_id)
+                    .transpose()
+                    .map_err(|error| to_pyerr(py, &error))?
+                    .map(|operation| operation.0),
+            },
+        };
+        py.detach(|| self.inner.clear_ontology(request))
+            .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Rank nodes by a centrality/structural algorithm (`by=`). Returns a

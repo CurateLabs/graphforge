@@ -30,7 +30,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use arrow::datatypes::SchemaRef;
 use gf_core::{GraphIdentity, TypeId};
 use gf_ir::{BindError, Binder, GraphOp, GraphPlan, IrExpr, ProcedureRegistry, RuntimeCatalog};
-use gf_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader};
+use gf_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use gf_storage::GraphCatalog;
 use gf_storage::ResolvedProjectGeneration;
 use sha2::{Digest, Sha256};
@@ -187,6 +187,7 @@ pub use gf_knowledge::{
     HypothesisSelectionEvent, KnowledgeError, ReasoningContentFormat, ReasoningKind,
     ReasoningRecord,
 };
+pub use gf_ontology::OntologyDoc;
 pub use gf_provenance::{
     EventKind, LineageRecord, LineageRole, ProvenanceError, ProvenanceEvent, SubjectKind,
 };

@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add Rust-owned deterministic runtime-catalog inspection, conservative ontology
   drafts, structured non-mutating validation, and explicit-source atomic
   YAML/JSON ontology export (#236).
+- Expose the Rust-owned ontology inspection, suggestion, validation, export,
+  durable adoption, inspection, and clear lifecycle consistently in Python and
+  Node, while keeping session loads explicitly non-durable (#237).
 - Add deterministic portable export of the current generation or a named
   checkpoint and validate-before-mutation atomic import into new or empty
   projects, excluding live pointers, locks, journals, caches, and trash (#229).
