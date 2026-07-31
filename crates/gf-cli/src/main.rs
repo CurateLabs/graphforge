@@ -2,15 +2,16 @@
 #![forbid(unsafe_code)]
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use arrow::ipc::writer::StreamWriter;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gf_api::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
     DeleteCheckpointRequest, DiffCheckpointsRequest, ExecutionResult, GraphForge,
-    ListCheckpointsRequest, OperationId, PageRequest, PageToken, RepositoryContext,
-    RevertCheckpointRequest,
+    ListCheckpointsRequest, OperationId, PageRequest, PageToken, PortableExportRequest,
+    PortableExportResult, PortableImportRequest, PortableImportResult, PortableSelection,
+    RepositoryContext, RevertCheckpointRequest,
 };
 use uuid::Uuid;
 
@@ -53,6 +54,10 @@ enum Command {
     },
     /// Restore the complete workspace from a checkpoint.
     Revert(RevertArgs),
+    /// Export one immutable generation as a portable envelope.
+    Export(ExportArgs),
+    /// Import a portable envelope into a new or empty project.
+    Import(ImportArgs),
     /// Manage immutable named workspace checkpoints.
     Checkpoint {
         #[command(subcommand)]
@@ -181,6 +186,33 @@ struct RevertArgs {
     actor_uuid: Option<String>,
 }
 
+#[derive(Args)]
+struct ExportArgs {
+    /// Export the generation committed as CURRENT when the command starts.
+    #[arg(
+        long,
+        required_unless_present = "checkpoint",
+        conflicts_with = "checkpoint"
+    )]
+    current: bool,
+    /// Export the generation pinned by this active checkpoint.
+    #[arg(long, required_unless_present = "current", conflicts_with = "current")]
+    checkpoint: Option<String>,
+    /// Portable envelope destination.
+    #[arg(long)]
+    output: PathBuf,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// Portable envelope source.
+    #[arg(long)]
+    input: PathBuf,
+    /// Required canonical UUID used for idempotent replay.
+    #[arg(long)]
+    idempotency_key: String,
+}
+
 fn canonical_uuid(value: &str) -> Result<Uuid, gf_api::GfError> {
     let parsed = Uuid::parse_str(value)
         .map_err(|_| gf_api::GfError::Validation("expected canonical UUID".into()))?;
@@ -236,6 +268,72 @@ fn write_result(result: &ExecutionResult) -> Result<(), gf_api::GfError> {
     output
         .flush()
         .map_err(|error| gf_api::GfError::Execution(error.to_string()))
+}
+
+fn write_export_result(result: &PortableExportResult, json: bool) -> Result<(), gf_api::GfError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(result)
+                .map_err(|error| gf_api::GfError::Execution(error.to_string()))?
+        );
+    } else {
+        println!(
+            "exported {} generation {} to {} (sha256 {}, {} bytes, {} participants)",
+            result.source,
+            result.generation_uuid,
+            result.output.display(),
+            result.envelope_sha256,
+            result.byte_length,
+            result.participant_count
+        );
+    }
+    Ok(())
+}
+
+fn write_import_result(result: &PortableImportResult, json: bool) -> Result<(), gf_api::GfError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(result)
+                .map_err(|error| gf_api::GfError::Execution(error.to_string()))?
+        );
+    } else {
+        let outcome = if result.idempotent_replay {
+            "replayed"
+        } else {
+            "imported"
+        };
+        println!(
+            "{outcome} source generation {} as {} (sha256 {})",
+            result.source_generation_uuid, result.generation_uuid, result.envelope_sha256
+        );
+    }
+    Ok(())
+}
+
+fn run_import(args: ImportArgs, path: &Path, json: bool) -> Result<(), gf_api::GfError> {
+    let result = GraphForge::import_portable(
+        path,
+        &PortableImportRequest {
+            input: args.input,
+            operation_id: OperationId(canonical_uuid(&args.idempotency_key)?),
+        },
+    )?;
+    write_import_result(&result, json)
+}
+
+fn run_export(graph: &GraphForge, args: ExportArgs, json: bool) -> Result<(), gf_api::GfError> {
+    let selection = match args.checkpoint {
+        Some(name) => PortableSelection::Checkpoint(name),
+        None if args.current => PortableSelection::Current,
+        None => unreachable!("clap requires exactly one export selector"),
+    };
+    let result = graph.export_portable(PortableExportRequest {
+        selection,
+        output: args.output,
+    })?;
+    write_export_result(&result, json)
 }
 
 fn run_repository(
@@ -308,10 +406,18 @@ fn run(cli: Cli) -> Result<(), gf_api::GfError> {
             .state_path
         }
     };
+    let command = match command {
+        Command::Import(args) => return run_import(args, &path, cli.json),
+        command => command,
+    };
     let path = path
         .to_str()
         .ok_or_else(|| gf_api::GfError::Validation("--project must be valid UTF-8".into()))?;
     let mut graph = GraphForge::new(Some(path))?;
+    let command = match command {
+        Command::Export(args) => return run_export(&graph, args, cli.json),
+        command => command,
+    };
     let result = match command {
         Command::Revert(args) => graph.revert_to_checkpoint(RevertCheckpointRequest {
             name: args.name,
@@ -499,5 +605,41 @@ mod tests {
             cli.command,
             Some(Command::Remove(RemoveArgs { yes: false }))
         ));
+    }
+
+    #[test]
+    fn export_requires_exactly_one_generation_selector() {
+        let base = ["gf", "--project", "/tmp/project", "export"];
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--output", "/tmp/out.gfportable"]))
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--current",
+                "--checkpoint",
+                "before-change",
+                "--output",
+                "/tmp/out.gfportable",
+            ]))
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--current",
+                "--output",
+                "/tmp/out.gfportable",
+            ]))
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--checkpoint",
+                "before-change",
+                "--output",
+                "/tmp/out.gfportable",
+            ]))
+            .is_ok()
+        );
     }
 }
