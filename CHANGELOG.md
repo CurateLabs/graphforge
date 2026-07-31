@@ -46,6 +46,8 @@ _Nothing yet._
 - Make tracked text checkout bytes LF-stable across platforms so Windows
   release gates compare configuration, ontology, manifest, and checksum
   fixtures without newline conversion (#263).
+- Close staged lease and manifest file handles before optimistic generation
+  promotion so Windows can atomically rename the durable directory (#265).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes, with packed clean-install `uvx`/offline `npx`
