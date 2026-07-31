@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "graphforge-pulumi-static"
 version = "0.5.0.dev0"
-description = "Provider-neutral GraphForge static target validation for Pulumi"
+description = "Provider-neutral GraphForge target validation and deployment specs for Pulumi"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = ["pulumi>=3.200,<4"]

@@ -1,0 +1,87 @@
+{
+  "artifact": {
+    "kind": "oci_image",
+    "locator": "registry.example.com/graphforge/core@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "version": "0.5.1"
+  },
+  "bindings": {
+    "secret_ids": [
+      "service-token"
+    ],
+    "source_ids": [
+      "example-data"
+    ]
+  },
+  "capability_compatibility": {
+    "requirements": [
+      {
+        "id": "graph",
+        "version": 1
+      },
+      {
+        "id": "workspace",
+        "version": 1
+      }
+    ],
+    "status": "requirements_declared"
+  },
+  "connectivity": {
+    "status": "not_checked"
+  },
+  "contract": "graphforge-deployment-spec/1",
+  "infrastructure": {
+    "mutation": "none",
+    "status": "caller_owned"
+  },
+  "ownership": {
+    "data": "external",
+    "infrastructure": "caller_owned",
+    "runtime": "caller_owned",
+    "specification": "graphforge"
+  },
+  "readiness": {
+    "status": "not_checked"
+  },
+  "requirements": {
+    "backup": {
+      "checkpoints": true,
+      "retention_count": 14
+    },
+    "health": {
+      "timeout_seconds": 30
+    },
+    "network": {
+      "exposure": "private",
+      "port": 8443,
+      "tls_required": true
+    },
+    "observability": {
+      "logs": true,
+      "metrics": true,
+      "traces": false
+    },
+    "resources": {
+      "cpu_millis": 1000,
+      "memory_bytes": 2147483648
+    },
+    "storage": {
+      "capacity_bytes": 10737418240,
+      "kind": "volume",
+      "persistent": true
+    },
+    "write": {
+      "mode": "queued_writer",
+      "queue_capacity": 64
+    }
+  },
+  "resolved_config_sha256": "eb9bd7c49ae277c62892b028d2c93e8328c24dd3e3fd5ecbabb4f2c94637e9e7",
+  "target_id": "production",
+  "topology": {
+    "execution": "container",
+    "kind": "service",
+    "ownership": "external",
+    "replicas": 2,
+    "scheduling": "long_running"
+  }
+}

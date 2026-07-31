@@ -93,8 +93,12 @@ assert_classification "$binding_iac" \
   docs/contracts/graphforge-resolved-config-v1.schema.json shared-iac-contract
 assert_classification "$binding_iac" \
   docs/contracts/graphforge-infra-validation-v1.schema.json shared-infra-contract
+assert_classification "$binding_iac" \
+  docs/contracts/graphforge-deployment-spec-v1.schema.json shared-deployment-contract
 assert_classification "$rust_binding_iac" \
   docs/contracts/examples/graphforge-infra-validation-production-v1.json shared-iac-fixture
+assert_classification "$rust_binding_iac" \
+  docs/contracts/examples/graphforge-deployment-spec-production-v1.json shared-deployment-fixture
 assert_classification "$rust_binding_iac" \
   docs/contracts/examples/graphforge-project-config-v1.yaml shared-project-config-fixture
 assert_classification "$rust_binding_iac" \

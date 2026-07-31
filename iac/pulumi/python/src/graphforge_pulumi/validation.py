@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Mapping
 from typing import Any
 
 import pulumi
+
+from ._canonical import canonical_json_bytes
 
 JsonObject = dict[str, Any]
 
@@ -366,12 +367,7 @@ def _validate_resolved_config(config: JsonObject) -> list[JsonObject]:
 
 
 def _canonical_json(value: JsonObject) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
+    return canonical_json_bytes(value)
 
 
 def validate_target(resolved_config: Mapping[str, Any], target_id: str) -> JsonObject:

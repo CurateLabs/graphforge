@@ -13,6 +13,11 @@ export interface TargetValidationArgs {
   targetId: string;
 }
 
+export interface DeploymentSpecArgs extends TargetValidationArgs {
+  /** Immutable, credential-free location of the caller-owned artifact. */
+  artifactLocator: string;
+}
+
 export interface InfraValidationReceipt extends JsonObject {
   contract: "graphforge-infra-validation/1";
   resolved_config_sha256: string;
@@ -36,8 +41,58 @@ export interface InfraValidationReceipt extends JsonObject {
   };
 }
 
+export interface DeploymentSpecDocument extends JsonObject {
+  contract: "graphforge-deployment-spec/1";
+  resolved_config_sha256: string;
+  target_id: string;
+  artifact: {
+    kind: "python_wheel" | "node_package" | "native_binary" | "oci_image";
+    locator: string;
+    sha256: string;
+    version: string;
+  };
+  topology: {
+    execution: "process" | "container" | "host";
+    kind: "embedded" | "service" | "worker" | "job" | "host";
+    ownership: "embedded" | "local" | "external";
+    replicas: number;
+    scheduling: "long_running" | "on_demand";
+  };
+  requirements: {
+    backup: JsonObject;
+    health: JsonObject;
+    network: JsonObject;
+    observability: JsonObject;
+    resources: JsonObject;
+    storage: JsonObject;
+    write: JsonObject;
+  };
+  bindings: {
+    secret_ids: string[];
+    source_ids: string[];
+  };
+  ownership: {
+    data: "external";
+    infrastructure: "caller_owned";
+    runtime: "caller_owned";
+    specification: "graphforge";
+  };
+  infrastructure: { mutation: "none"; status: "caller_owned" };
+  connectivity: { status: "not_checked" };
+  readiness: { status: "not_checked" };
+  capability_compatibility: {
+    requirements: JsonObject[];
+    status: "requirements_declared";
+  };
+}
+
 const STABLE_ID = /^[a-z](?:[a-z0-9]|[-_](?=[a-z0-9])){0,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const CONTROL_OR_SPACE = /[\u0000-\u0020\u007f]/u;
+const WINDOWS_PATH = /^[A-Za-z]:[\\/]/;
+const OCI_LOCATOR = /^(?<repository>[^@]+)@sha256:(?<digest>[0-9a-f]{64})$/;
+const OCI_REPOSITORY =
+  /^[a-z0-9]+(?:[.-][a-z0-9]+)*(?::[1-9][0-9]{0,4})?\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/;
 
 function fail(message: string): never {
   throw new Error(`invalid graphforge-resolved-config/1: ${message}`);
@@ -419,16 +474,27 @@ function validateResolvedConfig(resolvedConfig: JsonObject): JsonObject[] {
   return targets;
 }
 
-function canonicalJson(value: JsonValue): string {
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function encodeJsonScalar(value: JsonPrimitive): string {
+  return JSON.stringify(value).replace(
+    /[<>&\u2028\u2029]/gu,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+export function canonicalJson(value: JsonValue): string {
   if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
+    return encodeJsonScalar(value);
   }
   if (Array.isArray(value)) {
     return `[${value.map(canonicalJson).join(",")}]`;
   }
-  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right));
+  const entries = Object.entries(value).sort(([left], [right]) => compareCodeUnits(left, right));
   return `{${entries
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+    .map(([key, item]) => `${encodeJsonScalar(key)}:${canonicalJson(item)}`)
     .join(",")}}`;
 }
 
@@ -477,6 +543,148 @@ export function validateTarget(
   };
 }
 
+function validateArtifactLocator(value: unknown, kind: string, expectedSha256: string): string {
+  if (typeof value !== "string" || value.length < 1 || value.length > 2048) {
+    throw new Error(
+      "invalid graphforge-deployment-spec/1: artifactLocator must be a bounded string",
+    );
+  }
+  if (CONTROL_OR_SPACE.test(value)) {
+    throw new Error(
+      "invalid graphforge-deployment-spec/1: artifactLocator contains whitespace or control characters",
+    );
+  }
+  const lowered = value.toLowerCase();
+  if (
+    value.startsWith("/") ||
+    value.startsWith("./") ||
+    value.startsWith("../") ||
+    value.startsWith("~") ||
+    WINDOWS_PATH.test(value) ||
+    value.includes("\\") ||
+    lowered.startsWith("file:")
+  ) {
+    throw new Error(
+      "invalid graphforge-deployment-spec/1: artifactLocator must not be a local path",
+    );
+  }
+
+  if (kind === "oci_image") {
+    const match = OCI_LOCATOR.exec(value);
+    if (match?.groups === undefined) {
+      throw new Error(
+        "invalid graphforge-deployment-spec/1: OCI artifactLocator must be pinned by sha256 digest",
+      );
+    }
+    const repository = match.groups.repository;
+    if (!OCI_REPOSITORY.test(repository)) {
+      throw new Error(
+        "invalid graphforge-deployment-spec/1: OCI artifactLocator must be registry/repository without a mutable tag",
+      );
+    }
+    if (match.groups.digest !== expectedSha256) {
+      throw new Error(
+        "invalid graphforge-deployment-spec/1: OCI artifactLocator digest does not match target.artifact.sha256",
+      );
+    }
+    return value;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(
+      "invalid graphforge-deployment-spec/1: non-OCI artifactLocator must be an https URL",
+    );
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.hostname === ""
+  ) {
+    throw new Error(
+      "invalid graphforge-deployment-spec/1: non-OCI artifactLocator must be credential-free https without query or fragment",
+    );
+  }
+  return value;
+}
+
+/** Render one closed deployment projection without reading project or source data. */
+export function renderDeploymentSpec(
+  resolvedConfig: JsonObject,
+  targetId: string,
+  artifactLocator: string,
+): DeploymentSpecDocument {
+  const validation = validateTarget(resolvedConfig, targetId);
+  const target = validation.target;
+  const artifact = object(target.artifact, "target.artifact");
+  const topology = object(target.topology, "target.topology");
+  const capabilities = validateCapabilities(target.capabilities);
+  const locator = validateArtifactLocator(
+    artifactLocator,
+    artifact.kind as string,
+    artifact.sha256 as string,
+  );
+
+  return {
+    contract: "graphforge-deployment-spec/1",
+    resolved_config_sha256: validation.resolved_config_sha256,
+    target_id: targetId,
+    artifact: {
+      kind: artifact.kind as DeploymentSpecDocument["artifact"]["kind"],
+      locator,
+      sha256: artifact.sha256 as string,
+      version: artifact.version as string,
+    },
+    topology: {
+      execution: topology.execution as DeploymentSpecDocument["topology"]["execution"],
+      kind: target.kind as DeploymentSpecDocument["topology"]["kind"],
+      ownership: target.ownership as DeploymentSpecDocument["topology"]["ownership"],
+      replicas: topology.replicas as number,
+      scheduling: topology.scheduling as DeploymentSpecDocument["topology"]["scheduling"],
+    },
+    requirements: {
+      backup: object(target.backup, "target.backup"),
+      health: object(target.health, "target.health"),
+      network: object(target.network, "target.network"),
+      observability: object(target.observability, "target.observability"),
+      resources: object(target.resources, "target.resources"),
+      storage: object(target.storage, "target.storage"),
+      write: object(target.write, "target.write"),
+    },
+    bindings: {
+      secret_ids: [...(target.secret_ids as string[])],
+      source_ids: [...(target.source_ids as string[])],
+    },
+    ownership: {
+      data: "external",
+      infrastructure: "caller_owned",
+      runtime: "caller_owned",
+      specification: "graphforge",
+    },
+    infrastructure: { mutation: "none", status: "caller_owned" },
+    connectivity: { status: "not_checked" },
+    readiness: { status: "not_checked" },
+    capability_compatibility: {
+      requirements: capabilities,
+      status: "requirements_declared",
+    },
+  };
+}
+
+/** Emit canonical UTF-8 deployment JSON with one trailing LF. */
+export function renderDeploymentSpecJson(
+  resolvedConfig: JsonObject,
+  targetId: string,
+  artifactLocator: string,
+): string {
+  return `${canonicalJson(renderDeploymentSpec(resolvedConfig, targetId, artifactLocator))}\n`;
+}
+
 /**
  * A state-safe, provider-free static validation component.
  *
@@ -496,5 +704,32 @@ export class TargetValidation extends pulumi.ComponentResource {
     super("graphforge:static:TargetValidation", name, {}, opts);
     this.receipt = pulumi.output(receipt);
     this.registerOutputs({ receipt: this.receipt });
+  }
+}
+
+/** Provider-free state projection; caller IaC owns every deployed resource. */
+export class DeploymentSpec extends pulumi.ComponentResource {
+  public readonly spec: pulumi.Output<DeploymentSpecDocument>;
+  public readonly canonicalJson: pulumi.Output<string>;
+
+  public constructor(
+    name: string,
+    args: DeploymentSpecArgs,
+    opts?: pulumi.ComponentResourceOptions,
+  ) {
+    const allowed = new Set(["resolvedConfig", "targetId", "artifactLocator"]);
+    for (const key of Object.keys(args)) {
+      if (!allowed.has(key)) {
+        throw new Error(`invalid graphforge-deployment-spec/1: unknown input ${key}`);
+      }
+    }
+    const spec = renderDeploymentSpec(args.resolvedConfig, args.targetId, args.artifactLocator);
+    const encoded = `${canonicalJson(spec)}\n`;
+    // Full resolved configuration and any secret values are deliberately not
+    // component inputs. Only the bounded reference-only projection enters state.
+    super("graphforge:deployment:DeploymentSpec", name, {}, opts);
+    this.spec = pulumi.output(spec);
+    this.canonicalJson = pulumi.output(encoded);
+    this.registerOutputs({ spec: this.spec, canonicalJson: this.canonicalJson });
   }
 }
