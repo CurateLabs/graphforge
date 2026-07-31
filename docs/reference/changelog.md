@@ -43,6 +43,9 @@ _Nothing yet._
 - Preserve LF bytes for canonical and packaged project skills on Windows
   checkouts so release-candidate wheels satisfy their recorded SHA-256 digests
   (#259).
+- Make tracked text checkout bytes LF-stable across platforms so Windows
+  release gates compare configuration, ontology, manifest, and checksum
+  fixtures without newline conversion (#263).
 - Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes, with packed clean-install `uvx`/offline `npx`
