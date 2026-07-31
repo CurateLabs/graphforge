@@ -349,6 +349,9 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install workspace dependencies for cross-package publication tests
+        run: pnpm install --frozen-lockfile
+
       - name: Mount Cargo build disk
         uses: useblacksmith/stickydisk@v1
         with:
