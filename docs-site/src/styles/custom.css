@@ -90,13 +90,50 @@ starlight-file-tree,
 }
 
 /*
- * Code readability: slightly heavier mono. Mirrors ec.config.mjs
- * styleOverrides.codeFontWeight (500) so thin Night Owl tokens stay legible.
+ * Code readability: heavier mono + forced light-theme ink.
+ * Unlayered so these beat @layer starlight.components (EC theme CSS).
+ * Mirrors ec.config.mjs styleOverrides (codeFontWeight / light fg+bg).
  */
 .expressive-code pre > code,
 .expressive-code .ec-line .code {
   font-weight: 500;
   -webkit-font-smoothing: antialiased;
+}
+
+:root[data-theme='light'] .expressive-code:not([data-theme='dark']),
+.expressive-code[data-theme='light'] {
+  --ec-codeFg: #111827;
+  --ec-codeBg: #f3f4f6;
+  --ec-frm-edBg: #f3f4f6;
+  --ec-frm-trmBg: #f3f4f6;
+  --ec-frm-trmTtbFg: #111827;
+  --ec-codeFontWg: 500;
+}
+
+/*
+ * Always paint light-theme token spans from --1 (light palette). Fallback
+ * near-black covers missing vars and defeats accidental --0-on-light paint.
+ */
+:root[data-theme='light'] .expressive-code:not([data-theme='dark']) .ec-line :where(span[style^='--']:not([class])),
+.expressive-code[data-theme='light'] .ec-line :where(span[style^='--']:not([class])) {
+  color: var(--1, #1f2937);
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .expressive-code {
+    --ec-codeFg: #111827;
+    --ec-codeBg: #f3f4f6;
+    --ec-frm-edBg: #f3f4f6;
+    --ec-frm-trmBg: #f3f4f6;
+    --ec-frm-trmTtbFg: #111827;
+    --ec-codeFontWg: 500;
+  }
+
+  :root:not([data-theme='dark']) .expressive-code .ec-line :where(span[style^='--']:not([class])) {
+    color: var(--1, #1f2937);
+    font-weight: 500;
+  }
 }
 
 table {

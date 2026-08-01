@@ -22,12 +22,14 @@ export default defineConfig({
         baseUrl: 'https://github.com/CurateLabs/graphforge/edit/main/docs/',
       },
       customCss: ['./src/styles/custom.css'],
+      // Full EC options (light fg/bg, frames, customizeTheme) live in ec.config.mjs.
       expressiveCode: {
-        minSyntaxHighlightingColorContrast: 7,
+        minSyntaxHighlightingColorContrast: 10,
         styleOverrides: {
           codeFontWeight: '500',
         },
       },
+
       // Published nav is reader-journey ordered (Diátaxis). On-disk trees remain
       // Guide / Book / Reference; slugs are unchanged so prior URLs stay stable.
       sidebar: [

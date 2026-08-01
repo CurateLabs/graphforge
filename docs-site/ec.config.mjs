@@ -36,8 +36,7 @@ function staticScrollableTabindex() {
 
 /**
  * Night Owl Light comments (#989fb1 / #939dbb) stay washed out even after EC's
- * default 5.5:1 pass. Prefer stronger slate comments, then let
- * minSyntaxHighlightingColorContrast finish keywords/strings.
+ * contrast pass. Prefer stronger slate comments.
  *
  * @param {string | string[] | undefined} scope
  */
@@ -50,17 +49,62 @@ function isCommentScope(scope) {
   );
 }
 
+/** Light-theme code surface: slightly off-white, near-black ink. */
+const LIGHT_CODE_BG = '#f3f4f6';
+const LIGHT_CODE_FG = '#111827';
+const LIGHT_COMMENT_FG = '#374151';
+
 export default defineEcConfig({
   plugins: [staticScrollableTabindex()],
-  // Soft Night Owl tokens need more than the default 5.5:1 on light code bg.
-  minSyntaxHighlightingColorContrast: 7,
+  // Soft Night Owl tokens need far more than the default 5.5:1 on light code bg.
+  // 10:1 pulls shell/keyword blues (e.g. #325193) down toward slate/near-black.
+  minSyntaxHighlightingColorContrast: 10,
   styleOverrides: {
     // Roboto Mono at 400 reads thin on light gray; 500 matches marketing density.
     codeFontWeight: '500',
+    // [dark, light] — force readable light defaults; leave dark to the theme.
+    codeForeground: ({ theme }) =>
+      theme.type === 'light' ? LIGHT_CODE_FG : theme.colors['editor.foreground'],
+    codeBackground: ({ theme }) =>
+      theme.type === 'light' ? LIGHT_CODE_BG : theme.colors['editor.background'],
+    frames: {
+      // Terminal frames otherwise follow Starlight gray-7 / theme terminal.bg.
+      terminalBackground: ({ theme, resolveSetting }) =>
+        theme.type === 'light' ? LIGHT_CODE_BG : resolveSetting('codeBackground'),
+      editorBackground: ({ theme, resolveSetting }) =>
+        theme.type === 'light' ? LIGHT_CODE_BG : resolveSetting('codeBackground'),
+      terminalTitlebarForeground: ({ theme }) =>
+        theme.type === 'light'
+          ? LIGHT_CODE_FG
+          : theme.colors['titleBar.activeForeground'],
+    },
   },
   customizeTheme: (theme) => {
-    // Light ≈7:1 on Starlight contrast-check bg (#f6f7f9). Dark: slate muted.
-    const commentFg = theme.type === 'light' ? '#4b5563' : '#94a3b8';
+    if (theme.type === 'light') {
+      theme.bg = LIGHT_CODE_BG;
+      theme.fg = LIGHT_CODE_FG;
+      theme.colors['editor.background'] = LIGHT_CODE_BG;
+      theme.colors['editor.foreground'] = LIGHT_CODE_FG;
+      if ('terminal.background' in theme.colors) {
+        theme.colors['terminal.background'] = LIGHT_CODE_BG;
+      }
+      for (const setting of theme.settings) {
+        if (!setting.settings) setting.settings = {};
+        if (isCommentScope(setting.scope)) {
+          setting.settings.foreground = LIGHT_COMMENT_FG;
+          continue;
+        }
+        // Untokenized / default-ish scopes: force near-black so shell lines
+        // (npm/pnpm install fences) never paint as washed Night Owl blue-grey.
+        if (!setting.settings.foreground) {
+          setting.settings.foreground = LIGHT_CODE_FG;
+        }
+      }
+      return;
+    }
+
+    // Dark: slate muted comments only.
+    const commentFg = '#94a3b8';
     for (const setting of theme.settings) {
       if (!isCommentScope(setting.scope)) continue;
       if (!setting.settings) setting.settings = {};
