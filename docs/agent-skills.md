@@ -110,8 +110,9 @@ linkage, and fails closed before native invocation when bounds are missing.
 `retrieveAnalyze` dispatches caller-selected find/index (**M19**) inputs and
 live analyst-verb (**M18**) families (`rank`, `cluster`, `paths`, `analyze`,
 `similar`) through public Node facades without inferred
-algorithm/provider/freshness choices, keeps knowledge/epistemic (M20/M21)
-tables unopened, and exposes truncation/empty/structured-error outcomes.
+algorithm/provider/freshness choices, keeps knowledge-layer (**M20**) and
+epistemic (**M21**) tables unopened, and exposes truncation/empty/structured-error
+outcomes.
 
 ## Release-candidate end-to-end verification
 

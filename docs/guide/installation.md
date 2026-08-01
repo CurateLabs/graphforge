@@ -20,7 +20,7 @@ uses the same Rust-owned engine described below.
 
 ---
 
-## Python package (current — v0.5.1)
+## Python package (v0.5.1 — being shipped)
 
 **Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
 
