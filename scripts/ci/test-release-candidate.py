@@ -77,6 +77,9 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
             "NOTICE",
             "THIRD_PARTY_NOTICES.md",
         ]
+        # Mirror napi platform package.json so offline install tests catch
+        # EBADPLATFORM when every native tarball is installed top-level.
+        metadata.update(manifest_module.NATIVE_PLATFORM_CONSTRAINTS[name])
     elif name == "@curatelabs/graphforge":
         metadata.update(
             {
@@ -300,6 +303,26 @@ def main() -> None:
             root = Path(temp)
             manifest_path, artifacts, _ = create_candidate(root, **options)
             rejected(manifest_path, artifacts, message)
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        _manifest_path, artifacts, manifest = create_candidate(root)
+        members = npm_members("@curatelabs/graphforge-linux-x64-gnu")
+        metadata = json.loads(members["package/package.json"])
+        del metadata["os"]
+        members["package/package.json"] = json.dumps(metadata, sort_keys=True).encode()
+        write_tar(
+            artifacts / "npm" / f"curatelabs-graphforge-linux-x64-gnu-{VERSION}.tgz",
+            members,
+        )
+        rebuilt = manifest_module.build_manifest(
+            version=VERSION,
+            dist_dir=artifacts,
+            commit_sha=SHA,
+            recorded_at=manifest["recorded_at"],
+            notes="missing native os metadata",
+        )
+        rejected(write_mutation(root, rebuilt), artifacts, "os metadata must be")
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)

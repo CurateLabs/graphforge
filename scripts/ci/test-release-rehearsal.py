@@ -112,9 +112,16 @@ def test_artifact_rehearsal() -> None:
             assert report["status"] == "passed"
             assert report["registry_writes"] == 0
             assert report["checks"]["candidate_completeness"]["nodes"] == 24
-            assert report["checks"]["node_cli_skills_clean_consumer"]["loaded_version"] == (
-                candidate_fixture.VERSION
-            )
+            node_check = report["checks"]["node_cli_skills_clean_consumer"]
+            assert node_check["loaded_version"] == candidate_fixture.VERSION
+            host_native = rehearsal._compatible_native_npm_name()
+            assert node_check["host_native_package"] == host_native
+            assert node_check["installed_packages"] == [
+                "@curatelabs/graphforge",
+                "@curatelabs/graphforge-cli",
+                "@curatelabs/graphforge-agent-skills",
+                host_native,
+            ]
             assert len(report["checks"]["rust_packages"]["packages"]) == 15
             assert not any(word in json.dumps(report).lower() for word in rehearsal.FORBIDDEN_TEXT)
 
@@ -287,9 +294,67 @@ def test_sequential_reconciliation() -> None:
     assert not any(word in json.dumps(report).lower() for word in rehearsal.FORBIDDEN_TEXT)
 
 
+def test_compatible_native_npm_and_npm_errors() -> None:
+    host = rehearsal._compatible_native_npm_name()
+    assert host in candidate_contract.NATIVE_NPM_PACKAGES
+    detail = rehearsal._command_failure_detail(
+        "\n".join(
+            [
+                "npm error code EBADPLATFORM",
+                "npm error notsup Unsupported platform for @curatelabs/graphforge-darwin-x64@0.5.1",
+                "npm error A complete log of this run can be found in: /tmp/npm.log",
+            ]
+        ),
+        1,
+    )
+    assert "EBADPLATFORM" in detail
+    assert "complete log" not in detail
+
+    original_platform = rehearsal.sys.platform
+    original_machine = rehearsal.platform.machine
+    original_libc = rehearsal.platform.libc_ver
+    try:
+        cases = [
+            ("darwin", "arm64", ("", ""), "@curatelabs/graphforge-darwin-arm64"),
+            ("darwin", "x86_64", ("", ""), "@curatelabs/graphforge-darwin-x64"),
+            ("linux", "x86_64", ("glibc", "2.39"), "@curatelabs/graphforge-linux-x64-gnu"),
+            ("linux", "aarch64", ("glibc", "2.39"), "@curatelabs/graphforge-linux-arm64-gnu"),
+            ("win32", "AMD64", ("", ""), "@curatelabs/graphforge-win32-x64-msvc"),
+        ]
+        for system, machine, libc, expected in cases:
+            rehearsal.sys.platform = system
+            rehearsal.platform.machine = lambda machine=machine: machine
+            rehearsal.platform.libc_ver = lambda libc=libc: libc
+            assert rehearsal._compatible_native_npm_name() == expected
+
+        rehearsal.sys.platform = "linux"
+        rehearsal.platform.machine = lambda: "x86_64"
+        rehearsal.platform.libc_ver = lambda: ("", "")
+        try:
+            rehearsal._compatible_native_npm_name()
+        except rehearsal.RehearsalError as error:
+            assert "unsupported rehearsal platform" in str(error)
+        else:
+            raise AssertionError("musl Linux host was accepted")
+
+        rehearsal.sys.platform = "darwin"
+        rehearsal.platform.machine = lambda: "powerpc"
+        try:
+            rehearsal._compatible_native_npm_name()
+        except rehearsal.RehearsalError as error:
+            assert "unsupported rehearsal platform" in str(error)
+        else:
+            raise AssertionError("unsupported Darwin arch was accepted")
+    finally:
+        rehearsal.sys.platform = original_platform
+        rehearsal.platform.machine = original_machine
+        rehearsal.platform.libc_ver = original_libc
+
+
 def main() -> None:
     test_artifact_rehearsal()
     test_sequential_reconciliation()
+    test_compatible_native_npm_and_npm_errors()
     print("release-rehearsal tests: ok")
 
 
