@@ -108,13 +108,15 @@ assert "secrets.CARGO_REGISTRY_TOKEN" in crates
 assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
 assert "Never print the value" in crates
 assert "secrets.NPM_TOKEN" not in crates
-assert "Refresh this node before authorize" in crates
+assert "Refresh this node and its crates dependencies before authorize" in crates
 assert (
-    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
-    in crates
+    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" '
+    '--node "$refresh_node" --live' in crates
 )
+assert "edge.get('from') == node" in crates
 observe_marker = (
-    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
+    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" '
+    '--node "$refresh_node" --live'
 )
 authorize_marker = (
     'release_action.py authorize --manifest "candidate/$MANIFEST_NAME" '

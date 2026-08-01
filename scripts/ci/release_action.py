@@ -139,6 +139,12 @@ def authorize(
         if isinstance(reason, str) and reason:
             detail += f": {reason}"
         detail += ")"
+        dependency_states = decision.get("dependency_states")
+        if isinstance(dependency_states, dict) and dependency_states:
+            rendered = ", ".join(
+                f"{dependency}={state}" for dependency, state in sorted(dependency_states.items())
+            )
+            detail += f" deps[{rendered}]"
         raise ActionError(f"node {node_id} is not safe to publish: {detail}")
     return {
         "schema": "graphforge-release-action-authorization-v1",
