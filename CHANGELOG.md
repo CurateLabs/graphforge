@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restructure Quick Start for Python and Node paths with separate
   copyable fences, and add a direct Studio (GraphForge for VS Code)
   pointer to the Marketplace, Open VSX, and extension guide (#301).
+- Restore separate pinned v0.5.1 install fences on remaining public
+  surfaces (root README, Node binding README, visualization guide,
+  book use-cases, VS Code install notes); no bare `pip install graphforge`
+  or mixed-tool OR fences in copyable install examples (#301).
 
 ## [0.5.1] - 2026-08-01
 

@@ -47,8 +47,8 @@ active, and the next step to fix whichever is missing.
 `@curatelabs/graphforge` is an optional peer dependency. Either:
 
 - Run **`GraphForge: Setup Native Binding`** — one QuickPick offering: link a detected sibling
-  build, browse to a built package folder (sets `graphforge.nativeModulePath`), or install it
-  via `npm install @curatelabs/graphforge` once it's published; or
+  build, browse to a built package folder (sets `graphforge.nativeModulePath`), or install
+  `@curatelabs/graphforge@0.5.1` from npm; or
 - Set `graphforge.nativeModulePath` yourself to an absolute path.
 
 ## Setting up the Python binding
@@ -65,19 +65,24 @@ Run **`GraphForge: Setup Python Binding`** — a single QuickPick with up to thr
    a workspace `.venv`/`venv`/`env` folder, then `python3`/`python` on `PATH`.
 2. **Select interpreter…** — browse for a specific interpreter; sets
    `graphforge.pythonInterpreterPath`.
-3. **Install via uv** — runs `uv add graphforge` in a uv-managed project (`pyproject.toml` /
-   `uv.lock` present), otherwise `uv pip install --python <interpreter> graphforge`, only after
-   you explicitly confirm. If `uv` isn't installed, the command stops and tells you to install
-   it — it never falls back to `pip`.
+3. **Install via uv** — runs `uv add "graphforge==0.5.1"` in a uv-managed project
+   (`pyproject.toml` / `uv.lock` present), otherwise
+   `uv pip install --python <interpreter> "graphforge==0.5.1"`, only after you explicitly
+   confirm. If `uv` isn't installed, the command stops and tells you to install it — it never
+   falls back to `pip`.
 
 Or from a terminal directly:
 
-```bash
-# in a uv-managed project (has pyproject.toml / uv.lock)
-uv add graphforge
+**uv** (project with `pyproject.toml` / `uv.lock`)
 
-# targeting an arbitrary interpreter/venv instead
-uv pip install --python /path/to/python graphforge
+```bash
+uv add "graphforge==0.5.1"
+```
+
+**uv pip** (arbitrary interpreter / venv)
+
+```bash
+uv pip install --python /path/to/python "graphforge==0.5.1"
 ```
 
 Requires the [`pyarrow`](https://pypi.org/project/pyarrow/) package alongside `graphforge`

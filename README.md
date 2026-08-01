@@ -75,15 +75,38 @@ Install GraphForge **v0.5.1** from PyPI or npm. Pin the release version — PyPI
 also lists an unrelated pure-Python `graphforge` **0.4.0**; do not confuse it
 with the CurateLabs native engine.
 
+**pip**
+
 ```bash
 pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
+```
+
+**npm**
+
+```bash
+npm install @curatelabs/graphforge@0.5.1
+```
+
+**pnpm**
+
+```bash
+pnpm add @curatelabs/graphforge@0.5.1
+```
+
+```bash
 python -c "import graphforge; print(graphforge.__version__)"  # 0.5.1…
 ```
 
 **Requirements:** Python 3.10–3.14
 
-See the [installation guide](docs/guide/installation.md) for Node setup,
-source builds, and verification.
+See the [installation guide](docs/guide/installation.md) for source builds
+and fuller verification.
 
 ### Ways to use GraphForge
 

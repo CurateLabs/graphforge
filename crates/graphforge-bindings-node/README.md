@@ -6,9 +6,21 @@ JavaScript fallback engine.
 
 ## Install
 
+**npm**
+
 ```bash
-npm install @curatelabs/graphforge apache-arrow
+npm install @curatelabs/graphforge@0.5.1
 ```
+
+**pnpm**
+
+```bash
+pnpm add @curatelabs/graphforge@0.5.1
+```
+
+Decode Arrow IPC results with [`apache-arrow`](https://www.npmjs.com/package/apache-arrow)
+(`npm install apache-arrow` / `pnpm add apache-arrow`) when you want table helpers
+in JavaScript.
 
 Node.js 20 or newer is required. Prebuilt packages are published for:
 

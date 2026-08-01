@@ -20,8 +20,16 @@ Both tools are complementary. GraphForge excels at storage, querying, and sharin
 
 ## Installation
 
+**pip**
+
 ```bash
-pip install graphforge
+pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
 ```
 
 For persistent notebooks, use a Parquet-backed project directory so results survive kernel restarts:
