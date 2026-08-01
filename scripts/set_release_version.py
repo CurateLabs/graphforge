@@ -198,8 +198,8 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     )
     if n != 1:
         raise ValueError("failed to update Cargo.toml workspace version")
-    CARGO_TOML.write_text(cargo_text, encoding="utf-8")
 
+    staged_manifests: list[tuple[Path, str]] = []
     pin_updates = 0
     for path in crate_manifests():
         text = path.read_text(encoding="utf-8")
@@ -208,7 +208,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
             text,
         )
         if count:
-            path.write_text(updated, encoding="utf-8")
+            staged_manifests.append((path, updated))
             pin_updates += count
     if pin_updates == 0:
         raise ValueError("failed to update any path+version graphforge crate dependencies")
@@ -225,7 +225,6 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     )
     if lock_count == 0:
         raise ValueError("failed to update Cargo.lock workspace package versions")
-    CARGO_LOCK.write_text(lock_text, encoding="utf-8")
 
     py_text = PYPROJECT.read_text(encoding="utf-8")
     py_text, n = re.subn(
@@ -236,8 +235,8 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     )
     if n != 1:
         raise ValueError("failed to update Python pyproject version")
-    PYPROJECT.write_text(py_text, encoding="utf-8")
 
+    staged_packages: list[tuple[Path, dict]] = []
     for path, key in (
         (NODE_PACKAGE, "node"),
         (CLI_PACKAGE, "cli"),
@@ -248,16 +247,25 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
         if path == SKILLS_PACKAGE:
             compatibility_meta = meta.setdefault("graphforgeCompatibility", {})
             compatibility_meta["release"] = expected[key]
-        path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        staged_packages.append((path, meta))
 
     for path in native_npm_packages():
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected["node"]
-        path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        staged_packages.append((path, meta))
 
     compatibility = json.loads(SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
     compatibility["package_version"] = expected["skills"]
     compatibility["graphforge_release"] = expected["skills"]
+
+    # Commit writes only after all updates validate.
+    CARGO_TOML.write_text(cargo_text, encoding="utf-8")
+    for path, updated in staged_manifests:
+        path.write_text(updated, encoding="utf-8")
+    CARGO_LOCK.write_text(lock_text, encoding="utf-8")
+    PYPROJECT.write_text(py_text, encoding="utf-8")
+    for path, meta in staged_packages:
+        path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     SKILLS_COMPATIBILITY.write_text(json.dumps(compatibility, indent=2) + "\n", encoding="utf-8")
 
     return expected
