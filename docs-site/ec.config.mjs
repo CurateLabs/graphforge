@@ -34,6 +34,37 @@ function staticScrollableTabindex() {
   };
 }
 
+/**
+ * Night Owl Light comments (#989fb1 / #939dbb) stay washed out even after EC's
+ * default 5.5:1 pass. Prefer stronger slate comments, then let
+ * minSyntaxHighlightingColorContrast finish keywords/strings.
+ *
+ * @param {string | string[] | undefined} scope
+ */
+function isCommentScope(scope) {
+  const scopes = Array.isArray(scope) ? scope : scope ? [scope] : [];
+  return scopes.some(
+    (s) =>
+      typeof s === 'string' &&
+      (s === 'comment' || s.startsWith('comment.') || s.includes('.comment')),
+  );
+}
+
 export default defineEcConfig({
   plugins: [staticScrollableTabindex()],
+  // Soft Night Owl tokens need more than the default 5.5:1 on light code bg.
+  minSyntaxHighlightingColorContrast: 7,
+  styleOverrides: {
+    // Roboto Mono at 400 reads thin on light gray; 500 matches marketing density.
+    codeFontWeight: '500',
+  },
+  customizeTheme: (theme) => {
+    // Light ≈7:1 on Starlight contrast-check bg (#f6f7f9). Dark: slate muted.
+    const commentFg = theme.type === 'light' ? '#4b5563' : '#94a3b8';
+    for (const setting of theme.settings) {
+      if (!isCommentScope(setting.scope)) continue;
+      if (!setting.settings) setting.settings = {};
+      setting.settings.foreground = commentFg;
+    }
+  },
 });

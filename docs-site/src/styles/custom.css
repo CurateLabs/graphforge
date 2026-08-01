@@ -89,6 +89,16 @@ starlight-file-tree,
   border-radius: 4px;
 }
 
+/*
+ * Code readability: slightly heavier mono. Mirrors ec.config.mjs
+ * styleOverrides.codeFontWeight (500) so thin Night Owl tokens stay legible.
+ */
+.expressive-code pre > code,
+.expressive-code .ec-line .code {
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+}
+
 table {
   border-radius: 4px;
   overflow: hidden;
