@@ -124,7 +124,7 @@ try {
   assert.equal(
     readdirSync(nativeRoot).some((name) => name.endsWith(".node")),
     true,
-    "build @graphforge/node before running the native lifecycle acceptance",
+    "build @curatelabs/graphforge before running the native lifecycle acceptance",
   );
   const nativeTarball = pack(nativeRoot);
   const cliTarball = pack(packageRoot, true);
@@ -152,14 +152,14 @@ try {
   const installedCliRoot = join(
     installRoot,
     "node_modules",
-    "@graphforge",
-    "cli",
+    "@curatelabs",
+    "graphforge-cli",
   );
   const installedNativeRoot = join(
     installRoot,
     "node_modules",
-    "@graphforge",
-    "node",
+    "@curatelabs",
+    "graphforge",
   );
   const installedCli = JSON.parse(
     readFileSync(join(installedCliRoot, "package.json"), "utf8"),
@@ -170,11 +170,11 @@ try {
   assert.equal(installedCli.version, packageMetadata.version);
   assert.equal(installedNative.version, packageMetadata.version);
   assert.equal(
-    installedCli.dependencies["@graphforge/node"],
+    installedCli.dependencies["@curatelabs/graphforge"],
     packageMetadata.version,
   );
   assert.equal(
-    installedCli.dependencies["@graphforge/node"].includes("workspace:"),
+    installedCli.dependencies["@curatelabs/graphforge"].includes("workspace:"),
     false,
   );
 

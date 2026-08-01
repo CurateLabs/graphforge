@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static contract for ordered, clean-consumer @graphforge/cli publication."""
+"""Static contract for ordered, clean-consumer @curatelabs/graphforge-cli publication."""
 
 from pathlib import Path
 
@@ -15,7 +15,7 @@ def main() -> None:
     npm_job, found, _ = tail.partition("\n  publish-crates:\n")
     assert found
     assert "needs: [candidate-preflight, publish-pypi]" in npm_job
-    assert "pnpm --filter @graphforge/cli test:offline" in npm_job
+    assert "pnpm --filter @curatelabs/graphforge-cli test:offline" in npm_job
     assert "node scripts/ci/verify-node-cli-release-package.mjs" in npm_job
     assert npm_job.count("scripts/publish_npm_artifacts.py") == 3
     assert npm_job.index("--group native") < npm_job.index("verify-node-cli-release-package.mjs")

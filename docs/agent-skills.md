@@ -1,17 +1,17 @@
 # Agent skills package
 
-The `@graphforge/agent-skills` package is the NPX distribution surface for
+The `@curatelabs/graphforge-agent-skills` package is the NPX distribution surface for
 GraphForge agent workflows. The package foundation declares compatibility with
 GraphForge v0.5.0 and contains a shared version-1 adapter with no graph,
 knowledge, or workflow semantics. It discovers existing v0.5 projects without
-mutation, opens them only through `@graphforge/node`, decodes native Arrow IPC
+mutation, opens them only through `@curatelabs/graphforge`, decodes native Arrow IPC
 through `apache-arrow`, checks exact capability versions, and normalizes errors
 for agents. It contains no alternate backend or runtime fallback.
 
 Every adapter and workflow open selects native embedded-write options. The
 validated choices are `single_writer` (default), `queued_writer`, and
 `optimistic_multi_writer`, with bounded queue capacity and rebase attempts.
-These options are forwarded unchanged to `@graphforge/node`; the package does
+These options are forwarded unchanged to `@curatelabs/graphforge`; the package does
 not infer operation, actor, provenance, graph, or knowledge identities and does
 not provide MCP, HTTP, or any other server transport.
 
@@ -22,7 +22,7 @@ versions fail with a structured version-1 adapter error.
 
 Skill manifests and invocation envelopes use the checked-in JSON Schema
 2020-12 contracts under `packages/agent-skills/schemas`. The package exports
-offline validators from `@graphforge/agent-skills/schemas`; they fail closed on
+offline validators from `@curatelabs/graphforge-agent-skills/schemas`; they fail closed on
 unknown, missing, malformed, or incompatible-version inputs and return at most
 eight deterministic diagnostics without echoing rejected values.
 
@@ -59,7 +59,7 @@ No registry access or package publication occurs.
 The package exports `bootstrapProject`, `buildKnowledge`,
 `resolveBeliefSubject`, `narrateBeliefRecords`,
 `dispatchRecordedNeutralAnalysis`, `exploreGraph`, and `retrieveAnalyze` from
-`@graphforge/agent-skills/workflows`, with checked manifests under
+`@curatelabs/graphforge-agent-skills/workflows`, with checked manifests under
 `packages/agent-skills/skills`. Bootstrap uses the public native constructor and
 Arrow query surface to create or reopen a zero-server local project, then closes,
 reopens, and queries one reserved idempotent marker. Exploratory mode is the
@@ -123,11 +123,11 @@ Analyst-agent and developer-agent scenarios are defined once in
 ```bash
 pnpm test:agent-skills
 pnpm smoke:agent-skills
-pnpm --filter @graphforge/agent-skills example:analyst
-pnpm --filter @graphforge/agent-skills example:developer
+pnpm --filter @curatelabs/graphforge-agent-skills example:analyst
+pnpm --filter @curatelabs/graphforge-agent-skills example:developer
 
 GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
-  pnpm --filter @graphforge/agent-skills test:rc-native -- \
+  pnpm --filter @curatelabs/graphforge-agent-skills test:rc-native -- \
     --commit-sha "$(git rev-parse HEAD)" \
     --evidence target/release-workflows/agent-skills/rc-e2e.json
 ```

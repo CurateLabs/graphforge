@@ -40,13 +40,13 @@ importers:
 
   packages/cli:
     dependencies:
-      '@graphforge/node':
+      '@curatelabs/graphforge':
         specifier: workspace:*
         version: link:../../crates/graphforge-bindings-node
 
   tests/features/node:
     dependencies:
-      '@graphforge/node':
+      '@curatelabs/graphforge':
         specifier: workspace:*
         version: link:../../../crates/graphforge-bindings-node
     devDependencies:

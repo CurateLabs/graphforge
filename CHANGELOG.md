@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+- Move all public npm packages from the unavailable `@graphforge` scope to the
+  Curate Labs-owned `@curatelabs` scope, using `@curatelabs/graphforge` for the
+  native binding and `@curatelabs/graphforge-*` for platform, CLI, and agent
+  skills packages; update release records, verification, and publication docs
+  to reject the retired candidate names (#279).
 
 ## [0.5.0] - 2026-07-31
 
@@ -47,7 +51,7 @@ _Nothing yet._
   authoritative `checkpoint show`, and non-mutating revert preview with
   required explicit `--yes` confirmation (#243).
 - Package host-discoverable project-local GraphForge skills from one canonical
-  source in both the `graphforge` wheel and `@graphforge/cli`, with
+  source in both the `graphforge` wheel and `@curatelabs/graphforge-cli`, with
   deterministic compatibility metadata and byte-parity checks (#230).
 - Preserve LF bytes for canonical and packaged project skills on Windows
   checkouts so release-candidate wheels satisfy their recorded SHA-256 digests
@@ -59,7 +63,7 @@ _Nothing yet._
   promotion so Windows can atomically rename the durable directory (#265).
 - Emit v0.5.0 artifact records with current M1, release, and legal tracker
   lineage instead of retired pre-migration issue references (#267).
-- Add byte-for-byte equivalent `graphforge` wheel and `@graphforge/cli` npm
+- Add byte-for-byte equivalent `graphforge` wheel and `@curatelabs/graphforge-cli` npm
   entry points backed by the same Rust CLI parser, execution, structured errors,
   output, and exit codes, with packed clean-install `uvx`/offline `npx`
   acceptance for the complete repository lifecycle. Project `export`/`import`
@@ -103,7 +107,7 @@ _Nothing yet._
   ordinary CI artifacts and publication bytes remain prohibited (#260).
 - Restore local multi-surface coverage via `make coverage`: Rust (`cargo llvm-cov` →
   `build/coverage-rust/`), Python wrapper (`pytest-cov` on
-  `crates/graphforge-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`
+  `crates/graphforge-bindings-py/python/graphforge`), and Node (`c8` on `@curatelabs/graphforge`
   `lib/`), each with an enforceable ≥85% line threshold (#2845).
 - Keep docs homepage shields.io badges inline (with wrap) under Starlight's
   block-image content styles (#2845).
@@ -348,7 +352,7 @@ the authoritative runnable corpus enforced by the BDD gate.
   evidence (#2469).
 
 - Add shared analyst-agent and developer-agent release-candidate scenarios for
-  `@graphforge/agent-skills`, with redacted golden CI outputs, executable
+  `@curatelabs/graphforge-agent-skills`, with redacted golden CI outputs, executable
   examples, and a native `npm pack` offline-install evidence runner (#2422).
 
 - Stop forwarding neighborhood/traversal `walk_length` into native bfs/path
@@ -556,7 +560,7 @@ the authoritative runnable corpus enforced by the BDD gate.
 
 - Synchronize pinned-checkpoint deletion with the completed recovery lock
   handoff so cleanup tests cannot race `checkpoints.lock` release (#2560).
-- Add the distributable `@graphforge/agent-skills` NPX package shell with
+- Add the distributable `@curatelabs/graphforge-agent-skills` NPX package shell with
   machine-readable GraphForge v0.5.0 compatibility and deterministic offline
   pack, install, and invocation validation (#2536).
 

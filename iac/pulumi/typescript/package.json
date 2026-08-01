@@ -1,6 +1,7 @@
 {
-  "name": "@graphforge/pulumi-static",
+  "name": "@curatelabs/graphforge-pulumi-static",
   "version": "0.5.0-dev.0",
+  "private": true,
   "description": "Provider-neutral GraphForge validation and deployment specifications for Pulumi",
   "license": "Apache-2.0",
   "type": "commonjs",

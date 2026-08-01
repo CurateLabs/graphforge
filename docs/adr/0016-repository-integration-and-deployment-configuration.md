@@ -109,7 +109,7 @@ request, project-state open, ontology load, or secret resolution.
 Rust owns repository discovery, validation/resolution, path safety, ignore-file
 editing, project lifecycle, portable interchange, checkpoint revert, and
 destructive-operation guards. The Rust `gf` CLI is the reference behavior;
-Python and Node expose thin `uvx graphforge` and `npx @graphforge/cli` surfaces.
+Python and Node expose thin `uvx graphforge` and `npx @curatelabs/graphforge-cli` surfaces.
 Portable interchange packages one complete project generation; it does not
 redefine the runtime-catalog inspection, ontology suggestion and non-mutating
 validation, or explicit ontology-document export contract delivered by #236,

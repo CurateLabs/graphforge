@@ -206,12 +206,12 @@ def registry_urls(version: str, crates: tuple[str, ...], docs_base: str) -> dict
     urls = {
         "pypi_json": f"https://pypi.org/pypi/graphforge/{version}/json",
         "pypi_project": f"https://pypi.org/project/graphforge/{version}/",
-        "npm_node": f"https://registry.npmjs.org/@graphforge/node/{version}",
-        "npm_node_page": f"https://www.npmjs.com/package/@graphforge/node/v/{version}",
-        "npm_cli": f"https://registry.npmjs.org/@graphforge/cli/{version}",
-        "npm_cli_page": f"https://www.npmjs.com/package/@graphforge/cli/v/{version}",
-        "npm_skills": f"https://registry.npmjs.org/@graphforge/agent-skills/{version}",
-        "npm_skills_page": f"https://www.npmjs.com/package/@graphforge/agent-skills/v/{version}",
+        "npm_node": f"https://registry.npmjs.org/@curatelabs/graphforge/{version}",
+        "npm_node_page": f"https://www.npmjs.com/package/@curatelabs/graphforge/v/{version}",
+        "npm_cli": f"https://registry.npmjs.org/@curatelabs/graphforge-cli/{version}",
+        "npm_cli_page": f"https://www.npmjs.com/package/@curatelabs/graphforge-cli/v/{version}",
+        "npm_skills": f"https://registry.npmjs.org/@curatelabs/graphforge-agent-skills/{version}",
+        "npm_skills_page": f"https://www.npmjs.com/package/@curatelabs/graphforge-agent-skills/v/{version}",
         "docs_quickstart": f"{docs}/guide/quickstart/",
         "docs_installation": f"{docs}/guide/installation/",
         "github_release": (f"https://github.com/CurateLabs/graphforge/releases/tag/v{version}"),
@@ -274,7 +274,10 @@ def run_preflight(ctx: Context) -> LaneResult:
         result.notes.append("do not fake green checkoffs against unpublished packages")
         return result
     result.ok = True
-    registry_note = "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills)"
+    registry_note = (
+        "PyPI and npm (@curatelabs/graphforge, @curatelabs/graphforge-cli, "
+        "@curatelabs/graphforge-agent-skills)"
+    )
     if ctx.crates:
         registry_note += f", plus crates.io ({', '.join(ctx.crates)})"
     else:
@@ -397,10 +400,10 @@ def lane_npm(ctx: Context) -> LaneResult:
     work.mkdir(parents=True)
     result.commands.append("npm init -y")
     _run(ctx, ["npm", "init", "-y"], cwd=work)
-    result.commands.append(f"npm install @graphforge/node@{ctx.version} apache-arrow")
+    result.commands.append(f"npm install @curatelabs/graphforge@{ctx.version} apache-arrow")
     _run(
         ctx,
-        ["npm", "install", f"@graphforge/node@{ctx.version}", "apache-arrow"],
+        ["npm", "install", f"@curatelabs/graphforge@{ctx.version}", "apache-arrow"],
         cwd=work,
     )
     smoke = work / "smoke.mjs"
@@ -408,7 +411,7 @@ def lane_npm(ctx: Context) -> LaneResult:
         """
 import assert from "node:assert/strict";
 import { tableFromIPC } from "apache-arrow";
-import { GraphForge, version } from "@graphforge/node";
+import { GraphForge, version } from "@curatelabs/graphforge";
 
 const reported = version();
 assert.ok(typeof reported === "string" && reported.length > 0, reported);
@@ -444,7 +447,7 @@ def lane_cli(ctx: Context) -> LaneResult:
     work.mkdir(parents=True)
     result.commands.append("npm init -y")
     _run(ctx, ["npm", "init", "-y"], cwd=work)
-    package = f"@graphforge/cli@{ctx.version}"
+    package = f"@curatelabs/graphforge-cli@{ctx.version}"
     result.commands.append(f"npm install {package}")
     _run(ctx, ["npm", "install", package], cwd=work)
     result.commands.append("npx --offline --no-install graphforge --version")
@@ -456,7 +459,7 @@ def lane_cli(ctx: Context) -> LaneResult:
     reported = out.strip()
     if ctx.version not in reported:
         raise VerifyError(
-            f"@graphforge/cli version mismatch: expected {ctx.version!r} in {reported!r}"
+            f"@curatelabs/graphforge-cli version mismatch: expected {ctx.version!r} in {reported!r}"
         )
     result.notes.append(f"published CLI executable ok: {reported}")
     result.ok = True
@@ -474,7 +477,7 @@ def lane_skills(ctx: Context) -> LaneResult:
     work.mkdir(parents=True)
     result.commands.append("npm init -y")
     _run(ctx, ["npm", "init", "-y"], cwd=work)
-    pkg = f"@graphforge/agent-skills@{ctx.version}"
+    pkg = f"@curatelabs/graphforge-agent-skills@{ctx.version}"
     result.commands.append(f"npm install {pkg}")
     _run(ctx, ["npm", "install", pkg], cwd=work)
     result.commands.append(
@@ -651,9 +654,9 @@ def lane_checksums(ctx: Context) -> LaneResult:
     observed: dict[str, dict[str, str]] = {"pypi": {}, "npm": {}, "crates": {}}
     observed["pypi"] = _pypi_file_digests(ctx)
     for package, surface_key in (
-        ("@graphforge/node", "npm"),
-        ("@graphforge/cli", "npm"),
-        ("@graphforge/agent-skills", "npm"),
+        ("@curatelabs/graphforge", "npm"),
+        ("@curatelabs/graphforge-cli", "npm"),
+        ("@curatelabs/graphforge-agent-skills", "npm"),
     ):
         filename, digest = _npm_dist_digest(ctx, package)
         observed[surface_key][f"{package}:{filename}"] = digest

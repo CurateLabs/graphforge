@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Pack @graphforge/cli, install it with the already-published native package in
+ * Pack @curatelabs/graphforge-cli, install it with the already-published native package in
  * a clean consumer directory, then execute through npx without registry access.
  *
- * This runs after @graphforge/node publication. It deliberately does not use
+ * This runs after @curatelabs/graphforge publication. It deliberately does not use
  * the workspace-linked native addon, so a missing or unusable public dependency
  * blocks publishing the CLI.
  */
@@ -60,7 +60,7 @@ try {
       "install",
       "--no-audit",
       "--no-fund",
-      `@graphforge/node@${metadata.version}`,
+      `@curatelabs/graphforge@${metadata.version}`,
       tarball,
     ],
     consumer,
@@ -71,7 +71,7 @@ try {
     consumer,
   ).trim();
   assert.match(output, new RegExp(metadata.version.replaceAll(".", "\\.")));
-  process.stdout.write(`clean @graphforge/cli package ok: ${output}\n`);
+  process.stdout.write(`clean @curatelabs/graphforge-cli package ok: ${output}\n`);
 } finally {
   rmSync(fixture, { recursive: true, force: true });
 }

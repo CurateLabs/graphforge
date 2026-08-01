@@ -332,14 +332,14 @@ pnpm-test-bdd:  ## Run BDD tests across Node workspace packages
 
 # Node JS API coverage via c8 over hand-written lib/*.mjs (and exercised loader).
 # Requires a built native addon (*.node); does not build it here (heavy — see AGENTS.md).
-coverage-node:  ## Run @graphforge/node JS API tests under c8 (requires *.node)
+coverage-node:  ## Run @curatelabs/graphforge JS API tests under c8 (requires *.node)
 	@set -- crates/graphforge-bindings-node/*.node; \
 	if [ ! -e "$$1" ]; then \
 	  echo "❌ Native addon missing under crates/graphforge-bindings-node/*.node"; \
-	  echo "   Build first: pnpm --filter @graphforge/node exec napi build --platform --release"; \
+	  echo "   Build first: pnpm --filter @curatelabs/graphforge exec napi build --platform --release"; \
 	  exit 1; \
 	fi
-	pnpm --filter @graphforge/node run test:coverage
+	pnpm --filter @curatelabs/graphforge run test:coverage
 	@test -s crates/graphforge-bindings-node/coverage/lcov.info || \
 		(echo "❌ crates/graphforge-bindings-node/coverage/lcov.info missing or empty" && exit 1)
 	@$(MAKE) check-coverage-node

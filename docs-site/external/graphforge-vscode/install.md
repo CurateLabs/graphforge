@@ -17,7 +17,7 @@
 `graphforge.runtime` (setting, default `auto`) controls which engine backs Cypher execution
 and the analyst verbs:
 
-- **Node (`@graphforge/node`)** — the default for Node-ish and ambiguous workspaces. Fast,
+- **Node (`@curatelabs/graphforge`)** — the default for Node-ish and ambiguous workspaces. Fast,
   in-process, no subprocess. Also the only runtime backing the more advanced surfaces:
   checkpoints, embedding spaces, indexing, invocation descriptors, composite transactions, and
   knowledge-ledger writes.
@@ -27,7 +27,7 @@ and the analyst verbs:
 
 In `auto`, **Node is the global default** — except when the workspace looks like a **Python
 project** and not primarily a Node project, in which case `auto` prefers Python even if
-`@graphforge/node` is also available:
+`@curatelabs/graphforge` is also available:
 
 - **Python signals:** `pyproject.toml`, `requirements.txt`, `uv.lock`, `.python-version`,
   `Pipfile`, `environment.yml`, `setup.py`, a notebook-dominant workspace root, or an explicitly
@@ -44,11 +44,11 @@ active, and the next step to fix whichever is missing.
 
 ## Setting up the Node binding
 
-`@graphforge/node` is an optional peer dependency. Either:
+`@curatelabs/graphforge` is an optional peer dependency. Either:
 
 - Run **`GraphForge: Setup Native Binding`** — one QuickPick offering: link a detected sibling
   build, browse to a built package folder (sets `graphforge.nativeModulePath`), or install it
-  via `npm install @graphforge/node` once it's published; or
+  via `npm install @curatelabs/graphforge` once it's published; or
 - Set `graphforge.nativeModulePath` yourself to an absolute path.
 
 ## Setting up the Python binding

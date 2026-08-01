@@ -114,7 +114,7 @@ def default_preflight(language: str) -> tuple[list[str], dict[str, str] | None]:
             [sys.executable, str(ROOT / "scripts/ci/run-python-binding-contract.py")],
             None,
         )
-    return (["pnpm", "--filter", "@graphforge/node", "test"], None)
+    return (["pnpm", "--filter", "@curatelabs/graphforge", "test"], None)
 
 
 def complete_inventory() -> list[str]:
@@ -385,7 +385,7 @@ def main() -> int:
                 "name": {
                     "rust": "graphforge-api",
                     "python": "graphforge",
-                    "node": "@graphforge/node",
+                    "node": "@curatelabs/graphforge",
                 }[args.language],
                 "version": package_version(args.language),
                 "artifact_sha256": digest_file(artifact),

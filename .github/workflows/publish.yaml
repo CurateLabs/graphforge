@@ -197,14 +197,14 @@ jobs:
             --version 0.5.0 \
             --group native
           node scripts/ci/verify-node-cli-release-package.mjs
-          pnpm --filter @graphforge/cli test:offline
+          pnpm --filter @curatelabs/graphforge-cli test:offline
           python3 scripts/publish_npm_artifacts.py \
             --release-record candidate/v0.5.0-artifacts.json \
             --artifacts-dir candidate/release-artifacts \
             --expected-sha "$RELEASE_SHA" \
             --version 0.5.0 \
             --group cli
-          pnpm --filter @graphforge/agent-skills test:offline
+          pnpm --filter @curatelabs/graphforge-agent-skills test:offline
           python3 scripts/publish_npm_artifacts.py \
             --release-record candidate/v0.5.0-artifacts.json \
             --artifacts-dir candidate/release-artifacts \

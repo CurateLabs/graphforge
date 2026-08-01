@@ -16,7 +16,7 @@ multi-tenant service. Operational detail:
 | Rust crates (`graphforge-*`, including `graphforge-cli`) | crates.io | Same release version | Maintainers |
 | Python package (wheels/sdist) | PyPI | Same release version | Maintainers |
 | Node binding package | npm | Same release version | Maintainers |
-| Lifecycle CLI package | npm (`@graphforge/cli`) | Same release version | Maintainers |
+| Lifecycle CLI package | npm (`@curatelabs/graphforge-cli`) | Same release version | Maintainers |
 | Agent skills package | npm (`npx` skills) | Same release line | Maintainers |
 | Source archive / GitHub Release | GitHub | Annotated tag | Maintainers |
 | Documentation site | Astro Starlight (`docs-site/`; CI via `docs.yml`) | Commit / release | Maintainers |

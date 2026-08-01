@@ -111,11 +111,11 @@ def test_preflight_ok_when_published() -> None:
     def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
         if "pypi.org/pypi/graphforge/0.5.0/json" in url:
             return 200, json.dumps({"info": {"version": "0.5.0"}}).encode(), {}
-        if "registry.npmjs.org/@graphforge/node/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge/0.5.0" in url:
             return 200, b"{}", {}
-        if "registry.npmjs.org/@graphforge/cli/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge-cli/0.5.0" in url:
             return 200, b"{}", {}
-        if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge-agent-skills/0.5.0" in url:
             return 200, b"{}", {}
         if "crates.io/api/v1/crates/graphforge-api/0.5.0" in url:
             return 200, json.dumps({"version": {"num": "0.5.0"}}).encode(), {}
@@ -135,7 +135,8 @@ def test_preflight_ok_when_published() -> None:
         result = cev.run_preflight(ctx)
         assert result.ok is True, result.error
         assert result.notes == [
-            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills); "
+            "PyPI and npm (@curatelabs/graphforge, @curatelabs/graphforge-cli, "
+            "@curatelabs/graphforge-agent-skills); "
             "no crates.io packages configured; probes OK for v0.5.0"
         ]
 
@@ -152,7 +153,8 @@ def test_preflight_ok_when_published() -> None:
         crate_result = cev.run_preflight(crate_ctx)
         assert crate_result.ok is True, crate_result.error
         assert crate_result.notes == [
-            "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills), "
+            "PyPI and npm (@curatelabs/graphforge, @curatelabs/graphforge-cli, "
+            "@curatelabs/graphforge-agent-skills), "
             "plus crates.io (graphforge-api); probes OK for v0.5.0"
         ]
 
@@ -198,33 +200,33 @@ def test_checksums_match_release_record() -> None:
                 ).encode(),
                 {},
             )
-        if "registry.npmjs.org/@graphforge/node/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge/0.5.0" in url:
             return (
                 200,
                 json.dumps(
                     {
                         "dist": {
-                            "tarball": "https://example.test/graphforge-node-0.5.0.tgz",
+                            "tarball": "https://example.test/curatelabs-graphforge-0.5.0.tgz",
                             "integrity": "sha256-abc",
                         }
                     }
                 ).encode(),
                 {},
             )
-        if "registry.npmjs.org/@graphforge/cli/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge-cli/0.5.0" in url:
             return (
                 200,
                 json.dumps(
                     {
                         "dist": {
-                            "tarball": "https://example.test/graphforge-cli-0.5.0.tgz",
+                            "tarball": ("https://example.test/curatelabs-graphforge-cli-0.5.0.tgz"),
                             "integrity": "sha256-cli",
                         }
                     }
                 ).encode(),
                 {},
             )
-        if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
+        if "registry.npmjs.org/@curatelabs/graphforge-agent-skills/0.5.0" in url:
             return (
                 200,
                 json.dumps(
@@ -278,7 +280,7 @@ def test_cli_lane_installs_and_executes_published_package() -> None:
         )
         result = cev.lane_cli(ctx)
         assert result.ok is True, result.error
-        assert ["npm", "install", "@graphforge/cli@0.5.0"] in commands
+        assert ["npm", "install", "@curatelabs/graphforge-cli@0.5.0"] in commands
         assert [
             "npx",
             "--offline",

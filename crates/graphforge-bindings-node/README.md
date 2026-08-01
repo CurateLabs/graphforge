@@ -1,4 +1,4 @@
-# `@graphforge/node`
+# `@curatelabs/graphforge`
 
 Native Node.js bindings for the GraphForge embedded graph engine. The package
 loads the Rust implementation for the current platform; it does not include a
@@ -7,7 +7,7 @@ JavaScript fallback engine.
 ## Install
 
 ```bash
-npm install @graphforge/node apache-arrow
+npm install @curatelabs/graphforge apache-arrow
 ```
 
 Node.js 20 or newer is required. Prebuilt packages are published for:
@@ -20,7 +20,7 @@ Node.js 20 or newer is required. Prebuilt packages are published for:
 
 ```js
 import { tableFromIPC } from "apache-arrow";
-import { GraphForge } from "@graphforge/node";
+import { GraphForge } from "@curatelabs/graphforge";
 
 const forge = new GraphForge();
 forge.execute("CREATE (:Person {name: 'Alice', age: 30})");

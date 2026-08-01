@@ -13,7 +13,7 @@ The Python and Node packages project the same native lifecycle contract:
 
 ```bash
 uvx graphforge init
-npx @graphforge/cli init
+npx @curatelabs/graphforge-cli init
 ```
 
 Both entry points forward arguments to the Rust CLI and preserve its exact

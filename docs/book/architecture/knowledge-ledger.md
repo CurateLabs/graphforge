@@ -184,7 +184,7 @@ The Node binding projects the same Rust request and returns Arrow IPC:
 
 ```javascript
 import { tableFromIPC } from "apache-arrow";
-import { GraphForge } from "@graphforge/node";
+import { GraphForge } from "@curatelabs/graphforge";
 
 const forge = new GraphForge("/data/project");
 await forge.enableCapability({

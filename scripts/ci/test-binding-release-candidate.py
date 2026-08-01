@@ -256,8 +256,8 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
 
     assert_active_lines(
         node_job,
-        "pnpm --filter @graphforge/node exec napi build --platform --release",
-        "pnpm --filter @graphforge/node test:smoke",
+        "pnpm --filter @curatelabs/graphforge exec napi build --platform --release",
+        "pnpm --filter @curatelabs/graphforge test:smoke",
         "tests/non-cypher-release-parity.test.mjs \\",
         "tests/async-errors.test.mjs",
         "cmp built-addon.sha256 tested-addon.sha256",
@@ -396,8 +396,8 @@ def main() -> None:
     for original, invalid in (
         ("timeout_minutes: 90", "timeout_minutes: 60"),
         ("--platform --release", "--platform --debug"),
-        ("pnpm --filter @graphforge/node test:smoke", "sleep 1"),
-        ("pnpm --filter @graphforge/node test:smoke", "retry native-smoke"),
+        ("pnpm --filter @curatelabs/graphforge test:smoke", "sleep 1"),
+        ("pnpm --filter @curatelabs/graphforge test:smoke", "retry native-smoke"),
         (
             "- name: Build declared publish target\n        shell: bash",
             "- name: Build declared publish target\n"
@@ -768,7 +768,7 @@ def main() -> None:
     pnpm = shutil.which("pnpm")
     assert pnpm is not None, "pnpm is required for napi CLI contract validation"
     help_result = subprocess.run(
-        [pnpm, "--filter", "@graphforge/node", "exec", "napi", "artifacts", "--help"],
+        [pnpm, "--filter", "@curatelabs/graphforge", "exec", "napi", "artifacts", "--help"],
         cwd=ROOT,
         check=False,
         capture_output=True,

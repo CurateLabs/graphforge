@@ -54,19 +54,19 @@ dependency (not bundled inside the `graphforge` wheel). See
 
 ---
 
-## Node package (`@graphforge/node`)
+## Node package (`@curatelabs/graphforge`)
 
 **Requirements:** a current Node.js LTS (CI covers the binding’s supported
 targets).
 
 ```bash
-npm install @graphforge/node
+npm install @curatelabs/graphforge
 # or
-pnpm add @graphforge/node
+pnpm add @curatelabs/graphforge
 ```
 
 ```js
-import { GraphForge } from "@graphforge/node";
+import { GraphForge } from "@curatelabs/graphforge";
 ```
 
 Until the CurateLabs package is published to npm, install from a local
@@ -83,7 +83,7 @@ query/bench results.
 | Surface | Packed / download | Installed / unpacked |
 |---|---|---|
 | Python `graphforge` | ~42 MB wheel | ~121 MB (mostly `_graphforge_rs.abi3.so`) |
-| Node `@graphforge/node` | ~44 MB npm pack | ~128 MB (mostly `.node` ≈ 121 MB) |
+| Node `@curatelabs/graphforge` | ~44 MB npm pack | ~128 MB (mostly `.node` ≈ 121 MB) |
 | PyArrow (Python dep, e.g. 21.0.0) | ~31 MB wheel | ~108 MB |
 
 **Caveats**

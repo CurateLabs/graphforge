@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as temp:
     archive = root / "package.tgz"
     archive.write_bytes(b"candidate")
     item = {
-        "name": "@graphforge/node",
+        "name": "@curatelabs/graphforge",
         "version": "0.5.0",
         "path": archive.name,
         "sha256": "abc123",

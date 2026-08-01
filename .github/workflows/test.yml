@@ -89,7 +89,7 @@ jobs:
       - uses: pnpm/action-setup@v4
 
       - name: Install pinned napi CLI
-        run: pnpm install --frozen-lockfile --filter @graphforge/node...
+        run: pnpm install --frozen-lockfile --filter @curatelabs/graphforge...
 
       - name: Test binding release-candidate evidence validator
         run: python3 scripts/ci/test-binding-release-candidate.py
@@ -596,18 +596,18 @@ jobs:
       - name: Build same-SHA addon
         # Pull requests need a behaviorally correct native addon, not release
         # code generation. Cross-platform release builds remain in publish.yaml.
-        run: pnpm --filter @graphforge/node exec napi build --platform
+        run: pnpm --filter @curatelabs/graphforge exec napi build --platform
 
       - name: Run Node acceptance tests
         shell: bash
         run: |
-          pnpm --filter @graphforge/node test:smoke
-          pnpm --filter @graphforge/node test
-          pnpm --filter @graphforge/node format:check
+          pnpm --filter @curatelabs/graphforge test:smoke
+          pnpm --filter @curatelabs/graphforge test
+          pnpm --filter @curatelabs/graphforge format:check
           pnpm test:node-cli
           pnpm format:node-cli
           pnpm smoke:node-cli
-          pnpm --filter @graphforge/cli test:lifecycle
+          pnpm --filter @curatelabs/graphforge-cli test:lifecycle
 
       - name: Run Node BDD suite
         working-directory: tests/features/node
@@ -700,7 +700,7 @@ jobs:
           uv venv /tmp/gf-concurrency --python 3.13
           uv pip install --python /tmp/gf-concurrency/bin/python dist/*.whl
           pnpm install --frozen-lockfile
-          pnpm --filter @graphforge/node exec napi build --platform
+          pnpm --filter @curatelabs/graphforge exec napi build --platform
 
       - name: Run required short concurrency matrix
         shell: bash

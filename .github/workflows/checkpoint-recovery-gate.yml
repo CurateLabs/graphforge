@@ -124,9 +124,9 @@ jobs:
       - name: Build and prove same-SHA Node package
         run: |
           pnpm install --frozen-lockfile
-          pnpm --filter @graphforge/node exec napi build --platform
-          pnpm --filter @graphforge/node exec node --test tests/checkpoints.test.mjs
-          pnpm --filter @graphforge/node pack --pack-destination "${{ github.workspace }}/dist"
+          pnpm --filter @curatelabs/graphforge exec napi build --platform
+          pnpm --filter @curatelabs/graphforge exec node --test tests/checkpoints.test.mjs
+          pnpm --filter @curatelabs/graphforge pack --pack-destination "${{ github.workspace }}/dist"
       - name: Record Node artifact
         run: |
           mkdir -p checkpoint-fragments

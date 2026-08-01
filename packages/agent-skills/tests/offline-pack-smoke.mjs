@@ -97,7 +97,7 @@ assert.deepEqual(compatibility.security_contract, {
 });
 for (const path of first.files.filter((path) => path.endsWith(".js"))) {
   const source = readFileSync(
-    join(consumer, "node_modules/@graphforge/agent-skills", path),
+    join(consumer, "node_modules/@curatelabs/graphforge-agent-skills", path),
     "utf8",
   );
   assert.equal(/(?:node:)?child_process/.test(source), false, path);
@@ -108,7 +108,7 @@ const adapterOutput = execFileSync(
   [
     "--input-type=module",
     "--eval",
-    "import { ADAPTER_CONTRACT_VERSION, stableJson } from '@graphforge/agent-skills'; process.stdout.write(stableJson({ version: ADAPTER_CONTRACT_VERSION }));",
+    "import { ADAPTER_CONTRACT_VERSION, stableJson } from '@curatelabs/graphforge-agent-skills'; process.stdout.write(stableJson({ version: ADAPTER_CONTRACT_VERSION }));",
   ],
   { cwd: consumer, encoding: "utf8" },
 );
@@ -119,7 +119,7 @@ const workflowOutput = execFileSync(
   [
     "--input-type=module",
     "--eval",
-    "import { bootstrapProject, buildKnowledge, resolveBeliefSubject, narrateBeliefRecords, dispatchRecordedNeutralAnalysis, exploreGraph, retrieveAnalyze } from '@graphforge/agent-skills/workflows'; process.stdout.write(JSON.stringify([typeof bootstrapProject, typeof buildKnowledge, typeof resolveBeliefSubject, typeof narrateBeliefRecords, typeof dispatchRecordedNeutralAnalysis, typeof exploreGraph, typeof retrieveAnalyze]));",
+    "import { bootstrapProject, buildKnowledge, resolveBeliefSubject, narrateBeliefRecords, dispatchRecordedNeutralAnalysis, exploreGraph, retrieveAnalyze } from '@curatelabs/graphforge-agent-skills/workflows'; process.stdout.write(JSON.stringify([typeof bootstrapProject, typeof buildKnowledge, typeof resolveBeliefSubject, typeof narrateBeliefRecords, typeof dispatchRecordedNeutralAnalysis, typeof exploreGraph, typeof retrieveAnalyze]));",
   ],
   { cwd: consumer, encoding: "utf8" },
 );
@@ -132,7 +132,7 @@ const securityOutput = execFileSync(
   [
     "--input-type=module",
     "--eval",
-    "import { requestSubprocess } from '@graphforge/agent-skills'; try { requestSubprocess({command:'SECRET_TOKEN_DO_NOT_ECHO'}); } catch (error) { process.stdout.write(JSON.stringify(error)); }",
+    "import { requestSubprocess } from '@curatelabs/graphforge-agent-skills'; try { requestSubprocess({command:'SECRET_TOKEN_DO_NOT_ECHO'}); } catch (error) { process.stdout.write(JSON.stringify(error)); }",
   ],
   { cwd: consumer, encoding: "utf8" },
 );
@@ -147,7 +147,7 @@ const schemaOutput = execFileSync(
   [
     "--input-type=module",
     "--eval",
-    "import { validateSkillInput } from '@graphforge/agent-skills/schemas'; process.stdout.write(JSON.stringify(validateSkillInput({schema_version:2})));",
+    "import { validateSkillInput } from '@curatelabs/graphforge-agent-skills/schemas'; process.stdout.write(JSON.stringify(validateSkillInput({schema_version:2})));",
   ],
   { cwd: consumer, encoding: "utf8" },
 );

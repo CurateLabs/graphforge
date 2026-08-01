@@ -26,7 +26,7 @@ try {
   writeFileSync(
     join(nativeRoot, "package.json"),
     JSON.stringify({
-      name: "@graphforge/node",
+      name: "@curatelabs/graphforge",
       version: metadata.version,
       type: "module",
       main: "index.js",
@@ -87,8 +87,8 @@ try {
   const installedSkills = join(
     installRoot,
     "node_modules",
-    "@graphforge",
-    "cli",
+    "@curatelabs",
+    "graphforge-cli",
     "project-skills",
   );
   const installedManifest = JSON.parse(
@@ -118,7 +118,13 @@ try {
   assert.equal(
     realpathSync(successArgs[1]),
     realpathSync(
-      join(installRoot, "node_modules", "@graphforge", "cli", "project-skills"),
+      join(
+        installRoot,
+        "node_modules",
+        "@curatelabs",
+        "graphforge-cli",
+        "project-skills",
+      ),
     ),
   );
   assert.deepEqual(successArgs.slice(2), ["--json", "config", "validate"]);
@@ -129,7 +135,7 @@ try {
 
   const npx = spawnSync(
     "npx",
-    ["--offline", "--no-install", "@graphforge/cli", "--info"],
+    ["--offline", "--no-install", "@curatelabs/graphforge-cli", "--info"],
     { cwd: installRoot, encoding: "utf8" },
   );
   assert.equal(npx.status, 0, npx.stderr);

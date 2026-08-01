@@ -219,7 +219,7 @@ dist/
 crates/graphforge-bindings-node/coverage/
 target-py-cov/
 
-# Keep @graphforge/node first-party JS (root lib/ ignore is for Python venvs)
+# Keep @curatelabs/graphforge first-party JS (root lib/ ignore is for Python venvs)
 !crates/graphforge-bindings-node/lib/
 !crates/graphforge-bindings-node/lib/**
 !packages/cli/lib/

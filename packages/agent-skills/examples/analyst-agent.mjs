@@ -8,7 +8,7 @@
  *   node examples/analyst-agent.mjs
  *
  * Usage (native):
- *   GRAPHFORGE_NODE_MODULE=/path/to/@graphforge/node/index.js \
+ *   GRAPHFORGE_NODE_MODULE=/path/to/@curatelabs/graphforge/index.js \
  *     node examples/analyst-agent.mjs --native
  */
 

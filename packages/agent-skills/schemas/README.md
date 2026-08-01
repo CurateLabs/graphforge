@@ -11,7 +11,7 @@ is closed (`additionalProperties: false`) and carries the exact integer
   error.
 
 Import `validateSkillManifest`, `validateSkillInput`, or `validateSkillOutput`
-from `@graphforge/agent-skills/schemas`. Validation is local and deterministic;
+from `@curatelabs/graphforge-agent-skills/schemas`. Validation is local and deterministic;
 it does not open a GraphForge project, execute a skill, or access the network.
 Each function returns `{ valid, diagnostics }`. Diagnostics contain only a
 stable code, schema path, and fixed message. They never echo rejected values,

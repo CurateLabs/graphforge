@@ -266,7 +266,7 @@ jobs:
         env:
           CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.arm_cflags || '' }}
         run: >-
-          pnpm --filter @graphforge/node exec napi build --platform --release
+          pnpm --filter @curatelabs/graphforge exec napi build --platform --release
           --target ${{ matrix.target }} ${{ matrix.cross_args }}
 
       - name: Execute native parity and smoke contract
@@ -284,8 +284,8 @@ jobs:
           node -e 'import("./crates/graphforge-bindings-node/index.js").then(m => {
             if (typeof m.version() !== "string") process.exit(1)
           })'
-          pnpm --filter @graphforge/node test:smoke
-          pnpm --filter @graphforge/node exec node --test \
+          pnpm --filter @curatelabs/graphforge test:smoke
+          pnpm --filter @curatelabs/graphforge exec node --test \
             tests/non-cypher-release-parity.test.mjs \
             tests/async-errors.test.mjs
           ADDON_PATH="${addons[0]}" node - <<'JS' > tested-addon.sha256
