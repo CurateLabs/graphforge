@@ -542,12 +542,15 @@ jobs:
         shell: bash
         run: |
           # Recovery checkouts the immutable tag SHA for certified crate bytes.
-          # Overlay the durable publisher (429 Retry-After waits) from main without
-          # moving the tag. Never print secrets.
+          # Overlay the durable publisher (429 Retry-After waits) and authorize
+          # diagnostics from main without moving the tag. Never print secrets.
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git show refs/remotes/origin/main:scripts/publish_crates.py \
             > "$RUNNER_TEMP/publish_crates.py"
           install -m 0755 "$RUNNER_TEMP/publish_crates.py" scripts/publish_crates.py
+          git show refs/remotes/origin/main:scripts/ci/release_action.py \
+            > "$RUNNER_TEMP/release_action.py"
+          install -m 0755 "$RUNNER_TEMP/release_action.py" scripts/ci/release_action.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
@@ -588,6 +591,12 @@ jobs:
           while IFS= read -r crate; do
             node="crates:$crate"
             planned_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            # Durable crates.io Retry-After waits can exceed MAX_OBSERVATION_AGE
+            # (10m). Refresh this node before authorize so still-absent crates do
+            # not hard-fail as observation_stale / blocked_registry_state.
+            python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live --observed-at "$planned_at" --out node-observation.json
+            jq --arg node "$node" --slurpfile current node-observation.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
+            mv observations.next.json observations.json
             python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node "$node" --planned-at "$planned_at" --out authorization.json
             if test "$(jq -r .publish authorization.json)" = false; then
               continue

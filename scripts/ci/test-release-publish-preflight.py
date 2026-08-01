@@ -100,6 +100,7 @@ assert "needs: candidate-preflight" in crates
 assert "timeout-minutes: 180" in crates
 assert "Use main-branch crates publisher for recovery" in crates
 assert "refs/remotes/origin/main:scripts/publish_crates.py" in crates
+assert "refs/remotes/origin/main:scripts/ci/release_action.py" in crates
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
@@ -107,6 +108,19 @@ assert "secrets.CARGO_REGISTRY_TOKEN" in crates
 assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
 assert "Never print the value" in crates
 assert "secrets.NPM_TOKEN" not in crates
+assert "Refresh this node before authorize" in crates
+assert (
+    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
+    in crates
+)
+observe_marker = (
+    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
+)
+authorize_marker = (
+    'release_action.py authorize --manifest "candidate/$MANIFEST_NAME" '
+    "--observations observations.json"
+)
+assert crates.index(observe_marker) < crates.index(authorize_marker)
 
 for lane in (pypi, native, main, cli, skills, crates):
     assert "release_action.py" in lane

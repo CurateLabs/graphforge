@@ -134,10 +134,12 @@ def authorize(
         raise ActionError(f"planner returned no decision for node {node_id}")
     action = next((item for item in plan["actions"] if item["node_id"] == node_id), None)
     if decision["disposition"] not in {"publish", "skip_verified"}:
-        raise ActionError(
-            f"node {node_id} is not safe to publish: "
-            f"{decision['disposition']} ({decision['state']})"
-        )
+        reason = decision.get("reason")
+        detail = f"{decision['disposition']} ({decision['state']}"
+        if isinstance(reason, str) and reason:
+            detail += f": {reason}"
+        detail += ")"
+        raise ActionError(f"node {node_id} is not safe to publish: {detail}")
     return {
         "schema": "graphforge-release-action-authorization-v1",
         "candidate_sha": manifest["commit_sha"],
