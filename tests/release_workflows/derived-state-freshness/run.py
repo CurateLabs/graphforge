@@ -345,12 +345,14 @@ def main() -> None:
         python_record = json.loads(python_path.read_text())
         python_summary = validate_binding(python_record, "python", actual, venv)
 
-        execute(["pnpm", "install", "--frozen-lockfile", "--filter", "@graphforge/node..."], env)
+        execute(
+            ["pnpm", "install", "--frozen-lockfile", "--filter", "@curatelabs/graphforge..."], env
+        )
         execute(
             [
                 "pnpm",
                 "--filter",
-                "@graphforge/node",
+                "@curatelabs/graphforge",
                 "exec",
                 "napi",
                 "build",

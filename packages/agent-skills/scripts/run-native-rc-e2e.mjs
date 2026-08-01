@@ -3,7 +3,7 @@
  * Native release-candidate E2E for #2422.
  *
  * 1. npm-pack the package and offline-install into a clean temp directory
- * 2. Run analyst + developer scenarios against a local `@graphforge/node` build
+ * 2. Run analyst + developer scenarios against a local `@curatelabs/graphforge` build
  * 3. Write redacted evidence with commit SHA and runtime versions
  *
  * Usage:
@@ -120,7 +120,10 @@ execFileSync(
 
 const installedWorkflows = await import(
   pathToFileURL(
-    join(consumer, "node_modules/@graphforge/agent-skills/workflows/index.js"),
+    join(
+      consumer,
+      "node_modules/@curatelabs/graphforge-agent-skills/workflows/index.js",
+    ),
   ).href
 );
 for (const name of [

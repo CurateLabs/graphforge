@@ -68,3 +68,22 @@ def test_crate_artifact_uses_crates_surface(tmp_path: Path) -> None:
     assert artifact["class"] == "rust-crate"
     assert artifact["surface"] == "crates"
     assert artifact["name"] == "graphforge-core"
+
+
+def test_owned_scope_npm_artifacts_keep_their_public_identity(tmp_path: Path) -> None:
+    expected = {
+        "curatelabs-graphforge-0.5.0.tgz": "@curatelabs/graphforge",
+        "curatelabs-graphforge-linux-x64-gnu-0.5.0.tgz": ("@curatelabs/graphforge-linux-x64-gnu"),
+        "curatelabs-graphforge-cli-0.5.0.tgz": "@curatelabs/graphforge-cli",
+        "curatelabs-graphforge-agent-skills-0.5.0.tgz": ("@curatelabs/graphforge-agent-skills"),
+    }
+    for filename in expected:
+        (tmp_path / filename).write_bytes(filename.encode())
+
+    record = record_release_artifacts.build_record(
+        version="0.5.0",
+        dist_dir=tmp_path,
+        notes="npm identity test",
+    )
+    observed = {artifact["filename"]: artifact["name"] for artifact in record["artifacts"]}
+    assert observed == expected

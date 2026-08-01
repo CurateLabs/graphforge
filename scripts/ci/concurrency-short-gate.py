@@ -166,7 +166,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
         [
             "pnpm",
             "--filter",
-            "@graphforge/node",
+            "@curatelabs/graphforge",
             "exec",
             "node",
             "--test",

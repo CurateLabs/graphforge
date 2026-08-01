@@ -559,7 +559,7 @@ def validate_report(
     commands = {
         "rust": ["cargo", "test", "-p", "graphforge-api"],
         "python": [sys.executable, str(ROOT / "scripts/ci/run-python-binding-contract.py")],
-        "node": ["pnpm", "--filter", "@graphforge/node", "test"],
+        "node": ["pnpm", "--filter", "@curatelabs/graphforge", "test"],
     }
     expected_provenance = {
         "schema": "graphforge-load-preflight/1",

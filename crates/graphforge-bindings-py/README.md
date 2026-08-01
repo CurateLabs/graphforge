@@ -34,7 +34,7 @@ uvx graphforge infra validate --target production --json
 ```
 
 The `graphforge` console entry point is a thin launcher over the same native
-Rust CLI contract used by `gf` and `npx @graphforge/cli`. Use `--project-dir`
+Rust CLI contract used by `gf` and `npx @curatelabs/graphforge-cli`. Use `--project-dir`
 to select a repository explicitly, `--json` for machine-readable results,
 `sync --check` for CI, `revert --preview` before restoring a checkpoint, and
 `--yes` for non-interactive destructive operations.

@@ -17,8 +17,8 @@
     ],
     "node": [
       "pnpm install --frozen-lockfile",
-      "pnpm --filter @graphforge/node exec napi build --platform",
-      "pnpm --filter @graphforge/node test"
+      "pnpm --filter @curatelabs/graphforge exec napi build --platform",
+      "pnpm --filter @curatelabs/graphforge test"
     ]
   },
   "cases": [

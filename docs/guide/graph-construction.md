@@ -197,7 +197,7 @@ at the boundary.
 
 ```js
 // Node — publishBulkNodes / publishBulkEdges over Arrow IPC
-import { GraphForge } from "@graphforge/node";
+import { GraphForge } from "@curatelabs/graphforge";
 ```
 
 Cross-binding bulk parity is exercised by the opt-in conformance runner (not a

@@ -32,14 +32,14 @@ CRATES = (
     "graphforge-cli",
 )
 NPM_PACKAGES = (
-    "@graphforge/node-darwin-arm64",
-    "@graphforge/node-darwin-x64",
-    "@graphforge/node-linux-arm64-gnu",
-    "@graphforge/node-linux-x64-gnu",
-    "@graphforge/node-win32-x64-msvc",
-    "@graphforge/node",
-    "@graphforge/cli",
-    "@graphforge/agent-skills",
+    "@curatelabs/graphforge-darwin-arm64",
+    "@curatelabs/graphforge-darwin-x64",
+    "@curatelabs/graphforge-linux-arm64-gnu",
+    "@curatelabs/graphforge-linux-x64-gnu",
+    "@curatelabs/graphforge-win32-x64-msvc",
+    "@curatelabs/graphforge",
+    "@curatelabs/graphforge-cli",
+    "@curatelabs/graphforge-agent-skills",
 )
 
 

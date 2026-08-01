@@ -212,7 +212,7 @@
       "argv": [
         "pnpm",
         "--filter",
-        "@graphforge/node",
+        "@curatelabs/graphforge",
         "exec",
         "node",
         "--test",

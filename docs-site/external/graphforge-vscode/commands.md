@@ -2,7 +2,7 @@
 
 Every command below is a stable ID, invokable from the Command Palette or programmatically via
 `vscode.commands.executeCommand("<id>", ...)`. Commands marked **Node-only** require the
-`@graphforge/node` runtime — they aren't backed by the Python bridge yet (see
+`@curatelabs/graphforge` runtime — they aren't backed by the Python bridge yet (see
 [`install.md`](install.md)).
 
 ## Setup
@@ -10,7 +10,7 @@ Every command below is a stable ID, invokable from the Command Palette or progra
 | Command | ID | What it does |
 |---|---|---|
 | GraphForge: Check Environment | `graphforge.checkEnvironment` | Reports both runtimes' status, which one is active, and the single next step. Accepts optional `{ silent: true }`. |
-| GraphForge: Setup Native Binding | `graphforge.setupNativeBinding` | QuickPick to link/browse/install `@graphforge/node`. |
+| GraphForge: Setup Native Binding | `graphforge.setupNativeBinding` | QuickPick to link/browse/install `@curatelabs/graphforge`. |
 | GraphForge: Setup Python Binding | `graphforge.setupPythonBinding` | QuickPick to select a Python interpreter or install `graphforge` via `uv`. |
 | GraphForge: Initialize Project Here | `graphforge.initializeProjectHere` | Creates a new GraphForge project in an empty/uninitialized folder. |
 | GraphForge: Open Project | `graphforge.openProject` | Opens an existing `FORMAT`-marked project; accepts an optional path string arg. |

@@ -105,7 +105,7 @@ class ReleaseLoadMatrixTests(unittest.TestCase):
                 sys.executable,
                 str(GATE.ROOT / "scripts/ci/run-python-binding-contract.py"),
             ],
-            "node": ["pnpm", "--filter", "@graphforge/node", "test"],
+            "node": ["pnpm", "--filter", "@curatelabs/graphforge", "test"],
         }
         return {
             "schema": GATE.REPORT_SCHEMA,

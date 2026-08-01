@@ -29,7 +29,7 @@ function paged(rows, request = {}) {
 
 /**
  * Deterministic GraphForge stand-in for RC golden tests (PR CI).
- * Native RC evidence uses the real `@graphforge/node` binding instead.
+ * Native RC evidence uses the real `@curatelabs/graphforge` binding instead.
  */
 export function createMockProject(projectPath) {
   mkdirSync(projectPath, { recursive: true });

@@ -7,17 +7,17 @@ explicit graph and knowledge records.
 
 ## Shared adapter
 
-Import the adapter from `@graphforge/agent-skills`. Pass the shipped
-`GraphForge` constructor from `@graphforge/node` and `tableFromIPC` from
+Import the adapter from `@curatelabs/graphforge-agent-skills`. Pass the shipped
+`GraphForge` constructor from `@curatelabs/graphforge` and `tableFromIPC` from
 `apache-arrow` to `openProject`; the adapter does not bundle or substitute a
 runtime:
 
 ```js
-import { openProject } from "@graphforge/agent-skills";
+import { openProject } from "@curatelabs/graphforge-agent-skills";
 import { tableFromIPC } from "apache-arrow";
 import { createRequire } from "node:module";
 
-const { GraphForge } = createRequire(import.meta.url)("@graphforge/node");
+const { GraphForge } = createRequire(import.meta.url)("@curatelabs/graphforge");
 const opened = await openProject({
   GraphForge,
   path: "/absolute/path/to/project",
@@ -61,7 +61,7 @@ The adapter deliberately has no `node:child_process` import or execution path.
 
 The package ships closed, versioned JSON schemas for skill manifests and
 input/output envelopes. Import the dependency-free offline validators from
-`@graphforge/agent-skills/schemas`. Rejected values produce at most eight
+`@curatelabs/graphforge-agent-skills/schemas`. Rejected values produce at most eight
 stably ordered diagnostics with fixed, non-value-bearing messages. See
 [`schemas/README.md`](schemas/README.md) for the contract and identifiers.
 Input, output, and error-detail payloads enforce the same recursive value
@@ -74,8 +74,8 @@ From the repository root, create the local artifact and run the deterministic
 offline install/invocation smoke:
 
 ```bash
-pnpm --filter @graphforge/agent-skills pack:local
-pnpm --filter @graphforge/agent-skills test:offline
+pnpm --filter @curatelabs/graphforge-agent-skills pack:local
+pnpm --filter @curatelabs/graphforge-agent-skills test:offline
 ```
 
 The smoke test installs the packed tarball into a clean temporary project and
@@ -92,7 +92,7 @@ for GraphForge `>=0.5.0 <0.6.0`.
 
 Import `bootstrapProject`, `buildKnowledge`, `resolveBeliefSubject`,
 `narrateBeliefRecords`, `dispatchRecordedNeutralAnalysis`, `exploreGraph`, and
-`retrieveAnalyze` from `@graphforge/agent-skills/workflows`. Both require the
+`retrieveAnalyze` from `@curatelabs/graphforge-agent-skills/workflows`. Both require the
 shipped `GraphForge` and `tableFromIPC` surfaces shown above. Bootstrap creates
 or reopens a local project, defaults to exploratory ontology mode, and verifies
 one reserved marker through a real close/reopen/query cycle. Replays return the
@@ -151,13 +151,13 @@ shared by:
 - the native pack-install runner `scripts/run-native-rc-e2e.mjs`
 
 ```bash
-pnpm --filter @graphforge/agent-skills test
-pnpm --filter @graphforge/agent-skills example:analyst
-pnpm --filter @graphforge/agent-skills example:developer
+pnpm --filter @curatelabs/graphforge-agent-skills test
+pnpm --filter @curatelabs/graphforge-agent-skills example:analyst
+pnpm --filter @curatelabs/graphforge-agent-skills example:developer
 
-# Optional native evidence against a local @graphforge/node build
+# Optional native evidence against a local @curatelabs/graphforge build
 GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
-  pnpm --filter @graphforge/agent-skills test:rc-native -- \
+  pnpm --filter @curatelabs/graphforge-agent-skills test:rc-native -- \
     --commit-sha "$(git rev-parse HEAD)" \
     --evidence target/release-workflows/agent-skills/rc-e2e.json
 ```

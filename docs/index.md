@@ -16,7 +16,7 @@ scripts, repositories, and editor workflows without requiring a database server.
 development line passes all **3,897 openCypher TCK scenarios**.
 
 > **Registry status:** GraphForge v0.5 packages are not published yet. PyPI currently serves
-> the legacy `graphforge` v0.4.0 line, while `@graphforge/node` and `@graphforge/cli` are not yet
+> the legacy `graphforge` v0.4.0 line, while `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` are not yet
 > available from npm. Follow the [installation guide](guide/installation.md) to build the
 > current Rust-owned engine from source.
 

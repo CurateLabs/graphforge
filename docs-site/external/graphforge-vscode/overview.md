@@ -31,7 +31,7 @@ graph.
 ## Two runtimes, one extension
 
 The extension can execute Cypher and analyst verbs through either engine binding — a native
-`@graphforge/node` addon, or the `graphforge` Python package — and picks sensibly between them
+`@curatelabs/graphforge` addon, or the `graphforge` Python package — and picks sensibly between them
 by default. See [`install.md`](install.md) for the full setup and selection story.
 
 ## License

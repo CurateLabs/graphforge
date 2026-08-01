@@ -14,8 +14,8 @@ artifacts.
 | Lane | Child | Outcome |
 | --- | --- | --- |
 | `pip` | #180 | `pip install graphforge==<version>` + documented quickstart E2E |
-| `npm` / `cli` | #183 | Install `@graphforge/node@<version>` and `@graphforge/cli@<version>` + smoke execution |
-| `skills` | #182 | Install `@graphforge/agent-skills@<version>` + offline `compatibility --json` |
+| `npm` / `cli` | #183 | Install `@curatelabs/graphforge@<version>` and `@curatelabs/graphforge-cli@<version>` + smoke execution |
+| `skills` | #182 | Install `@curatelabs/graphforge-agent-skills@<version>` + offline `compatibility --json` |
 | `cargo` | #185 | Add all 15 `graphforge-*` crates at `<version>` and compile a clean consumer |
 | `reopen` | #184 | Create/close/reopen project; Arrow rows survive reopen |
 | `urls` | #186 | Published docs + package/registry URLs resolve |

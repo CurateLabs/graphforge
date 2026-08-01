@@ -7,4 +7,4 @@ shared adapter and injected shipped Node/Arrow surfaces; neither contains a
 runtime, fallback backend, inference, search, traversal, or algorithm behavior.
 
 The checked manifest for each workflow is stored beside this file. Import the
-implementations from `@graphforge/agent-skills/workflows`.
+implementations from `@curatelabs/graphforge-agent-skills/workflows`.

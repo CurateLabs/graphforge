@@ -201,7 +201,7 @@ make test-tck
 make coverage            # all surfaces + thresholds
 make coverage-rust       # cargo llvm-cov → build/coverage-rust/
 make coverage-python     # pytest-cov on graphforge-bindings-py/python/graphforge
-make coverage-node       # c8 on @graphforge/node lib/ (needs *.node)
+make coverage-node       # c8 on @curatelabs/graphforge lib/ (needs *.node)
 make coverage-report     # open Python HTML report
 make coverage-diff       # changed Python wrapper files only
 
@@ -236,7 +236,7 @@ cover Rust; Codecov CI is separate/out of scope for this gate):
 |---------|------|-------|-----------|
 | Rust | `cargo llvm-cov` | workspace crates via `cargo test --workspace` | ≥85% lines |
 | Python | `pytest-cov` | `crates/graphforge-bindings-py/python/graphforge` | ≥85% lines; ≥90% patch on changed wrapper files |
-| Node | `c8` | hand-written `@graphforge/node` `lib/**/*.mjs` | ≥85% lines |
+| Node | `c8` | hand-written `@curatelabs/graphforge` `lib/**/*.mjs` | ≥85% lines |
 
 Override floors with `COVERAGE_FAIL_UNDER_RUST`, `COVERAGE_FAIL_UNDER_PYTHON`,
 and `COVERAGE_FAIL_UNDER_NODE`.

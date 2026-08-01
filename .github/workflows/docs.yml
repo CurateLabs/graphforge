@@ -52,7 +52,7 @@ jobs:
           cache: pnpm
 
       - name: Install docs-site dependencies
-        run: pnpm install --filter @graphforge/docs-site...
+        run: pnpm install --filter @curatelabs/graphforge-docs-site...
 
       - name: Build Starlight documentation
         run: pnpm docs:build

@@ -265,7 +265,7 @@ def main() -> None:
         node_dir = temporary_path / "node"
         node_dir.mkdir()
         run(
-            ["pnpm", "install", "--frozen-lockfile", "--filter", "@graphforge/node..."],
+            ["pnpm", "install", "--frozen-lockfile", "--filter", "@curatelabs/graphforge..."],
             root=root,
             env=env,
         )
@@ -273,7 +273,7 @@ def main() -> None:
             [
                 "pnpm",
                 "--filter",
-                "@graphforge/node",
+                "@curatelabs/graphforge",
                 "exec",
                 "napi",
                 "build",

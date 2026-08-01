@@ -2,21 +2,28 @@
   "repository": "CurateLabs/graphforge-vscode",
   "revision": "7da03dd6690808c22a5b23b0e71e5810b67904c3",
   "sourceDirectory": "docs/published",
+  "localPatches": [
+    {
+      "issue": "#279",
+      "reason": "Use the Curate Labs-owned npm scope for the v0.5.0 release.",
+      "sources": ["commands.md", "install.md", "overview.md"]
+    }
+  ],
   "pages": [
     {
       "source": "overview.md",
       "destination": "guide/vscode-extension/index.md",
-      "sha256": "207980122331d69c59d2294515f62927a572cb76f83b27e576014a6530e76962"
+      "sha256": "ca0e4559e2514d22b7f94c03f63e5074cf75df6e24cd986f008cb46eee2b69ed"
     },
     {
       "source": "install.md",
       "destination": "guide/vscode-extension/install.md",
-      "sha256": "46987901769db65fdb0642b88c21cdfbb765428a3aae0d206c2473f05bce4899"
+      "sha256": "7c76f70a82eb21c90e2a0d81ffaa9f806d7f1e287619aba4abfee76e3c28dcf5"
     },
     {
       "source": "commands.md",
       "destination": "guide/vscode-extension/commands.md",
-      "sha256": "bea4c3d8336e4475fc9eae72e2acc75256251a4a582be707a00209b62caff892"
+      "sha256": "1dda4c7aaed8f5121eae0319311880eadbfe57a3c923d40ace911e912aa74000"
     },
     {
       "source": "agent-interop.md",

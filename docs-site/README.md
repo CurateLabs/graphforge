@@ -26,8 +26,8 @@ Or: `make docs-serve` / `make docs-build` / `make docs-clean`.
 | --- | --- |
 | `astro.config.mjs` | Starlight config and **reader-journey** sidebar |
 | `scripts/sync-content.mjs` | Allowlist sync from `docs/` → content collection; rewrites `.md` links to site paths |
-| `external-docs.json` | Pinned `graphforge-vscode` published-page allowlist, destinations, and checksums |
-| `external/graphforge-vscode/` | Mechanically generated, build-verifiable public extension snapshot |
+| `external-docs.json` | Pinned `graphforge-vscode` allowlist, destinations, checksums, and explicit local patch ledger |
+| `external/graphforge-vscode/` | Build-verifiable public extension snapshot plus ledgered release corrections |
 | `scripts/update-extension-docs.mjs` | Authenticated refresh command; rejects changes to the published-file contract |
 | `scripts/test-extension-docs.mjs` | Offline allowlist, checksum, destination, and private-marker contract test |
 | `scripts/check-links.mjs` | Post-build internal link + stale-base checker |
@@ -49,3 +49,8 @@ if the upstream published-file set changed so additions require an explicit dest
 review. Never use a branch name or manually add private extension documents. Run
 `pnpm docs:build` and `pnpm docs:check-links`; normal builds are offline and fail on a missing
 snapshot, mutable revision, unexpected allowlist, or checksum mismatch.
+
+If a release-critical correction must land before its upstream documentation
+revision, record the issue, reason, and exact source files in `localPatches` and
+update their checksums. The next upstream refresh must either contain that
+correction and remove the patch entry or deliberately reapply and retain it.

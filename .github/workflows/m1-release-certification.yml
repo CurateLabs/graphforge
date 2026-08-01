@@ -168,7 +168,7 @@ jobs:
             echo "unexpected Node addon existed before the exact-SHA build" >&2
             exit 1
           fi
-          pnpm --filter @graphforge/node exec napi build --platform --release \
+          pnpm --filter @curatelabs/graphforge exec napi build --platform --release \
             --target x86_64-unknown-linux-gnu
           addons=(crates/graphforge-bindings-node/*.node)
           wheels=(dist/*.whl)

@@ -52,9 +52,9 @@ deterministic success evidence (or an explicit maintainer disposition to skip).
 | 1 | Annotate tag `v0.5.0` on the verified RC commit on `main` | [#193](https://github.com/CurateLabs/graphforge/issues/193) | `git rev-parse v0.5.0^{}` == RC SHA |
 | 2 | Publish GitHub Release for `v0.5.0` with final CHANGELOG notes + checksum links/attachments | [#194](https://github.com/CurateLabs/graphforge/issues/194) | Release URL; notes match CHANGELOG; `Publish to PyPI, npm, and crates.io` run starts |
 | 3 | `publish.yaml` builds and publishes **Python** to PyPI | [#195](https://github.com/CurateLabs/graphforge/issues/195) | Workflow green; `graphforge==0.5.0` on PyPI; checksums match RC record |
-| 4 | Same workflow publishes **Node** `@graphforge/node` and platform packages to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; target inventory and checksums match |
-| 5 | Same workflow publishes **NPX CLI** `@graphforge/cli` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; clean-consumer handoff passed |
-| 6 | Same workflow publishes **NPX skills** `@graphforge/agent-skills` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; packed offline contract passed |
+| 4 | Same workflow publishes **Node** `@curatelabs/graphforge` and platform packages to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; target inventory and checksums match |
+| 5 | Same workflow publishes **NPX CLI** `@curatelabs/graphforge-cli` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; clean-consumer handoff passed |
+| 6 | Same workflow publishes **NPX skills** `@curatelabs/graphforge-agent-skills` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; packed offline contract passed |
 | 7 | Same workflow publishes the complete 15-crate **Rust** surface to crates.io in dependency order | [#196](https://github.com/CurateLabs/graphforge/issues/196) | Workflow green; all packages at `0.5.0`; checksums match; `DecisionNerd` owns each crate |
 | 8 | Deploy / confirm documentation for the release commit/tag | [#197](https://github.com/CurateLabs/graphforge/issues/197) | Pages run green; live anonymous URLs serve the RC docs set |
 | 9 | Verify registry/package **metadata** (repo, license, docs, tag) | [#199](https://github.com/CurateLabs/graphforge/issues/199) | Concise surface checklist on #199 |
@@ -172,11 +172,11 @@ final #192 close.
       certification workflow passes for that exact commit
 - [ ] The same-SHA `Binding Release Candidate` run contains an unexpired
       `M1-Release-Candidate-<sha>` bundle and its release record validates
-- [ ] `@graphforge` npm organization exists and the publishing maintainer can
-      create public organization-scoped packages
-- [ ] `NPM_TOKEN` is a granular token authorized for the `@graphforge` scope,
-      can satisfy the account's 2FA policy for CI publishing, is stored as a
-      repository Actions secret, and passes the workflow's `npm whoami` preflight
+- [x] The owned npm organization is `@curatelabs`; do not publish the retired
+      `@graphforge/*` candidate names
+- [ ] `NPM_TOKEN` is a granular token with read/write package and scope access
+      to `@curatelabs`, has **Bypass 2FA** enabled, is stored as a repository
+      Actions secret, and passes the workflow's `npm whoami` preflight
 - [ ] After the first publish, configure trusted publishing for each npm package
       before removing the token path; npm requires an existing package and a
       supported GitHub-hosted runner

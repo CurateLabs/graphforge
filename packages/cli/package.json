@@ -1,5 +1,5 @@
 {
-  "name": "@graphforge/cli",
+  "name": "@curatelabs/graphforge-cli",
   "version": "0.5.0",
   "description": "GraphForge repository lifecycle CLI",
   "license": "Apache-2.0",
@@ -40,7 +40,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@graphforge/node": "workspace:*"
+    "@curatelabs/graphforge": "workspace:*"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",

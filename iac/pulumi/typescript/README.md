@@ -1,7 +1,7 @@
-# `@graphforge/pulumi-static`
+# `@curatelabs/graphforge-pulumi-static`
 
 ```ts
-import { TargetValidation } from "@graphforge/pulumi-static";
+import { TargetValidation } from "@curatelabs/graphforge-pulumi-static";
 import resolvedConfig from "./graphforge-resolved.json";
 
 const validation = new TargetValidation("production", {
@@ -21,7 +21,7 @@ connectivity, or readiness operations.
 Render a provider- and runtime-neutral projection for caller-owned IaC:
 
 ```ts
-import { DeploymentSpec } from "@graphforge/pulumi-static";
+import { DeploymentSpec } from "@curatelabs/graphforge-pulumi-static";
 import resolvedConfig from "./graphforge-resolved.json";
 
 const deployment = new DeploymentSpec("production", {
