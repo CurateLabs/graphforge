@@ -1550,19 +1550,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "gf-api"
+name = "graphforge-api"
 version = "0.5.0-dev"
 dependencies = [
  "arrow",
  "datafusion",
  "futures",
- "gf-core",
- "gf-cypher",
- "gf-exec",
- "gf-ir",
- "gf-ontology",
- "gf-rel",
- "gf-storage",
+ "graphforge-core",
+ "graphforge-cypher",
+ "graphforge-exec",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "graphforge-rel",
+ "graphforge-storage",
  "parquet",
  "serde_json",
  "tempfile",
@@ -1570,16 +1570,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "gf-ast"
+name = "graphforge-ast"
 version = "0.5.0-dev"
 dependencies = [
- "gf-core",
+ "graphforge-core",
  "serde",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-core"
+name = "graphforge-core"
 version = "0.5.0-dev"
 dependencies = [
  "serde",
@@ -1589,19 +1589,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "gf-cypher"
+name = "graphforge-cypher"
 version = "0.5.0-dev"
 dependencies = [
- "gf-ast",
- "gf-core",
- "gf-ir",
- "gf-rel",
+ "graphforge-ast",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-rel",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-exec"
+name = "graphforge-exec"
 version = "0.5.0-dev"
 dependencies = [
  "anyhow",
@@ -1610,34 +1610,34 @@ dependencies = [
  "datafusion",
  "datafusion-datasource",
  "futures",
- "gf-core",
- "gf-ir",
- "gf-ontology",
- "gf-plan",
- "gf-rel",
- "gf-storage",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "graphforge-plan",
+ "graphforge-rel",
+ "graphforge-storage",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-ir"
+name = "graphforge-ir"
 version = "0.5.0-dev"
 dependencies = [
  "arrow",
- "gf-ast",
- "gf-core",
- "gf-ontology",
+ "graphforge-ast",
+ "graphforge-core",
+ "graphforge-ontology",
  "serde",
  "serde_json",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-ontology"
+name = "graphforge-ontology"
 version = "0.5.0-dev"
 dependencies = [
  "arrow",
- "gf-core",
+ "graphforge-core",
  "parquet",
  "serde",
  "serde_json",
@@ -1647,42 +1647,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "gf-plan"
+name = "graphforge-plan"
 version = "0.5.0-dev"
 dependencies = [
  "datafusion",
- "gf-core",
- "gf-ir",
+ "graphforge-core",
+ "graphforge-ir",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-rel"
+name = "graphforge-rel"
 version = "0.5.0-dev"
 dependencies = [
  "chrono",
  "chrono-tz",
  "datafusion",
  "datafusion-functions-aggregate",
- "gf-core",
- "gf-ir",
- "gf-ontology",
- "gf-plan",
- "gf-storage",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "graphforge-plan",
+ "graphforge-storage",
  "thiserror",
 ]
 
 [[package]]
-name = "gf-storage"
+name = "graphforge-storage"
 version = "0.5.0-dev"
 dependencies = [
  "arrow",
  "async-trait",
  "datafusion",
  "datafusion-catalog",
- "gf-core",
- "gf-ir",
- "gf-ontology",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-ontology",
  "parquet",
  "serde_json",
  "tempfile",
@@ -1700,9 +1700,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "graphforge-fuzz"
 version = "0.0.0"
 dependencies = [
- "gf-api",
- "gf-cypher",
- "gf-ontology",
+ "graphforge-api",
+ "graphforge-cypher",
+ "graphforge-ontology",
  "libfuzzer-sys",
 ]
 

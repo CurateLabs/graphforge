@@ -13,10 +13,10 @@ SPEC.loader.exec_module(publish_dry_run)
 def test_cargo_order_skips_gf_core_conflict() -> None:
     order, _source = publish_dry_run.cargo_publish_order()
     assert order
-    assert "gf-core" not in order
-    assert "gf-bindings-py" not in order
-    assert "gf-bindings-node" not in order
-    assert "gf-cli" not in order
+    assert "graphforge-core" not in order
+    assert "graphforge-bindings-py" not in order
+    assert "graphforge-bindings-node" not in order
+    assert "graphforge-cli" not in order
 
 
 def test_npm_dry_run_surfaces_ok() -> None:

@@ -7,7 +7,7 @@
  * 3. Write redacted evidence with commit SHA and runtime versions
  *
  * Usage:
- *   GRAPHFORGE_NODE_MODULE=$PWD/crates/gf-bindings-node/index.js \
+ *   GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
  *     node packages/agent-skills/scripts/run-native-rc-e2e.mjs \
  *       --commit-sha $(git rev-parse HEAD) \
  *       --evidence /tmp/agent-skills-rc-e2e.json
@@ -60,7 +60,7 @@ const evidencePath =
 
 const modulePath =
   process.env.GRAPHFORGE_NODE_MODULE ??
-  join(repoRoot, "crates/gf-bindings-node/index.js");
+  join(repoRoot, "crates/graphforge-bindings-node/index.js");
 const { GraphForge, version } = await import(pathToFileURL(modulePath).href);
 const require = createRequire(join(dirname(modulePath), "package.json"));
 const { tableFromIPC } = require("apache-arrow");

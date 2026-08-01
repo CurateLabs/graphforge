@@ -96,11 +96,11 @@ lifecycle commands:
 
 ```text
 Python (PyO3, thin) ─┐
-Node (N-API, thin) ──┼──> gf-api ──> Arrow results
+Node (N-API, thin) ──┼──> graphforge-api ──> Arrow results
 CLI (thin launcher) ─┘
 
-Cypher: gf-cypher ──> gf-ir ──> gf-rel ──> gf-exec
-                                                   └──> gf-storage (Parquet + JSON metadata)
+Cypher: graphforge-cypher ──> graphforge-ir ──> graphforge-rel ──> graphforge-exec
+                                                   └──> graphforge-storage (Parquet + JSON metadata)
 Analyst verbs bypass the Cypher parser and dispatch through Rust-owned typed handlers.
 ```
 

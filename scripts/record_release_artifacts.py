@@ -79,6 +79,11 @@ def artifact_identity(path: Path, artifact_class: str, version: str) -> tuple[st
             package = normalized[len("graphforge-") : -len(suffix)]
             return "npm", f"@graphforge/{package}"
         return "npm", path.stem
+    if artifact_class == "rust-crate":
+        suffix = f"-{version}.crate"
+        if path.name.startswith("graphforge-") and path.name.endswith(suffix):
+            return "crates", path.name[: -len(suffix)]
+        return "crates", path.stem
     return "github", path.name
 
 

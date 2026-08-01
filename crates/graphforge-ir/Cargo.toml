@@ -1,0 +1,26 @@
+[package]
+name = "graphforge-ir"
+description = "GraphForge Graph IR — semantic, graph-native, semver-versioned"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+graphforge-ast = { version = "0.5.0", path = "../graphforge-ast" }
+graphforge-ontology = { version = "0.5.0", path = "../graphforge-ontology" }
+arrow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+graphforge-cypher = { path = "../graphforge-cypher" }
+graphforge-ontology = { path = "../graphforge-ontology" }
+insta = { workspace = true, features = ["json"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

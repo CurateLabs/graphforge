@@ -10,21 +10,21 @@ import subprocess
 import sys
 from typing import Any
 
-DOMAIN_CRATES = {"gf-provenance", "gf-knowledge"}
+DOMAIN_CRATES = {"graphforge-provenance", "graphforge-knowledge"}
 GRAPH_CRATES = {
-    "gf-ast",
-    "gf-core",
-    "gf-cypher",
-    "gf-exec",
-    "gf-io",
-    "gf-ir",
-    "gf-ontology",
-    "gf-plan",
-    "gf-rel",
-    "gf-search",
-    "gf-storage",
+    "graphforge-ast",
+    "graphforge-core",
+    "graphforge-cypher",
+    "graphforge-exec",
+    "graphforge-io",
+    "graphforge-ir",
+    "graphforge-ontology",
+    "graphforge-plan",
+    "graphforge-rel",
+    "graphforge-search",
+    "graphforge-storage",
 }
-THIN_ADAPTERS = {"gf-bindings-py", "gf-bindings-node", "gf-cli"}
+THIN_ADAPTERS = {"graphforge-bindings-py", "graphforge-bindings-node", "graphforge-cli"}
 
 
 def load_metadata(path: Path | None) -> dict[str, Any]:
@@ -52,12 +52,12 @@ def violations(metadata: dict[str, Any]) -> list[str]:
 
     for domain in sorted(DOMAIN_CRATES & packages.keys()):
         workspace_dependencies = packages[domain] & packages.keys()
-        for dependency in sorted(workspace_dependencies - {"gf-core"}):
-            errors.append(f"{domain} may depend on gf-core only, not {dependency}")
+        for dependency in sorted(workspace_dependencies - {"graphforge-core"}):
+            errors.append(f"{domain} may depend on graphforge-core only, not {dependency}")
 
     for adapter in sorted(THIN_ADAPTERS & packages.keys()):
         for domain in sorted(DOMAIN_CRATES & packages[adapter]):
-            errors.append(f"{adapter} must depend on gf-api, not directly on {domain}")
+            errors.append(f"{adapter} must depend on graphforge-api, not directly on {domain}")
 
     return errors
 

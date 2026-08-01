@@ -28,7 +28,7 @@ Two concrete failure modes motivate the boundary:
 1. **Schema drift toward the graph.** Fusing `props_json`, `confidence`, `provenance_id`, and
    valid-time columns into one node-fact row mixes graph, knowledge, and temporal concerns.
    Topology must stay identity + type only; properties and knowledge live elsewhere
-   (`crates/gf-storage/src/schemas.rs`).
+   (`crates/graphforge-storage/src/schemas.rs`).
 
 2. **Knowledge concerns with no home.** Provenance, confidence, evidence, and the evolution of
    an analyst's understanding are not graph concerns. Without a knowledge layer they drift as
@@ -77,9 +77,9 @@ depend on higher ones.
 
 | Layer | Owns | Crates / storage (today) | Must NOT hold |
 |---|---|---|---|
-| **Graph** | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency index | `gf-cypher`, `gf-ir`, `gf-rel`, `gf-exec`, `gf-storage` (`topology/`, `properties/`, `indexes/adjacency/`) | confidence semantics, epistemic status, evidence, reasoning |
-| **Knowledge** | Provenance events + lineage, confidence + policy, evidence links, ontology-inference lineage, epistemic assertions/status/supersession/valid-time | `gf-provenance` + `gf-knowledge` (**Shipped**); `provenance/`, `knowledge/` Parquet | graph topology, traversal logic, Cypher semantics |
-| **Workbench** | Analyst verbs, hybrid search, workflows/recipes, exploration, project envelope | `gf-api`, bindings, search modules | graph-semantic state, persisted knowledge logic |
+| **Graph** | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency index | `graphforge-cypher`, `graphforge-ir`, `graphforge-rel`, `graphforge-exec`, `graphforge-storage` (`topology/`, `properties/`, `indexes/adjacency/`) | confidence semantics, epistemic status, evidence, reasoning |
+| **Knowledge** | Provenance events + lineage, confidence + policy, evidence links, ontology-inference lineage, epistemic assertions/status/supersession/valid-time | `graphforge-provenance` + `graphforge-knowledge` (**Shipped**); `provenance/`, `knowledge/` Parquet | graph topology, traversal logic, Cypher semantics |
+| **Workbench** | Analyst verbs, hybrid search, workflows/recipes, exploration, project envelope | `graphforge-api`, bindings, search modules | graph-semantic state, persisted knowledge logic |
 
 ### The boundary rule (load-bearing)
 

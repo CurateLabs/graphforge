@@ -10,7 +10,7 @@ pnpm --filter @graphforge/agent-skills example:analyst
 pnpm --filter @graphforge/agent-skills example:developer
 
 # Native GraphForge from a local `@graphforge/node` build
-GRAPHFORGE_NODE_MODULE=$PWD/crates/gf-bindings-node/index.js \
+GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
   node packages/agent-skills/examples/analyst-agent.mjs --native
 ```
 

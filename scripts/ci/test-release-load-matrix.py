@@ -95,12 +95,12 @@ class ReleaseLoadMatrixTests(unittest.TestCase):
         _source, selectors = GATE.inventory(matrix)
         complete = sorted(set().union(*selectors.values()))
         probe_paths = {
-            "rust": GATE.ROOT / "crates/gf-api/examples/release_load_probe.rs",
+            "rust": GATE.ROOT / "crates/graphforge-api/examples/release_load_probe.rs",
             "python": GATE.ROOT / "scripts/ci/release-load-python-probe.py",
-            "node": GATE.ROOT / "crates/gf-bindings-node/tests/release-load-probe.mjs",
+            "node": GATE.ROOT / "crates/graphforge-bindings-node/tests/release-load-probe.mjs",
         }
         commands = {
-            "rust": ["cargo", "test", "-p", "gf-api"],
+            "rust": ["cargo", "test", "-p", "graphforge-api"],
             "python": [
                 sys.executable,
                 str(GATE.ROOT / "scripts/ci/run-python-binding-contract.py"),

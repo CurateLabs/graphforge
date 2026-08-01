@@ -13,7 +13,7 @@ multi-tenant service. Operational detail:
 
 | Artifact | Destination | Versioned by | Owner |
 | --- | --- | --- | --- |
-| Rust crates | No crates.io publication for v0.5.0; future surface requires a separate naming decision | SemVer / git tag | Maintainers |
+| Rust crates (`graphforge-*`, including `graphforge-cli`) | crates.io | Same release version | Maintainers |
 | Python package (wheels/sdist) | PyPI | Same release version | Maintainers |
 | Node binding package | npm | Same release version | Maintainers |
 | Lifecycle CLI package | npm (`@graphforge/cli`) | Same release version | Maintainers |
@@ -49,7 +49,8 @@ pnpm docs:build
 # Publication tooling — authoritative order:
 # docs/development/publication-order.md
 python3 scripts/ci/crate-publish-plan.py check
-# v0.5.0: check intentionally fails closed and no cargo publish is run.
+# Cargo: package the complete 15-crate graph in dependency order.
+make publish-dry-run-cargo
 # Python: maturin / TestPyPI clean-install checks
 # Node / CLI / skills: npm publish --dry-run
 ```
@@ -69,7 +70,7 @@ must be green on the **same SHA** that is tagged for publication.
 | PR branch | `main` | Focused PR, green CI Gate, clean review threads |
 | `main` SHA | Release candidate | Milestone gates for the release issue (#192 for v0.5.0) |
 | Release candidate | Registries + GitHub Release | Dry-runs, checksums/SBOM where configured, human release execution |
-| Published artifacts | Clean-install verification | Fresh env smokes for pip/npm paths; no crates.io surface in v0.5.0 |
+| Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
 
 ## Deployment verification

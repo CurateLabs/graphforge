@@ -38,7 +38,7 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | ADR | Title | Status | Path |
 | --- | --- | --- | --- |
 | 0001 | Rust Core | Accepted | [`../../adr/0001-rust-core.md`](../../adr/0001-rust-core.md) |
-| 0002 | Recursive Descent + Pratt Parser for gf-cypher | Accepted | [`../../adr/0002-lr1-grammar.md`](../../adr/0002-lr1-grammar.md) |
+| 0002 | Recursive Descent + Pratt Parser for graphforge-cypher | Accepted | [`../../adr/0002-lr1-grammar.md`](../../adr/0002-lr1-grammar.md) |
 | 0003 | Progressive Ontology — Exploration First | Accepted | [`../../adr/0003-progressive-ontology.md`](../../adr/0003-progressive-ontology.md) |
 | 0004 | Graph-Native Adjacency Index | Accepted | [`../../adr/0004-adjacency-index.md`](../../adr/0004-adjacency-index.md) |
 | 0005 | Layered Architecture — Graph / Knowledge / Workbench | Accepted | [`../../adr/0005-layered-architecture.md`](../../adr/0005-layered-architecture.md) |

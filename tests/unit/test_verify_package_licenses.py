@@ -36,4 +36,4 @@ def test_npm_packages_pack_license_and_notice() -> None:
 
 def test_cargo_core_package_includes_license_and_notice() -> None:
     # One leaf crate keeps CI light; full matrix is `make package-license-verify`.
-    assert verify_package_licenses.verify_cargo_crate("gf-core") == []
+    assert verify_package_licenses.verify_cargo_crate("graphforge-core") == []

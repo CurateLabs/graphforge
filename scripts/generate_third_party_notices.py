@@ -15,20 +15,21 @@ ROOT = Path(__file__).resolve().parents[1]
 ABOUT_CONFIG = ROOT / "about.toml"
 OUTPUT = ROOT / "legal" / "THIRD_PARTY_NOTICES.md"
 COPIES = (
-    ROOT / "crates" / "gf-bindings-py" / "THIRD_PARTY_NOTICES.md",
-    ROOT / "crates" / "gf-bindings-node" / "THIRD_PARTY_NOTICES.md",
-    ROOT / "crates" / "gf-cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-bindings-py" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-bindings-node" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFESTS = (
-    ROOT / "crates" / "gf-bindings-py" / "Cargo.toml",
-    ROOT / "crates" / "gf-bindings-node" / "Cargo.toml",
-    ROOT / "crates" / "gf-cli" / "Cargo.toml",
+    ROOT / "crates" / "graphforge-bindings-py" / "Cargo.toml",
+    ROOT / "crates" / "graphforge-bindings-node" / "Cargo.toml",
+    ROOT / "crates" / "graphforge-cli" / "Cargo.toml",
 )
 
 
 def is_first_party(crate_name: str) -> bool:
     """Return True for GraphForge workspace crates that are not third-party."""
-    return crate_name.startswith("gf-") or crate_name == "graphforge"
+    return crate_name.startswith("graphforge-") or crate_name == "graphforge"
 
 
 def _run_cargo_about_once(manifest: Path, json_path: Path) -> dict:

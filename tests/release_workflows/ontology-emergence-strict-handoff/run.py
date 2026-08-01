@@ -140,7 +140,7 @@ def build_wheel(root: Path, output: Path, env: dict[str, str]) -> tuple[Path, st
             "build",
             "--release",
             "--manifest-path",
-            "crates/gf-bindings-py/Cargo.toml",
+            "crates/graphforge-bindings-py/Cargo.toml",
             "--out",
             str(wheel_dir),
         ],
@@ -213,7 +213,7 @@ def main() -> None:
                 "cargo",
                 "run",
                 "-p",
-                "gf-api",
+                "graphforge-api",
                 "--release",
                 "--example",
                 "ontology_emergence_strict_handoff",
@@ -286,7 +286,7 @@ def main() -> None:
             env=env,
         )
         (node_dir / "package.json").write_text(
-            (root / "crates/gf-bindings-node/package.json").read_text(encoding="utf-8"),
+            (root / "crates/graphforge-bindings-node/package.json").read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         modules = list(node_dir.glob("index.js"))

@@ -28,30 +28,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Crates intended for crates.io (bindings ship via PyPI/npm).
 CARGO_PUBLISH_CRATES = (
-    "gf-core",
-    "gf-ast",
-    "gf-knowledge",
-    "gf-ontology",
-    "gf-provenance",
-    "gf-ir",
-    "gf-plan",
-    "gf-storage",
-    "gf-io",
-    "gf-rel",
-    "gf-search",
-    "gf-cypher",
-    "gf-exec",
-    "gf-api",
-    "gf-cli",
+    "graphforge-core",
+    "graphforge-ast",
+    "graphforge-knowledge",
+    "graphforge-ontology",
+    "graphforge-provenance",
+    "graphforge-ir",
+    "graphforge-plan",
+    "graphforge-storage",
+    "graphforge-io",
+    "graphforge-rel",
+    "graphforge-search",
+    "graphforge-cypher",
+    "graphforge-exec",
+    "graphforge-api",
+    "graphforge-cli",
 )
 
 NPM_PACKAGES = (
-    ROOT / "crates" / "gf-bindings-node",
+    ROOT / "crates" / "graphforge-bindings-node",
     ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
 
-PYTHON_PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
+PYTHON_PYPROJECT = ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml"
 
 
 def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -102,7 +102,7 @@ def verify_npm_package(package_dir: Path) -> list[str]:
     errors: list[str] = []
     required_files = ["LICENSE", "NOTICE"]
     if package_dir in (
-        ROOT / "crates" / "gf-bindings-node",
+        ROOT / "crates" / "graphforge-bindings-node",
         ROOT / "packages" / "cli",
     ):
         required_files.append("THIRD_PARTY_NOTICES.md")
@@ -192,22 +192,24 @@ def verify_python_package() -> list[str]:
     errors: list[str] = []
     text = PYTHON_PYPROJECT.read_text(encoding="utf-8") if PYTHON_PYPROJECT.exists() else ""
     if 'license = "Apache-2.0"' not in text:
-        errors.append("crates/gf-bindings-py/pyproject.toml lacks license = Apache-2.0")
+        errors.append("crates/graphforge-bindings-py/pyproject.toml lacks license = Apache-2.0")
     match = re.search(r"license-files\s*=\s*\[([^\]]+)\]", text)
     if not match:
-        errors.append("crates/gf-bindings-py/pyproject.toml lacks license-files")
+        errors.append("crates/graphforge-bindings-py/pyproject.toml lacks license-files")
         return errors
     declared = [part.strip().strip("\"'") for part in match.group(1).split(",") if part.strip()]
     for required in ("LICENSE", "NOTICE"):
         if required not in declared:
-            errors.append(f"crates/gf-bindings-py/pyproject.toml license-files lacks {required}")
+            errors.append(
+                f"crates/graphforge-bindings-py/pyproject.toml license-files lacks {required}"
+            )
         path = PYTHON_PYPROJECT.parent / required
         if not path.exists():
-            errors.append(f"crates/gf-bindings-py/{required} is missing")
+            errors.append(f"crates/graphforge-bindings-py/{required} is missing")
     if "THIRD_PARTY_NOTICES.md" in declared:
         path = PYTHON_PYPROJECT.parent / "THIRD_PARTY_NOTICES.md"
         if not path.exists():
-            errors.append("crates/gf-bindings-py/THIRD_PARTY_NOTICES.md is missing")
+            errors.append("crates/graphforge-bindings-py/THIRD_PARTY_NOTICES.md is missing")
     return errors
 
 

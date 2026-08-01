@@ -29,7 +29,7 @@ The testing principles are the same for both:
 Each crate contains unit tests inline with the source and integration tests in `tests/`:
 
 ```
-crates/gf-cypher/
+crates/graphforge-cypher/
 ├── src/
 │   ├── lexer.rs        # #[cfg(test)] inline unit tests
 │   ├── parser.rs       # #[cfg(test)] inline unit tests
@@ -45,7 +45,7 @@ crates/gf-cypher/
 cargo test --workspace
 
 # One crate
-cargo test -p gf-cypher
+cargo test -p graphforge-cypher
 
 # With output
 cargo test --workspace -- --nocapture
@@ -69,14 +69,14 @@ Run the omission gate and bounded public-facade matrix with:
 ```bash
 python3 scripts/ci/non-cypher-surface-gate.py
 python3 scripts/ci/test-non-cypher-surface-gate.py
-cargo test -p gf-api \
+cargo test -p graphforge-api \
   --test public_lifecycle_conformance \
   --test m22_m18_public_surface \
   --test m22_m19_public_surface
 ```
 
 The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,
-`gf-api` unit contracts, and these persisted integration tests from one exact
+`graphforge-api` unit contracts, and these persisted integration tests from one exact
 source SHA when assembling release-certification evidence. Its downloadable
 report records the inventory digest and test binary digests. Ordinary
 implementation and construction issues close on acceptance-criteria outcomes
@@ -115,7 +115,7 @@ The parser migration strategy requires differential testing between the Python L
 Differential tests run both parsers on the same input and assert AST parity:
 
 ```bash
-cargo test -p gf-cypher -- differential
+cargo test -p graphforge-cypher -- differential
 ```
 
 ---
@@ -200,7 +200,7 @@ make test-tck
 # With coverage (Rust + Python + Node; ≥85% lines per surface)
 make coverage            # all surfaces + thresholds
 make coverage-rust       # cargo llvm-cov → build/coverage-rust/
-make coverage-python     # pytest-cov on gf-bindings-py/python/graphforge
+make coverage-python     # pytest-cov on graphforge-bindings-py/python/graphforge
 make coverage-node       # c8 on @graphforge/node lib/ (needs *.node)
 make coverage-report     # open Python HTML report
 make coverage-diff       # changed Python wrapper files only
@@ -235,7 +235,7 @@ cover Rust; Codecov CI is separate/out of scope for this gate):
 | Surface | Tool | Scope | Threshold |
 |---------|------|-------|-----------|
 | Rust | `cargo llvm-cov` | workspace crates via `cargo test --workspace` | ≥85% lines |
-| Python | `pytest-cov` | `crates/gf-bindings-py/python/graphforge` | ≥85% lines; ≥90% patch on changed wrapper files |
+| Python | `pytest-cov` | `crates/graphforge-bindings-py/python/graphforge` | ≥85% lines; ≥90% patch on changed wrapper files |
 | Node | `c8` | hand-written `@graphforge/node` `lib/**/*.mjs` | ≥85% lines |
 
 Override floors with `COVERAGE_FAIL_UNDER_RUST`, `COVERAGE_FAIL_UNDER_PYTHON`,

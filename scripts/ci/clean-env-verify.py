@@ -29,13 +29,30 @@ EVIDENCE_SCHEMA = "graphforge-clean-env-evidence-v1"
 RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
 DEFAULT_VERSION = "0.5.0"
 DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
-DEFAULT_CRATES: tuple[str, ...] = ()
+DEFAULT_CRATES = (
+    "graphforge-core",
+    "graphforge-ast",
+    "graphforge-knowledge",
+    "graphforge-ontology",
+    "graphforge-provenance",
+    "graphforge-ir",
+    "graphforge-plan",
+    "graphforge-storage",
+    "graphforge-io",
+    "graphforge-rel",
+    "graphforge-search",
+    "graphforge-cypher",
+    "graphforge-exec",
+    "graphforge-api",
+    "graphforge-cli",
+)
 
 LANE_ISSUES = {
     "pip": 180,
     "npm": 183,
     "cli": 183,
     "skills": 182,
+    "cargo": 185,
     "reopen": 184,
     "urls": 186,
     "checksums": 187,
@@ -503,9 +520,9 @@ def lane_cargo(ctx: Context) -> LaneResult:
     if work.exists():
         shutil.rmtree(work)
     work.mkdir(parents=True)
-    crate_dir = work / "gf_clean_env_smoke"
-    result.commands.append("cargo new --bin gf_clean_env_smoke")
-    _run(ctx, ["cargo", "new", "--bin", "gf_clean_env_smoke"], cwd=work)
+    crate_dir = work / "graphforge_clean_env_smoke"
+    result.commands.append("cargo new --bin graphforge_clean_env_smoke")
+    _run(ctx, ["cargo", "new", "--bin", "graphforge_clean_env_smoke"], cwd=work)
     for crate in ctx.crates:
         result.commands.append(f"cargo add {crate}@{ctx.version}")
         _run(ctx, ["cargo", "add", f"{crate}@{ctx.version}"], cwd=crate_dir)
@@ -707,6 +724,7 @@ LANE_RUNNERS: dict[str, Callable[[Context], LaneResult]] = {
     "npm": lane_npm,
     "cli": lane_cli,
     "skills": lane_skills,
+    "cargo": lane_cargo,
     "reopen": lane_reopen,
     "urls": lane_urls,
     "checksums": lane_checksums,

@@ -1,0 +1,9 @@
+---
+source: crates/graphforge-rel/tests/logical_plan_golden.rs
+---
+Projection: var_0.name AS name [name:Utf8;N]
+  Projection: var_0.node_uuid, var_0.node_id, var_0.type_id, var_0.type_ids, var_0.created_at, var_0.updated_at, var_0__props.name AS name [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC"), name:Utf8;N]
+    Left Join:  Filter: var_0.node_uuid = var_0__props.node_uuid [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC"), node_uuid:FixedSizeBinary(16);N, name:Utf8;N]
+      Filter: array_has(var_0.type_ids, UInt32(0)) [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+        TableScan: var_0 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+      TableScan: var_0__props [node_uuid:FixedSizeBinary(16), name:Utf8;N]

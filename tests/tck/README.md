@@ -11,7 +11,7 @@ Vendored snapshot of the openCypher Technology Compatibility Kit (TCK) Gherkin f
 ## Local modification
 
 Every feature is tagged **`@skip-rust @skip-node`** at the feature level so the Rust
-(`crates/gf-api/tests/bdd/`) and Node (`tests/features/node/`) BDD suites treat all TCK scenarios as
+(`crates/graphforge-api/tests/bdd/`) and Node (`tests/features/node/`) BDD suites treat all TCK scenarios as
 skipped until conformance tiers land (M17: #597–#601, #608). Tags are removed tier-by-tier as
 scenarios start passing. Files are otherwise upstream, except **line endings** normalized to LF
 (9 upstream files shipped as CRLF).
@@ -20,7 +20,7 @@ scenarios start passing. Files are otherwise upstream, except **line endings** n
 > step uses the `And`/`But` continuation keyword (e.g. `Match5.feature`'s scenario-leading
 > `And having executed:`, which continues the Background's `Given`); cucumber-js is lenient. Rather
 > than edit the vendored files, the **BDD runner normalizes block-leading `And`/`But` → `Given` at
-> load time into an ephemeral copy** (`crates/gf-api/tests/bdd/main.rs`), so these files stay
+> load time into an ephemeral copy** (`crates/graphforge-api/tests/bdd/main.rs`), so these files stay
 > byte-for-byte upstream and re-vendoring is a clean copy.
 
 ## Re-vendoring
@@ -37,5 +37,5 @@ done
 ```
 
 No gherkin-parser fix-ups are needed at vendor time — the BDD runner normalizes block-leading
-`And`/`But` steps at load time (see the note above). Verify with `cargo test -p gf-api --test bdd`
+`And`/`But` steps at load time (see the note above). Verify with `cargo test -p graphforge-api --test bdd`
 (green = the whole corpus parses and the un-skipped tiers pass).

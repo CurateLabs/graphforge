@@ -4,8 +4,8 @@
 Surfaces:
 - Cargo workspace ``[workspace.package].version``
 - Cargo lockfile entries for workspace packages
-- Python ``crates/gf-bindings-py/pyproject.toml`` (PEP 440)
-- Node ``crates/gf-bindings-node/package.json``
+- Python ``crates/graphforge-bindings-py/pyproject.toml`` (PEP 440)
+- Node ``crates/graphforge-bindings-node/package.json``
 - NPX lifecycle CLI ``packages/cli/package.json``
 - NPX skills ``packages/agent-skills/package.json``
 - NPX skills ``packages/agent-skills/compatibility.json``
@@ -32,17 +32,17 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
-PYPROJECT = ROOT / "crates" / "gf-bindings-py" / "pyproject.toml"
-NODE_PACKAGE = ROOT / "crates" / "gf-bindings-node" / "package.json"
+PYPROJECT = ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml"
+NODE_PACKAGE = ROOT / "crates" / "graphforge-bindings-node" / "package.json"
 CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
 SKILLS_COMPATIBILITY = ROOT / "packages" / "agent-skills" / "compatibility.json"
 
 
 def cargo_lock_versions() -> dict[str, str]:
-    """Return versions for local gf-* packages recorded in Cargo.lock."""
+    """Return versions for local graphforge-* packages recorded in Cargo.lock."""
     text = CARGO_LOCK.read_text(encoding="utf-8")
-    return dict(re.findall(r'(?m)^name = "(gf-[^"]+)"\nversion = "([^"]+)"$', text))
+    return dict(re.findall(r'(?m)^name = "(graphforge-[^"]+)"\nversion = "([^"]+)"$', text))
 
 
 def parse_base(version: str) -> tuple[str, bool]:
@@ -152,7 +152,7 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
         return f"{match.group(1)}{expected['cargo']}{match.group(2)}"
 
     lock_text, lock_count = re.subn(
-        r'(?m)^(name = "gf-[^"]+"\nversion = ")[^"]+(")$',
+        r'(?m)^(name = "graphforge-[^"]+"\nversion = ")[^"]+(")$',
         update_lock,
         lock_text,
     )

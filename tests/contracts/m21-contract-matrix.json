@@ -4,16 +4,16 @@
   "m20_baseline_sha": "8101c2c52246b903a39ff502dc325915974e4d69",
   "command_groups": {
     "rust": [
-      "cargo test -p gf-knowledge --no-fail-fast",
-      "cargo test -p gf-storage graph_projection --no-fail-fast",
-      "cargo test -p gf-api --lib --no-fail-fast",
-      "cargo test -p gf-api --test knowledge_isolation --no-fail-fast"
+      "cargo test -p graphforge-knowledge --no-fail-fast",
+      "cargo test -p graphforge-storage graph_projection --no-fail-fast",
+      "cargo test -p graphforge-api --lib --no-fail-fast",
+      "cargo test -p graphforge-api --test knowledge_isolation --no-fail-fast"
     ],
     "python": [
-      "uvx maturin build --manifest-path crates/gf-bindings-py/Cargo.toml --profile dev --out dist/m21",
+      "uvx maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --profile dev --out dist/m21",
       "uv venv /tmp/gf-m21-python --python 3.13",
       "uv pip install --python /tmp/gf-m21-python/bin/python dist/m21/*.whl pyarrow",
-      "/tmp/gf-m21-python/bin/python crates/gf-bindings-py/tests/smoke.py"
+      "/tmp/gf-m21-python/bin/python crates/graphforge-bindings-py/tests/smoke.py"
     ],
     "node": [
       "pnpm install --frozen-lockfile",
@@ -28,8 +28,8 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "schema"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/schema_inventory.rs", "symbol": "m20_schema_inventory_matches_checked_contract"},
-        {"kind": "rust", "path": "crates/gf-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m20_schema_inventory_matches_checked_contract"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"}
       ]
     },
     {
@@ -38,13 +38,13 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_status_rejects_conflicts_missing_refs_and_direct_supersession"},
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/status.rs", "symbol": "round_trip_fingerprint_statusless_and_identical_time_order_are_stable"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/status.rs", "symbol": "every_nonterminal_transition_is_allowed_and_superseded_is_terminal"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertion_status"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/assertion-status.test.mjs", "symbol": "assertion status is explicit, atomic, append-only, and Arrow-only"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_status_rejects_conflicts_missing_refs_and_direct_supersession"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/status.rs", "symbol": "round_trip_fingerprint_statusless_and_identical_time_order_are_stable"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/status.rs", "symbol": "every_nonterminal_transition_is_allowed_and_superseded_is_terminal"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_status"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertion-status.test.mjs", "symbol": "assertion status is explicit, atomic, append-only, and Arrow-only"}
       ]
     },
     {
@@ -53,13 +53,13 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "reasoning_rejects_dangling_cross_assertion_and_conflicting_replay"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/reasoning.rs", "symbol": "amendment_branch_history_is_preserved_and_current_is_deterministic"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/reasoning.rs", "symbol": "self_cycle_missing_and_cross_assertion_predecessors_fail"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/reasoning.rs", "symbol": "payload_encoding_and_size_limits_are_sanitized"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_reasoning"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/reasoning.test.mjs", "symbol": "reasoning is immutable, exact, idempotent, and Arrow-only"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_rejects_dangling_cross_assertion_and_conflicting_replay"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "amendment_branch_history_is_preserved_and_current_is_deterministic"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "self_cycle_missing_and_cross_assertion_predecessors_fail"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/reasoning.rs", "symbol": "payload_encoding_and_size_limits_are_sanitized"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_reasoning"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/reasoning.test.mjs", "symbol": "reasoning is immutable, exact, idempotent, and Arrow-only"}
       ]
     },
     {
@@ -68,11 +68,11 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_rejects_self_links_cycles_dangling_refs_and_conflicts"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/supersession.rs", "symbol": "chains_branches_order_round_trip_and_fingerprint_are_stable"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertion_supersessions"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/assertion-supersession.test.mjs", "symbol": "supersession atomically publishes Arrow relation and terminal status"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_rejects_self_links_cycles_dangling_refs_and_conflicts"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/supersession.rs", "symbol": "chains_branches_order_round_trip_and_fingerprint_are_stable"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_supersessions"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertion-supersession.test.mjs", "symbol": "supersession atomically publishes Arrow relation and terminal status"}
       ]
     },
     {
@@ -81,11 +81,11 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/hypothesis.rs", "symbol": "add_select_change_clear_and_selected_removal_are_explicit"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/hypothesis.rs", "symbol": "selecting_nonmember_and_invalid_membership_transitions_fail"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_hypothesis_selection"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/hypothesis-selection.test.mjs", "symbol": "hypothesis membership and selection are explicit and Arrow-only"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/hypothesis.rs", "symbol": "add_select_change_clear_and_selected_removal_are_explicit"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/hypothesis.rs", "symbol": "selecting_nonmember_and_invalid_membership_transitions_fail"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_hypothesis_selection"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/hypothesis-selection.test.mjs", "symbol": "hypothesis membership and selection are explicit and Arrow-only"}
       ]
     },
     {
@@ -94,8 +94,8 @@
       "command_groups": ["rust"],
       "surfaces": ["rust"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
-        {"kind": "rust", "path": "crates/gf-api/src/belief_projection.rs", "symbol": "supersession_branches_and_multi_group_conflicts_require_explicit_resolution"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "supersession_branches_and_multi_group_conflicts_require_explicit_resolution"}
       ]
     },
     {
@@ -104,8 +104,8 @@
       "command_groups": ["rust"],
       "surfaces": ["rust"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/epistemic_snapshot.rs", "symbol": "public_snapshot_is_cutoff_stable_branch_preserving_and_reopen_deterministic"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/valid_time.rs", "symbol": "transaction_cutoff_and_uuid_tie_breaking_preserve_prior_views"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/epistemic_snapshot.rs", "symbol": "public_snapshot_is_cutoff_stable_branch_preserving_and_reopen_deterministic"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/valid_time.rs", "symbol": "transaction_cutoff_and_uuid_tie_breaking_preserve_prior_views"}
       ]
     },
     {
@@ -114,10 +114,10 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"},
-        {"kind": "rust", "path": "crates/gf-knowledge/src/valid_time.rs", "symbol": "half_open_unbounded_empty_and_invalid_intervals_are_explicit"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertion_validity"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/valid-time.test.mjs", "symbol": "valid time is opt-in, append-only, and evaluated after transaction time"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"},
+        {"kind": "rust", "path": "crates/graphforge-knowledge/src/valid_time.rs", "symbol": "half_open_unbounded_empty_and_invalid_intervals_are_explicit"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_validity"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/valid-time.test.mjs", "symbol": "valid time is opt-in, append-only, and evaluated after transaction time"}
       ]
     },
     {
@@ -126,12 +126,12 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "find"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "initial_project_reports_mandatory_graph_and_workspace_capabilities"},
-        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "epistemic_v1_is_supported_but_future_versions_are_rejected"},
-        {"kind": "rust", "path": "crates/gf-api/src/capabilities.rs", "symbol": "future_capability_is_reported_without_opening_participants"},
-        {"kind": "rust", "path": "crates/gf-api/src/valid_time.rs", "symbol": "absent_capability_is_a_structured_error"},
-        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "corrupt_knowledge_bytes_do_not_block_graph_only_reopen_or_recovery"},
-        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/capabilities.rs", "symbol": "initial_project_reports_mandatory_graph_and_workspace_capabilities"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/capabilities.rs", "symbol": "epistemic_v1_is_supported_but_future_versions_are_rejected"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/capabilities.rs", "symbol": "future_capability_is_reported_without_opening_participants"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/valid_time.rs", "symbol": "absent_capability_is_a_structured_error"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_recovery.rs", "symbol": "corrupt_knowledge_bytes_do_not_block_graph_only_reopen_or_recovery"},
+        {"kind": "rust", "path": "crates/graphforge-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"}
       ]
     },
     {
@@ -140,11 +140,11 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "recovery"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
-        {"kind": "rust", "path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
-        {"kind": "rust", "path": "crates/gf-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
-        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"},
-        {"kind": "rust", "path": "crates/gf-storage/src/project_recovery.rs", "symbol": "injected_operation_errors_report_exact_commit_state"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_and_first_status_publish_as_one_idempotent_generation"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_recovery.rs", "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_recovery.rs", "symbol": "injected_operation_errors_report_exact_commit_state"}
       ]
     },
     {
@@ -153,7 +153,7 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "rank", "cluster", "similar", "paths", "analyze"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"}
       ]
     },
     {
@@ -162,11 +162,11 @@
       "command_groups": ["rust"],
       "surfaces": ["rust", "arrow"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-storage/src/graph_projection.rs", "symbol": "projection_is_canonically_ordered_and_reproducible"},
-        {"kind": "rust", "path": "crates/gf-storage/src/graph_projection.rs", "symbol": "projection_fingerprint_ignores_parquet_chunking_and_dictionary_layout"},
-        {"kind": "rust", "path": "crates/gf-storage/src/graph_projection.rs", "symbol": "unrelated_runtime_catalog_entries_do_not_change_projection_identity"},
-        {"kind": "rust", "path": "crates/gf-storage/src/graph_projection.rs", "symbol": "projection_preserves_graph_rows_closes_endpoints_and_never_induces_edges"},
-        {"kind": "rust", "path": "crates/gf-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_ignores_batches_and_dictionary_layout"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/graph_projection.rs", "symbol": "projection_is_canonically_ordered_and_reproducible"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/graph_projection.rs", "symbol": "projection_fingerprint_ignores_parquet_chunking_and_dictionary_layout"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/graph_projection.rs", "symbol": "unrelated_runtime_catalog_entries_do_not_change_projection_identity"},
+        {"kind": "rust", "path": "crates/graphforge-storage/src/graph_projection.rs", "symbol": "projection_preserves_graph_rows_closes_endpoints_and_never_induces_edges"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/canonical_arrow.rs", "symbol": "result_fingerprint_ignores_batches_and_dictionary_layout"}
       ]
     },
     {
@@ -175,9 +175,9 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_resolved_belief_projection"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/belief-projection.test.mjs", "symbol": "resolved rank records M20 output and exactly retries its M21 attachment"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_resolved_belief_projection"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/belief-projection.test.mjs", "symbol": "resolved rank records M20 output and exactly retries its M21 attachment"}
       ]
     },
     {
@@ -186,11 +186,11 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_reasoning"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertion_validity"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/assertion-status.test.mjs", "symbol": "assertion status is explicit, atomic, append-only, and Arrow-only"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/valid-time.test.mjs", "symbol": "valid time is opt-in, append-only, and evaluated after transaction time"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_reasoning"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_validity"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertion-status.test.mjs", "symbol": "assertion status is explicit, atomic, append-only, and Arrow-only"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/valid-time.test.mjs", "symbol": "valid time is opt-in, append-only, and evaluated after transaction time"}
       ]
     },
     {
@@ -199,11 +199,11 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-storage/src/project_generation.rs", "symbol": "resolution_does_not_open_unrequested_participant_tables"},
-        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "reserved_sidecars_do_not_affect_default_reads_or_traversal"},
-        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_assertions"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/assertions.test.mjs", "symbol": "assertions are atomic, idempotent, exact, and Arrow-only"}
+        {"kind": "rust", "path": "crates/graphforge-storage/src/project_generation.rs", "symbol": "resolution_does_not_open_unrequested_participant_tables"},
+        {"kind": "rust", "path": "crates/graphforge-api/tests/knowledge_isolation.rs", "symbol": "reserved_sidecars_do_not_affect_default_reads_or_traversal"},
+        {"kind": "rust", "path": "crates/graphforge-api/tests/knowledge_isolation.rs", "symbol": "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertions"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertions.test.mjs", "symbol": "assertions are atomic, idempotent, exact, and Arrow-only"}
       ]
     },
     {
@@ -212,9 +212,9 @@
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node", "find"],
       "tests": [
-        {"kind": "rust", "path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"},
-        {"kind": "python-call", "path": "crates/gf-bindings-py/tests/smoke.py", "symbol": "check_find"},
-        {"kind": "node", "path": "crates/gf-bindings-node/tests/core.test.mjs", "symbol": "find"}
+        {"kind": "rust", "path": "crates/graphforge-api/tests/knowledge_isolation.rs", "symbol": "find_is_identical_across_absent_populated_corrupt_and_future_knowledge"},
+        {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_find"},
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/core.test.mjs", "symbol": "find"}
       ]
     }
   ]

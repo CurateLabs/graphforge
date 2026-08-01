@@ -12,21 +12,21 @@ execution.
 
 ## Boundary
 
-- `gf-api` is the only public orchestration boundary.
-- `gf-provenance` and `gf-knowledge` own records, validation, schemas, ordering,
+- `graphforge-api` is the only public orchestration boundary.
+- `graphforge-provenance` and `graphforge-knowledge` own records, validation, schemas, ordering,
   and canonical bytes. They are not binding dependencies.
-- `gf-storage` receives opaque participants and owns generation publication.
+- `graphforge-storage` receives opaque participants and owns generation publication.
 - Graph reads, openCypher reads, and analyst-verb/find compute never open provenance or
   knowledge participants.
 - All buffered ledger reads and write receipts are Arrow
-  `gf_exec::ExecutionResult` values with the exact registered schema and no
+  `graphforge_exec::ExecutionResult` values with the exact registered schema and no
   execution surrogate IDs.
 - Python returns `pyarrow.Table`. Node resolves a `Promise<Buffer>` containing
   one Arrow IPC stream. Neither binding rebuilds a schema or record.
 
 ## Shared Rust types
 
-The implementation exports these types from `gf-api`:
+The implementation exports these types from `graphforge-api`:
 
 ```rust
 pub const M20_API_VERSION: u32 = 1;
@@ -56,7 +56,7 @@ pub struct CancellationToken(/* cloneable shared state */);
 #[derive(Debug)]
 pub struct RecordedAlgorithmResult {
     pub run_uuid: uuid::Uuid,
-    pub result: gf_exec::ExecutionResult,
+    pub result: graphforge_exec::ExecutionResult,
 }
 ```
 
@@ -165,7 +165,7 @@ ordered by `(recorded_at, provenance_uuid, role, ordinal, subject_uuid)`.
 ### Graph mutation event and no-op policy
 
 Graph execution emits a neutral UUID-only receipt. When provenance is enabled,
-`gf-api` commits the graph snapshot, one event per aggregate mutation kind, and
+`graphforge-api` commits the graph snapshot, one event per aggregate mutation kind, and
 its ordered input/output lineage in the same project generation.
 
 | Successful mutation path | Provenance behavior |

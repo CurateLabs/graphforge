@@ -1,0 +1,20 @@
+[package]
+name = "graphforge-knowledge"
+description = "Immutable GraphForge knowledge and epistemic record domains"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+unicode-normalization = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

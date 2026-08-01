@@ -26,8 +26,8 @@ Related operational docs:
    [#200](https://github.com/CurateLabs/graphforge/issues/200) is complete.
 4. Dry-runs are green for applicable surfaces: Python sdist/wheel packaging and
    clean install, `npm publish --dry-run` for Node + CLI + skills, and docs
-   preview. The approved crates.io no-publish disposition replaces a Cargo
-   publish dry-run for v0.5.0.
+   preview. All 15 Rust crates pass package inventory checks; the topological
+   publish plan passes before any crates.io write.
 5. Required release-certification evidence for the RC SHA is assembled per
    `AGENTS.md` / `#192` (Binding RC, load matrix, gates as required for
    **publication**, not for ordinary child-issue close).
@@ -46,18 +46,18 @@ deterministic success evidence (or an explicit maintainer disposition to skip).
 | Step | Action | Issue | Evidence |
 | --- | --- | --- | --- |
 | 1 | Annotate tag `v0.5.0` on the verified RC commit on `main` | [#193](https://github.com/CurateLabs/graphforge/issues/193) | `git rev-parse v0.5.0^{}` == RC SHA |
-| 2 | Publish GitHub Release for `v0.5.0` with final CHANGELOG notes + checksum links/attachments | [#194](https://github.com/CurateLabs/graphforge/issues/194) | Release URL; notes match CHANGELOG; `Publish to PyPI and npm` run starts |
+| 2 | Publish GitHub Release for `v0.5.0` with final CHANGELOG notes + checksum links/attachments | [#194](https://github.com/CurateLabs/graphforge/issues/194) | Release URL; notes match CHANGELOG; `Publish to PyPI, npm, and crates.io` run starts |
 | 3 | `publish.yaml` builds and publishes **Python** to PyPI | [#195](https://github.com/CurateLabs/graphforge/issues/195) | Workflow green; `graphforge==0.5.0` on PyPI; checksums match RC record |
 | 4 | Same workflow publishes **Node** `@graphforge/node` and platform packages to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; target inventory and checksums match |
 | 5 | Same workflow publishes **NPX CLI** `@graphforge/cli` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; clean-consumer handoff passed |
 | 6 | Same workflow publishes **NPX skills** `@graphforge/agent-skills` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; packed offline contract passed |
-| 7 | Record the approved **no crates.io publication** disposition for v0.5.0 | [#196](https://github.com/CurateLabs/graphforge/issues/196) | Plan script output + this recorded disposition |
+| 7 | Same workflow publishes the complete 15-crate **Rust** surface to crates.io in dependency order | [#196](https://github.com/CurateLabs/graphforge/issues/196) | Workflow green; all packages at `0.5.0`; checksums match; `DecisionNerd` owns each crate |
 | 8 | Deploy / confirm documentation for the release commit/tag | [#197](https://github.com/CurateLabs/graphforge/issues/197) | Pages run green; live anonymous URLs serve the RC docs set |
 | 9 | Verify registry/package **metadata** (repo, license, docs, tag) | [#199](https://github.com/CurateLabs/graphforge/issues/199) | Concise surface checklist on #199 |
 
 Notes:
 
-- Steps 3–6 are automated by `.github/workflows/publish.yaml` once the GitHub
+- Steps 3–7 are automated by `.github/workflows/publish.yaml` once the GitHub
   Release is published. Maintainers watch that run; they do not re-build
   different bytes under `0.5.0` if a job fails.
 - Before any registry write, the workflow requires the release tag, current
@@ -71,24 +71,25 @@ Notes:
 
 ## Crates.io dependency order
 
-Library crates publish (when unblocked) in topological order of workspace path
-dependencies, excluding language-binding and CLI crates (those ship via PyPI /
-npm, not as the public Rust surface):
+Rust crates publish in topological order of workspace path dependencies. The
+Python and Node binding implementation crates remain private to Cargo because
+their public artifacts ship through PyPI/npm; the Rust CLI is public:
 
-1. `gf-core`
-2. `gf-ast`
-3. `gf-knowledge`
-4. `gf-ontology`
-5. `gf-provenance`
-6. `gf-ir`
-7. `gf-plan`
-8. `gf-storage`
-9. `gf-io`
-10. `gf-rel`
-11. `gf-search`
-12. `gf-cypher`
-13. `gf-exec`
-14. `gf-api`
+1. `graphforge-core`
+2. `graphforge-ast`
+3. `graphforge-knowledge`
+4. `graphforge-ontology`
+5. `graphforge-provenance`
+6. `graphforge-ir`
+7. `graphforge-plan`
+8. `graphforge-storage`
+9. `graphforge-io`
+10. `graphforge-rel`
+11. `graphforge-search`
+12. `graphforge-cypher`
+13. `graphforge-exec`
+14. `graphforge-api`
+15. `graphforge-cli`
 
 Generate or verify this list with:
 
@@ -97,23 +98,23 @@ python3 scripts/ci/crate-publish-plan.py list
 python3 scripts/ci/crate-publish-plan.py check
 ```
 
-`check` fails closed on known crates.io name conflicts, missing
-`version` alongside path deps (required for `cargo publish`), and cycles.
+`check` fails closed on non-`graphforge-*` names, missing `version` alongside
+normal path dependencies (required for `cargo publish`), and cycles. Workspace
+dev-dependencies remain path-only so Cargo excludes those test-only edges from
+published manifests, preventing first-publication cycles.
 
-### Crates.io disposition (v0.5.0)
+### Crates.io publication decision (v0.5.0)
 
-**Final maintainer disposition:** GraphForge v0.5.0 publishes no Rust crates to
-crates.io. This is the approved no-publish outcome tracked by
-[#196](https://github.com/CurateLabs/graphforge/issues/196); it applies to the
-complete 14-crate plan above, so no partial GraphForge crate set may be
-published as `0.5.0`.
+**Final maintainer decision:** GraphForge v0.5.0 publishes the complete
+15-crate Rust surface above to crates.io under `graphforge-*` names. This is
+tracked by [#196](https://github.com/CurateLabs/graphforge/issues/196); no
+partial alternative package set is permitted.
 
-The disposition is required because **`gf-core` is already owned on crates.io
-by an unrelated project**. The excluded `gf-cli` name is also foreign-owned,
-and the planned library crates still lack the path-plus-`version` dependency
-metadata required by `cargo publish`. Resolving those blockers would require a
-separate, maintainer-approved crate naming and publication project; renaming
-the crate graph during v0.5.0 release execution is outside #196.
+The previous `gf-*` names were abandoned because `gf-core` and `gf-cli` are
+owned by unrelated projects. On 2026-07-31 the official crates.io API returned
+not-found for all 15 `graphforge-*` names. Every normal workspace path
+dependency declares both `path` and version `0.5.0` so Cargo can publish the
+runtime graph; path-only dev-dependencies are intentionally not published.
 
 The evidence command remains:
 
@@ -121,10 +122,10 @@ The evidence command remains:
 python3 scripts/ci/crate-publish-plan.py check
 ```
 
-It intentionally fails closed while reporting the ordered plan's name and
-manifest blockers. The release workflow records the same output without
-running `cargo publish`. Python, Node, and agent-skills publication may proceed
-once their own preconditions hold because they do not depend on crates.io.
+The release workflow invokes `scripts/publish_crates.py` after the npm surfaces.
+That publisher packages each crate, checks its SHA-256, publishes once, waits
+for crates.io indexing, verifies `DecisionNerd` ownership, and resumes only
+when an existing `0.5.0` checksum matches the local archive.
 
 ## Stop conditions
 
@@ -170,8 +171,10 @@ final #192 close.
       supported GitHub-hosted runner
 - [ ] PyPI trusted publishing OIDC is configured for
       `CurateLabs/graphforge`, workflow `publish.yaml`, with no environment name
-- [x] Crates.io no-publish disposition is recorded for v0.5.0 (#196); no Cargo
-      registry credential is required for this release
+- [x] All 15 `graphforge-*` names were available on crates.io when checked
+- [x] The crates.io credential is stored in Pulumi ESC
+      `curatelabs/graphforge/release` and projected to the repository's
+      encrypted `CARGO_REGISTRY_TOKEN` Actions secret
 - [x] Public Apache-2.0 legal and contribution docs are deployed (#200)
 - [ ] Maintainer authorization to create annotated tag + GitHub Release
 - [x] Repository and release documentation are publicly readable

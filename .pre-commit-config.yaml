@@ -62,7 +62,7 @@ repos:
     rev: 1.8.0
     hooks:
       - id: bandit
-        args: [-c, pyproject.toml, -r, crates/gf-bindings-py/python]
+        args: [-c, pyproject.toml, -r, crates/graphforge-bindings-py/python]
         additional_dependencies: ["bandit[toml]"]
 
   # Markdown linting

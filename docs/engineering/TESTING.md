@@ -14,9 +14,9 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
 ## Ownership
 
-Rust owns behavior. The public facade is `gf-api`; Cypher runs
-`gf-cypher → gf-ir → gf-rel → gf-exec`; storage and project format live in
-`gf-storage`. Python and Node are thin bindings that project Rust semantics into
+Rust owns behavior. The public facade is `graphforge-api`; Cypher runs
+`graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`; storage and project format live in
+`graphforge-storage`. Python and Node are thin bindings that project Rust semantics into
 language-native APIs and Arrow/IPC — never fallback engines or parallel
 implementations of graph logic.
 
@@ -58,8 +58,8 @@ SHA pairing and downloadable artifacts are publication evidence — see
   lanes are fine; failed or cancelled applicable jobs are not.
 - PR native binding acceptance is **Linux-only** and uses Cargo’s `dev` profile.
   That is fast feedback, not multi-OS certification.
-- When Rust surfaces change, Test Suite also runs `Windows gf-storage Locks`
-  (`cargo test -p gf-storage project_generation::tests:: --lib` on
+- When Rust surfaces change, Test Suite also runs `Windows graphforge-storage Locks`
+  (`cargo test -p graphforge-storage project_generation::tests:: --lib` on
   `blacksmith-4vcpu-windows-2025`) for the `#[cfg(windows)]` project-root lock
   unit tests that Linux `rust-test` cannot execute.
 - Repository policy always validates workflow syntax, the classifier, domain
@@ -77,7 +77,7 @@ parity mismatches reject the candidate. It does not tag or publish.
 **Windows posture:** the Windows Python lane proves user-facing use of the
 installed abi3 wheel (build → clean-install → native contracts). It is **not** a
 second MSVC `cargo test` of the full Rust workspace. Windows project-root lock
-unit tests are hosted by Test Suite `Windows gf-storage Locks`, not Binding RC.
+unit tests are hosted by Test Suite `Windows graphforge-storage Locks`, not Binding RC.
 Do not treat “wheel contracts green” as “every Rust unit test ran under MSVC.”
 
 ### Non-Cypher surface and other publication gates
@@ -109,7 +109,7 @@ docs surfaces; it does not prove runtime behavior.
 | Claim | Acceptable evidence | Not enough alone |
 | --- | --- | --- |
 | Cypher semantics | TCK BDD / `make test-tck`; facade `execute` tests returning Arrow | Parser-only or logical-plan unit tests |
-| Analyst verbs / find | `gf-api` surface tests + non-Cypher inventory rows | Binding wrapper that never calls Rust |
+| Analyst verbs / find | `graphforge-api` surface tests + non-Cypher inventory rows | Binding wrapper that never calls Rust |
 | Persistence / reopen | Facade lifecycle + kill-reopen / recovery suites | “Wrote Parquet files” without reopen readback |
 | Binding parity | Same-SHA clean-install wheel/addon; Arrow/IPC and error-code equality | Import smoke or stubbed natives |
 | Concurrency contract | Frozen short matrix in PR CI; stress lane is diagnostic | Stress retries used as the merge gate |
@@ -125,8 +125,8 @@ weakened assertions (`AGENTS.md`).
 | Layer | What it verifies | Tools / entrypoints |
 | --- | --- | --- |
 | Unit | Crate-local logic (parse, lower, storage helpers) | `cargo test` inline + crate `tests/` |
-| Integration / facade | Lifecycle, verbs, reopen, concurrency contracts | `gf-api` workspace tests |
-| Language compliance | openCypher semantics | `cargo test -p gf-core --test bdd` / `make test-tck` |
+| Integration / facade | Lifecycle, verbs, reopen, concurrency contracts | `graphforge-api` workspace tests |
+| Language compliance | openCypher semantics | `cargo test -p graphforge-core --test bdd` / `make test-tck` |
 | Binding / IPC | Python & Node projections match Rust semantics | pytest, Node BDD, Arrow/IPC equality |
 | Contract gates | Non-Cypher public surface inventory + evidence | `scripts/ci/non-cypher-surface-gate.py`, surface-gate workflows |
 | Agent skills | Offline pack/install, compatibility, schema fail-closed | `pnpm test:agent-skills`, `pnpm smoke:agent-skills` |
@@ -137,9 +137,9 @@ weakened assertions (`AGENTS.md`).
 
 | Experience / Requirement | Scenario (Given/When/Then) | Test / evidence |
 | ------------------------ | -------------------------- | ---- |
-| FR-1 Cypher → Arrow | Given a graph, when `execute` runs, then Arrow rows match | Workspace/`gf-api` query tests; TCK corpus |
-| FR-2 Analyst verbs | Given a graph, when a verb runs, then Arrow scores/rows return | `gf-api` analyst-verb/find surface tests; non-Cypher gate |
-| FR-3 Project reopen | Given a published project, when reopened, then reads see published state | `cargo test -p gf-api --test public_lifecycle_conformance`; composite recovery suites |
+| FR-1 Cypher → Arrow | Given a graph, when `execute` runs, then Arrow rows match | Workspace/`graphforge-api` query tests; TCK corpus |
+| FR-2 Analyst verbs | Given a graph, when a verb runs, then Arrow scores/rows return | `graphforge-api` analyst-verb/find surface tests; non-Cypher gate |
+| FR-3 Project reopen | Given a published project, when reopened, then reads see published state | `cargo test -p graphforge-api --test public_lifecycle_conformance`; composite recovery suites |
 | FR-4 Ontology modes | Given exploratory vs strict, when labels/violations occur, then accept or fail closed | Ontology round-trip / mode tests; agent bootstrap mode conflicts |
 | FR-5 Layer isolation | Given knowledge by UUID, when Cypher runs, then graph-only baseline holds | Layer/boundary regression coverage |
 | FR-6 Binding parity | Given the same op on Rust/Python/Node, when compared, then Arrow/IPC agrees | Binding RC / concurrency parity suites |
@@ -184,7 +184,7 @@ make pre-push
 # Non-Cypher surface (Rust)
 python3 scripts/ci/non-cypher-surface-gate.py
 python3 scripts/ci/test-non-cypher-surface-gate.py
-cargo test -p gf-api \
+cargo test -p graphforge-api \
   --test public_lifecycle_conformance \
   --test m22_m18_public_surface \
   --test m22_m19_public_surface
@@ -198,9 +198,9 @@ pnpm docs:build
 pnpm docs:check-links
 ```
 
-Targeted iteration may use crate filters (`cargo test -p gf-cypher`). Keep native
+Targeted iteration may use crate filters (`cargo test -p graphforge-cypher`). Keep native
 builds isolated with `CARGO_TARGET_DIR`; limit concurrent heavy builds
-(`AGENTS.md`). Literal `gf-api` integration test binary names above are checked-in
+(`AGENTS.md`). Literal `graphforge-api` integration test binary names above are checked-in
 identifiers; they are not product milestone labels.
 
 ## Continuous integration

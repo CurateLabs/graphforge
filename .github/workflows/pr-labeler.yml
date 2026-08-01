@@ -49,15 +49,15 @@ jobs:
           # Check file patterns
           while IFS= read -r file; do
             case "$file" in
-              crates/gf-cypher/*)
+              crates/graphforge-cypher/*)
                 HAS_PARSER=1
                 HAS_SRC=1
                 ;;
-              crates/gf-plan/*|crates/gf-rel/*)
+              crates/graphforge-plan/*|crates/graphforge-rel/*)
                 HAS_PLANNER=1
                 HAS_SRC=1
                 ;;
-              crates/gf-exec/*)
+              crates/graphforge-exec/*)
                 HAS_EXECUTOR=1
                 HAS_SRC=1
                 ;;

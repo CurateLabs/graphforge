@@ -75,7 +75,7 @@ class SurfaceGateTests(unittest.TestCase):
         manifest = self.manifest()
         manifest["m19_contracts"]["release-tested"]["test_refs"] = [
             {
-                "path": "crates/gf-api/tests/fixed_hop_limit.rs",
+                "path": "crates/graphforge-api/tests/fixed_hop_limit.rs",
                 "symbol": "release_livejournal_fixed_hop_limits",
             }
         ]
@@ -97,7 +97,7 @@ class SurfaceGateTests(unittest.TestCase):
     def test_broad_non_symbol_reference_fails(self) -> None:
         manifest = self.manifest()
         manifest["method_evidence_groups"]["m18"]["test_refs"] = [
-            {"path": "crates/gf-api/src/lib.rs", "pattern": "#\\[cfg\\(test\\)\\]"}
+            {"path": "crates/graphforge-api/src/lib.rs", "pattern": "#\\[cfg\\(test\\)\\]"}
         ]
         self.assertTrue(any("malformed or broad" in error for error in self.validate(manifest)))
 
@@ -105,7 +105,7 @@ class SurfaceGateTests(unittest.TestCase):
         manifest = self.manifest()
         manifest["method_evidence_groups"]["m19-provider-rerank"]["test_refs"] = [
             {
-                "path": "crates/gf-api/tests/m22_m19_public_surface.rs",
+                "path": "crates/graphforge-api/tests/m22_m19_public_surface.rs",
                 "symbol": "add_paper",
             }
         ]
@@ -115,7 +115,7 @@ class SurfaceGateTests(unittest.TestCase):
         manifest = self.manifest()
         manifest["method_evidence_groups"]["checkpoint-view"]["test_refs"] = [
             {
-                "path": "crates/gf-api/tests/m22_m18_public_surface.rs",
+                "path": "crates/graphforge-api/tests/m22_m18_public_surface.rs",
                 "symbol": (
                     "persisted_public_rank_is_exact_after_repeat_and_reopen_"
                     "and_unavailable_is_stable"
@@ -126,7 +126,7 @@ class SurfaceGateTests(unittest.TestCase):
         self.assertTrue(any("CheckpointView.rank is not called" in error for error in errors))
 
     def test_every_adjacency_read_has_exactly_one_visibility_guard(self) -> None:
-        source = (GATE.ROOT / "crates/gf-api/src/lib.rs").read_text()
+        source = (GATE.ROOT / "crates/graphforge-api/src/lib.rs").read_text()
         calls = list(re.finditer(r"self\.adjacency_provider\.revalidate\(\);", source))
         self.assertEqual(len(calls), 12)
         for call in calls:

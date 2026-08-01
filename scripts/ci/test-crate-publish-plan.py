@@ -34,21 +34,25 @@ mod = load_module()
 
 # Synthetic topo: leaf libraries only.
 synthetic = {
-    "gf-core": set(),
-    "gf-ast": {"gf-core"},
-    "gf-api": {"gf-core", "gf-ast"},
-    "gf-bindings-py": {"gf-api"},
-    "gf-cli": {"gf-api"},
+    "graphforge-core": set(),
+    "graphforge-ast": {"graphforge-core"},
+    "graphforge-api": {"graphforge-core", "graphforge-ast"},
+    "graphforge-bindings-py": {"graphforge-api"},
+    "graphforge-cli": {"graphforge-api"},
 }
 order = mod.topological_publish_order(synthetic)
-assert order == ["gf-core", "gf-ast", "gf-api"], order
-assert "gf-bindings-py" not in order
-assert "gf-cli" not in order
+assert order == [
+    "graphforge-core",
+    "graphforge-ast",
+    "graphforge-api",
+    "graphforge-cli",
+], order
+assert "graphforge-bindings-py" not in order
+assert "graphforge-cli" in order
 
-cycle = {"a": {"b"}, "b": {"a"}, "gf-bindings-node": {"a"}}
-# Exclude bindings; cycle remains among a/b — but a/b are not gf-* workspace
-# names. Use gf-* names:
-cycle = {"gf-a": {"gf-b"}, "gf-b": {"gf-a"}}
+cycle = {"a": {"b"}, "b": {"a"}, "graphforge-bindings-node": {"a"}}
+# Exclude bindings; cycle remains among graphforge-a/graphforge-b.
+cycle = {"graphforge-a": {"graphforge-b"}, "graphforge-b": {"graphforge-a"}}
 try:
     mod.topological_publish_order(cycle)
     raise AssertionError("expected cycle to fail")
@@ -58,22 +62,23 @@ except SystemExit as exc:
 listed = run("list")
 assert listed.returncode == 0, listed.stderr
 names = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
-assert names[0] == "gf-core", names
-assert names[-1] == "gf-api", names
-assert "gf-bindings-py" not in names
-assert "gf-cli" not in names
+assert names[0] == "graphforge-core", names
+assert names[-1] == "graphforge-cli", names
+assert "graphforge-bindings-py" not in names
+assert "graphforge-cli" in names
 # Relative order samples
-assert names.index("gf-ast") < names.index("gf-ir")
-assert names.index("gf-storage") < names.index("gf-api")
+assert names.index("graphforge-ast") < names.index("graphforge-ir")
+assert names.index("graphforge-storage") < names.index("graphforge-api")
 
 checked = run("check")
-assert checked.returncode == 1, checked.stdout
-assert "gf-core" in checked.stderr
-assert "name conflict" in checked.stderr
-assert "version=" in checked.stderr or "missing version" in checked.stderr
+assert checked.returncode == 0, checked.stderr
+assert "15 crates" in checked.stdout
 
 dry = run("dry-run-commands")
-assert dry.returncode == 1, dry.stdout
-assert "name conflict" in dry.stderr.lower() or "Refusing" in dry.stderr
+assert dry.returncode == 0, dry.stderr
+commands = [line for line in dry.stdout.splitlines() if line]
+assert len(commands) == 15, commands
+assert commands[0].startswith("cargo publish -p graphforge-core ")
+assert commands[-1].startswith("cargo publish -p graphforge-cli ")
 
 print("crate-publish-plan tests passed")

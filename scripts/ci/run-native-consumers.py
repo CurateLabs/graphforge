@@ -77,7 +77,7 @@ def main() -> None:
     """Validate the audit, execute survivors, and print closure evidence."""
     root = Path(__file__).resolve().parents[2]
     installed = Path(graphforge.__file__).resolve()
-    source_package = root / "crates/gf-bindings-py/python/graphforge"
+    source_package = root / "crates/graphforge-bindings-py/python/graphforge"
     if installed.is_relative_to(source_package):
         raise AssertionError(f"repository source shadowed the installed wheel: {installed}")
 

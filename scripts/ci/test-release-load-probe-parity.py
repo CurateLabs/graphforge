@@ -12,8 +12,8 @@ import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-NODE_PROBE = ROOT / "crates/gf-bindings-node/tests/release-load-probe.mjs"
-RUST_PROBE = ROOT / "crates/gf-api/examples/release_load_probe.rs"
+NODE_PROBE = ROOT / "crates/graphforge-bindings-node/tests/release-load-probe.mjs"
+RUST_PROBE = ROOT / "crates/graphforge-api/examples/release_load_probe.rs"
 PYTHON_PROBE = ROOT / "scripts/ci/release-load-python-probe.py"
 
 NODE_OPERATION = "018f0f4e-7b8c-7000-8000-00000000b001"

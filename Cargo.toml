@@ -1,23 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/gf-core",
-  "crates/gf-ast",
-  "crates/gf-cypher",
-  "crates/gf-ir",
-  "crates/gf-rel",
-  "crates/gf-exec",
-  "crates/gf-search",
-  "crates/gf-storage",
-  "crates/gf-io",
-  "crates/gf-provenance",
-  "crates/gf-knowledge",
-  "crates/gf-ontology",
-  "crates/gf-plan",
-  "crates/gf-api",
-  "crates/gf-bindings-py",
-  "crates/gf-bindings-node",
-  "crates/gf-cli",
+  "crates/graphforge-core",
+  "crates/graphforge-ast",
+  "crates/graphforge-cypher",
+  "crates/graphforge-ir",
+  "crates/graphforge-rel",
+  "crates/graphforge-exec",
+  "crates/graphforge-search",
+  "crates/graphforge-storage",
+  "crates/graphforge-io",
+  "crates/graphforge-provenance",
+  "crates/graphforge-knowledge",
+  "crates/graphforge-ontology",
+  "crates/graphforge-plan",
+  "crates/graphforge-api",
+  "crates/graphforge-bindings-py",
+  "crates/graphforge-bindings-node",
+  "crates/graphforge-cli",
 ]
 
 [workspace.package]
@@ -60,7 +60,7 @@ lalrpop-util = "0.23"
 logos = "0.16"
 
 # Python binding. NOTE: the `extension-module` feature is scoped to the
-# `gf-bindings-py` crate (not enabled here), because it suppresses libpython
+# `graphforge-bindings-py` crate (not enabled here), because it suppresses libpython
 # linkage for ALL crates that share this workspace dep — which would break
 # `cargo test`/embedded-Python use elsewhere.
 pyo3 = { version = "0.28" }

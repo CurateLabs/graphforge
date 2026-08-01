@@ -135,7 +135,7 @@ def main() -> None:
             raise AssertionError(f"committed notebook cell {index + 1} retains execution state")
 
     installed = Path(graphforge.__file__).resolve()
-    source_package = root / "crates/gf-bindings-py/python/graphforge"
+    source_package = root / "crates/graphforge-bindings-py/python/graphforge"
     if installed.is_relative_to(source_package):
         raise AssertionError(f"repository source shadowed the installed wheel: {installed}")
 

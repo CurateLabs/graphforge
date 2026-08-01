@@ -13,7 +13,7 @@ openCypher lists are **heterogeneous**: `[1, 2.0, 5]` is a list whose elements k
 types (two integers, one float). Operations preserve those types — `max([1, 2.0, 5])` returns the
 **integer** `5`, while `min([1, 2.0, 5, 0.1])` returns the **float** `0.1`.
 
-GraphForge lowers a list literal in `lower_list_literal` (`crates/gf-rel/src/expr.rs`). A homogeneous
+GraphForge lowers a list literal in `lower_list_literal` (`crates/graphforge-rel/src/expr.rs`). A homogeneous
 list const-folds via `ScalarValue::new_list`; a **heterogeneous** one fails the homogeneity guard and
 falls back to DataFusion's `make_array`, which **coerces every element to one common Arrow type**
 (widening `[1, 2.0, 5]` → `List<Float64>`). The per-element int/float distinction is destroyed *at

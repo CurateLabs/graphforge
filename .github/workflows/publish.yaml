@@ -1,4 +1,4 @@
-name: Publish to PyPI and npm
+name: Publish to PyPI, npm, and crates.io
 
 on:
   release:
@@ -62,7 +62,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
           manylinux: auto # builds the Linux wheel in a manylinux container
           sccache: "false"
 
@@ -84,7 +84,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          args: --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
 
       - name: Save sdist for publish job
         uses: actions/cache/save@v6
@@ -173,7 +173,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p node-artifacts
-          cp crates/gf-bindings-node/*.node node-artifacts/
+          cp crates/graphforge-bindings-node/*.node node-artifacts/
 
       - name: Save addon for publish job
         uses: actions/cache/save@v6
@@ -190,7 +190,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: crates/gf-bindings-node
+        working-directory: crates/graphforge-bindings-node
     steps:
       - uses: actions/checkout@v7
 
@@ -349,24 +349,20 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---- Rust crates (crates.io) ----
-  # v0.5.0 has an approved no-publish disposition. Automation records the
-  # ordered plan and fail-closed blockers; it never runs `cargo publish`
-  # (see docs/development/publication-order.md and #196).
-  crates-publish-plan:
-    name: Record crates.io publish plan
-    needs: license-compliance
+  # Publish last so an earlier PyPI/npm failure cannot leave only a Rust
+  # surface behind. The publisher is checksum-safe and resumable.
+  publish-crates:
+    name: Publish Rust crates to crates.io
+    needs: publish-agent-skills
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
 
-      - name: Emit ordered crate list and disposition
-        run: |
-          python3 scripts/ci/crate-publish-plan.py list | tee crates-io-publish-order.txt
-          set +e
-          python3 scripts/ci/crate-publish-plan.py check > crates-io-publish-check.txt 2>&1
-          status=$?
-          set -e
-          cat crates-io-publish-check.txt
-          if [ "$status" -ne 0 ]; then
-            echo "::warning::crates.io publish blocked — see publication-order.md disposition and crates-io-publish-check.txt"
-          fi
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Publish the complete ordered Rust surface
+        run: python3 scripts/publish_crates.py
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

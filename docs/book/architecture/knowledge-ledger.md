@@ -14,10 +14,10 @@ The crate boundary is part of the storage contract:
 
 | Owner | Responsibility |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
-| `gf-storage` | v0.5 project manifest, immutable generations, participant checksums, atomic publication, recovery, and the single-writer lock |
-| `gf-provenance` | provenance events, lineage schemas, validation, ordering, and canonical identities |
-| `gf-knowledge` | knowledge assertions, graph references, confidence, evidence, and algorithm runs; additive epistemic and valid-time records |
-| `gf-api` | public requests, cross-domain UUID validation, idempotency, and assembly of one atomic generation |
+| `graphforge-storage` | v0.5 project manifest, immutable generations, participant checksums, atomic publication, recovery, and the single-writer lock |
+| `graphforge-provenance` | provenance events, lineage schemas, validation, ordering, and canonical identities |
+| `graphforge-knowledge` | knowledge assertions, graph references, confidence, evidence, and algorithm runs; additive epistemic and valid-time records |
+| `graphforge-api` | public requests, cross-domain UUID validation, idempotency, and assembly of one atomic generation |
 | Python and Node bindings | thin projections of the Rust API and its Arrow results |
 
 Graph reads and neutral analyst-verb/find computation never open provenance or knowledge
@@ -95,16 +95,16 @@ the generated [Knowledge schema inventory](../../reference/m20-schema-inventory.
 Its companion
 [`m20-schema-inventory.sha256`](../../reference/m20-schema-inventory.sha256)
 binds the bytes. The inventory is assembled directly from the two owning Rust
-registries; `gf-storage`, bindings, and documentation do not define duplicate
+registries; `graphforge-storage`, bindings, and documentation do not define duplicate
 schemas.
 
 To review and accept an intentional registry change:
 
 ```bash
 UPDATE_M20_SCHEMA_INVENTORY=1 \
-  cargo test -p gf-api --lib m20_schema_inventory_matches_checked_contract
+  cargo test -p graphforge-api --lib m20_schema_inventory_matches_checked_contract
 git diff -- docs/reference/m20-schema-inventory.*
-cargo test -p gf-api --lib m20_schema_inventory_matches_checked_contract
+cargo test -p graphforge-api --lib m20_schema_inventory_matches_checked_contract
 ```
 
 The test compares generated and checked bytes exactly. A new record family,

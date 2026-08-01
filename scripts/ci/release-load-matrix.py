@@ -552,12 +552,12 @@ def validate_report(
     complete_inventory = sorted(set().union(*selectors.values()))
     adapter = ROOT / "scripts/ci/release-load-executor.py"
     probe_paths = {
-        "rust": ROOT / "crates/gf-api/examples/release_load_probe.rs",
+        "rust": ROOT / "crates/graphforge-api/examples/release_load_probe.rs",
         "python": ROOT / "scripts/ci/release-load-python-probe.py",
-        "node": ROOT / "crates/gf-bindings-node/tests/release-load-probe.mjs",
+        "node": ROOT / "crates/graphforge-bindings-node/tests/release-load-probe.mjs",
     }
     commands = {
-        "rust": ["cargo", "test", "-p", "gf-api"],
+        "rust": ["cargo", "test", "-p", "graphforge-api"],
         "python": [sys.executable, str(ROOT / "scripts/ci/run-python-binding-contract.py")],
         "node": ["pnpm", "--filter", "@graphforge/node", "test"],
     }

@@ -32,30 +32,36 @@ def run(packages: list[dict[str, Any]]) -> subprocess.CompletedProcess[str]:
 
 
 base = [
-    package("gf-core", []),
-    package("gf-storage", ["gf-core"]),
-    package("gf-exec", ["gf-core", "gf-storage"]),
-    package("gf-provenance", ["gf-core"]),
-    package("gf-knowledge", ["gf-core"]),
+    package("graphforge-core", []),
+    package("graphforge-storage", ["graphforge-core"]),
+    package("graphforge-exec", ["graphforge-core", "graphforge-storage"]),
+    package("graphforge-provenance", ["graphforge-core"]),
+    package("graphforge-knowledge", ["graphforge-core"]),
     package(
-        "gf-api",
-        ["gf-core", "gf-storage", "gf-exec", "gf-provenance", "gf-knowledge"],
+        "graphforge-api",
+        [
+            "graphforge-core",
+            "graphforge-storage",
+            "graphforge-exec",
+            "graphforge-provenance",
+            "graphforge-knowledge",
+        ],
     ),
-    package("gf-bindings-py", ["gf-api"]),
-    package("gf-bindings-node", ["gf-api"]),
-    package("gf-cli", ["gf-api"]),
+    package("graphforge-bindings-py", ["graphforge-api"]),
+    package("graphforge-bindings-node", ["graphforge-api"]),
+    package("graphforge-cli", ["graphforge-api"]),
 ]
 
 assert run(base).returncode == 0
 
 for consumer, dependency in [
-    ("gf-storage", "gf-knowledge"),
-    ("gf-exec", "gf-provenance"),
-    ("gf-knowledge", "gf-storage"),
-    ("gf-provenance", "gf-knowledge"),
-    ("gf-bindings-py", "gf-knowledge"),
-    ("gf-bindings-node", "gf-provenance"),
-    ("gf-cli", "gf-knowledge"),
+    ("graphforge-storage", "graphforge-knowledge"),
+    ("graphforge-exec", "graphforge-provenance"),
+    ("graphforge-knowledge", "graphforge-storage"),
+    ("graphforge-provenance", "graphforge-knowledge"),
+    ("graphforge-bindings-py", "graphforge-knowledge"),
+    ("graphforge-bindings-node", "graphforge-provenance"),
+    ("graphforge-cli", "graphforge-knowledge"),
 ]:
     changed = [
         package(

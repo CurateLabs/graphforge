@@ -5,8 +5,8 @@
 **Canonical encoding:** [`graphforge-canonical/1`](canonical-fingerprints-v1.md)  
 
 This contract gives every live `rank`, `cluster`, `paths`, `analyze`, and
-`similar` algorithm one knowledge-neutral identity. It is owned by `gf-api`.
-`gf-exec` continues to own graph projection and algorithm execution and never
+`similar` algorithm one knowledge-neutral identity. It is owned by `graphforge-api`.
+`graphforge-exec` continues to own graph projection and algorithm execution and never
 opens provenance or knowledge records.
 
 ## Descriptor schema
@@ -96,7 +96,7 @@ exact logical graph input consumed by the selected kernel so irrelevant project
 files, Parquet layout, row groups, and generation UUIDs do not change an
 otherwise identical invocation.
 
-`gf-exec` resolves a registered `algorithm_projection@1` table containing:
+`graphforge-exec` resolves a registered `algorithm_projection@1` table containing:
 
 | Field | Arrow type | Null |
 |---|---|---|
@@ -128,9 +128,9 @@ never participate.
 
 ## Preparation and dispatch
 
-`gf-api` exposes typed descriptor preparation for the five analyst verbs.
+`graphforge-api` exposes typed descriptor preparation for the five analyst verbs.
 Preparation validates and normalizes inputs, resolves the projection through
-the same `gf-exec` projection adapter used by execution, and returns the typed
+the same `graphforge-exec` projection adapter used by execution, and returns the typed
 descriptor plus canonical bytes and fingerprint. It does not run the kernel or
 write project state.
 
@@ -158,7 +158,7 @@ observable from all three surfaces.
 
 ## Exhaustiveness and evolution
 
-The descriptor registry is generated from the five `gf-core` algorithm
+The descriptor registry is generated from the five `graphforge-core` algorithm
 catalogs. A catalog value without:
 
 - a parameter contract;

@@ -115,8 +115,8 @@ Every implementation preflights checked time, row, dimension, and memory
 bounds before allocating or mutating output. The internal `memory_bytes` limit
 defaults to 1 GiB and includes output, working matrices, topology projections,
 optimizer state, and bounded scratch described below. Work is cooperatively
-cancellable at deterministic outer-loop boundaries. Rust in `gf-exec` owns
-projection, computation, limits, cancellation, and Arrow shaping; `gf-api`
+cancellable at deterministic outer-loop boundaries. Rust in `graphforge-exec` owns
+projection, computation, limits, cancellation, and Arrow shaping; `graphforge-api`
 dispatches it, and Python and Node are thin argument/result adapters.
 
 The neutral algorithm invocation descriptor may persist the algorithm/version,

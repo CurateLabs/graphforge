@@ -1,0 +1,48 @@
+[package]
+name = "graphforge-api"
+description = "GraphForge public Rust API — the GraphForge engine facade"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+graphforge-ir = { version = "0.5.0", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.5.0", path = "../graphforge-ontology" }
+graphforge-provenance = { version = "0.5.0", path = "../graphforge-provenance" }
+graphforge-knowledge = { version = "0.5.0", path = "../graphforge-knowledge" }
+graphforge-cypher = { version = "0.5.0", path = "../graphforge-cypher" }
+graphforge-rel = { version = "0.5.0", path = "../graphforge-rel" }
+graphforge-storage = { version = "0.5.0", path = "../graphforge-storage" }
+graphforge-exec = { version = "0.5.0", path = "../graphforge-exec" }
+graphforge-search = { version = "0.5.0", path = "../graphforge-search" }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+futures = { workspace = true }
+parquet = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"
+fs4 = "0.13"
+uuid = { workspace = true }
+
+[dev-dependencies]
+cucumber = { workspace = true }
+tokio = { workspace = true }
+graphforge-cypher = { path = "../graphforge-cypher" }
+graphforge-storage = { path = "../graphforge-storage", features = ["test-failpoints"] }
+
+# BDD runner for the public-API + TCK feature files (tests/features/).
+# A custom-harness target (cucumber drives its own main).
+[[test]]
+name = "bdd"
+harness = false
+
+[lints]
+workspace = true

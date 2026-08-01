@@ -10,10 +10,10 @@ runtime.
 
 | target | surface | invariant |
 |---|---|---|
-| `fuzz_parse` | `gf_cypher::parse` | arbitrary text never panics |
-| `fuzz_bind` | `parse` → `gf_ir::Binder::bind` (exploratory) | parseable queries never panic when bound |
-| `fuzz_ontology` | `gf_ontology::OntologyLoader::{load_yaml,load_json}` | arbitrary bytes never panic |
-| `fuzz_exec` | `gf_api::GraphForge::execute` (parse→bind→lower→execute) | parseable queries never panic when executed |
+| `fuzz_parse` | `graphforge_cypher::parse` | arbitrary text never panics |
+| `fuzz_bind` | `parse` → `graphforge_ir::Binder::bind` (exploratory) | parseable queries never panic when bound |
+| `fuzz_ontology` | `graphforge_ontology::OntologyLoader::{load_yaml,load_json}` | arbitrary bytes never panic |
+| `fuzz_exec` | `graphforge_api::GraphForge::execute` (parse→bind→lower→execute) | parseable queries never panic when executed |
 
 ## Running
 

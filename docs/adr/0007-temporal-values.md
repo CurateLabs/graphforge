@@ -3,7 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-06-24
 **Build target:** v0.5.0 (conformance hardening); openCypher `Temporal3`–`Temporal10`
-**Related:** builds on the lowering-time construction of temporal values (ADR-less, `gf-rel::temporal`)
+**Related:** builds on the lowering-time construction of temporal values (ADR-less, `graphforge-rel::temporal`)
 
 ---
 
@@ -67,19 +67,19 @@ This rule reproduces every one of the 946 currently-passing construction strings
 the `Temporal2`/`Temporal1` examples), so the migration carries **no rendering regression** — the
 committed `passing_baseline.txt` gate is the proof obligation at each step.
 
-The existing string formatters in `gf-rel::temporal` (`format_time`, `format_offset`,
+The existing string formatters in `graphforge-rel::temporal` (`format_time`, `format_offset`,
 `format_duration`, `format_date`) already implement these rules and are reused verbatim by the
 renderer; only their *inputs* change from parsed-literal structs to Arrow-value decompositions.
 
 ### Where each concern lives
 
-- **gf-rel** (`temporal.rs`, `expr.rs`): construction emits Arrow temporal scalars; new static
+- **graphforge-rel** (`temporal.rs`, `expr.rs`): construction emits Arrow temporal scalars; new static
   `ScalarUDF`s (alongside `CYPHER_SIZE`) implement accessors, truncation, projection-from-value, and
   duration arithmetic; comparison/ordering need **no** code — Arrow kernels handle native temporal
   types, and the struct-backed `time`/`datetime` compare by their instant fields.
-- **gf-api** (result shaper + `tck_steps.rs::render_cell`): add render arms for the six Arrow shapes
-  above, delegating to the shared `gf-rel::temporal` formatters.
-- **gf-ir**: no new expression-level type system. Temporal functions are **monomorphic by name**
+- **graphforge-api** (result shaper + `tck_steps.rs::render_cell`): add render arms for the six Arrow shapes
+  above, delegating to the shared `graphforge-rel::temporal` formatters.
+- **graphforge-ir**: no new expression-level type system. Temporal functions are **monomorphic by name**
   (`datetime.year`, `date.truncate`) exactly as the corpus spells them, so dispatch needs no
   inference. `IrLiteral::DateTime`/`Duration` (already present) are retained for parameter binding.
 

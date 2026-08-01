@@ -6,7 +6,7 @@
   "version": 1,
   "domain": "investigative-social-network-analysis",
   "owning_issue": 2465,
-  "implementation": "crates/gf-api/examples/sna_intelligence_workflow.rs",
+  "implementation": "crates/graphforge-api/examples/sna_intelligence_workflow.rs",
   "analytical_question": "Does a cross-community association support influence, coordination, or coincidence?",
   "observable_outcome": "A mistaken directional relationship is replaced by a neutral association; alternatives remain visible and coordination is only an explicit working interpretation.",
   "generator": {"identity": "sna-intelligence-generator-v1", "seed": 2465, "fixture_fingerprint": "sha256:28c54f5773e1e6444d5811cbd16d418cb38822c4f9a8e722fea9a726ba4902e1"},

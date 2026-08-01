@@ -23,31 +23,31 @@
     {"id": "required-validation", "validation": ["format", "clippy", "targeted-tests", "required-ci"]}
   ],
   "evidence": [
-    {"id": "same-instance", "slice": "same-process", "path": "crates/gf-api/src/same_process_concurrency_tests.rs", "symbol": "independent_instances_and_one_instance_reads_are_deterministic", "helpers": ["run_workers"], "deadline": "bounded", "coordination": "barrier-channel"},
-    {"id": "cross-session", "slice": "same-process", "path": "crates/gf-api/src/same_process_concurrency_tests.rs", "symbol": "cross_session_reads_are_canonically_equal", "helpers": ["run_workers"], "deadline": "bounded", "coordination": "barrier-channel"},
-    {"id": "nested-runtime", "slice": "same-process", "path": "crates/gf-api/src/same_process_concurrency_tests.rs", "symbol": "synchronous_calls_complete_inside_existing_tokio_runtime", "helpers": [], "deadline": "bounded", "coordination": "channel"},
-    {"id": "stream-drop", "slice": "cancellation", "path": "crates/gf-api/src/stream_cancellation_isolation_tests.rs", "symbol": "early_stream_drop_does_not_truncate_concurrent_peer", "helpers": ["recv"], "deadline": "bounded", "coordination": "channel"},
-    {"id": "token-cancellation", "slice": "cancellation", "path": "crates/gf-api/src/stream_cancellation_isolation_tests.rs", "symbol": "cooperative_token_cancellation_does_not_cancel_concurrent_peer", "helpers": ["recv"], "deadline": "bounded", "coordination": "channel"},
-    {"id": "shared-read-write", "slice": "shared-directory", "path": "crates/gf-api/src/shared_directory_semantics_tests.rs", "symbol": "shared_directory_reads_pin_complete_generations_and_reopen_sees_commit", "helpers": ["recv"], "deadline": "bounded", "coordination": "barrier-channel"},
-    {"id": "competing-writer", "slice": "shared-directory", "path": "crates/gf-api/src/shared_directory_semantics_tests.rs", "symbol": "competing_writer_fails_before_its_staging_or_publication", "helpers": ["recv"], "deadline": "bounded", "coordination": "barrier-channel"},
-    {"id": "killed-writer", "slice": "multi-process", "path": "crates/gf-api/src/multi_process_publication_tests.rs", "symbol": "killed_staged_child_releases_lock_and_recovers_without_partial_generation", "helpers": ["spawn", "marker_before", "kill", "wait", "drop"], "deadline": "bounded", "coordination": "subprocess-ipc"},
-    {"id": "published-child", "slice": "multi-process", "path": "crates/gf-api/src/multi_process_publication_tests.rs", "symbol": "published_child_is_visible_only_to_fresh_current_reader", "helpers": ["spawn", "marker", "marker_before", "wait", "drop"], "deadline": "bounded", "coordination": "subprocess-ipc"},
-    {"id": "composite-kill-reopen", "slice": "composite-recovery", "path": "crates/gf-api/src/composite_recovery_tests.rs", "symbol": "composite_kill_reopen_matrix_never_exposes_mixed_state", "helpers": ["spawn", "wait", "drop", "verify_case"], "deadline": "bounded", "coordination": "failpoint-subprocess"}
+    {"id": "same-instance", "slice": "same-process", "path": "crates/graphforge-api/src/same_process_concurrency_tests.rs", "symbol": "independent_instances_and_one_instance_reads_are_deterministic", "helpers": ["run_workers"], "deadline": "bounded", "coordination": "barrier-channel"},
+    {"id": "cross-session", "slice": "same-process", "path": "crates/graphforge-api/src/same_process_concurrency_tests.rs", "symbol": "cross_session_reads_are_canonically_equal", "helpers": ["run_workers"], "deadline": "bounded", "coordination": "barrier-channel"},
+    {"id": "nested-runtime", "slice": "same-process", "path": "crates/graphforge-api/src/same_process_concurrency_tests.rs", "symbol": "synchronous_calls_complete_inside_existing_tokio_runtime", "helpers": [], "deadline": "bounded", "coordination": "channel"},
+    {"id": "stream-drop", "slice": "cancellation", "path": "crates/graphforge-api/src/stream_cancellation_isolation_tests.rs", "symbol": "early_stream_drop_does_not_truncate_concurrent_peer", "helpers": ["recv"], "deadline": "bounded", "coordination": "channel"},
+    {"id": "token-cancellation", "slice": "cancellation", "path": "crates/graphforge-api/src/stream_cancellation_isolation_tests.rs", "symbol": "cooperative_token_cancellation_does_not_cancel_concurrent_peer", "helpers": ["recv"], "deadline": "bounded", "coordination": "channel"},
+    {"id": "shared-read-write", "slice": "shared-directory", "path": "crates/graphforge-api/src/shared_directory_semantics_tests.rs", "symbol": "shared_directory_reads_pin_complete_generations_and_reopen_sees_commit", "helpers": ["recv"], "deadline": "bounded", "coordination": "barrier-channel"},
+    {"id": "competing-writer", "slice": "shared-directory", "path": "crates/graphforge-api/src/shared_directory_semantics_tests.rs", "symbol": "competing_writer_fails_before_its_staging_or_publication", "helpers": ["recv"], "deadline": "bounded", "coordination": "barrier-channel"},
+    {"id": "killed-writer", "slice": "multi-process", "path": "crates/graphforge-api/src/multi_process_publication_tests.rs", "symbol": "killed_staged_child_releases_lock_and_recovers_without_partial_generation", "helpers": ["spawn", "marker_before", "kill", "wait", "drop"], "deadline": "bounded", "coordination": "subprocess-ipc"},
+    {"id": "published-child", "slice": "multi-process", "path": "crates/graphforge-api/src/multi_process_publication_tests.rs", "symbol": "published_child_is_visible_only_to_fresh_current_reader", "helpers": ["spawn", "marker", "marker_before", "wait", "drop"], "deadline": "bounded", "coordination": "subprocess-ipc"},
+    {"id": "composite-kill-reopen", "slice": "composite-recovery", "path": "crates/graphforge-api/src/composite_recovery_tests.rs", "symbol": "composite_kill_reopen_matrix_never_exposes_mixed_state", "helpers": ["spawn", "wait", "drop", "verify_case"], "deadline": "bounded", "coordination": "failpoint-subprocess"}
   ],
   "validation": {
     "commands": [
       {"id": "format", "argv": ["cargo", "fmt", "--all", "--", "--check"]},
       {"id": "clippy", "argv": ["cargo", "clippy", "--workspace", "--", "-D", "warnings"]},
-      {"id": "same-instance", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "same_process_concurrency_tests::independent_instances_and_one_instance_reads_are_deterministic", "--", "--exact"]},
-      {"id": "cross-session", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "same_process_concurrency_tests::cross_session_reads_are_canonically_equal", "--", "--exact"]},
-      {"id": "nested-runtime", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "same_process_concurrency_tests::synchronous_calls_complete_inside_existing_tokio_runtime", "--", "--exact"]},
-      {"id": "stream-drop", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "stream_cancellation_isolation_tests::early_stream_drop_does_not_truncate_concurrent_peer", "--", "--exact"]},
-      {"id": "token-cancellation", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "stream_cancellation_isolation_tests::cooperative_token_cancellation_does_not_cancel_concurrent_peer", "--", "--exact"]},
-      {"id": "shared-read-write", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "shared_directory_semantics_tests::shared_directory_reads_pin_complete_generations_and_reopen_sees_commit", "--", "--exact"]},
-      {"id": "competing-writer", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "shared_directory_semantics_tests::competing_writer_fails_before_its_staging_or_publication", "--", "--exact"]},
-      {"id": "killed-writer", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "multi_process_publication_tests::killed_staged_child_releases_lock_and_recovers_without_partial_generation", "--", "--exact"]},
-      {"id": "published-child", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "multi_process_publication_tests::published_child_is_visible_only_to_fresh_current_reader", "--", "--exact"]},
-      {"id": "composite-kill-reopen", "argv": ["cargo", "test", "-p", "gf-api", "--lib", "composite_recovery_tests::composite_kill_reopen_matrix_never_exposes_mixed_state", "--", "--exact"]}
+      {"id": "same-instance", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "same_process_concurrency_tests::independent_instances_and_one_instance_reads_are_deterministic", "--", "--exact"]},
+      {"id": "cross-session", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "same_process_concurrency_tests::cross_session_reads_are_canonically_equal", "--", "--exact"]},
+      {"id": "nested-runtime", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "same_process_concurrency_tests::synchronous_calls_complete_inside_existing_tokio_runtime", "--", "--exact"]},
+      {"id": "stream-drop", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "stream_cancellation_isolation_tests::early_stream_drop_does_not_truncate_concurrent_peer", "--", "--exact"]},
+      {"id": "token-cancellation", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "stream_cancellation_isolation_tests::cooperative_token_cancellation_does_not_cancel_concurrent_peer", "--", "--exact"]},
+      {"id": "shared-read-write", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "shared_directory_semantics_tests::shared_directory_reads_pin_complete_generations_and_reopen_sees_commit", "--", "--exact"]},
+      {"id": "competing-writer", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "shared_directory_semantics_tests::competing_writer_fails_before_its_staging_or_publication", "--", "--exact"]},
+      {"id": "killed-writer", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "multi_process_publication_tests::killed_staged_child_releases_lock_and_recovers_without_partial_generation", "--", "--exact"]},
+      {"id": "published-child", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "multi_process_publication_tests::published_child_is_visible_only_to_fresh_current_reader", "--", "--exact"]},
+      {"id": "composite-kill-reopen", "argv": ["cargo", "test", "-p", "graphforge-api", "--lib", "composite_recovery_tests::composite_kill_reopen_matrix_never_exposes_mixed_state", "--", "--exact"]}
     ],
     "required_ci_job": "Test Suite / CI Gate"
   }

@@ -26,7 +26,7 @@
   "version": 1,
   "domain": "reliable-analytical-automation",
   "owning_issue": 2473,
-  "implementation": "crates/gf-api/examples/atomic_recovery_workflow.rs",
+  "implementation": "crates/graphforge-api/examples/atomic_recovery_workflow.rs",
   "analytical_question": "Can one analytical step publish graph, provenance, assertions, evidence, and epistemic participants atomically such that interruption never exposes a mixed generation?",
   "observable_outcome": "Every accepted failpoint and validation rejection recovers exactly one complete previous or new generation with idempotent retry and no orphans.",
   "generator": {

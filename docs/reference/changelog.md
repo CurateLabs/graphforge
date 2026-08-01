@@ -11,10 +11,14 @@ _Nothing yet._
 
 ## [0.5.0] - 2026-07-31
 
+- Rename the complete Cargo workspace from `gf-*` / `gf_*` to the public
+  `graphforge-*` / `graphforge_*` namespace, publish the 14 Rust libraries plus
+  `graphforge-cli` to crates.io in dependency order, and keep the Python/Node
+  binding implementation crates private to their language registries (#196, #269).
 - Freeze Cargo, Python, Node, CLI, and agent-skills release metadata at
   `0.5.0`; fail closed before registry writes on SHA/version/changelog/npm
   drift; align publication, release-record, certification, and clean-environment
-  tooling with the current repository and approved no-crates disposition (#192).
+  tooling with the current repository and complete crates.io surface (#192).
 - Align the published homepage and root README with the v0.5 development line, remove legacy
   PyPI v0.4 badges/install claims, and route readers to current Python, Node, CLI, and VS Code
   workflows (#255).
@@ -94,7 +98,7 @@ _Nothing yet._
   ordinary CI artifacts and publication bytes remain prohibited (#260).
 - Restore local multi-surface coverage via `make coverage`: Rust (`cargo llvm-cov` →
   `build/coverage-rust/`), Python wrapper (`pytest-cov` on
-  `crates/gf-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`
+  `crates/graphforge-bindings-py/python/graphforge`), and Node (`c8` on `@graphforge/node`
   `lib/`), each with an enforceable ≥85% line threshold (#2845).
 - Keep docs homepage shields.io badges inline (with wrap) under Starlight's
   block-image content styles (#2845).
@@ -109,8 +113,8 @@ _Nothing yet._
 
 - Identify **v0.5.0** as the first GraphForge line under Apache-2.0 in licensing
   docs (`docs/legal/licensing.md`) (#218).
-- Align architecture/status banners with shipped v0.5.0: ADR 0005 `gf-provenance` /
-  `gf-knowledge` wording, consistent Shipped / Partially built / Designed framing on
+- Align architecture/status banners with shipped v0.5.0: ADR 0005 `graphforge-provenance` /
+  `graphforge-knowledge` wording, consistent Shipped / Partially built / Designed framing on
   roadmap and architecture pages, and drop stale provenance-stub requirements language
   (#2792).
 - Realign root `CONTRIBUTING.md` with the Rust-owned workspace and Apache-2.0
@@ -138,14 +142,14 @@ the authoritative runnable corpus enforced by the BDD gate.
   from MIT to the Apache License 2.0 (`Apache-2.0`). Existing v0.4.0 and earlier
   tags/packages remain under their original MIT grants.
 - **Product architecture is the Rust core, not the Python 0.4 engine.** The
-  public v0.5.0 product is Rust-owned (`gf-cypher → gf-ir → gf-rel → gf-exec`)
+  public v0.5.0 product is Rust-owned (`graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`)
   with Parquet project storage and Arrow results. Python and Node are thin
-  bindings over `gf-api`, not fallback engines.
+  bindings over `graphforge-api`, not fallback engines.
 - **Graph-embedded confidence/provenance removed (#2410).** Obsolete
   graph-embedded confidence/provenance columns, storage-owned domain schemas,
   confidence-aware execution options, and relational confidence folding are
   gone. A graph property named `confidence` is ordinary domain data; immutable
-  assessments and lineage live in `gf-knowledge` / `gf-provenance`.
+  assessments and lineage live in `graphforge-knowledge` / `graphforge-provenance`.
 - **Project authority is the immutable generation, not root YAML/JSON (#2476).**
   Canonical ontology, explicit ontology mode, and authoritative project
   configuration are mandatory `workspace@1` participants of every generation.
@@ -195,7 +199,7 @@ the authoritative runnable corpus enforced by the BDD gate.
 - Add third-party Rust dependency SPDX allowlisting (`deny.toml` / `cargo deny`),
   generated `legal/THIRD_PARTY_NOTICES.md` for binary redistributions, and
   package `LICENSE`/`NOTICE`/`THIRD_PARTY_NOTICES.md` packaging coverage
-  (including `gf-knowledge` NOTICE sync) (#2783).
+  (including `graphforge-knowledge` NOTICE sync) (#2783).
 
 - Document approximate Python/Node install footprints (download + unpacked disk)
   and the separate PyArrow dependency on the installation guide, with darwin-arm64
@@ -373,7 +377,7 @@ the authoritative runnable corpus enforced by the BDD gate.
   standardized 144-case host load matrix and emitting one fail-closed aggregate
   artifact (#2431).
 
-- Preserve `gf-storage`'s unsafe-code prohibition on Windows by delegating the
+- Preserve `graphforge-storage`'s unsafe-code prohibition on Windows by delegating the
   project-root named mutex to a safe, cross-process lock guard, including
   abandoned-owner recovery.
 
@@ -608,8 +612,8 @@ the authoritative runnable corpus enforced by the BDD gate.
 - Remove obsolete graph-embedded confidence/provenance columns, storage-owned
   domain schemas, confidence-aware execution options, and relational confidence
   folding. A graph property named `confidence` is now always ordinary domain
-  data; immutable assessments and lineage remain owned by `gf-knowledge` and
-  `gf-provenance` (#2410).
+  data; immutable assessments and lineage remain owned by `graphforge-knowledge` and
+  `graphforge-provenance` (#2410).
 
 ### Fixed
 
@@ -718,7 +722,7 @@ the authoritative runnable corpus enforced by the BDD gate.
 
 - Add the generated, SHA-256-bound M20 provenance/knowledge schema inventory
   and immutable-ledger operator documentation, with byte-for-byte registry
-  drift enforcement in `gf-api` (#776).
+  drift enforcement in `graphforge-api` (#776).
 
 - Add deterministic recorded M18 algorithm-run lifecycles with immutable
   run/event ledgers, pre-dispatch start publication, terminal result
@@ -762,7 +766,7 @@ the authoritative runnable corpus enforced by the BDD gate.
   visibility, resumable current-format initialization, and graph/knowledge
   isolation with no ignored recovery tests.
 
-- **Atomic project-generation publication (#2409)** — `gf-storage` now stages,
+- **Atomic project-generation publication (#2409)** — `graphforge-storage` now stages,
   validates, flushes, and publishes complete graph/provenance/knowledge
   participant sets through one `CURRENT` replacement, with a non-blocking OS
   writer lock, canonical durable journals, exact participant checksums,
@@ -1490,7 +1494,7 @@ directed=True)`, returning fixed-order mutual, asymmetric, and null counts
 - Add the Rust M18 `AdjacencyProvider` adapter with deterministic UUID mappings,
   label/relation/direction selection, strict optional numeric weights, and
   stale-index fallback coverage (#610).
-- M18 analyst algorithms now share exhaustive Rust `by=` enums in `gf-core`.
+- M18 analyst algorithms now share exhaustive Rust `by=` enums in `graphforge-core`.
   Python validates names through the same registry, every algorithm maps to a
   stable UUID-only logical Arrow schema, and the `local_clustering_coefficient`
   alias has one canonical owner.
@@ -1813,7 +1817,7 @@ directed=True)`, returning fixed-order mutual, asymmetric, and null counts
   (the two Temporal10 large-value scenarios), 0 regressions.
 - Date values now round-trip through node-property storage as a typed date, and
   `date` **component accessors** work (ADR 0009 / #920). A new `IrLiteral::Date`
-  carries an Arrow `Date32` through the write/read path (`gf-storage`), so a
+  carries an Arrow `Date32` through the write/read path (`graphforge-storage`), so a
   stored date reads back and renders as a date (not a datetime). `d.year`/
   `.quarter`/`.month`/`.week`/`.weekYear`/`.day`/`.ordinalDay`/`.weekDay`/
   `.dayOfQuarter` on a `Date32`-typed value lower to component extraction
@@ -1855,7 +1859,7 @@ directed=True)`, returning fixed-order mutual, asymmetric, and null counts
   `date({year, month, day})`, `localtime`/`time`/`localdatetime`/`datetime`
   (with default-`Z`, offset, or IANA named-zone `timezone:` fields), and
   `duration({months, days, …})` (#599). Map fields are read at lowering time
-  (`gf-rel::temporal`), so a map of literal/constant fields is canonicalised to
+  (`graphforge-rel::temporal`), so a map of literal/constant fields is canonicalised to
   the quoted-ISO `Utf8` the TCK renders. Supports calendar/ISO-week/ordinal/
   quarter date selection (with `dayOfWeek`/`dayOfQuarter` and `date`-anchored
   week forms), additive `millisecond`+`microsecond`+`nanosecond` subseconds,
@@ -1869,7 +1873,7 @@ directed=True)`, returning fixed-order mutual, asymmetric, and null counts
 - All temporal constructors now build from an ISO-8601 **string** literal —
   `localtime`, `time`, `localdatetime`, `datetime` (incl. named time zones), and
   `duration`, joining `date` (#599). As with `date`, a literal-string argument is
-  parsed and canonicalised in `gf-rel::temporal` at lowering time and emitted as
+  parsed and canonicalised in `graphforge-rel::temporal` at lowering time and emitted as
   the quoted-ISO `Utf8` literal the TCK renders. Highlights:
   - Times render at the precision the input specified (`21:40` vs `21:40:32` vs
     `21:40:32.142`), with trailing-zero subseconds trimmed.
@@ -1888,7 +1892,7 @@ directed=True)`, returning fixed-order mutual, asymmetric, and null counts
 - `date(<string>)` now accepts every ISO-8601 form, not just canonical
   `YYYY-MM-DD` (#599). Because the openCypher TCK builds temporals from constant
   arguments, `date(<literal string>)` is parsed and canonicalised at **lowering
-  time** (new `gf-rel::temporal`, on `chrono`) and emitted as the `Utf8` literal
+  time** (new `graphforge-rel::temporal`, on `chrono`) and emitted as the `Utf8` literal
   the TCK renders as the quoted ISO date — no runtime UDF. Covers calendar
   (`2015-07-21`, `20150721`), year-month (`2015-07`, `201507`), year-only
   (`2015`), ISO-week (`2015-W30-2`, `2015W302`, `2015-W30`, `2015W30`), and
@@ -2040,7 +2044,7 @@ empty` (zero rows). Previously undefined, so every scenario using them failed on
   that stops passing fails CI (a regression) — even if a _different_ scenario
   newly passes, so an XPASS cannot mask a regression (a count could). Newly
   passing scenarios are surfaced as a `TCK XPASS` warning and locked in by
-  re-blessing (`BLESS_TCK_BASELINE=1 cargo test -p gf-api --test bdd`). Running
+  re-blessing (`BLESS_TCK_BASELINE=1 cargo test -p graphforge-api --test bdd`). Running
   the whole corpus immediately surfaced **249** passing (vs 25 previously
   un-skipped) — engine improvements now auto-surface instead of needing manual
   un-skips. Removes the obsolete tag-based `tck_coverage.rs` gate.
@@ -2158,7 +2162,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   is shared at the `GraphForge` facade with cheap per-session revalidation
   (#832), so repeat queries don't re-load the CSR. A differential corpus pins
   adjacency-backed traversal byte-for-byte against the join path. Maintenance:
-  `gf_storage::adjacency::validate_adjacency_index` diffs a persisted index
+  `graphforge_storage::adjacency::validate_adjacency_index` diffs a persisted index
   against a fresh rebuild (#766).
 - Incremental adjacency rebuild (#765) — a pure-append topology commit now
   records a per-commit delta segment (`indexes/adjacency/deltas/<generation>.parquet`),
@@ -2167,7 +2171,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   traversable immediately on an indexed graph; a DELETE (or a chain longer than 64) breaks the chain and falls back to the existing full rebuild, which now
   also prunes the segments it subsumes. Results are unchanged — the overlay is
   byte-identical to a full rebuild.
-- Diagnostic I/O read counters `gf_storage::io_stats` (#767) — process-global
+- Diagnostic I/O read counters `graphforge_storage::io_stats` (#767) — process-global
   `IoSnapshot` counting full vs `edge_id`-filtered edge reads and full node
   reads across the catalog-free direct readers (`read_edges`,
   `read_edges_filtered`, `read_nodes`). Advisory instrumentation (no behavior
@@ -2194,7 +2198,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   CREATEs) used to pass the old guard and die in lowering — they now sequence,
   and two CREATE clauses no longer mint colliding `node_id` surrogates (one
   shared writer per statement).
-- All-or-nothing Parquet writes (#790) — every write in gf-storage stages a
+- All-or-nothing Parquet writes (#790) — every write in graphforge-storage stages a
   sibling temp file and atomically renames it into place, so an I/O failure
   mid-write (disk full, encode error) can never leave a truncated file. The
   multi-file rewrites (DELETE across topology/property files, SET/REMOVE
@@ -2244,7 +2248,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   `var_<n>.<prop>` available), and the new `GraphSetExec` evaluates it per batch via
   `create_physical_expr(...).evaluate(...)` (the `UnwindExec` pattern), converting
   each row's result to an `IrLiteral` (`scalar_to_ir_literal`). Writes rewrite the
-  property files in place via new `gf-storage` primitives (`set_node_properties` /
+  property files in place via new `graphforge-storage` primitives (`set_node_properties` /
   `remove_node_properties` / `set_edge_properties_rewrite` / `remove_edge_properties`)
   that reuse the writer's decode → merge → re-infer cycle — SET on a propertyless
   node mints a fresh row; REMOVE of an absent key/uuid is a no-op (openCypher). Node
@@ -2273,7 +2277,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
 - Reject mixing CREATE/MERGE with DELETE in one statement (#792, step 1) — a query
   that combines a buffered-append write (`CREATE`/`MERGE`) with an in-place rewrite
   write (`DELETE`), e.g. `MATCH (a) CREATE (b) DELETE a`, was silently mis-handled:
-  the gf-api write router classified the plan as a single write kind and ran only
+  the graphforge-api write router classified the plan as a single write kind and ran only
   the DELETE side, dropping the CREATE. It now returns a clear `GfError::Validation`
   ("a single query may not mix CREATE/MERGE with DELETE yet; run them as separate
   statements") — a guard at the top of `run_plan`. Neither side runs on rejection;
@@ -2316,14 +2320,14 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   delete set and removes them too. `DELETE` of a NULL (e.g. an unmatched
   `OPTIONAL MATCH` row) is a no-op per openCypher, not an error. Wired through the
   `ExtensionPlanner` dispatch, a new `ExecutionSession::execute_delete`, and the
-  gf-api write router (`GraphOp::Delete` → the write path; rejected on the
+  graphforge-api write router (`GraphOp::Delete` → the write path; rejected on the
   streaming path like other writes). The `errors.feature` no-DETACH scenario now
   runs against a real connected graph (its `given` step built an empty forge
   before). `SET`/`REMOVE` remain deferred (still reject at bind).
 - DELETE — logical node + write-gated lowering (#740) — new `GraphDeleteNode`
-  (gf-plan) mirroring `GraphCreateNode`: an input-driven write node carrying the
+  (graphforge-plan) mirroring `GraphCreateNode`: an input-driven write node carrying the
   resolved `DeleteTarget`s (var + node/edge kind) and the `detach` flag, emitting
-  a one-row `nodes_deleted`/`edges_deleted` summary. gf-rel lowers `GraphOp::Delete`
+  a one-row `nodes_deleted`/`edges_deleted` summary. graphforge-rel lowers `GraphOp::Delete`
   beside `Create`, gated on the write target (`new_for_writes`) so a read-only
   session still rejects it. Each target's node-vs-edge kind is resolved from the
   input plan's schema (`var_<n>.node_uuid` vs `var_<n>.edge_uuid`), so the
@@ -2336,7 +2340,7 @@ var_0`). A fresh node scan over a non-empty input cross-joins; a WHERE over
   `UndeclaredVariable` — only `DELETE <var>` is valid per openCypher. Whether a
   target is a node or edge is resolved downstream at execution time. (`SET`/
   `REMOVE`/`CALL` still reject at bind for now.) Physical execution follows.
-- DELETE — storage rewrite primitive (#740) — new `gf-storage::mutator` module
+- DELETE — storage rewrite primitive (#740) — new `graphforge-storage::mutator` module
   with `delete_nodes`, `delete_edges`, and `incident_edge_uuids`. Unlike the
   append-only `GraphWriter`, these **rewrite** committed Parquet files in place:
   read the current rows, drop the targeted ones (by `node_uuid`/`edge_uuid` via a
@@ -2455,7 +2459,7 @@ length(r)` returns the hop count per path). `size()` stays deferred (string vs
 - Query parameters + e2e gate complete (#584) — `$name` placeholders are now
   bound to values: `execute_with_params("… WHERE n.age > $min …", {min: 28})`
   substitutes the placeholder via DataFusion's `LogicalPlan::with_param_values`
-  before physical planning. `ir_literal_to_scalar` (gf-rel) converts
+  before physical planning. `ir_literal_to_scalar` (graphforge-rel) converts
   `IrLiteral` → `ScalarValue` (one source of truth shared with literal
   lowering); the `Parameter` placeholder id now carries the `$` so DataFusion's
   named-param binding resolves it. New `ExecutionSession::execute_plan_with_params`
@@ -2474,7 +2478,7 @@ length(r)` returns the hop count per path). `size()` stays deferred (string vs
   as a single flush. No cross-session dedup (pure `CREATE` mints fresh UUIDs;
   MATCH…CREATE upsert is #703). The merge is not atomic (acceptable for this
   small-graph engine). Unblocks the #584 incremental-CREATE scenario.
-- End-to-end execution baseline tests (#584) — a `gf-api` integration suite drives
+- End-to-end execution baseline tests (#584) — a `graphforge-api` integration suite drives
   the full pipeline (parse → bind → lower → execute → Arrow) through the public
   `GraphForge::execute` against a fixture graph (5 Person, 4 KNOWS, 1 LIKES).
   Covers simple scans, `WHERE`, `count()`, single-/two-hop and variable-length
@@ -2550,12 +2554,12 @@ length(r)` returns the hop count per path). `size()` stays deferred (string vs
   of a schema-only source, so a `MATCH (n:Label)` reads the rows a prior `CREATE`
   wrote. (Schema-only lowering is retained for explain/golden paths that have no
   project directory.) Part of the #583 read-path epic.
-- New `gf-api` crate (#716) — the public `GraphForge` engine facade now lives in
-  a top-level `gf-api` crate (depends on the full pipeline: gf-cypher/gf-ir/
-  gf-rel/gf-exec/gf-storage/gf-ontology). It was relocated out of `gf-core`,
+- New `graphforge-api` crate (#716) — the public `GraphForge` engine facade now lives in
+  a top-level `graphforge-api` crate (depends on the full pipeline: graphforge-cypher/graphforge-ir/
+  graphforge-rel/graphforge-exec/graphforge-storage/graphforge-ontology). It was relocated out of `graphforge-core`,
   which is the foundation crate every other crate depends on and therefore can't
-  host the facade without a dependency cycle. `gf-cli` and the language bindings
-  now depend on `gf-api`; the BDD API/TCK harness moved with it. (First step of
+  host the facade without a dependency cycle. `graphforge-cli` and the language bindings
+  now depend on `graphforge-api`; the BDD API/TCK harness moved with it. (First step of
   the #583 read-path epic; facade methods remain stubs until #717–#719.)
 - `UNWIND` **execution** (#582) — `UnwindExec` evaluates the list expression per
   input row and explodes it into one output row per element (input columns + the
@@ -2594,7 +2598,7 @@ length(r)` returns the hop count per path). `size()` stays deferred (string vs
   the destination node's columns (so a downstream `RETURN b.node_id` resolves).
   Physical BFS execution and the edge-variable (relationship-list) binding land
   in follow-up PRs.
-- Catalog-free edge/node readers in `gf-storage` (#580) — `read_edges(dir,
+- Catalog-free edge/node readers in `graphforge-storage` (#580) — `read_edges(dir,
 rel_name, mode)` and `read_nodes(dir)` read the topology Parquet files
   directly, mirroring the `GraphWriter` layout (typed vs `_exploratory`). Lets
   physical execution nodes (e.g. the upcoming `VarLenExpandExec`) read edges
@@ -2604,8 +2608,8 @@ rel_name, mode)` and `read_nodes(dir)` read the topology Parquet files
 - `execute_arrow()` returning `pyarrow.Table` via Arrow C Data Interface
 - `execute_stream()` returning `pyarrow.RecordBatchReader`
 - Parquet storage provider (replaces SQLite in the Rust core)
-- PyO3 + maturin Python binding (`gf-bindings-py`)
-- napi-rs Node binding with Arrow IPC (`gf-bindings-node`)
+- PyO3 + maturin Python binding (`graphforge-bindings-py`)
+- napi-rs Node binding with Arrow IPC (`graphforge-bindings-node`)
 - See [ADR 0001](../adr/0001-rust-core.md) and [roadmap](../releases/roadmap.md)
 
 ## [0.4.0] - 2026-05-07

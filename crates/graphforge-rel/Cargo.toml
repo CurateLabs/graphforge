@@ -1,0 +1,29 @@
+[package]
+name = "graphforge-rel"
+description = "GraphForge Graph IR → DataFusion relational lowering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+graphforge-ir = { version = "0.5.0", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.5.0", path = "../graphforge-ontology" }
+graphforge-plan = { version = "0.5.0", path = "../graphforge-plan" }
+graphforge-storage = { version = "0.5.0", path = "../graphforge-storage" }
+datafusion = { workspace = true }
+arrow-data = { workspace = true }
+datafusion-functions-aggregate = "53"
+chrono = "0.4"
+chrono-tz = "0.10"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+insta = { workspace = true }
+graphforge-cypher = { path = "../graphforge-cypher" }
+
+[lints]
+workspace = true

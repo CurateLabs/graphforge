@@ -1309,7 +1309,7 @@ descriptor and a durable `algorithm_run_uuid`; the epistemic layer may resolve a
 before dispatch and attach interpretations afterward without changing the algorithm result.
 
 For `by="gomory_hu_tree"`, the classic parent-update Rust kernel, graph-wide source-free
-invocation, `gf-api` dispatch, knowledge-isolation proof, and fresh-wheel/fresh-addon Python
+invocation, `graphforge-api` dispatch, knowledge-isolation proof, and fresh-wheel/fresh-addon Python
 and Node acceptance are shipped. Merged evidence is recorded in
 [PR 2169](https://github.com/CurateLabs/graphforge-legecy/pull/2169),
 [PR 2364](https://github.com/CurateLabs/graphforge-legecy/pull/2364),
@@ -1472,7 +1472,7 @@ shipped. The epistemic layer resolves explicit UUID graph input before this same
 change the canonical schema.
 
 ```rust
-use gf_api::{NodeSelector, PathAlgorithm, PathsOptions};
+use graphforge_api::{NodeSelector, PathAlgorithm, PathsOptions};
 
 let minimum = graph.paths(
     None::<&NodeSelector>,
@@ -1556,7 +1556,7 @@ and Node only coerce arguments and decode the native Arrow result. The schema me
 `graphforge.verb=paths`.
 
 ```rust
-use gf_api::{GraphForge, NodeSelector, PathAlgorithm, PathsOptions};
+use graphforge_api::{GraphForge, NodeSelector, PathAlgorithm, PathsOptions};
 
 let rows = graph.paths(
     &NodeSelector::Handle(alice),
@@ -1619,7 +1619,7 @@ invocation descriptor and `algorithm_run_uuid`, while the epistemic layer may re
 before dispatch and attach interpretations afterward.
 
 ```rust
-use gf_api::{NodeSelector, PathAlgorithm, PathsOptions};
+use graphforge_api::{NodeSelector, PathAlgorithm, PathsOptions};
 
 let walks = graph.paths(
     &NodeSelector::Handle(alice),
@@ -2237,7 +2237,7 @@ assertions, evidence, and reasoning afterward. Neither layer changes algorithm
 options, computation, or schema.
 
 The Rust modularity kernel, canonical schema, graph-native partition-property
-resolution, and `gf-api` dispatch are shipped. Fresh-native Python and Node
+resolution, and `graphforge-api` dispatch are shipped. Fresh-native Python and Node
 acceptance coverage is also shipped, and the contract below describes the
 currently available facade behavior.
 
@@ -3611,7 +3611,7 @@ checkpoint binding contract described below.
 
 ### Named checkpoints
 
-`gf-api` exposes `GraphForge.checkpoint`, `list_checkpoints`,
+`graphforge-api` exposes `GraphForge.checkpoint`, `list_checkpoints`,
 `show_checkpoint`, `open_checkpoint`, `diff_checkpoints`,
 `revert_to_checkpoint`, and `delete_checkpoint` as the Rust-owned
 [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json) contract.
@@ -3679,11 +3679,11 @@ Key public types:
 
 | Type | Crate | Description |
 | ----------------- | ------------- | ------------------------------------ |
-| `GraphForge` | `gf-core` | Main engine facade — builder pattern |
-| `ExecutionResult` | `gf-core` | `{ schema, batches, stats }` |
-| `GraphPlan` | `gf-ir` | Versioned graph IR envelope |
-| `OntologyHandle` | `gf-ontology` | Loaded ontology reference |
-| `GfError` | `gf-core` | Typed public error enum |
+| `GraphForge` | `graphforge-core` | Main engine facade — builder pattern |
+| `ExecutionResult` | `graphforge-core` | `{ schema, batches, stats }` |
+| `GraphPlan` | `graphforge-ir` | Versioned graph IR envelope |
+| `OntologyHandle` | `graphforge-ontology` | Loaded ontology reference |
+| `GfError` | `graphforge-core` | Typed public error enum |
 
 ---
 

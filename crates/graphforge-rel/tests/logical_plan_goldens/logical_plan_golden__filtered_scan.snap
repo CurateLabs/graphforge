@@ -1,0 +1,7 @@
+---
+source: crates/graphforge-rel/tests/logical_plan_golden.rs
+---
+Projection: Int64(1) AS one [one:Int64]
+  Filter: cypher_cmp_pred(var_0.prop_0, Int64(30), Int8(2)) [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+    Filter: array_has(var_0.type_ids, UInt32(0)) [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+      TableScan: var_0 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]

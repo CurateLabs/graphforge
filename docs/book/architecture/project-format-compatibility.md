@@ -48,7 +48,7 @@ The knowledge layer starts from the v0.5 graph and project contracts on `main`.
 
 ## Committed-generation resolution
 
-`gf-storage` resolves a project by reading the exact `FORMAT` marker, the
+`graphforge-storage` resolves a project by reading the exact `FORMAT` marker, the
 canonical bounded `CURRENT` record, and the manifest of the UUID named by that
 record. It never elects a generation by directory enumeration. The manifest
 digest must match `CURRENT`, and machine-owned paths must remain normalized,
@@ -66,7 +66,7 @@ modified.
 
 ## Atomic generation publication
 
-`gf-storage` stages a complete participant set beneath one private generation
+`graphforge-storage` stages a complete participant set beneath one private generation
 UUID while holding the non-blocking OS writer lock. Participant paths are
 machine-derived from bounded lowercase capability and record-family IDs.
 Every request is a complete replacement snapshot: callers must explicitly

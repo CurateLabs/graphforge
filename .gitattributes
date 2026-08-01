@@ -1,10 +1,10 @@
 * text=auto eol=lf
 
 /.github/workflows/test.yml text eol=lf
-/crates/gf-bindings-node/package.json text eol=lf
-/crates/gf-bindings-node/tests/*.mjs text eol=lf
+/crates/graphforge-bindings-node/package.json text eol=lf
+/crates/graphforge-bindings-node/tests/*.mjs text eol=lf
 /package.json text eol=lf
 /pnpm-lock.yaml text eol=lf
 /project-skills/** text eol=lf
-/crates/gf-bindings-py/python/graphforge/_project_skills/** text eol=lf
+/crates/graphforge-bindings-py/python/graphforge/_project_skills/** text eol=lf
 /packages/cli/project-skills/** text eol=lf

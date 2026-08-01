@@ -18,6 +18,12 @@ cev = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cev  # required for dataclasses under Python 3.9
 SPEC.loader.exec_module(cev)
 
+assert len(cev.DEFAULT_CRATES) == 15
+assert cev.DEFAULT_CRATES[0] == "graphforge-core"
+assert cev.DEFAULT_CRATES[-1] == "graphforge-cli"
+assert cev.LANE_ISSUES["cargo"] == 185
+assert cev.LANE_RUNNERS["cargo"] is cev.lane_cargo
+
 
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +117,7 @@ def test_preflight_ok_when_published() -> None:
             return 200, b"{}", {}
         if "registry.npmjs.org/@graphforge/agent-skills/0.5.0" in url:
             return 200, b"{}", {}
-        if "crates.io/api/v1/crates/gf-api/0.5.0" in url:
+        if "crates.io/api/v1/crates/graphforge-api/0.5.0" in url:
             return 200, json.dumps({"version": {"num": "0.5.0"}}).encode(), {}
         return 404, b"", {}
 
@@ -137,7 +143,7 @@ def test_preflight_ok_when_published() -> None:
             version="0.5.0",
             work_root=Path(tmp),
             docs_base=cev.DEFAULT_DOCS_BASE,
-            crates=("gf-api",),
+            crates=("graphforge-api",),
             release_record=None,
             fetch=fetch,
             run_cmd=cev.run_subprocess,
@@ -147,7 +153,7 @@ def test_preflight_ok_when_published() -> None:
         assert crate_result.ok is True, crate_result.error
         assert crate_result.notes == [
             "PyPI and npm (@graphforge/node, @graphforge/cli, @graphforge/agent-skills), "
-            "plus crates.io (gf-api); probes OK for v0.5.0"
+            "plus crates.io (graphforge-api); probes OK for v0.5.0"
         ]
 
 

@@ -16,6 +16,7 @@ artifacts.
 | `pip` | #180 | `pip install graphforge==<version>` + documented quickstart E2E |
 | `npm` / `cli` | #183 | Install `@graphforge/node@<version>` and `@graphforge/cli@<version>` + smoke execution |
 | `skills` | #182 | Install `@graphforge/agent-skills@<version>` + offline `compatibility --json` |
+| `cargo` | #185 | Add all 15 `graphforge-*` crates at `<version>` and compile a clean consumer |
 | `reopen` | #184 | Create/close/reopen project; Arrow rows survive reopen |
 | `urls` | #186 | Published docs + package/registry URLs resolve |
 | `checksums` | #187 | Registry digests match `graphforge-release-record-v1` |
@@ -29,6 +30,7 @@ tracker (#167) is intentionally post-release and does not block or auto-close #1
 | --- | --- |
 | #180, #184 | PyPI publish (#195) |
 | #182, #183 | npm publish (#198) |
+| #185 | crates.io publish (#196) |
 | #186 | docs deploy (#197) + registry metadata (#199) |
 | #187 | release record + published package checksums |
 
@@ -57,10 +59,9 @@ CI: workflow_dispatch **Clean Environment Verify**
 (`.github/workflows/clean-env-verify.yml`). Inputs: `version`, `lanes`, and optional
 `release_record_path`. Upload the evidence artifact to the matching child issues.
 
-GraphForge v0.5.0 intentionally has no crates.io publication surface; the
-approved disposition is recorded in #196 and post-release child #185 is not
-applicable. The harness therefore
-does not probe crates.io or run a Cargo clean-install lane for this release.
+GraphForge v0.5.0 publishes 15 Rust packages under `graphforge-*`. The harness
+probes all 15 by default and the `cargo` lane creates a clean consumer, adds
+the exact release version of every crate, and runs `cargo check`.
 
 ## Release record schema
 
@@ -84,7 +85,7 @@ does not probe crates.io or run a Cargo clean-install lane for this release.
 }
 ```
 
-Surfaces: `pypi`, `npm`, and `github`. Produced under #2798 and attached to
+Surfaces: `pypi`, `npm`, `crates`, and `github`. Produced for #192 and attached to
 the GitHub Release (#2803). Validate with:
 
 ```bash

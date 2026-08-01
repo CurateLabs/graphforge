@@ -140,7 +140,7 @@ Security scanning is configured in CI:
 
 ```bash
 # Run security checks locally
-bandit -c pyproject.toml -r crates/gf-bindings-py/python
+bandit -c pyproject.toml -r crates/graphforge-bindings-py/python
 ```
 
 ### Dependency Scanning

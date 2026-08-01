@@ -1,0 +1,21 @@
+[package]
+name = "graphforge-core"
+description = "GraphForge core types and traits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+
+# The BDD API/TCK harness moved to graphforge-api (it drives the GraphForge facade,
+# which now lives there). See #716.
+
+[lints]
+workspace = true

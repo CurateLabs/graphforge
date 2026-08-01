@@ -125,7 +125,7 @@ cd graphforge
 uv sync --dev
 
 # 4. Build and install the Rust extension in development mode
-maturin develop --release -m crates/gf-bindings-py/Cargo.toml
+maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 
 # 5. Verify
 python -c "import graphforge; print(graphforge.__version__)"

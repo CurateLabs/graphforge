@@ -7,7 +7,7 @@ are not retained in this tree.
 | ADR | Title | File |
 | --- | --- | --- |
 | 0001 | [Rust Core](0001-rust-core.md) | `0001-rust-core.md` |
-| 0002 | [Recursive Descent + Pratt Parser for gf-cypher](0002-lr1-grammar.md) | `0002-lr1-grammar.md` |
+| 0002 | [Recursive Descent + Pratt Parser for graphforge-cypher](0002-lr1-grammar.md) | `0002-lr1-grammar.md` |
 | 0003 | [Progressive Ontology — Exploration First](0003-progressive-ontology.md) | `0003-progressive-ontology.md` |
 | 0004 | [Graph-Native Adjacency Index](0004-adjacency-index.md) | `0004-adjacency-index.md` |
 | 0005 | [Layered Architecture — Graph / Knowledge / Workbench](0005-layered-architecture.md) | `0005-layered-architecture.md` |

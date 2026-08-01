@@ -216,11 +216,11 @@ dist/
 # Agent worktrees (never commit)
 # ==============================================================
 .claude/worktrees/
-crates/gf-bindings-node/coverage/
+crates/graphforge-bindings-node/coverage/
 target-py-cov/
 
 # Keep @graphforge/node first-party JS (root lib/ ignore is for Python venvs)
-!crates/gf-bindings-node/lib/
-!crates/gf-bindings-node/lib/**
+!crates/graphforge-bindings-node/lib/
+!crates/graphforge-bindings-node/lib/**
 !packages/cli/lib/
 !packages/cli/lib/**

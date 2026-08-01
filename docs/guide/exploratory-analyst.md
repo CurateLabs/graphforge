@@ -76,7 +76,7 @@ first/last-seen timestamps. The same Rust-owned contract is available as
 After exploring the data, the analyst understands the domain better. They start renaming and normalising.
 
 ```rust
-use gf_api::OntologySuggestionOptions;
+use graphforge_api::OntologySuggestionOptions;
 
 let suggestion = forge.suggest_ontology(OntologySuggestionOptions {
     ontology_id: "analyst-draft".into(),
@@ -115,7 +115,7 @@ the result fields use the normal JavaScript camel-case convention.
 If the analyst wants to enforce constraints or share a validated graph, they can graduate to an ontology.
 
 ```rust
-use gf_api::{OntologyExportFormat, OntologyExportSource};
+use graphforge_api::{OntologyExportFormat, OntologyExportSource};
 
 forge.export_ontology(
     OntologyExportSource::Suggested(suggestion.document),

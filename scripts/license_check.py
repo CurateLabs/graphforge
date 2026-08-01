@@ -20,29 +20,29 @@ CANONICAL_LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb00
 CARGO_PACKAGE_DIRS = tuple(
     ROOT / "crates" / name
     for name in (
-        "gf-api",
-        "gf-ast",
-        "gf-bindings-node",
-        "gf-bindings-py",
-        "gf-cli",
-        "gf-core",
-        "gf-cypher",
-        "gf-exec",
-        "gf-io",
-        "gf-ir",
-        "gf-knowledge",
-        "gf-ontology",
-        "gf-plan",
-        "gf-provenance",
-        "gf-rel",
-        "gf-search",
-        "gf-storage",
+        "graphforge-api",
+        "graphforge-ast",
+        "graphforge-bindings-node",
+        "graphforge-bindings-py",
+        "graphforge-cli",
+        "graphforge-core",
+        "graphforge-cypher",
+        "graphforge-exec",
+        "graphforge-io",
+        "graphforge-ir",
+        "graphforge-knowledge",
+        "graphforge-ontology",
+        "graphforge-plan",
+        "graphforge-provenance",
+        "graphforge-rel",
+        "graphforge-search",
+        "graphforge-storage",
     )
 )
 LICENSE_COPIES = (
     ROOT / "LICENSE",
-    ROOT / "crates" / "gf-bindings-node" / "LICENSE",
-    ROOT / "crates" / "gf-bindings-py" / "LICENSE",
+    ROOT / "crates" / "graphforge-bindings-node" / "LICENSE",
+    ROOT / "crates" / "graphforge-bindings-py" / "LICENSE",
     ROOT / "packages" / "agent-skills" / "LICENSE",
     ROOT / "packages" / "cli" / "LICENSE",
 )
@@ -54,20 +54,20 @@ NOTICE_COPIES = (
 )
 THIRD_PARTY_NOTICE_COPIES = (
     ROOT / "legal" / "THIRD_PARTY_NOTICES.md",
-    ROOT / "crates" / "gf-bindings-py" / "THIRD_PARTY_NOTICES.md",
-    ROOT / "crates" / "gf-bindings-node" / "THIRD_PARTY_NOTICES.md",
-    ROOT / "crates" / "gf-cli" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-bindings-py" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-bindings-node" / "THIRD_PARTY_NOTICES.md",
+    ROOT / "crates" / "graphforge-cli" / "THIRD_PARTY_NOTICES.md",
     ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFEST_EXPECTATIONS = {
     ROOT / "Cargo.toml": ('license = "Apache-2.0"',),
     ROOT / "pyproject.toml": ('license = "Apache-2.0"',),
     ROOT / "package.json": ('"license": "Apache-2.0"',),
-    ROOT / "crates" / "gf-bindings-py" / "pyproject.toml": (
+    ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml": (
         'license = "Apache-2.0"',
         'license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]',
     ),
-    ROOT / "crates" / "gf-bindings-node" / "package.json": (
+    ROOT / "crates" / "graphforge-bindings-node" / "package.json": (
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',

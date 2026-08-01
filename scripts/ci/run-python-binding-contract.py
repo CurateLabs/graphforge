@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-tests = sorted((ROOT / "crates/gf-bindings-py/tests").glob("*.py"))
+tests = sorted((ROOT / "crates/graphforge-bindings-py/tests").glob("*.py"))
 if not tests:
     raise SystemExit("no Python binding acceptance tests discovered")
 for test in tests:

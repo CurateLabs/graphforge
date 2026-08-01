@@ -1,10 +1,10 @@
 [project]
 # Deps-only workspace root (package = false). The canonical `graphforge`
-# distribution is the native maturin wheel at crates/gf-bindings-py; this root
+# distribution is the native maturin wheel at crates/graphforge-bindings-py; this root
 # project is never built or published, so it carries a distinct name.
 name = "graphforge-workspace"
 version = "0.4.0"
-description = "GraphForge dev workspace (deps + tooling); the package ships from crates/gf-bindings-py"
+description = "GraphForge dev workspace (deps + tooling); the package ships from crates/graphforge-bindings-py"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -61,7 +61,7 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 # The canonical `graphforge` package is the native maturin wheel
-# (crates/gf-bindings-py), installed in CI via `maturin build` + `uv pip install`.
+# (crates/graphforge-bindings-py), installed in CI via `maturin build` + `uv pip install`.
 # This root project is deps-only (a non-package workspace root). The 0.4.x
 # pure-Python stub at src/graphforge was deleted in the shim-retirement PR
 # (#862); its dev-tooling consumers are ported natively under #860.
@@ -80,7 +80,7 @@ constraint-dependencies = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-src = ["crates/gf-bindings-py/python", "tests"]
+src = ["crates/graphforge-bindings-py/python", "tests"]
 # ruff 0.16 formats Python fences in Markdown by default; keep format scope on
 # Python/notebook sources so docs prose and intentional example style stay stable.
 extend-exclude = ["*.md"]
@@ -204,7 +204,7 @@ markers = [
 [tool.coverage.run]
 # Measure the thin Python wrapper only (Rust lives in `_graphforge_rs`).
 # Path source keeps collection tied to the maturin `python-source` tree.
-source = ["crates/gf-bindings-py/python/graphforge"]
+source = ["crates/graphforge-bindings-py/python/graphforge"]
 branch = true
 omit = [
     "*/tests/*",

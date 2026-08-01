@@ -1,0 +1,66 @@
+---
+source: crates/graphforge-ir/tests/golden.rs
+---
+{
+  "ir_version": {
+    "major": 0,
+    "minor": 3,
+    "patch": 0
+  },
+  "dialect": "openCypher",
+  "ontology_version": "v1:b1beadfb8bdd6dcbae7c4dbe879ad203f53e7568e219f8f26ec3c60a489e1d33",
+  "ontology_mode": "advisory",
+  "feature_flags": [],
+  "ops": [
+    {
+      "Unwind": {
+        "list_expr": 3,
+        "alias": 0
+      }
+    },
+    {
+      "Project": {
+        "items": [
+          {
+            "expr": 4,
+            "alias": "x",
+            "out_var": null
+          }
+        ],
+        "distinct": false
+      }
+    }
+  ],
+  "exprs": {
+    "nodes": [
+      {
+        "Literal": {
+          "type": "Int",
+          "value": 1
+        }
+      },
+      {
+        "Literal": {
+          "type": "Int",
+          "value": 2
+        }
+      },
+      {
+        "Literal": {
+          "type": "Int",
+          "value": 3
+        }
+      },
+      {
+        "ListLiteral": [
+          0,
+          1,
+          2
+        ]
+      },
+      {
+        "VarRef": 0
+      }
+    ]
+  }
+}

@@ -56,7 +56,7 @@ def main() -> None:
     env.setdefault(
         "CARGO_TARGET_DIR", str(ROOT / "target/release-workflows/cargo-knowledge-evolution")
     )
-    run(["cargo", "run", "-p", "gf-api", "--example", "knowledge_evolution_workflow"], env)
+    run(["cargo", "run", "-p", "graphforge-api", "--example", "knowledge_evolution_workflow"], env)
     rust = json.loads(rust_path.read_text())
     schema = json.loads((BUNDLE / "expected/evidence-schema.json").read_text())
     if (
@@ -69,7 +69,7 @@ def main() -> None:
         or rust["knowledge"]["current_selection"] is not None
     ):
         raise SystemExit("Rust evidence is incomplete or stale")
-    with tempfile.TemporaryDirectory(prefix="gf-knowledge-evolution-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="graphforge-knowledge-evolution-") as temporary:
         temp = Path(temporary)
         wheels = temp / "wheels"
         wheels.mkdir()
@@ -80,7 +80,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",

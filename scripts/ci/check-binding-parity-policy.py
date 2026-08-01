@@ -11,9 +11,9 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
-NODE_POLICY = ROOT / "crates/gf-bindings-node/tests/non-cypher-parity-policy.json"
-PYTHON_GATE = ROOT / "crates/gf-bindings-py/tests/non_cypher_release.py"
-PYTHON_STUB_GATE = ROOT / "crates/gf-bindings-py/tests/stub_surface.py"
+NODE_POLICY = ROOT / "crates/graphforge-bindings-node/tests/non-cypher-parity-policy.json"
+PYTHON_GATE = ROOT / "crates/graphforge-bindings-py/tests/non_cypher_release.py"
+PYTHON_STUB_GATE = ROOT / "crates/graphforge-bindings-py/tests/stub_surface.py"
 
 
 def digest(values: set[str]) -> str:
@@ -47,7 +47,7 @@ def main() -> None:
     for method_id, rationale in node["classification"]["nodeOnly"].items():
         assert "." in method_id and rationale.strip()
 
-    test_root = ROOT / "crates/gf-bindings-node/tests"
+    test_root = ROOT / "crates/graphforge-bindings-node/tests"
     for group, files in node["evidence"].items():
         assert files, f"{group} has no exact Node evidence"
         for filename, titles in files.items():

@@ -76,7 +76,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
           manylinux: auto
           sccache: "false"
 
@@ -123,13 +123,13 @@ jobs:
         run: |
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
-          test -f crates/gf-bindings-py/tests/gil_release.py
-          for test_file in crates/gf-bindings-py/tests/*.py; do
+          test -f crates/graphforge-bindings-py/tests/gil_release.py
+          for test_file in crates/graphforge-bindings-py/tests/*.py; do
             uv run --isolated --no-project --with "${wheels[0]}" python "$test_file"
           done
           GRAPHFORGE_PYTHON_PARITY_REPORT="$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \
             uv run --isolated --no-project --with "${wheels[0]}" \
-            python crates/gf-bindings-py/tests/non_cypher_release.py \
+            python crates/graphforge-bindings-py/tests/non_cypher_release.py \
             --classification-only
 
       - name: Write target evidence
@@ -145,7 +145,7 @@ jobs:
             --execution-mode native \
             --artifact "${wheels[0]}" \
             --classification "$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \
-            --package-manifest crates/gf-bindings-py/pyproject.toml \
+            --package-manifest crates/graphforge-bindings-py/pyproject.toml \
             --case "clean-installed native Python contract" \
             --case "structured errors and Arrow results" \
             --case "no fallback execution" \
@@ -248,7 +248,7 @@ jobs:
       - name: Reject stale native output
         shell: bash
         run: |
-          if compgen -G 'crates/gf-bindings-node/*.node' > /dev/null; then
+          if compgen -G 'crates/graphforge-bindings-node/*.node' > /dev/null; then
             echo "unexpected addon existed before the matrix build" >&2
             exit 1
           fi
@@ -265,7 +265,7 @@ jobs:
         if: matrix.execution_mode == 'native'
         shell: bash
         run: |
-          addons=(crates/gf-bindings-node/*.node)
+          addons=(crates/graphforge-bindings-node/*.node)
           test "${#addons[@]}" -eq 1
           ADDON_PATH="${addons[0]}" node - <<'JS' > built-addon.sha256
           const crypto = require("node:crypto");
@@ -273,7 +273,7 @@ jobs:
           process.stdout.write(crypto.createHash("sha256")
             .update(fs.readFileSync(process.env.ADDON_PATH)).digest("hex") + "\n");
           JS
-          node -e 'import("./crates/gf-bindings-node/index.js").then(m => {
+          node -e 'import("./crates/graphforge-bindings-node/index.js").then(m => {
             if (typeof m.version() !== "string") process.exit(1)
           })'
           pnpm --filter @graphforge/node test:smoke
@@ -291,7 +291,7 @@ jobs:
       - name: Validate cross-built package
         if: matrix.execution_mode == 'package-validation'
         shell: bash
-        working-directory: crates/gf-bindings-node
+        working-directory: crates/graphforge-bindings-node
         env:
           NODE_TARGET: ${{ matrix.target }}
         run: |
@@ -307,7 +307,7 @@ jobs:
       - name: Write target evidence
         shell: bash
         run: |
-          addons=(crates/gf-bindings-node/*.node)
+          addons=(crates/graphforge-bindings-node/*.node)
           rationale=()
           if test "${{ matrix.execution_mode }}" = package-validation; then
             rationale=(--execution-rationale \
@@ -320,16 +320,16 @@ jobs:
             --execution-mode "${{ matrix.execution_mode }}" \
             "${rationale[@]}" \
             --artifact "${addons[0]}" \
-            --classification crates/gf-bindings-node/tests/non-cypher-parity-policy.json \
-            --package-manifest crates/gf-bindings-node/package.json \
+            --classification crates/graphforge-bindings-node/tests/non-cypher-parity-policy.json \
+            --package-manifest crates/graphforge-bindings-node/package.json \
             --case "${{ matrix.execution_mode }} binding contract" \
-            --output "crates/gf-bindings-node/${{ matrix.report_target }}.json"
+            --output "crates/graphforge-bindings-node/${{ matrix.report_target }}.json"
 
       - name: Stage Node report for aggregate job
         shell: bash
         run: |
           mkdir -p binding-rc-reports
-          cp "crates/gf-bindings-node/${{ matrix.report_target }}.json" binding-rc-reports/
+          cp "crates/graphforge-bindings-node/${{ matrix.report_target }}.json" binding-rc-reports/
 
       - name: Save Node report for aggregate job
         uses: actions/upload-artifact@v7

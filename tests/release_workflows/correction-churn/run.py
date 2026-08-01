@@ -81,7 +81,7 @@ def main() -> None:
     env.setdefault(
         "CARGO_TARGET_DIR", str(ROOT / "target/release-workflows/cargo-correction-churn")
     )
-    run(["cargo", "run", "-p", "gf-api", "--example", "correction_churn_workflow"], env)
+    run(["cargo", "run", "-p", "graphforge-api", "--example", "correction_churn_workflow"], env)
     rust_record = json.loads(rust_evidence.read_text())
     validate_evidence(rust_record, actual)
 
@@ -97,7 +97,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",

@@ -3,7 +3,7 @@
   "api_contract": "graphforge-m20-api/1",
   "canonical_contract": "graphforge-canonical/1",
   "surfaces": {
-    "rust_result": "gf_exec::ExecutionResult",
+    "rust_result": "graphforge_exec::ExecutionResult",
     "python_result": "pyarrow.Table",
     "node_result": "Promise<Buffer> (Arrow IPC stream)"
   },

@@ -10,7 +10,7 @@
       "domain": "investigative-social-network-analysis",
       "owning_issue": 2465,
       "bundle": "tests/release_workflows/sna-intelligence",
-      "implementation": "crates/gf-api/examples/sna_intelligence_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/sna_intelligence_workflow.rs",
       "evidence": "target/release-workflow-evidence/sna-intelligence.json",
       "generator": {
         "path": "tests/release_workflows/sna-intelligence/generator.yaml",
@@ -66,7 +66,7 @@
       "domain": "probate-research",
       "owning_issue": 2466,
       "bundle": "tests/release_workflows/probate-genealogy",
-      "implementation": "crates/gf-api/examples/probate_genealogy_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/probate_genealogy_workflow.rs",
       "evidence": "target/release-workflow-evidence/probate-genealogy.json",
       "generator": {
         "path": "tests/release_workflows/probate-genealogy/generator.yaml",
@@ -117,7 +117,7 @@
       "domain": "cybersecurity-investigation",
       "owning_issue": 2467,
       "bundle": "tests/release_workflows/cyber-intrusion",
-      "implementation": "crates/gf-api/examples/cyber_intrusion_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/cyber_intrusion_workflow.rs",
       "evidence": "target/release-workflow-evidence/cyber-intrusion.json",
       "generator": {
         "path": "tests/release_workflows/cyber-intrusion/generator.yaml",
@@ -171,7 +171,7 @@
       "domain": "finance-fraud-analysis",
       "owning_issue": 2468,
       "bundle": "tests/release_workflows/finance-fraud",
-      "implementation": "crates/gf-api/examples/finance_fraud_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/finance_fraud_workflow.rs",
       "evidence": "target/release-workflow-evidence/finance-fraud.json",
       "steps": [
         "FF-01",
@@ -257,7 +257,7 @@
       "domain": "long-running-data-curation",
       "owning_issue": 2471,
       "bundle": "tests/release_workflows/correction-churn",
-      "implementation": "crates/gf-api/examples/correction_churn_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/correction_churn_workflow.rs",
       "evidence": "target/release-workflow-evidence/correction-churn.json",
       "generator": {
         "path": "tests/release_workflows/correction-churn/generator.yaml",
@@ -308,7 +308,7 @@
       "domain": "hypothesis-driven-evidence-review",
       "owning_issue": 2472,
       "bundle": "tests/release_workflows/knowledge-evolution",
-      "implementation": "crates/gf-api/examples/knowledge_evolution_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/knowledge_evolution_workflow.rs",
       "evidence": "target/release-workflow-evidence/knowledge-evolution.json",
       "generator": {
         "path": "tests/release_workflows/knowledge-evolution/generator.yaml",
@@ -362,7 +362,7 @@
       "domain": "continuously-curated-analytical-projects",
       "owning_issue": 2470,
       "bundle": "tests/release_workflows/derived-state-freshness",
-      "implementation": "crates/gf-api/examples/derived_state_freshness_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/derived_state_freshness_workflow.rs",
       "evidence": "target/release-workflow-evidence/derived-state-freshness.json",
       "steps": [
         "DSF-01",
@@ -431,7 +431,7 @@
       "domain": "exploratory-research-and-governed-handoff",
       "owning_issue": 2469,
       "bundle": "tests/release_workflows/ontology-emergence-strict-handoff",
-      "implementation": "crates/gf-api/examples/ontology_emergence_strict_handoff.rs",
+      "implementation": "crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs",
       "evidence": "target/release-workflow-evidence/ontology-emergence-strict-handoff.json",
       "steps": [
         "OEH-01",
@@ -511,7 +511,7 @@
       "domain": "reliable-analytical-automation",
       "owning_issue": 2473,
       "bundle": "tests/release_workflows/atomic-recovery",
-      "implementation": "crates/gf-api/examples/atomic_recovery_workflow.rs",
+      "implementation": "crates/graphforge-api/examples/atomic_recovery_workflow.rs",
       "evidence": "target/release-workflow-evidence/atomic-recovery.json",
       "steps": [
         "AR-01",

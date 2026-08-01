@@ -102,4 +102,10 @@ for build_job, next_job in (
 skills_job = workflow.split("  publish-agent-skills:\n", 1)[1].split("\n  # ---- Rust crates", 1)[0]
 assert "needs: publish-node-cli" in skills_job
 
+crates_job = workflow.split("  publish-crates:\n", 1)[1]
+assert "needs: publish-agent-skills" in crates_job
+assert "scripts/publish_crates.py" in crates_job
+assert "secrets.CARGO_REGISTRY_TOKEN" in crates_job
+assert "cargo publish" not in crates_job
+
 print("release publish preflight tests passed")

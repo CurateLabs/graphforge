@@ -102,7 +102,7 @@ while IFS= read -r -d '' path; do
       ;;
 
     tests/features/api/* | tests/features/api/**/* | \
-      crates/gf-api/tests/bdd/* | crates/gf-api/tests/bdd/**/*)
+      crates/graphforge-api/tests/bdd/* | crates/graphforge-api/tests/bdd/**/*)
       gherkin=true
       bindings=true
       rust=true
@@ -113,17 +113,17 @@ while IFS= read -r -d '' path; do
       bindings=true
       ;;
 
-    crates/gf-api/* | crates/gf-bindings-py/* | crates/gf-bindings-node/*)
+    crates/graphforge-api/* | crates/graphforge-bindings-py/* | crates/graphforge-bindings-node/*)
       bindings=true
       [[ "$path" == *.rs ]] && rust=true
       [[ "$path" == *.py ]] && python=true
-      if [[ "$path" == crates/gf-api/src/repository.rs ]]; then
+      if [[ "$path" == crates/graphforge-api/src/repository.rs ]]; then
         pulumi=true
         terraform=true
       fi
       ;;
 
-    crates/gf-cli/src/lib.rs)
+    crates/graphforge-cli/src/lib.rs)
       rust=true
       pulumi=true
       terraform=true
@@ -163,13 +163,13 @@ while IFS= read -r -d '' path; do
       bindings=true
       ;;
 
-    crates/gf-bindings-py/python/* | crates/gf-bindings-py/python/**/* | \
+    crates/graphforge-bindings-py/python/* | crates/graphforge-bindings-py/python/**/* | \
       scripts/*.py | scripts/**/*.py | examples/*.py)
       python=true
       ;;
 
-    tests/features/* | tests/features/**/* | crates/gf-api/tests/bdd/* | \
-      crates/gf-api/tests/bdd/**/*)
+    tests/features/* | tests/features/**/* | crates/graphforge-api/tests/bdd/* | \
+      crates/graphforge-api/tests/bdd/**/*)
       gherkin=true
       rust=true
       ;;

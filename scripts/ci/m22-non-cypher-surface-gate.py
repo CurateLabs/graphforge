@@ -173,9 +173,10 @@ def validate_rust(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
     ):
         raise ValueError("Rust component test-binary ledger mismatch")
     commands = [
-        "cargo test -p gf-api --lib --no-fail-fast",
-        "cargo test -p gf-api --test knowledge_isolation --test public_lifecycle_conformance "
-        "--test public_facade_remaining_conformance --test m22_m18_public_surface "
+        "cargo test -p graphforge-api --lib --no-fail-fast",
+        "cargo test -p graphforge-api --test knowledge_isolation "
+        "--test public_lifecycle_conformance --test public_facade_remaining_conformance "
+        "--test m22_m18_public_surface "
         "--test m22_m19_public_surface --test m22_provider_public_surface "
         "--test provider_session --no-fail-fast",
     ]

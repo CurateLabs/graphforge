@@ -65,7 +65,7 @@ smaller graph, committed binary, fallback implementation, network provider, or
 proprietary data.
 
 The exhaustive proof is not inferred from the representative load operation.
-Rust runs the complete `gf-api` suite, including typed dispatch of all 94 M18
+Rust runs the complete `graphforge-api` suite, including typed dispatch of all 94 M18
 entries across rank, cluster, paths, analyze, and similar plus every public
 checkpoint/M20/M21/M19 test reference. Python runs every shipped native-wheel
 acceptance file, and Node runs the complete native `node:test` suite. The

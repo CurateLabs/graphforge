@@ -55,7 +55,7 @@ def main() -> None:
                 "cargo",
                 "test",
                 "-p",
-                "gf-api",
+                "graphforge-api",
                 "--lib",
                 "unrelated_ok_test",
                 "--",

@@ -29,8 +29,8 @@ def test_license_and_notice_copies_match() -> None:
 def test_manifest_expectations_cover_publishable_packages() -> None:
     for path in (
         license_check.ROOT / "packages" / "agent-skills" / "package.json",
-        license_check.ROOT / "crates" / "gf-bindings-node" / "package.json",
-        license_check.ROOT / "crates" / "gf-bindings-py" / "pyproject.toml",
+        license_check.ROOT / "crates" / "graphforge-bindings-node" / "package.json",
+        license_check.ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml",
     ):
         assert path in license_check.MANIFEST_EXPECTATIONS
 

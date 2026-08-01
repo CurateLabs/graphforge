@@ -108,7 +108,7 @@ def main() -> None:
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "composite_kill_reopen_matrix_never_exposes_mixed_state",
             "--",
@@ -116,7 +116,7 @@ def main() -> None:
         ],
         env,
     )
-    run(["cargo", "run", "-p", "gf-api", "--example", "atomic_recovery_workflow"], env)
+    run(["cargo", "run", "-p", "graphforge-api", "--example", "atomic_recovery_workflow"], env)
     rust_record = json.loads(rust_evidence.read_text())
     validate_evidence(rust_record, actual)
 
@@ -132,7 +132,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",

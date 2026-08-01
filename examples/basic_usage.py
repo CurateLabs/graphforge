@@ -210,7 +210,7 @@ def run() -> dict[str, Any]:
     """Execute the installed-wheel M18/M19 workflow and return evidence."""
     module_path = Path(g.__file__).resolve()
     repository = Path(__file__).resolve().parents[1]
-    source_package = repository / "crates/gf-bindings-py/python/graphforge"
+    source_package = repository / "crates/graphforge-bindings-py/python/graphforge"
     assert not module_path.is_relative_to(source_package)
 
     with tempfile.TemporaryDirectory() as project:

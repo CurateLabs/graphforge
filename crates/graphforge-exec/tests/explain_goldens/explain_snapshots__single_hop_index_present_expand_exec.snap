@@ -1,0 +1,14 @@
+---
+source: crates/graphforge-exec/tests/explain_snapshots.rs
+---
+ProjectionExec: expr=[name@0 as bn]
+  HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)], projection=[name@1]
+    DataSourceExec: partitions=1, partition_sizes=[1]
+    FilterExec: array_has(type_ids@1, 0), projection=[node_uuid@0]
+      RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
+        ProjectionExec: expr=[node_uuid@15 as node_uuid, type_ids@18 as type_ids]
+          ExpandExec: rel=KNOWS, dir=->, adjacency=hit, fetch=all, demand_batch=all, cancel=none
+            HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
+              FilterExec: array_has(type_ids@3, 0)
+                DataSourceExec: partitions=1, partition_sizes=[1]
+              DataSourceExec: partitions=1, partition_sizes=[1]

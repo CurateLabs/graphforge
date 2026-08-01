@@ -10,8 +10,8 @@ git -C "$fixture" init -q
 git -C "$fixture" config user.name "GraphForge CI"
 git -C "$fixture" config user.email "ci@graphforge.invalid"
 
-mkdir -p "$fixture/crates/gf-exec/src"
-printf 'baseline\n' >"$fixture/crates/gf-exec/src/lib.rs"
+mkdir -p "$fixture/crates/graphforge-exec/src"
+printf 'baseline\n' >"$fixture/crates/graphforge-exec/src/lib.rs"
 printf '[workspace.package]\nlicense = "MIT"\n' >"$fixture/Cargo.toml"
 git -C "$fixture" add .
 git -C "$fixture" commit -qm baseline
@@ -57,10 +57,10 @@ rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_
 rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true'
 all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true'
 
-assert_classification "$rust_only" crates/gf-exec/src/kernel.rs core-rust
-assert_classification "$binding_rust" crates/gf-api/src/lib.rs public-api-rust
-assert_classification "$binding_python" crates/gf-bindings-py/tests/smoke.py python-binding
-assert_classification "$binding_only" crates/gf-bindings-node/tests/analyze.test.mjs node-binding
+assert_classification "$rust_only" crates/graphforge-exec/src/kernel.rs core-rust
+assert_classification "$binding_rust" crates/graphforge-api/src/lib.rs public-api-rust
+assert_classification "$binding_python" crates/graphforge-bindings-py/tests/smoke.py python-binding
+assert_classification "$binding_only" crates/graphforge-bindings-node/tests/analyze.test.mjs node-binding
 assert_classification "$binding_only" packages/cli/bin/graphforge.js node-cli
 assert_classification "$binding_rust_python" \
   project-skills/graphforge-bootstrap/SKILL.md project-skill-source
@@ -102,8 +102,8 @@ assert_classification "$rust_binding_iac" \
 assert_classification "$rust_binding_iac" \
   docs/contracts/examples/graphforge-project-config-v1.yaml shared-project-config-fixture
 assert_classification "$rust_binding_iac" \
-  crates/gf-api/src/repository.rs rust-owned-iac-contract
-assert_classification "$rust_iac" crates/gf-cli/src/lib.rs rust-owned-iac-cli
+  crates/graphforge-api/src/repository.rs rust-owned-iac-contract
+assert_classification "$rust_iac" crates/graphforge-cli/src/lib.rs rust-owned-iac-cli
 assert_classification "$all" ".github/workflows/test.yml" workflow
 assert_classification "$all" scripts/ci/require-gates.sh aggregate-gate
 assert_classification "$all" scripts/ci/concurrency-short-gate.py concurrency-short-gate
