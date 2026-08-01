@@ -22,7 +22,21 @@ def load_module():
 
 
 mod = load_module()
-assert mod.VERSION == "0.5.0"
+assert mod.VERSION == "0.5.1"
+
+assert mod.normalize_registry_token("  abc\n") == "abc"
+assert mod.normalize_registry_token("abc\r\n") == "abc"
+try:
+    mod.normalize_registry_token("   \n")
+    raise AssertionError("expected empty token after trim to fail")
+except ValueError as exc:
+    assert "empty after trim" in str(exc)
+try:
+    mod.normalize_registry_token("abc\x00def")
+    raise AssertionError("expected control character to fail")
+except ValueError as exc:
+    assert "non-printable" in str(exc)
+    assert "\x00" not in str(exc)
 
 commands: list[list[str]] = []
 mod.package_checksum = lambda _name, expected=None: expected or "abc123"
@@ -69,19 +83,19 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     artifacts = root / "artifacts"
     artifacts.mkdir()
-    archive = artifacts / "graphforge-core-0.5.0.crate"
+    archive = artifacts / "graphforge-core-0.5.1.crate"
     archive.write_bytes(b"certified crate")
     sha = hashlib.sha256(archive.read_bytes()).hexdigest()
     record = {
         "schema": "graphforge-release-record-v1",
-        "version": "0.5.0",
-        "tag": "v0.5.0",
+        "version": "0.5.1",
+        "tag": "v0.5.1",
         "commit_sha": "release-sha",
         "artifacts": [
             {
                 "surface": "crates",
                 "name": "graphforge-core",
-                "version": "0.5.0",
+                "version": "0.5.1",
                 "path": archive.name,
                 "sha256": sha,
             }
@@ -107,7 +121,7 @@ with tempfile.TemporaryDirectory() as temp:
             assert "escapes artifact root" in str(exc)
 
     record["artifacts"][0]["path"] = archive.name
-    record["artifacts"][0]["version"] = "0.5.1"
+    record["artifacts"][0]["version"] = "0.5.0"
     record_path.write_text(json.dumps(record), encoding="utf-8")
     try:
         mod.release_record_checksums(record_path, artifacts)

@@ -9,6 +9,9 @@ continues when crates.io reports the same checksum.
 Requires ``CARGO_REGISTRY_TOKEN`` in the environment. The maintained release
 credential is projected from Pulumi ESC into the GitHub Actions secret used by
 ``publish.yaml``.
+
+The token is normalized before ``cargo publish``: leading/trailing whitespace
+and CR/LF are stripped. The value is never logged.
 """
 
 from __future__ import annotations
@@ -37,6 +40,23 @@ _VERSION_MATCH = re.search(
 if _VERSION_MATCH is None:
     raise RuntimeError("Cargo.toml lacks [workspace.package] version")
 VERSION = _VERSION_MATCH.group(1)
+
+
+def normalize_registry_token(raw: str) -> str:
+    """Return a cargo-safe registry token, or raise ValueError without echoing it.
+
+    Cargo rejects tokens with non-printable / non-ISO-8859-1 characters. Secret
+    projection and pasted GitHub secrets commonly introduce a trailing newline.
+    """
+    token = raw.strip()
+    if not token:
+        raise ValueError("CARGO_REGISTRY_TOKEN is empty after trim")
+    # Printable ISO-8859-1: exclude C0 controls, DEL, and code points above 255.
+    if any(ord(ch) < 32 or ord(ch) == 127 or ord(ch) > 255 for ch in token):
+        raise ValueError(
+            "CARGO_REGISTRY_TOKEN contains non-printable or non-ISO-8859-1 characters"
+        )
+    return token
 
 
 def load_plan_module():
@@ -213,8 +233,12 @@ def main(argv: list[str] | None = None) -> int:
         print("--release-record and --artifacts-dir must be provided together", file=sys.stderr)
         return 2
 
-    if not os.environ.get("CARGO_REGISTRY_TOKEN", "").strip():
-        print("CARGO_REGISTRY_TOKEN is required", file=sys.stderr)
+    try:
+        os.environ["CARGO_REGISTRY_TOKEN"] = normalize_registry_token(
+            os.environ.get("CARGO_REGISTRY_TOKEN", "")
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
         return 2
 
     plan = load_plan_module()
