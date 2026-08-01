@@ -82,14 +82,12 @@ def test_check_aligned_rejects_stale_path_pin(
         lambda: [(path, dependency, "0.5.0")],
     )
     errors = set_release_version.check_aligned()
-    assert any(
-        dependency in error and "0.5.0" in error and "0.5.1" in error for error in errors
-    ), errors
+    assert any(dependency in error and "0.5.0" in error and "0.5.1" in error for error in errors), (
+        errors
+    )
 
 
-def test_apply_version_rewrites_path_pins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cargo = tmp_path / "Cargo.toml"
     cargo.write_text('[workspace.package]\nversion = "0.5.0"\n', encoding="utf-8")
     lock = tmp_path / "Cargo.lock"
@@ -101,8 +99,7 @@ def test_apply_version_rewrites_path_pins(
     manifest = crates / "graphforge-api" / "Cargo.toml"
     manifest.parent.mkdir()
     manifest.write_text(
-        '[dependencies]\n'
-        'graphforge-core = { version = "0.5.0", path = "../graphforge-core" }\n',
+        '[dependencies]\ngraphforge-core = { version = "0.5.0", path = "../graphforge-core" }\n',
         encoding="utf-8",
     )
     for path, content in (
