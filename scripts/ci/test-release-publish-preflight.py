@@ -83,12 +83,32 @@ for mutation in mutations:
     }
     assert mod.validate(**values), mutation
 
+stale_changelog = changelog.replace("_Nothing yet._", "- Stale release entry")
+assert (
+    mod.validate(
+        tag="v0.5.0",
+        expected_sha=sha,
+        actual_sha=sha,
+        versions=versions,
+        changelog=stale_changelog,
+        docs_changelog=stale_changelog,
+        allow_unreleased_entries=True,
+    )
+    == []
+)
+
 workflow = WORKFLOW.read_text(encoding="utf-8")
 preflight = workflow.split("  candidate-preflight:\n", 1)[1].split("\n  publish-pypi:", 1)[0]
 assert "release-publish-preflight.py" in preflight
 assert "github.event.release.tag_name" in preflight
 assert "github.sha" in preflight
 assert "refs/remotes/origin/main" in preflight
+assert "workflow_dispatch:" in workflow
+assert "waive_unreleased_entries:" in workflow
+assert "RECOVERY_REASON" in preflight
+assert "--allow-unreleased-entries" in preflight
+assert "git show" in preflight
+assert "refs/remotes/origin/main:scripts/ci/release-publish-preflight.py" in preflight
 assert "npm whoami" in preflight
 assert "secrets.NPM_TOKEN" in preflight
 assert "M1-Release-Candidate-$RELEASE_SHA" in preflight

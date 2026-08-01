@@ -3,6 +3,22 @@ name: Publish to PyPI, npm, and crates.io
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable release tag to resume
+        required: true
+        default: v0.5.0
+        type: string
+      waive_unreleased_entries:
+        description: Waive only the tagged CHANGELOG Unreleased-entry check
+        required: true
+        default: false
+        type: boolean
+      recovery_reason:
+        description: Public maintainer reason for the recovery dispatch
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,24 +36,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           fetch-depth: 0
 
       - name: Require the certified current main commit and release versions
         id: source
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+          EVENT_SHA: ${{ github.sha }}
+          WAIVE_UNRELEASED_ENTRIES: ${{ inputs.waive_unreleased_entries || false }}
+          RECOVERY_REASON: ${{ inputs.recovery_reason || '' }}
         run: |
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main
+          RELEASE_SHA="$(git rev-parse "$RELEASE_TAG^{}")"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse "$RELEASE_TAG^{}")" = "$RELEASE_SHA"
-          test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
-          python3 scripts/ci/release-publish-preflight.py \
-            --tag "$RELEASE_TAG" \
-            --expected-sha "$RELEASE_SHA"
+          preflight_args=(--tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA")
+          if test "$GITHUB_EVENT_NAME" = release; then
+            test "$EVENT_SHA" = "$RELEASE_SHA"
+            test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
+          else
+            test "$WAIVE_UNRELEASED_ENTRIES" = true
+            test -n "$RECOVERY_REASON"
+            gh release view "$RELEASE_TAG" >/dev/null
+            git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+            git show \
+              refs/remotes/origin/main:scripts/ci/release-publish-preflight.py \
+              > "$RUNNER_TEMP/release-publish-preflight.py"
+            install -m 0755 \
+              "$RUNNER_TEMP/release-publish-preflight.py" \
+              scripts/ci/release-publish-preflight.py
+            preflight_args+=(--allow-unreleased-entries)
+            printf 'Recovery reason: %s\n' "$RECOVERY_REASON"
+          fi
+          python3 scripts/ci/release-publish-preflight.py "${preflight_args[@]}"
           printf 'release_sha=%s\n' "$RELEASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Verify release license policy
@@ -95,7 +129,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
         run: |
           asset_name="v0.5.0-artifacts.json"
           asset_count="$(gh release view "$RELEASE_TAG" --json assets \

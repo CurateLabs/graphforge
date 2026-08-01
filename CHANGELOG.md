@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add an explicit, maintainer-reasoned publication recovery dispatch that can
+  resume the immutable `v0.5.0` tag and retained candidate after waiving only
+  the tagged changelog's stale `[Unreleased]` entries; all artifact, checksum,
+  identity, ordering, and fail-closed registry checks remain required (#281).
 - Move all public npm packages from the unavailable `@graphforge` scope to the
   Curate Labs-owned `@curatelabs` scope, using `@curatelabs/graphforge` for the
   native binding and `@curatelabs/graphforge-*` for platform, CLI, and agent
