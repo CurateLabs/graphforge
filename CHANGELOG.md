@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Derive publication recovery from the immutable candidate plus fresh PyPI,
+  npm, and crates.io truth: normalize absence, accepted propagation, verified
+  bytes, conflict, failure, and indeterminate evidence; bound visibility checks
+  without sleeps or repeat writes; and schedule only dependency-valid absent
+  nodes with available retained artifacts (#294).
 - Replace checksum-only release records with a deterministic, partitioned
   candidate manifest that enforces the complete 24-node public package set,
   one root version, exact dependency edges, archive entrypoints/legal files,

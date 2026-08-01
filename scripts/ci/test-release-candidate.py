@@ -10,6 +10,8 @@ import io
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -349,6 +351,10 @@ def main() -> None:
         rejected(write_mutation(root, malformed), artifacts, "unexpected candidate manifest schema")
 
     print("release-candidate tests: ok")
+    subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("test-release-registry.py"))],
+        check=True,
+    )
 
 
 if __name__ == "__main__":
