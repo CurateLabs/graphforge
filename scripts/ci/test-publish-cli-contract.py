@@ -17,7 +17,8 @@ def main() -> None:
     assert "needs: [candidate-preflight, publish-pypi]" in npm_job
     assert "pnpm --filter @curatelabs/graphforge-cli test:offline" in npm_job
     assert "node scripts/ci/verify-node-cli-release-package.mjs" in npm_job
-    assert npm_job.count("scripts/publish_npm_artifacts.py") == 3
+    assert npm_job.count("python3 scripts/publish_npm_artifacts.py") == 3
+    assert "Load reviewed npm recovery publisher" in npm_job
     assert npm_job.index("--group native") < npm_job.index("verify-node-cli-release-package.mjs")
     assert npm_job.index("verify-node-cli-release-package.mjs") < npm_job.index("--group cli")
     assert npm_job.index("--group cli") < npm_job.index("--group skills")
