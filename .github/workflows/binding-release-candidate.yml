@@ -383,12 +383,6 @@ jobs:
           --expected-sha "${{ needs.validate_source.outputs.evidence_sha }}"
           --output binding-rc-aggregate/report.json
 
-      - name: Save fail-closed aggregate for M1 certification
-        uses: actions/cache/save@v6
-        with:
-          path: binding-rc-aggregate/report.json
-          key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
-
       - name: Retain aggregate publication evidence
         uses: actions/upload-artifact@v7
         with:

@@ -141,8 +141,10 @@ jobs:
           )
           PY
 
-      - name: Save Rust report for M1 certification
-        uses: actions/cache/save@v6
+      - name: Retain Rust report for M1 certification
+        uses: actions/upload-artifact@v7
         with:
+          name: M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
           path: non-cypher-evidence/
-          key: rust-non-cypher-${{ env.EVIDENCE_SHA }}
+          if-no-files-found: error
+          retention-days: 30

@@ -69,7 +69,10 @@ class M1ReleaseCertificationTests(unittest.TestCase):
             self.binding_run,
             SHA,
         )
-        self.assertEqual(result["components"]["rust"]["cache_key"], "rust-non-cypher-" + SHA)
+        self.assertEqual(
+            result["components"]["rust"]["artifact_name"],
+            "M1-Rust-Non-Cypher-" + SHA,
+        )
         for key, value, message in (
             ("status", "in_progress", "not completed"),
             ("conclusion", "failure", "not completed"),
@@ -151,7 +154,10 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         self.assertLess(rust_build, node_build)
         final_job = jobs[aggregate:]
         self.assertIn("Revalidate current main and component artifacts", final_job)
-        self.assertIn("actions/cache/restore@v6", final_job)
+        self.assertNotIn("actions/cache/restore@v6", final_job)
+        self.assertEqual(final_job.count("actions/download-artifact@v8"), 3)
+        self.assertIn("run-id: ${{ inputs.rust_run_id }}", final_job)
+        self.assertIn("run-id: ${{ inputs.binding_rc_run_id }}", final_job)
 
     def rust_report(self) -> dict:
         inventory = GATE.load_json(GATE.SURFACE)
