@@ -86,6 +86,8 @@ class M1ReleaseCertificationTests(unittest.TestCase):
 
     def test_workflow_is_manual_exact_main_and_validates_before_building(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("#192 publication readiness", text)
+        self.assertNotIn("#742", text)
         header, jobs = text.split("jobs:\n", 1)
         self.assertIn("workflow_dispatch:", header)
         for forbidden in ("push:", "pull_request:", "schedule:"):
