@@ -12,8 +12,8 @@
 
 GraphForge is an embedded, local-first graph execution environment with a Rust core, Arrow
 results, and Parquet persistence. It brings openCypher and analyst-intent verbs to notebooks,
-scripts, repositories, and editor workflows without requiring a database server. The v0.5
-development line passes all **3,897 openCypher TCK scenarios**.
+scripts, repositories, and editor workflows without requiring a database server. The current
+v0.5 engine passes all **3,897 openCypher TCK scenarios**.
 
 > **Registry status:** CurateLabs will publish GraphForge **v0.5.1** to PyPI (`graphforge`)
 > and npm (`@curatelabs/graphforge`, `@curatelabs/graphforge-cli`) as part of this release.

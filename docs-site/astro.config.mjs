@@ -172,6 +172,7 @@ export default defineConfig({
             { label: 'Workflow', slug: 'development/workflow' },
             { label: 'Testing Strategy', slug: 'development/testing' },
             { label: 'Product roadmap', slug: 'releases/roadmap' },
+            { label: 'Publishing', slug: 'engineering/publishing' },
             { label: 'Release Process', slug: 'development/release-process' },
             { label: 'Publication Order', slug: 'development/publication-order' },
             { label: 'Release Workflows', slug: 'development/release-workflows' },

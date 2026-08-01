@@ -73,7 +73,7 @@ appends the required explicit confidence assessment. Epistemic (**M21**)
 reasoning or status is appended only when explicitly requested.
 `confidence` graph properties are never converted to assessments, and a
 knowledge-layer (**M20**) assertion remains statusless unless the caller
-supplies an M21 status block.
+supplies an epistemic (**M21**) status block.
 Separate public writes are not represented as one larger transaction; each
 native failure preserves the previous complete generation, and the workflow
 does not destructively compensate or overwrite records.
@@ -99,7 +99,7 @@ silently truncating them.
 caller-prepared `InvocationDescriptor` and exact run/operation/attachment
 identities. It invokes the public resolved recorded-analysis API, returns Arrow
 result linkage with independent run and attachment lifecycles, and preserves a
-completed knowledge-layer (M20) run when attachment is absent or fails.
+completed knowledge-layer (**M20**) run when attachment is absent or fails.
 
 `exploreGraph` accepts an explicit explore mode, start UUIDs, and finite
 `result_limit` (plus depth for neighborhood/traversal, and a target UUID for
