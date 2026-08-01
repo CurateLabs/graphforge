@@ -128,4 +128,8 @@ assert "secrets.CARGO_REGISTRY_TOKEN" in credential_workflow
 for forbidden in ("npm publish", "uv publish", "cargo publish", "release:\n"):
     assert forbidden not in credential_workflow
 
+for job in (preflight, pypi_job, npm_job, crates_job, credential_workflow):
+    assert "continue-on-error" not in job
+    assert "|| true" not in job
+
 print("release publish preflight tests passed")

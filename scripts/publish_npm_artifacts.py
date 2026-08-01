@@ -64,8 +64,13 @@ def published_checksum(name: str, version: str) -> str | None:
     if not isinstance(tarball, str) or not tarball.startswith("https://registry.npmjs.org/"):
         raise RuntimeError(f"npm {name}@{version} lacks a trusted registry tarball URL")
     request = urllib.request.Request(tarball, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return _sha256_bytes(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return _sha256_bytes(response.read())
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
 
 
 def publish_archive(path: Path) -> None:

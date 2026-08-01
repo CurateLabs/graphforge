@@ -176,6 +176,7 @@ def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str
         raise RuntimeError("release record commit does not match the checked-out commit")
 
     checksums: dict[str, str] = {}
+    artifacts_root = artifacts_dir.resolve()
     for item in record.get("artifacts", []):
         if item.get("surface") != "crates":
             continue
@@ -184,9 +185,13 @@ def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str
         checksum = item.get("sha256")
         if not all(isinstance(value, str) for value in (name, relative, checksum)):
             raise RuntimeError("release record contains an invalid crates.io artifact")
+        if item.get("version") != VERSION:
+            raise RuntimeError(f"release record version mismatch for crate {name}")
         if name in checksums:
             raise RuntimeError(f"release record contains duplicate crate {name}")
-        archive = artifacts_dir / relative
+        archive = (artifacts_dir / relative).resolve()
+        if not archive.is_relative_to(artifacts_root):
+            raise RuntimeError(f"certified crate archive escapes artifact root: {relative}")
         if not archive.is_file():
             raise RuntimeError(f"certified crate archive is missing: {relative}")
         actual = hashlib.sha256(archive.read_bytes()).hexdigest()
