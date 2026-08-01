@@ -244,6 +244,16 @@ def _node_consumer(
             f"expected {manifest['version']}"
         )
     cli = node_root / "node_modules" / "@curatelabs" / "graphforge-cli" / "bin" / "graphforge.js"
+    # Real CLI config validate requires a repository project; init creates one.
+    # Fixture CLI tarballs ignore args and still emit JSON for both steps.
+    _run(["git", "init", "-q"], cwd=node_root, env=environment)
+    init_output = _run(["node", str(cli), "--json", "init"], cwd=node_root, env=environment)
+    try:
+        init_payload = json.loads(init_output)
+    except json.JSONDecodeError as error:
+        raise RehearsalError("clean CLI init did not emit JSON") from error
+    if not isinstance(init_payload, dict):
+        raise RehearsalError("clean CLI init emitted an invalid result")
     cli_output = _run(
         ["node", str(cli), "--json", "config", "validate"], cwd=node_root, env=environment
     )
@@ -253,6 +263,8 @@ def _node_consumer(
         raise RehearsalError("clean CLI consumer did not emit JSON") from error
     if not isinstance(cli_payload, dict):
         raise RehearsalError("clean CLI consumer emitted an invalid result")
+    if cli_payload.get("valid") is False:
+        raise RehearsalError("clean CLI config validate reported invalid")
     skills = (
         node_root
         / "node_modules"

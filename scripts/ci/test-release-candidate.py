@@ -107,7 +107,14 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
             {
                 "package/bin/graphforge.js": (
                     b"#!/usr/bin/env node\n"
-                    b"process.stdout.write(JSON.stringify({contract:'fixture'}));\n"
+                    b"const args = process.argv.slice(2).join(' ');\n"
+                    b"if (args.includes('config validate')) {\n"
+                    b"  process.stdout.write(JSON.stringify({valid:true}));\n"
+                    b"} else if (args.includes('init')) {\n"
+                    b"  process.stdout.write(JSON.stringify({created_config:true}));\n"
+                    b"} else {\n"
+                    b"  process.stdout.write(JSON.stringify({contract:'fixture'}));\n"
+                    b"}\n"
                 ),
                 "package/lib/run.mjs": b"export function run() {}\n",
                 "package/THIRD_PARTY_NOTICES.md": b"Third party",
