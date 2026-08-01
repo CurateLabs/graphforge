@@ -113,13 +113,14 @@ assert (
     'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
     in crates
 )
-observe_before_authorize = crates.index(
+observe_marker = (
     'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
 )
-authorize_index = crates.index(
-    'release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json'
+authorize_marker = (
+    'release_action.py authorize --manifest "candidate/$MANIFEST_NAME" '
+    "--observations observations.json"
 )
-assert observe_before_authorize < authorize_index
+assert crates.index(observe_marker) < crates.index(authorize_marker)
 
 for lane in (pypi, native, main, cli, skills, crates):
     assert "release_action.py" in lane
