@@ -61,14 +61,54 @@ LLMs, citation networks, dependency graphs, social connections, and evolving kno
 GraphForge makes those graphs portable and inspectable without turning them into an application
 database or requiring a long-running service.
 
-| | NetworkX | **GraphForge** | Neo4j / Memgraph |
-|:---|:---|:---|:---|
-| **Setup** | Python package | Embedded package | Run a server |
-| **Query language** | Python API | **Full openCypher** | Full Cypher |
-| **Persistence** | Manual | **Parquet project directory** | Native |
-| **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
-| **Notebook-friendly** | ✓ | ✓ | Requires connection |
-| **Primary role** | In-memory graph library | Local knowledge-analysis workbench | Operational graph database |
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Aspect</th>
+      <th scope="col">NetworkX</th>
+      <th scope="col">GraphForge</th>
+      <th scope="col">Neo4j / Memgraph</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th scope="row">Setup</th>
+      <td>Python package</td>
+      <td>Embedded package</td>
+      <td>Run a server</td>
+    </tr>
+    <tr>
+      <th scope="row">Query language</th>
+      <td>Python API</td>
+      <td><strong>Full openCypher</strong></td>
+      <td>Full Cypher</td>
+    </tr>
+    <tr>
+      <th scope="row">Persistence</th>
+      <td>Manual</td>
+      <td><strong>Parquet project directory</strong></td>
+      <td>Native</td>
+    </tr>
+    <tr>
+      <th scope="row">Results</th>
+      <td>Python objects</td>
+      <td><strong>Apache Arrow Tables</strong></td>
+      <td>Driver rows</td>
+    </tr>
+    <tr>
+      <th scope="row">Notebook-friendly</th>
+      <td>✓</td>
+      <td>✓</td>
+      <td>Requires connection</td>
+    </tr>
+    <tr>
+      <th scope="row">Primary role</th>
+      <td>In-memory graph library</td>
+      <td>Local knowledge-analysis workbench</td>
+      <td>Operational graph database</td>
+    </tr>
+  </tbody>
+</table>
 
 Use GraphForge for knowledge graphs, citation networks, LLM output storage, repository-aware
 analysis, and social-network research. Use an operational database for high-throughput,

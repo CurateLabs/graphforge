@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix homepage accessibility: label the NetworkX/GraphForge/Neo4j comparison
+  table headers (including row scopes) and emit static `tabindex` on Expressive
+  Code `<pre>` blocks so keyboard users can reach horizontally scrollable
+  regions before the deferred EC script runs (Refs #301).
 - Align the Starlight docs theme (backgrounds, accents, links, sidebar) with
   the graphforge-nextjs brand color tokens (Refs #301).
 - Add a Node Plotly.js visualization example over the shared karate projection,
