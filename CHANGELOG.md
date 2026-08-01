@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add an opt-in visualization limits stress harness over the shared #298
+  projection contract (Plotly, Jaal, PyVis, Cytoscape.js, Sigma.js) with a
+  frozen size ladder, dispatch-only CI-class evidence workflow, and honest
+  comparison report — never a PR/push/scheduled/required/release gate (#299).
+
 ## [0.5.1] - 2026-08-01
 
 - Freeze Cargo, Python, Node/native npm, CLI, and agent-skills surfaces at

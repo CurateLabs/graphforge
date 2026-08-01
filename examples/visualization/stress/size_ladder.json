@@ -1,0 +1,27 @@
+{
+  "name": "visualization-limits-size-ladder",
+  "seed": 29901,
+  "selection": "deterministic_bfs_from_lowest_id",
+  "stopping": {
+    "per_option_timeout_seconds": 120,
+    "ladder_stop_on_first_failure_or_timeout": true,
+    "max_peak_rss_mb": 6144,
+    "notes": "Stop advancing an option after the first failure, timeout, or RSS limit observation. Other options continue independently."
+  },
+  "steps": [
+    {"id": "xs", "target_nodes": 10},
+    {"id": "s", "target_nodes": 20},
+    {"id": "karate_full", "target_nodes": 34},
+    {"id": "m", "target_nodes": 100},
+    {"id": "l", "target_nodes": 250},
+    {"id": "xl", "target_nodes": 500},
+    {"id": "xxl", "target_nodes": 1000},
+    {"id": "facebook_2k", "target_nodes": 2000},
+    {"id": "facebook_full", "target_nodes": 4039}
+  ],
+  "resource_observation": {
+    "timing": "perf_counter wall seconds",
+    "memory": "resource.getrusage(RUSAGE_SELF).ru_maxrss where available; Linux KB, macOS bytes — normalized to MB in the result record",
+    "payload_size": "UTF-8 byte length of the adapter output artifact or JSON payload"
+  }
+}

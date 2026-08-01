@@ -1,0 +1,8 @@
+.cache/
+node/node_modules/
+results/results-20*.json
+results/REPORT.generated.md
+results/environment-preamble.json
+__pycache__/
+*.pyc
+.venv/

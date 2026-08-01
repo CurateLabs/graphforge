@@ -1,0 +1,179 @@
+{
+  "nodes": [
+    {
+      "id": "1",
+      "label": "M1",
+      "club_id": 1
+    },
+    {
+      "id": "2",
+      "label": "M2",
+      "club_id": 2
+    },
+    {
+      "id": "3",
+      "label": "M3",
+      "club_id": 3
+    },
+    {
+      "id": "4",
+      "label": "M4",
+      "club_id": 4
+    },
+    {
+      "id": "5",
+      "label": "M5",
+      "club_id": 5
+    },
+    {
+      "id": "6",
+      "label": "M6",
+      "club_id": 6
+    },
+    {
+      "id": "7",
+      "label": "M7",
+      "club_id": 7
+    },
+    {
+      "id": "8",
+      "label": "M8",
+      "club_id": 8
+    },
+    {
+      "id": "9",
+      "label": "M9",
+      "club_id": 9
+    },
+    {
+      "id": "10",
+      "label": "M10",
+      "club_id": 10
+    },
+    {
+      "id": "11",
+      "label": "M11",
+      "club_id": 11
+    },
+    {
+      "id": "12",
+      "label": "M12",
+      "club_id": 12
+    },
+    {
+      "id": "13",
+      "label": "M13",
+      "club_id": 13
+    },
+    {
+      "id": "14",
+      "label": "M14",
+      "club_id": 14
+    },
+    {
+      "id": "15",
+      "label": "M15",
+      "club_id": 15
+    },
+    {
+      "id": "16",
+      "label": "M16",
+      "club_id": 16
+    },
+    {
+      "id": "17",
+      "label": "M17",
+      "club_id": 17
+    },
+    {
+      "id": "18",
+      "label": "M18",
+      "club_id": 18
+    },
+    {
+      "id": "19",
+      "label": "M19",
+      "club_id": 19
+    },
+    {
+      "id": "20",
+      "label": "M20",
+      "club_id": 20
+    },
+    {
+      "id": "21",
+      "label": "M21",
+      "club_id": 21
+    },
+    {
+      "id": "22",
+      "label": "M22",
+      "club_id": 22
+    },
+    {
+      "id": "23",
+      "label": "M23",
+      "club_id": 23
+    },
+    {
+      "id": "24",
+      "label": "M24",
+      "club_id": 24
+    },
+    {
+      "id": "25",
+      "label": "M25",
+      "club_id": 25
+    },
+    {
+      "id": "26",
+      "label": "M26",
+      "club_id": 26
+    },
+    {
+      "id": "27",
+      "label": "M27",
+      "club_id": 27
+    },
+    {
+      "id": "28",
+      "label": "M28",
+      "club_id": 28
+    },
+    {
+      "id": "29",
+      "label": "M29",
+      "club_id": 29
+    },
+    {
+      "id": "30",
+      "label": "M30",
+      "club_id": 30
+    },
+    {
+      "id": "31",
+      "label": "M31",
+      "club_id": 31
+    },
+    {
+      "id": "32",
+      "label": "M32",
+      "club_id": 32
+    },
+    {
+      "id": "33",
+      "label": "M33",
+      "club_id": 33
+    },
+    {
+      "id": "34",
+      "label": "M34",
+      "club_id": 34
+    }
+  ],
+  "directed": false,
+  "dataset": "zachary-karate-club",
+  "projection_id": "karate-member-friend-v1",
+  "relationship_type": "FRIEND",
+  "layout_seed": 42
+}

@@ -1,0 +1,104 @@
+# On-demand visualization stress evidence for issue #299.
+# MUST NOT be added to pull_request, push, schedule, required, or release gates.
+name: Visualization Limits Stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_nodes:
+        description: "Only run ladder steps with target_nodes <= this value (empty = full ladder)"
+        required: false
+        default: ""
+        type: string
+      ref_note:
+        description: "Optional note stored in the evidence manifest"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: visualization-limits-stress-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stress:
+    name: Visualization limits (dispatch-only)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install Node visualization probes
+        working-directory: examples/visualization/stress/node
+        run: npm install --no-fund --no-audit
+
+      - name: Build native Python wheel
+        run: |
+          uvx maturin build \
+            --manifest-path crates/graphforge-bindings-py/Cargo.toml \
+            --profile dev \
+            --out dist
+          uv venv /tmp/gf-viz-stress --python 3.13
+          uv pip install --python /tmp/gf-viz-stress/bin/python dist/*.whl
+          uv pip install --python /tmp/gf-viz-stress/bin/python \
+            -r examples/visualization/stress/requirements-stress.txt
+
+      - name: Record environment preamble
+        run: |
+          mkdir -p examples/visualization/stress/results
+          {
+            echo "{"
+            echo "  \"github_run_id\": \"${{ github.run_id }}\","
+            echo "  \"github_sha\": \"${{ github.sha }}\","
+            echo "  \"runner_name\": \"${{ runner.name }}\","
+            echo "  \"runner_os\": \"${{ runner.os }}\","
+            echo "  \"ref_note\": $(python3 -c 'import json,os; print(json.dumps(os.environ.get("REF_NOTE","")))'),"
+            echo "  \"workflow\": \"visualization-limits-stress.yml\","
+            echo "  \"trigger\": \"workflow_dispatch\""
+            echo "}"
+          } > examples/visualization/stress/results/environment-preamble.json
+        env:
+          REF_NOTE: ${{ inputs.ref_note }}
+
+      - name: Run stress harness
+        run: |
+          MAX_ARGS=()
+          if [ -n "${{ inputs.max_nodes }}" ]; then
+            MAX_ARGS=(--max-nodes "${{ inputs.max_nodes }}")
+          fi
+          /tmp/gf-viz-stress/bin/python \
+            examples/visualization/stress/harness/run.py \
+            "${MAX_ARGS[@]}" \
+            --output examples/visualization/stress/results
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: visualization-limits-stress-${{ github.sha }}
+          path: |
+            examples/visualization/stress/results/
+            examples/visualization/stress/METHODOLOGY.md
+            examples/visualization/stress/size_ladder.json
+          if-no-files-found: error
