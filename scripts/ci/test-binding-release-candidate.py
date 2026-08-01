@@ -591,6 +591,8 @@ def main() -> None:
     assert "Assemble immutable M1 release candidate" in rc_workflow_text
     release_candidate_job = rc_workflow_text.split("  release_candidate:\n", 1)[1]
     assert 'node-version: "22"' in release_candidate_job
+    assert validator_from_workspace in release_candidate_job
+    assert "../../../scripts/ci/validate-napi-artifacts.py" not in release_candidate_job
     assert "scripts/ci/release-candidate.py validate" in rc_workflow_text
     assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
         rc_workflow_text
