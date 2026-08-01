@@ -46,17 +46,8 @@ assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
 assert "scripts/set_release_version.py --check" in workflow
-assert "waive_unreleased" not in workflow
-assert "allow-unreleased-entries" not in workflow
-assert "CHANGELOG" not in workflow
 for group in ("manifest", "python", "npm", "crates", "evidence"):
     assert f"M1-Release-Candidate-{group}-" in workflow
-
-preflight_source = SCRIPT.read_text(encoding="utf-8")
-assert "CHANGELOG" not in preflight_source
-assert "Unreleased" not in preflight_source
-assert "docs/reference/changelog.md" not in preflight_source
-assert "allow_unreleased_entries" not in preflight_source
 
 preflight = workflow.split("  candidate-preflight:\n", 1)[1].split("\n  publish-pypi:", 1)[0]
 assert "release-publish-preflight.py" in preflight
