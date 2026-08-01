@@ -19,7 +19,7 @@ M20_INVENTORY = ROOT / "docs/reference/m20-schema-inventory.json"
 M21_INVENTORY = ROOT / "docs/reference/m21-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
 M20_BASELINE_SHA = "8101c2c52246b903a39ff502dc325915974e4d69"
-M20_BASELINE_INVENTORY_SHA256 = "91425c060bdae4450dcf8a5f2ed8593f024ccc812d06e19fd9e2b71b6fc92e93"
+M20_BASELINE_INVENTORY_SHA256 = "a231b688536609c107256f8578552d7ceedced8ef04d2dae9cd2aeef144f304c"
 REQUIRED_CASES = {
     "m20-frozen-baseline",
     "status-events",
