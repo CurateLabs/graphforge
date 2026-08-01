@@ -551,6 +551,10 @@ jobs:
           git show refs/remotes/origin/main:scripts/ci/release_action.py \
             > "$RUNNER_TEMP/release_action.py"
           install -m 0755 "$RUNNER_TEMP/release_action.py" scripts/ci/release_action.py
+          git show refs/remotes/origin/main:scripts/ci/crate-authorize-refresh-nodes.py \
+            > "$RUNNER_TEMP/crate-authorize-refresh-nodes.py"
+          install -m 0755 "$RUNNER_TEMP/crate-authorize-refresh-nodes.py" \
+            scripts/ci/crate-authorize-refresh-nodes.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
@@ -592,11 +596,14 @@ jobs:
             node="crates:$crate"
             planned_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             # Durable crates.io Retry-After waits can exceed MAX_OBSERVATION_AGE
-            # (10m). Refresh this node before authorize so still-absent crates do
-            # not hard-fail as observation_stale / blocked_registry_state.
-            python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live --observed-at "$planned_at" --out node-observation.json
-            jq --arg node "$node" --slurpfile current node-observation.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
-            mv observations.next.json observations.json
+            # (10m). Refresh this node and its crates dependencies before authorize
+            # so still-absent crates and verified deps do not hard-fail as
+            # observation_stale / blocked_registry_state / blocked_dependencies.
+            while IFS= read -r refresh_node; do
+              python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$refresh_node" --live --observed-at "$planned_at" --out node-observation.json
+              jq --arg node "$refresh_node" --slurpfile current node-observation.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
+              mv observations.next.json observations.json
+            done < <(python3 scripts/ci/crate-authorize-refresh-nodes.py --manifest "candidate/$MANIFEST_NAME" --node "$node")
             python3 scripts/ci/release_action.py authorize --manifest "candidate/$MANIFEST_NAME" --observations observations.json --availability availability.json --node "$node" --planned-at "$planned_at" --out authorization.json
             if test "$(jq -r .publish authorization.json)" = false; then
               continue

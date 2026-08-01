@@ -116,6 +116,7 @@ jobs:
       - name: Test crates.io publish plan helper
         run: |
           python3 scripts/ci/test-crate-publish-plan.py
+          python3 scripts/ci/test-crate-authorize-refresh-nodes.py
           python3 scripts/ci/test-publish-crates.py
 
       - name: Test release publication preflight

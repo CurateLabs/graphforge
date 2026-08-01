@@ -128,9 +128,39 @@ def test_authorization() -> None:
             planned_at=registry_fixture.NOW,
         )
     except action.ActionError as error:
-        assert "blocked_dependencies" in str(error)
+        message = str(error)
+        assert "blocked_dependencies" in message
+        assert "deps[" in message
+        assert "npm:@curatelabs/graphforge-linux-x64-gnu=absent" in message
     else:
         raise AssertionError("dependency-blocked npm main was authorized")
+
+    stale_dep_manifest = copy.deepcopy(manifest)
+    stale_dep_manifest["dependencies"].append(
+        {"from": "crates:graphforge-api", "requires": "crates:graphforge-search"}
+    )
+    stale_dep = copy.deepcopy(verified)
+    registry_fixture.replace_observation(
+        stale_dep,
+        registry_fixture.observed(manifest, "crates:graphforge-api", {"status": 404}),
+    )
+    stale_search = registry_fixture.observed(manifest, "crates:graphforge-search")
+    stale_search["observed_at"] = "2029-12-31T00:00:00+00:00"
+    registry_fixture.replace_observation(stale_dep, stale_search)
+    try:
+        action.authorize(
+            stale_dep_manifest,
+            stale_dep,
+            availability,
+            "crates:graphforge-api",
+            planned_at=registry_fixture.NOW,
+        )
+    except action.ActionError as error:
+        message = str(error)
+        assert "blocked_dependencies" in message
+        assert "crates:graphforge-search=indeterminate" in message
+    else:
+        raise AssertionError("stale crate dependency was authorized")
 
     stale = copy.deepcopy(verified)
     stale_obs = registry_fixture.observed(manifest, "crates:graphforge-search", {"status": 404})
