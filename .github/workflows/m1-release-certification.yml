@@ -1,4 +1,4 @@
-# Release-certification only for #742 publication readiness.
+# Release-certification only for #192 publication readiness.
 # Not a close gate for child implementation/construction issues (AGENTS.md).
 name: M1 Release Certification Gate
 
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: Exact current main SHA for publication certification (#742)
+        description: Exact current main SHA for publication certification (#192)
         required: true
         type: string
       rust_run_id:
