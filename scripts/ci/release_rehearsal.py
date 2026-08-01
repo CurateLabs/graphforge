@@ -215,9 +215,7 @@ def _node_consumer(
             "npm_config_update_notifier": "false",
         }
     )
-    tarballs = [
-        str((artifacts_dir / by_name[name]["path"]).resolve()) for name in install_names
-    ]
+    tarballs = [str((artifacts_dir / by_name[name]["path"]).resolve()) for name in install_names]
     _run(
         ["npm", "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", *tarballs],
         cwd=node_root,
