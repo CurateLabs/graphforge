@@ -1,25 +1,61 @@
 # Quick Start
 
-Get a graph running in five minutes on the v0.5.0 API. Every query and analyst
-verb returns an Apache Arrow `Table`. Node and edge handles use stable `.uuid`
-identity (no numeric storage ids).
+Get a graph running in five minutes on the v0.5.1 API. Choose **Python** or
+**Node** — both are thin bindings over the same Rust engine. Every query and
+analyst verb returns Apache Arrow results. Node and edge handles use stable
+`.uuid` identity (no numeric storage ids).
 
 For full install options, see [Installation](installation.md).
-To run the same engine from your editor, see the [VS Code extension guide](vscode-extension/).
+
+> **Studio (editor):** Prefer working inside VS Code or Cursor? Install
+> **[GraphForge for VS Code](https://marketplace.visualstudio.com/items?itemName=CurateLabsAI.graphforge)**
+> (also on [Open VSX](https://open-vsx.org/extension/CurateLabsAI/graphforge)) —
+> the editor workflow marketed as **Studio** on the product site. It detects
+> Python- and Node-first workspaces, configures the matching binding, and runs
+> the same Rust-owned engine. Setup and commands:
+> [Studio / VS Code extension guide](vscode-extension/).
 
 ---
 
 ## Install
 
+### Python
+
+**pip**
+
 ```bash
-pip install graphforge
-# or
-uv add graphforge
+pip install "graphforge==0.5.1"
 ```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
+```
+
+### Node
+
+**npm**
+
+```bash
+npm install @curatelabs/graphforge@0.5.1
+```
+
+**pnpm**
+
+```bash
+pnpm add @curatelabs/graphforge@0.5.1
+```
+
+Node query and analyst-verb results are Arrow IPC buffers. Decode them with
+[`apache-arrow`](https://www.npmjs.com/package/apache-arrow) (`tableFromIPC`)
+when you want table helpers in JavaScript.
 
 ---
 
 ## Create and Query a Graph
+
+### Python
 
 ```python
 from graphforge import GraphForge
@@ -51,6 +87,37 @@ print(df)
 `forge.execute()` always returns a PyArrow `Table`. Use `table.to_pandas()` for pandas,
 `pl.from_arrow(table)` for Polars, or iterate rows with `table.to_pylist()`.
 
+### Node
+
+```js
+import { tableFromIPC } from "apache-arrow";
+import { GraphForge } from "@curatelabs/graphforge";
+
+const forge = new GraphForge(); // in-memory; use new GraphForge("my-graph/") for persistence
+
+// Add nodes — returns a NodeHandle (use .uuid for identity)
+const alice = forge.addNode("Person", { name: "Alice", age: 30 });
+const bob = forge.addNode("Person", { name: "Bob", age: 25 });
+
+// Add a relationship
+forge.addEdge(alice, "KNOWS", bob, { since: 2020 });
+
+// Query with openCypher — returns an Arrow IPC buffer
+const table = tableFromIPC(forge.execute(`
+    MATCH (p:Person)-[:KNOWS]->(friend:Person)
+    WHERE p.age > 25
+    RETURN p.name AS person, friend.name AS friend, p.age AS age
+    ORDER BY p.age DESC
+`));
+
+console.log(table.toArray());
+// [ { person: 'Alice', friend: 'Bob', age: 30 } ]
+```
+
+`forge.execute()` returns an Arrow IPC buffer. Decode with `tableFromIPC(...)`
+from `apache-arrow`, then use `table.toArray()`, column accessors, or other
+Arrow JS helpers.
+
 ---
 
 ## Persist a Graph
@@ -62,8 +129,11 @@ open.
 The directory must already exist — GraphForge opens a project root, it does not create the
 directory for you. Opening a missing path raises `StorageError: path does not exist`.
 
+### Python
+
 ```python
 from pathlib import Path
+from graphforge import GraphForge
 
 Path("research").mkdir(parents=True, exist_ok=True)
 
@@ -77,20 +147,44 @@ table = forge.execute("MATCH (p:Paper) RETURN p.title AS title")
 print(table.column("title")[0].as_py())   # Graph Neural Networks
 ```
 
+### Node
+
+```js
+import { mkdirSync } from "node:fs";
+import { tableFromIPC } from "apache-arrow";
+import { GraphForge } from "@curatelabs/graphforge";
+
+mkdirSync("research", { recursive: true });
+
+let forge = new GraphForge("research/");
+forge.addNode("Paper", { title: "Graph Neural Networks", year: 2024 });
+forge.close();
+
+// Reload in a later session (the directory now exists)
+forge = new GraphForge("research/");
+const table = tableFromIPC(
+  forge.execute("MATCH (p:Paper) RETURN p.title AS title"),
+);
+console.log(table.getChild("title").get(0)); // Graph Neural Networks
+```
+
 ---
 
 ## Bulk Load
 
 For loading many nodes or edges at once, use the atomic Arrow bulk surfaces
-(`publish_bulk_nodes` / `publish_bulk_edges`) or the convenience helpers
+(`publish_bulk_nodes` / `publish_bulk_edges` in Python;
+`publishBulkNodes` / `publishBulkEdges` in Node) or the Python convenience helpers
 `add_nodes()` / `add_edges()`. Pass a stable `operation_uuid` and receive a
-canonical receipt table. Inputs may be a list of dicts, a pandas DataFrame, or
-an Arrow Table. See [Graph Construction](graph-construction.md) for the full
-scalar + bulk path.
+canonical receipt table. Python inputs may be a list of dicts, a pandas DataFrame,
+or an Arrow Table. Node bulk publication takes Arrow IPC. See
+[Graph Construction](graph-construction.md) for the full scalar + bulk path.
 
 The operation identity must be a **UUIDv7** — `uuid.uuid4()` is rejected with
 `GF_BULK_VALIDATION(invalid_uuid)`. Python 3.14 ships `uuid.uuid7()`; on earlier
 versions generate one with the stdlib helper below.
+
+### Python
 
 ```python
 import os
@@ -131,12 +225,22 @@ edges_df = pd.DataFrame({
 forge.add_edges("CITES", edges_df, operation_uuid=edge_op, src="src_id", dst="dst_id")
 ```
 
+### Node
+
+Node bulk construction publishes Arrow IPC through `publishBulkNodes` /
+`publishBulkEdges` with a stable UUIDv7 `operationUuid`. See
+[Graph Construction](graph-construction.md) and the Node binding tests for the
+IPC table shape.
+
 ---
 
 ## Rank Nodes
 
-`forge.rank()` scores every node of a given label and returns an Arrow Table containing all
-node properties plus a `score` column. No mutation happens unless you pass `write_property`.
+`forge.rank()` scores every node of a given label and returns an Arrow result
+containing all node properties plus a `score` column. No mutation happens unless
+you pass `write_property` / the write-back argument.
+
+### Python
 
 ```python
 # Read-only — just get the scores back as a table
@@ -152,6 +256,27 @@ forge.rank("Person", by="pagerank", write_property="rank")
 forge.execute("MATCH (n:Person) RETURN n.name, n.rank ORDER BY n.rank DESC LIMIT 5")
 ```
 
+### Node
+
+```js
+import { tableFromIPC } from "apache-arrow";
+
+// Read-only — decode the Arrow IPC buffer
+const table = tableFromIPC(forge.rank("Person", "pagerank"));
+console.log(table.toArray());
+
+// Restrict to a relationship type (via, directed)
+const between = tableFromIPC(
+  forge.rank("Person", "betweenness", "KNOWS", false),
+);
+
+// Opt-in write-back — stores the score as a node property
+forge.rank("Person", "pagerank", undefined, true, "rank");
+forge.execute(
+  "MATCH (n:Person) RETURN n.name, n.rank ORDER BY n.rank DESC LIMIT 5",
+);
+```
+
 Example values for `by`: `pagerank`, `betweenness`, `closeness`, `degree`,
 `clustering_coefficient`, `triangles`. See the
 [complete canonical catalog](../book/architecture/algorithms.md).
@@ -160,9 +285,12 @@ Example values for `by`: `pagerank`, `betweenness`, `closeness`, `degree`,
 
 ## Find Relevant Content
 
-`forge.find()` runs a hybrid text + vector search and returns an Arrow Table with node
-properties alongside `score` and `matched_on` columns. The index is built automatically on
-the first call — no setup step required. `label` is required on every call.
+`forge.find()` runs a hybrid text + vector search and returns an Arrow result with
+node properties alongside `score` and `matched_on` columns. The index is built
+automatically on the first call — no setup step required. `label` is required on
+every call.
+
+### Python
 
 ```python
 # Text search — index built lazily on first call
@@ -201,12 +329,29 @@ forge.index("Paper", properties=["title", "abstract"])
 forge.index("Paper", node=paper_handle, vector=embedding, space="sbert")
 ```
 
+### Node
+
+```js
+import { tableFromIPC } from "apache-arrow";
+
+// Text search — query, label, then optional vector / similarTo / semanticQuery / limit
+const table = tableFromIPC(forge.find("graph neural networks", "Paper"));
+console.log(table.toArray());
+
+// Limit results (positional: query, label, vector, similarTo, semanticQuery, limit)
+const limited = tableFromIPC(
+  forge.find("graph neural networks", "Paper", undefined, undefined, undefined, 20),
+);
+```
+
 ---
 
 ## Group into Communities
 
-`forge.cluster()` assigns every node of a given label to a community and returns an Arrow
-Table with node properties plus a `community_id` column.
+`forge.cluster()` assigns every node of a given label to a community and returns an
+Arrow result with node properties plus a `community_id` column.
+
+### Python
 
 ```python
 # Read-only community detection
@@ -223,6 +368,24 @@ forge.execute("""
 """)
 ```
 
+### Node
+
+```js
+import { tableFromIPC } from "apache-arrow";
+
+// Read-only community detection
+const table = tableFromIPC(forge.cluster("Person", "louvain"));
+console.log(table.toArray());
+
+// Restrict to a relationship type and write the result back
+forge.cluster("Person", "louvain", "KNOWS", false, "community");
+forge.execute(`
+    MATCH (n:Person)
+    RETURN n.community AS community, count(*) AS size
+    ORDER BY size DESC LIMIT 5
+`);
+```
+
 Example values for `by`: `louvain`, `components`. See the
 [complete canonical catalog](../book/architecture/algorithms.md).
 
@@ -230,8 +393,9 @@ Example values for `by`: `louvain`, `components`. See the
 
 ## Next Steps
 
+- [Studio / VS Code extension](vscode-extension/) — explore projects and run Cypher in the editor
 - [Tutorial](tutorial.md) — guided walkthrough with a full citation network example
-- [Graph Construction](graph-construction.md) — scalar Python API and atomic bulk batches
+- [Graph Construction](graph-construction.md) — scalar API and atomic bulk batches
 - [Cypher Reference](cypher-guide.md) — complete query language documentation
 - [Analytics Integration](analytics-integration.md) — Arrow, pandas, Polars, rank, cluster, find
 - [API Reference](../reference/api.md) — full Python API

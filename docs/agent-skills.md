@@ -69,10 +69,11 @@ mode mismatch fails as a structured conflict.
 Build knowledge enables only the public provenance, knowledge, and optionally
 epistemic capabilities. It adds graph records through UUID handles, publishes an
 assertion and non-empty evidence bundle through the native composite API, then
-appends the required explicit confidence assessment. M21 reasoning or status is
-appended only when explicitly requested.
-`confidence` graph properties are never converted to assessments, and an M20
-assertion remains statusless unless the caller supplies an M21 status block.
+appends the required explicit confidence assessment. Epistemic (**M21**)
+reasoning or status is appended only when explicitly requested.
+`confidence` graph properties are never converted to assessments, and a
+knowledge-layer (**M20**) assertion remains statusless unless the caller
+supplies an epistemic (**M21**) status block.
 Separate public writes are not represented as one larger transaction; each
 native failure preserves the previous complete generation, and the workflow
 does not destructively compensate or overwrite records.
@@ -98,7 +99,7 @@ silently truncating them.
 caller-prepared `InvocationDescriptor` and exact run/operation/attachment
 identities. It invokes the public resolved recorded-analysis API, returns Arrow
 result linkage with independent run and attachment lifecycles, and preserves a
-completed M20 run when attachment is absent or fails.
+completed knowledge-layer (**M20**) run when attachment is absent or fails.
 
 `exploreGraph` accepts an explicit explore mode, start UUIDs, and finite
 `result_limit` (plus depth for neighborhood/traversal, and a target UUID for
@@ -106,10 +107,12 @@ path mode). It opens only the graph capability, dispatches the public Node
 paths/descriptor facade, returns UUID-addressed summaries with complete-result
 linkage, and fails closed before native invocation when bounds are missing.
 
-`retrieveAnalyze` dispatches caller-selected M19 find inputs and live M18
-families (`rank`, `cluster`, `paths`, `analyze`, `similar`) through public Node
-facades without inferred algorithm/provider/freshness choices, keeps M20/M21
-tables unopened, and exposes truncation/empty/structured-error outcomes.
+`retrieveAnalyze` dispatches caller-selected find/index (**M19**) inputs and
+live analyst-verb (**M18**) families (`rank`, `cluster`, `paths`, `analyze`,
+`similar`) through public Node facades without inferred
+algorithm/provider/freshness choices, keeps knowledge-layer (**M20**) and
+epistemic (**M21**) tables unopened, and exposes truncation/empty/structured-error
+outcomes.
 
 ## Release-candidate end-to-end verification
 
@@ -133,6 +136,7 @@ GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
 ```
 
 The native runner installs the local `npm pack` artifact offline, exercises
-bootstrap/build/explore/find/M18/belief/reopen plus developer embed/error paths,
-redacts volatile paths/timestamps, and records GraphForge/package/Node versions
-with the commit SHA. npm publication remains the v0.5.0 publication close-out issue.
+bootstrap/build/explore/find/analyst-verb/belief/reopen plus developer
+embed/error paths, redacts volatile paths/timestamps, and records
+GraphForge/package/Node versions with the commit SHA. npm publication remains
+part of the coordinated **v0.5.1** release close-out.

@@ -28,12 +28,16 @@ handles use stable `.uuid` identity. For a five-minute path, see
 
 Install GraphForge using uv (recommended) or pip:
 
-```bash
-# Using uv
-uv add graphforge
+**uv** (recommended)
 
-# Using pip
-pip install graphforge
+```bash
+uv add "graphforge==0.5.1"
+```
+
+**pip**
+
+```bash
+pip install "graphforge==0.5.1"
 ```
 
 Verify the installation:

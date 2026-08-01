@@ -64,7 +64,10 @@ rendering.
 ### Python
 
 ```bash
-python -m pip install graphforge
+python -m pip install "graphforge==0.5.1"
+```
+
+```bash
 python -m pip install -r examples/visualization/requirements.txt
 python examples/visualization/dataset/fetch.py
 ```

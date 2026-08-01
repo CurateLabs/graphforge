@@ -2,7 +2,7 @@
 
 **Composable graph tooling for analysis, construction, and refinement**
 
-[![Version](https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg)](guide/installation.md)
+[![Version](https://img.shields.io/badge/version-v0.5.1-F59E0B.svg)](guide/installation.md)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](guide/installation.md)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white)](guide/installation.md)
 [![Rust](https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white)](development/contributing.md)
@@ -12,13 +12,13 @@
 
 GraphForge is an embedded, local-first graph execution environment with a Rust core, Arrow
 results, and Parquet persistence. It brings openCypher and analyst-intent verbs to notebooks,
-scripts, repositories, and editor workflows without requiring a database server. The v0.5
-development line passes all **3,897 openCypher TCK scenarios**.
+scripts, repositories, and editor workflows without requiring a database server. The current
+v0.5 engine passes all **3,897 openCypher TCK scenarios**.
 
-> **Registry status:** GraphForge v0.5 packages are not published yet. PyPI currently serves
-> the legacy `graphforge` v0.4.0 line, while `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` are not yet
-> available from npm. Follow the [installation guide](guide/installation.md) to build the
-> current Rust-owned engine from source.
+> **Install tip:** Pin GraphForge **v0.5.1** from PyPI (`graphforge==0.5.1`) or npm
+> (`@curatelabs/graphforge@0.5.1`). PyPI also lists an unrelated pure-Python `graphforge`
+> **0.4.0**; do not assume an unpinned install resolves to the CurateLabs native engine.
+> See [Installation](guide/installation.md).
 
 ```python
 from graphforge import GraphForge
@@ -45,7 +45,7 @@ they never replace or fall back from the Rust engine.
 
 | Page | Job |
 |---|---|
-| [Installation](guide/installation.md) | Check registry status and build Python or Node from source |
+| [Installation](guide/installation.md) | Install Python or Node packages, or build from source |
 | [Quick Start](guide/quickstart.md) | Create, query, and persist your first graph |
 | [Tutorial](guide/tutorial.md) | Work through a complete citation-network example |
 | [CLI and repository integration](guides/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |
@@ -60,14 +60,54 @@ LLMs, citation networks, dependency graphs, social connections, and evolving kno
 GraphForge makes those graphs portable and inspectable without turning them into an application
 database or requiring a long-running service.
 
-| | NetworkX | **GraphForge** | Neo4j / Memgraph |
-|:---|:---|:---|:---|
-| **Setup** | Python package | Embedded package | Run a server |
-| **Query language** | Python API | **Full openCypher** | Full Cypher |
-| **Persistence** | Manual | **Parquet project directory** | Native |
-| **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
-| **Notebook-friendly** | ✓ | ✓ | Requires connection |
-| **Primary role** | In-memory graph library | Local knowledge-analysis workbench | Operational graph database |
+<table>
+  <thead>
+    <tr>
+      <th scope="col">Aspect</th>
+      <th scope="col">NetworkX</th>
+      <th scope="col">GraphForge</th>
+      <th scope="col">Neo4j / Memgraph</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th scope="row">Setup</th>
+      <td>Python package</td>
+      <td>Embedded package</td>
+      <td>Run a server</td>
+    </tr>
+    <tr>
+      <th scope="row">Query language</th>
+      <td>Python API</td>
+      <td><strong>Full openCypher</strong></td>
+      <td>Full Cypher</td>
+    </tr>
+    <tr>
+      <th scope="row">Persistence</th>
+      <td>Manual</td>
+      <td><strong>Parquet project directory</strong></td>
+      <td>Native</td>
+    </tr>
+    <tr>
+      <th scope="row">Results</th>
+      <td>Python objects</td>
+      <td><strong>Apache Arrow Tables</strong></td>
+      <td>Driver rows</td>
+    </tr>
+    <tr>
+      <th scope="row">Notebook-friendly</th>
+      <td>✓</td>
+      <td>✓</td>
+      <td>Requires connection</td>
+    </tr>
+    <tr>
+      <th scope="row">Primary role</th>
+      <td>In-memory graph library</td>
+      <td>Local knowledge-analysis workbench</td>
+      <td>Operational graph database</td>
+    </tr>
+  </tbody>
+</table>
 
 Use GraphForge for knowledge graphs, citation networks, LLM output storage, repository-aware
 analysis, and social-network research. Use an operational database for high-throughput,
@@ -129,9 +169,10 @@ knowledge, checkpoint, and compatibility contracts.
 | Page | Job |
 |---|---|
 | [Documentation map](README.md) | Understand the public information architecture |
-| [Contributing](development/contributing.md) | Develop and send focused changes |
+| [Contributing](development/contributing.md) | Prerequisites, validation, and focused PRs |
 | [Testing](engineering/TESTING.md) | See how GraphForge proves behavior |
-| [Publishing](engineering/PUBLISHING.md) | Follow package and release boundaries |
 | [Roadmap](releases/roadmap.md) | Review current and planned product surfaces |
+| [Publishing](engineering/PUBLISHING.md) | Package destinations and release sequence |
+| [Release process](development/release-process.md) | Operator checklist for cutting a release |
 
 GraphForge is open source under the [Apache License 2.0](legal/licensing.md).

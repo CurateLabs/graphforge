@@ -1,7 +1,7 @@
 <h1 align="center">GraphForge</h1>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg" alt="GraphForge v0.5 development line" /></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5.1-F59E0B.svg" alt="GraphForge v0.5.1" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
   <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
@@ -50,7 +50,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | Embedded package (v0.5 registries pending) | Run a server |
+| **Setup** | `pip install` | Embedded package (`graphforge==0.5.1`) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
@@ -71,21 +71,42 @@ aggregations remain edge-count bound. See scale limits for measured ceilings.*
 
 ## Installation
 
-GraphForge v0.5 packages are not published yet. The `graphforge` package currently
-visible on PyPI is the legacy v0.4.0 line, and the v0.5 Node and CLI packages are
-not yet available from npm. Build the current Rust-owned engine from source:
+Install GraphForge **v0.5.1** from PyPI or npm. Pin the release version — PyPI
+also lists an unrelated pure-Python `graphforge` **0.4.0**; do not confuse it
+with the CurateLabs native engine.
+
+**pip**
 
 ```bash
-git clone https://github.com/CurateLabs/graphforge.git
-cd graphforge
-uv sync --dev
-maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
+```
+
+**npm**
+
+```bash
+npm install @curatelabs/graphforge@0.5.1
+```
+
+**pnpm**
+
+```bash
+pnpm add @curatelabs/graphforge@0.5.1
+```
+
+```bash
+python -c "import graphforge; print(graphforge.__version__)"  # 0.5.1…
 ```
 
 **Requirements:** Python 3.10–3.14
 
-See the [installation guide](docs/guide/installation.md) for Node setup, source-build
-requirements, verification, and registry status.
+See the [installation guide](docs/guide/installation.md) for source builds
+and fuller verification.
 
 ### Ways to use GraphForge
 
@@ -317,9 +338,14 @@ heads and stale commits before any platform matrix build starts.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| **v0.5.0** | Rust core, Arrow results, Parquet projects, seven analyst verbs | **Development line** |
-| v0.5.1 | Swift + Kotlin bindings (UniFFI) | Planned |
+| **v0.5.1** | Coordinated release across crates, PyPI, npm, CLI, and docs | **Current** |
+| v0.5.x | Swift + Kotlin bindings (UniFFI) and follow-on surfaces | Planned |
 | v1.0 | Long-term API stability commitment | Future |
+
+**Next steps:** [install](docs/guide/installation.md) → [quick start](docs/guide/quickstart.md)
+→ [docs site](https://docs.graphforge.sh/). Contributors start at
+[Contributing](docs/development/contributing.md); operators at
+[Publishing](docs/engineering/PUBLISHING.md).
 
 See [docs/releases/roadmap.md](docs/releases/roadmap.md) for delivery detail.
 Release notes accumulate in [CHANGELOG.md](CHANGELOG.md).

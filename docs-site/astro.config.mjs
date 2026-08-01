@@ -22,6 +22,14 @@ export default defineConfig({
         baseUrl: 'https://github.com/CurateLabs/graphforge/edit/main/docs/',
       },
       customCss: ['./src/styles/custom.css'],
+      // Full EC options (light fg/bg, frames, customizeTheme) live in ec.config.mjs.
+      expressiveCode: {
+        minSyntaxHighlightingColorContrast: 10,
+        styleOverrides: {
+          codeFontWeight: '500',
+        },
+      },
+
       // Published nav is reader-journey ordered (Diátaxis). On-disk trees remain
       // Guide / Book / Reference; slugs are unchanged so prior URLs stay stable.
       sidebar: [
@@ -79,17 +87,20 @@ export default defineConfig({
                   slug: 'book/architecture/canonical-fingerprints-v1',
                 },
                 {
-                  label: 'M20 Immutable Knowledge Ledger',
+                  label: 'Immutable Knowledge Ledger',
                   slug: 'book/architecture/knowledge-ledger',
                 },
-                { label: 'M20 Public API v1', slug: 'book/architecture/m20-public-api-v1' },
+                {
+                  label: 'Knowledge Public API',
+                  slug: 'book/architecture/m20-public-api-v1',
+                },
                 { label: 'AST & Planning', slug: 'book/architecture/ast-and-planning' },
                 { label: 'Execution Model', slug: 'book/architecture/execution-model' },
                 { label: 'Algorithms', slug: 'book/architecture/algorithms' },
                 { label: 'Architecture Refactor v0.5', slug: 'book/architecture/refactor-v0-5' },
                 { label: 'Embedding v1', slug: 'book/architecture/embedding-v1' },
                 {
-                  label: 'M18 Invocation Descriptor v1',
+                  label: 'Analyst Invocation Descriptor',
                   slug: 'book/architecture/m18-invocation-descriptor-v1',
                 },
               ],
@@ -168,16 +179,17 @@ export default defineConfig({
             { label: 'Contributing', slug: 'development/contributing' },
             { label: 'Workflow', slug: 'development/workflow' },
             { label: 'Testing Strategy', slug: 'development/testing' },
-            { label: 'Release Load Matrix', slug: 'development/release-load-matrix' },
+            { label: 'Product roadmap', slug: 'releases/roadmap' },
+            { label: 'Publishing', slug: 'engineering/publishing' },
             { label: 'Release Process', slug: 'development/release-process' },
             { label: 'Publication Order', slug: 'development/publication-order' },
+            { label: 'Release Workflows', slug: 'development/release-workflows' },
+            { label: 'Release Strategy', slug: 'development/release-strategy' },
+            { label: 'Release Load Matrix', slug: 'development/release-load-matrix' },
             {
               label: 'Clean-environment verification',
               slug: 'development/clean-environment-verification',
             },
-            { label: 'Release Strategy', slug: 'development/release-strategy' },
-            { label: 'Release Workflows', slug: 'development/release-workflows' },
-            { label: 'Product roadmap', slug: 'releases/roadmap' },
           ],
         },
         {
@@ -216,7 +228,7 @@ export default defineConfig({
                   slug: 'adr/0011-dynamic-heterogeneous-values',
                 },
                 {
-                  label: '0012 — M20/M21 Domain Ownership',
+                  label: '0012 — Knowledge & Epistemic Domains',
                   slug: 'adr/0012-m20-domain-ownership',
                 },
                 {

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a Node Plotly.js visualization example over the shared karate projection,
+  matching the Python Plotly adapter (circular layout seed `42`, CDN HTML +
+  figure JSON) so Plotly is covered in both runtimes (Refs #298).
+- Add an opt-in visualization limits stress harness over the shared #298
+  projection contract (Plotly Python, Plotly.js, Jaal, PyVis, Cytoscape.js,
+  Sigma.js) with a frozen size ladder, dispatch-only CI-class evidence
+  workflow, and honest comparison report — never a PR/push/scheduled/required/
+  release gate (#299).
+- Align public installation guidance with **v0.5.1**; pin install examples to
+  `graphforge==0.5.1` / `@curatelabs/graphforge@0.5.1` (#197).
+- Polish M1-facing reader journeys: retire unexplained milestone/analyst
+  shorthand on entry points and nav labels, reorder contribute/operate next
+  steps, and keep audit terminology where operators need exact workflow names
+  (#301).
+- Use final shipped voice for v0.5.1 install and release wording (no
+  pre-publish hedges in public docs) (#301).
+
 ## [0.5.1] - 2026-08-01
 
 - Freeze Cargo, Python, Node/native npm, CLI, and agent-skills surfaces at

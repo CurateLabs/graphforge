@@ -29,7 +29,7 @@ A knowledge graph provides:
 | Feature | GraphForge | Neo4j |
 |---------|-----------|-------|
 | **Deployment** | Embedded in Python process | Requires server setup |
-| **Setup** | `pip install graphforge` | Install server, configure ports, manage service |
+| **Setup** | `pip install "graphforge==0.5.1"` | Install server, configure ports, manage service |
 | **Integration** | Native Python API | HTTP API or driver |
 | **Agent workflow** | Direct in-process access | Network calls add latency |
 | **Development** | Zero config, instant start | Configuration, connection strings |
@@ -436,7 +436,7 @@ def get_authorized_tools(gf, user_role):
 - **Debugging**: Use standard Python debuggers and tools
 
 ### 3. Development Velocity
-- **Instant setup**: `pip install graphforge` and you're running
+- **Instant setup**: `pip install "graphforge==0.5.1"` and you're running
 - **Rapid iteration**: No server restarts or connection management
 - **Portable**: Works in notebooks, scripts, containers, serverless
 
@@ -476,8 +476,16 @@ def get_authorized_tools(gf, user_role):
 
 ### Installation
 
+**pip**
+
 ```bash
-pip install graphforge
+pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
 ```
 
 ### Quick Example

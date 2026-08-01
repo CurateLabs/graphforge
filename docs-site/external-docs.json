@@ -6,7 +6,11 @@
     {
       "issue": "#279",
       "reason": "Use the Curate Labs-owned npm scope for the v0.5.0 release.",
-      "sources": ["commands.md", "install.md", "overview.md"]
+      "sources": [
+        "commands.md",
+        "install.md",
+        "overview.md"
+      ]
     }
   ],
   "pages": [
@@ -18,7 +22,7 @@
     {
       "source": "install.md",
       "destination": "guide/vscode-extension/install.md",
-      "sha256": "7c76f70a82eb21c90e2a0d81ffaa9f806d7f1e287619aba4abfee76e3c28dcf5"
+      "sha256": "285ebcd8420c21e5116086278d5ef99cd63c0d05e14a6d7d9cfea805add6e6b0"
     },
     {
       "source": "commands.md",
