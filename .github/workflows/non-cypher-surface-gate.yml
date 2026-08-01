@@ -141,7 +141,7 @@ jobs:
           )
           PY
 
-      - name: Save Rust report for M22
+      - name: Save Rust report for M1 certification
         uses: actions/cache/save@v6
         with:
           path: non-cypher-evidence/

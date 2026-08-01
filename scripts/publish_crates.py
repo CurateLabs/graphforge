@@ -82,7 +82,7 @@ def owner_logins(name: str) -> set[str]:
     return {owner["login"] for owner in payload.get("users", [])}
 
 
-def package_checksum(name: str) -> str:
+def package_checksum(name: str, expected_checksum: str | None = None) -> str:
     run(
         [
             "cargo",
@@ -98,7 +98,13 @@ def package_checksum(name: str) -> str:
     archive = target_dir / "package" / f"{name}-{VERSION}.crate"
     if not archive.is_file():
         raise RuntimeError(f"cargo package did not create {archive}")
-    return hashlib.sha256(archive.read_bytes()).hexdigest()
+    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if expected_checksum is not None and checksum != expected_checksum:
+        raise RuntimeError(
+            f"{name} {VERSION} packaged checksum {checksum} differs from "
+            f"the certified release record {expected_checksum}"
+        )
+    return checksum
 
 
 def wait_for_version(name: str, checksum: str, timeout_seconds: int) -> None:
@@ -117,8 +123,13 @@ def wait_for_version(name: str, checksum: str, timeout_seconds: int) -> None:
     raise RuntimeError(f"timed out waiting for crates.io to index {name} {VERSION}")
 
 
-def publish_one(name: str, *, timeout_seconds: int) -> str:
-    checksum = package_checksum(name)
+def publish_one(
+    name: str,
+    *,
+    timeout_seconds: int,
+    expected_checksum: str | None = None,
+) -> str:
+    checksum = package_checksum(name, expected_checksum)
     existing = version_record(name)
     if existing is not None:
         registry_checksum = existing.get("checksum")
@@ -142,6 +153,49 @@ def publish_one(name: str, *, timeout_seconds: int) -> str:
     return outcome
 
 
+def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str, str]:
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot read release record {record_path}: {error}") from error
+    if record.get("schema") != "graphforge-release-record-v1":
+        raise RuntimeError("unexpected release record schema")
+    if record.get("version") != VERSION or record.get("tag") != f"v{VERSION}":
+        raise RuntimeError("release record version/tag does not match the Cargo version")
+    if (
+        record.get("commit_sha")
+        != subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+    ):
+        raise RuntimeError("release record commit does not match the checked-out commit")
+
+    checksums: dict[str, str] = {}
+    for item in record.get("artifacts", []):
+        if item.get("surface") != "crates":
+            continue
+        name = item.get("name")
+        relative = item.get("path")
+        checksum = item.get("sha256")
+        if not all(isinstance(value, str) for value in (name, relative, checksum)):
+            raise RuntimeError("release record contains an invalid crates.io artifact")
+        if name in checksums:
+            raise RuntimeError(f"release record contains duplicate crate {name}")
+        archive = artifacts_dir / relative
+        if not archive.is_file():
+            raise RuntimeError(f"certified crate archive is missing: {relative}")
+        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if actual != checksum:
+            raise RuntimeError(f"certified crate archive checksum mismatch: {relative}")
+        checksums[name] = checksum
+    return checksums
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -150,7 +204,21 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="Seconds to wait for each successful upload to appear in crates.io",
     )
+    parser.add_argument(
+        "--release-record",
+        type=Path,
+        help="Certified graphforge-release-record-v1 JSON",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        help="Root containing the certified artifact paths",
+    )
     args = parser.parse_args(argv)
+
+    if (args.release_record is None) != (args.artifacts_dir is None):
+        print("--release-record and --artifacts-dir must be provided together", file=sys.stderr)
+        return 2
 
     if not os.environ.get("CARGO_REGISTRY_TOKEN", "").strip():
         print("CARGO_REGISTRY_TOKEN is required", file=sys.stderr)
@@ -162,6 +230,16 @@ def main(argv: list[str] | None = None) -> int:
     if len(order) != 15:
         print(f"refusing unexpected publish-set size: {len(order)}", file=sys.stderr)
         return 2
+
+    expected_checksums: dict[str, str] = {}
+    if args.release_record is not None and args.artifacts_dir is not None:
+        expected_checksums = release_record_checksums(args.release_record, args.artifacts_dir)
+        if set(expected_checksums) != set(order):
+            print(
+                "release record crates do not match the complete publication plan",
+                file=sys.stderr,
+            )
+            return 2
 
     check = subprocess.run(
         [sys.executable, str(PLAN_SCRIPT), "check"],
@@ -176,7 +254,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {index:02d}. {name}")
 
     for name in order:
-        publish_one(name, timeout_seconds=args.index_timeout)
+        publish_one(
+            name,
+            timeout_seconds=args.index_timeout,
+            expected_checksum=expected_checksums.get(name),
+        )
 
     print(f"crates.io publication complete: {len(order)} crates at {VERSION}")
     return 0

@@ -8,15 +8,23 @@ permissions:
   contents: read
 
 jobs:
-  license-compliance:
-    name: Release publication preflight
+  candidate-preflight:
+    name: Verify immutable M1 release candidate
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      candidate_run_id: ${{ steps.candidate.outputs.run_id }}
+      release_sha: ${{ steps.source.outputs.release_sha }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
 
       - name: Require the certified current main commit and release versions
+        id: source
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -25,10 +33,12 @@ jobs:
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$RELEASE_SHA"
           test "$(git rev-parse refs/remotes/origin/main)" = "$RELEASE_SHA"
           python3 scripts/ci/release-publish-preflight.py \
             --tag "$RELEASE_TAG" \
             --expected-sha "$RELEASE_SHA"
+          printf 'release_sha=%s\n' "$RELEASE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Verify release license policy
         run: python3 scripts/license_check.py --report license-compliance-report.json
@@ -38,331 +48,200 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      # This runs before any PyPI or npm write. A missing/invalid token therefore
-      # fails the release without leaving only the Python surface published.
-      - name: Verify npm publication identity
+      - name: Verify npm publication identity before any registry write
         run: npm whoami
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # Build the native abi3 wheel per OS. abi3-py310 → one wheel per OS covers
-  # CPython 3.10+; the binding's pyproject is the canonical `graphforge` dist.
-  build-wheels:
-    name: Build wheel on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    needs: license-compliance
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [blacksmith-4vcpu-ubuntu-2404, blacksmith-6vcpu-macos-15, blacksmith-4vcpu-windows-2025]
-    steps:
-      - uses: actions/checkout@v7
+      - name: Resolve successful same-SHA candidate run
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.source.outputs.release_sha }}
+        run: |
+          run_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/binding-release-candidate.yml/runs?event=workflow_dispatch&status=success&head_sha=$RELEASE_SHA&per_page=20" \
+            --jq '.workflow_runs | map(select(.head_sha == env.RELEASE_SHA)) | first | .id // empty')"
+          test -n "$run_id"
+          artifact_name="M1-Release-Candidate-$RELEASE_SHA"
+          artifact_count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+            --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length")"
+          test "$artifact_count" = 1
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
 
-      - name: Build the native wheel (maturin)
-        uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
-          manylinux: auto # builds the Linux wheel in a manylinux container
-          sccache: "false"
+      - name: Download exact-SHA candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.source.outputs.release_sha }}
+          CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.run_id }}
+        run: |
+          gh run download "$CANDIDATE_RUN_ID" \
+            --name "M1-Release-Candidate-$RELEASE_SHA" \
+            --dir candidate
 
-      - name: Save wheel for publish job
-        uses: actions/cache/save@v6
-        with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-${{ matrix.os }}
-          enableCrossOsArchive: true
+      - name: Validate candidate bytes and checksum record
+        env:
+          RELEASE_SHA: ${{ steps.source.outputs.release_sha }}
+        run: |
+          python3 scripts/ci/release-candidate.py validate \
+            --record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$RELEASE_SHA" \
+            --version 0.5.0
 
-  build-sdist:
-    name: Build sdist
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: license-compliance
-    steps:
-      - uses: actions/checkout@v7
+      - name: Attach checksum record without replacing different bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          asset_name="v0.5.0-artifacts.json"
+          asset_count="$(gh release view "$RELEASE_TAG" --json assets \
+            --jq "[.assets[] | select(.name == \"$asset_name\")] | length")"
+          if test "$asset_count" = 0; then
+            gh release upload "$RELEASE_TAG" "candidate/$asset_name"
+          else
+            test "$asset_count" = 1
+            mkdir -p existing-release-asset
+            gh release download "$RELEASE_TAG" --pattern "$asset_name" \
+              --dir existing-release-asset
+            cmp "candidate/$asset_name" "existing-release-asset/$asset_name"
+          fi
 
-      - name: Build sdist (maturin)
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
-
-      - name: Save sdist for publish job
-        uses: actions/cache/save@v6
-        with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-sdist
-          enableCrossOsArchive: true
-
-  publish:
-    name: Publish to PyPI
-    needs: [build-wheels, build-sdist]
+  publish-pypi:
+    name: Publish exact candidate to PyPI
+    needs: candidate-preflight
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
-      id-token: write # PyPI trusted publishing (OIDC) — no API token needed
+      actions: read
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/cache/restore@v6
+      - uses: actions/checkout@v7
         with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-ubuntu-2404
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-blacksmith-6vcpu-macos-15
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-blacksmith-4vcpu-windows-2025
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - uses: actions/cache/restore@v6
-        with:
-          path: dist
-          key: publish-python-${{ github.run_id }}-sdist
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
+          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
 
       - uses: astral-sh/setup-uv@v9.0.0
 
-      - name: Publish to PyPI
-        run: uv publish dist/*
+      - name: Download exact-SHA candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
+          CANDIDATE_RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
+        run: >-
+          gh run download "$CANDIDATE_RUN_ID"
+          --name "M1-Release-Candidate-$RELEASE_SHA"
+          --dir candidate
 
-  # ---- Node binding (@graphforge/node) ----
-  # Cross-build the napi addon for every target, then publish to npm. This only
-  # runs on a release; the cross-compilation (esp. the Linux-arm `--use-napi-cross`
-  # path) and npm auth are validated at the first real release.
-  build-node:
-    name: Build addon (${{ matrix.settings.target }})
-    runs-on: ${{ matrix.settings.host }}
-    needs: license-compliance
-    strategy:
-      fail-fast: false
-      matrix:
-        settings:
-          - { host: blacksmith-6vcpu-macos-15, target: x86_64-apple-darwin }
-          - { host: blacksmith-6vcpu-macos-15, target: aarch64-apple-darwin }
-          - { host: blacksmith-4vcpu-ubuntu-2404, target: x86_64-unknown-linux-gnu }
-          - { host: blacksmith-4vcpu-ubuntu-2404, target: aarch64-unknown-linux-gnu, cross: "--use-napi-cross", arm_cflags: "-D__ARM_ARCH=8" }
-          - { host: blacksmith-4vcpu-windows-2025, target: x86_64-pc-windows-msvc }
+      - name: Revalidate candidate
+        env:
+          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
+        run: >-
+          python3 scripts/ci/release-candidate.py validate
+          --record candidate/v0.5.0-artifacts.json
+          --artifacts-dir candidate/release-artifacts
+          --expected-sha "$RELEASE_SHA"
+          --version 0.5.0
+
+      - name: Publish the recorded Python files
+        run: >-
+          uv publish
+          --check-url https://pypi.org/simple/
+          candidate/release-artifacts/python/*
+
+  publish-npm:
+    name: Publish exact candidate to npm
+    needs: [candidate-preflight, publish-pypi]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
 
       - uses: actions/setup-node@v6
         with:
           node-version: "20"
+          registry-url: "https://registry.npmjs.org"
 
       - uses: pnpm/action-setup@v4
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.96.0"
-          targets: ${{ matrix.settings.target }}
+      - name: Install release verification dependencies
+        run: pnpm install --frozen-lockfile
 
-      - name: Install workspace dependencies
-        run: pnpm install
-
-      - name: Build the addon for ${{ matrix.settings.target }}
+      - name: Download exact-SHA candidate
         env:
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.settings.arm_cflags || '' }}
-        run: pnpm --filter @graphforge/node exec napi build --platform --release --target ${{ matrix.settings.target }} ${{ matrix.settings.cross || '' }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
+          CANDIDATE_RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
+        run: >-
+          gh run download "$CANDIDATE_RUN_ID"
+          --name "M1-Release-Candidate-$RELEASE_SHA"
+          --dir candidate
 
-      - name: Stage addon for publish job
+      - name: Publish recorded npm tarballs in dependency order
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
         run: |
-          mkdir -p node-artifacts
-          cp crates/graphforge-bindings-node/*.node node-artifacts/
+          npm whoami
+          python3 scripts/publish_npm_artifacts.py \
+            --release-record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$RELEASE_SHA" \
+            --version 0.5.0 \
+            --group native
+          node scripts/ci/verify-node-cli-release-package.mjs
+          pnpm --filter @graphforge/cli test:offline
+          python3 scripts/publish_npm_artifacts.py \
+            --release-record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$RELEASE_SHA" \
+            --version 0.5.0 \
+            --group cli
+          pnpm --filter @graphforge/agent-skills test:offline
+          python3 scripts/publish_npm_artifacts.py \
+            --release-record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$RELEASE_SHA" \
+            --version 0.5.0 \
+            --group skills
 
-      - name: Save addon for publish job
-        uses: actions/cache/save@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-${{ matrix.settings.target }}
-          enableCrossOsArchive: true
-
-  publish-node:
-    name: Publish to npm
-    needs: [build-node, publish]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: crates/graphforge-bindings-node
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install workspace dependencies
-        run: pnpm install
-        working-directory: .
-
-      - name: Restore x86_64 macOS addon
-        uses: actions/cache/restore@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-x86_64-apple-darwin
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore aarch64 macOS addon
-        uses: actions/cache/restore@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-aarch64-apple-darwin
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore x86_64 Linux addon
-        uses: actions/cache/restore@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-x86_64-unknown-linux-gnu
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore aarch64 Linux addon
-        uses: actions/cache/restore@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-aarch64-unknown-linux-gnu
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-      - name: Restore Windows addon
-        uses: actions/cache/restore@v6
-        with:
-          path: node-artifacts
-          key: publish-node-${{ github.run_id }}-x86_64-pc-windows-msvc
-          fail-on-cache-miss: true
-          enableCrossOsArchive: true
-
-      - name: Stage restored addons
-        run: |
-          mkdir -p artifacts
-          cp ../../node-artifacts/*.node artifacts/
-
-      - name: Assemble per-platform npm packages
-        # create-npm-dirs scaffolds npm/<platform>/, artifacts moves each built
-        # .node into the matching platform package.
-        run: |
-          pnpm exec napi create-npm-dirs
-          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
-          python3 ../../../scripts/ci/validate-napi-artifacts.py \
-            --npm-dir npm --manifest package.json
-
-      - name: Verify npm publishing identity
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish platform packages and main package
-        # npm invokes prepublishOnly exactly once. napi then publishes each
-        # generated public platform package and wires those exact versions into
-        # the main package before npm publishes it.
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  # ---- NPX lifecycle CLI (@graphforge/cli) ----
-  publish-node-cli:
-    name: Publish GraphForge CLI to npm
-    needs: [publish, publish-node]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: packages/cli
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install workspace dependencies
-        run: pnpm install
-        working-directory: .
-
-      - name: Offline pack smoke before publish
-        run: pnpm --filter @graphforge/cli test:offline
-        working-directory: .
-
-      - name: Verify clean install against published native package
-        run: node scripts/ci/verify-node-cli-release-package.mjs
-        working-directory: .
-
-      - name: Verify npm publishing identity
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @graphforge/cli
-        run: pnpm publish --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  # ---- NPX agent skills (@graphforge/agent-skills) ----
-  publish-agent-skills:
-    name: Publish agent-skills to npm
-    needs: publish-node-cli
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: read
-    defaults:
-      run:
-        working-directory: packages/agent-skills
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - uses: pnpm/action-setup@v4
-
-      - name: Install workspace dependencies
-        run: pnpm install
-        working-directory: .
-
-      - name: Offline pack smoke before publish
-        run: pnpm --filter @graphforge/agent-skills test:offline
-        working-directory: .
-
-      - name: Verify npm publishing identity
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @graphforge/agent-skills
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-  # ---- Rust crates (crates.io) ----
-  # Publish last so an earlier PyPI/npm failure cannot leave only a Rust
-  # surface behind. The publisher is checksum-safe and resumable.
   publish-crates:
-    name: Publish Rust crates to crates.io
-    needs: publish-agent-skills
+    name: Publish recorded Rust crates to crates.io
+    needs: [candidate-preflight, publish-npm]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.candidate-preflight.outputs.release_sha }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
+
+      - name: Download exact-SHA candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
+          CANDIDATE_RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
+        run: >-
+          gh run download "$CANDIDATE_RUN_ID"
+          --name "M1-Release-Candidate-$RELEASE_SHA"
+          --dir candidate
 
       - name: Publish the complete ordered Rust surface
-        run: python3 scripts/publish_crates.py
+        run: >-
+          python3 scripts/publish_crates.py
+          --release-record candidate/v0.5.0-artifacts.json
+          --artifacts-dir candidate/release-artifacts
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

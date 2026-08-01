@@ -234,11 +234,18 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     assert "actions/cache@v6" not in node_job
     assert "actions/cache/restore@v6" not in node_job
     assert "actions/cache/save@v6" not in node_job
-    assert node_job.count("actions/upload-artifact@v7") == 1
+    assert node_job.count("actions/upload-artifact@v7") == 2
     assert_active_lines(
         node_job,
         "name: binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}",
         "path: binding-rc-reports/${{ matrix.report_target }}.json",
+        "if-no-files-found: error",
+        "retention-days: 1",
+    )
+    assert_active_lines(
+        node_job,
+        "name: binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}",
+        "path: crates/graphforge-bindings-node/*.node",
         "if-no-files-found: error",
         "retention-days: 1",
     )
@@ -579,21 +586,20 @@ def main() -> None:
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in package_validation_step
     assert (ROOT / "scripts/ci/validate-napi-artifacts.py").samefile(ARTIFACT_VALIDATOR)
 
-    publish_workflow_text = PUBLISH_WORKFLOW.read_text()
-    publish_wheel_job = publish_workflow_text.split("  build-wheels:", 1)[1].split(
-        "  build-sdist:", 1
-    )[0]
-    post_maturin = publish_wheel_job.split("uses: PyO3/maturin-action@v1", 1)[1]
-    assert "cargo " not in post_maturin.lower()
-    assert "tests/*.py" not in post_maturin
-    assert "native contract" not in post_maturin.lower()
-    publish_transfer = workflow_step(post_maturin, "uses: actions/cache/save@v6")
-    assert_active_lines(
-        publish_transfer,
-        "uses: actions/cache/save@v6",
-        "path: dist",
-        "key: publish-python-${{ github.run_id }}-${{ matrix.os }}",
+    assert "Save tested wheel for release-candidate assembly" in rc_workflow_text
+    assert "Save tested addon for release-candidate assembly" in rc_workflow_text
+    assert "Assemble immutable M1 release candidate" in rc_workflow_text
+    assert "scripts/ci/release-candidate.py validate" in rc_workflow_text
+    assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
+        rc_workflow_text
     )
+
+    publish_workflow_text = PUBLISH_WORKFLOW.read_text()
+    assert "M1-Release-Candidate-$RELEASE_SHA" in publish_workflow_text
+    assert "PyO3/maturin-action" not in publish_workflow_text
+    assert "napi build" not in publish_workflow_text
+    assert "candidate/release-artifacts/python/*" in publish_workflow_text
+    assert "--check-url https://pypi.org/simple/" in publish_workflow_text
 
     with tempfile.TemporaryDirectory() as directory:
         temp = Path(directory)
@@ -714,7 +720,7 @@ def main() -> None:
         ]
         assert wrapper_log.read_text().splitlines()
 
-    for workflow in (RC_WORKFLOW, PUBLISH_WORKFLOW):
+    for workflow in (RC_WORKFLOW,):
         workflow_text = workflow.read_text()
         assert "run build --" not in workflow_text, (
             f"{workflow.name} forwards napi options to Cargo after `--`"
@@ -737,12 +743,17 @@ def main() -> None:
         assert "arm_cflags || ''" in workflow_text, (
             f"{workflow.name} must source target-scoped CFLAGS from its matrix entry"
         )
-        assert workflow_text.count(ARTIFACT_COMMAND) == 1, (
+        assert workflow_text.count(ARTIFACT_COMMAND) == 2, (
             f"{workflow.name} must use the shared explicit napi artifact command"
         )
         assert "napi artifacts --dir" not in workflow_text, (
             f"{workflow.name} uses the unsupported napi artifacts --dir option"
         )
+
+    publish_text = PUBLISH_WORKFLOW.read_text()
+    assert "exec napi build --platform --release" not in publish_text
+    assert ARTIFACT_COMMAND not in publish_text
+    assert "M1-Release-Candidate-$RELEASE_SHA" in publish_text
 
     pnpm = shutil.which("pnpm")
     assert pnpm is not None, "pnpm is required for napi CLI contract validation"

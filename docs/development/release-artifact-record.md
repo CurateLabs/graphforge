@@ -17,9 +17,11 @@ commits under the same version.
 ## How to record
 
 1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #192).
-2. Build or collect artifacts for that SHA into a directory (wheels, sdists,
-   npm tarballs, all 15 `.crate` archives, and SBOM/provenance if emitted).
-3. Run:
+2. Dispatch `Binding Release Candidate` for that exact current `main` SHA. Its
+   final job builds `M1-Release-Candidate-<sha>` from the tested wheels/addons,
+   then adds the sdist, npm tarballs, all 15 `.crate` archives, dry-run evidence,
+   and license reports.
+3. The workflow runs the equivalent of:
 
 ```bash
 python3 scripts/record_release_artifacts.py \
@@ -29,7 +31,8 @@ python3 scripts/record_release_artifacts.py \
   --notes "RC sha=<40-char> built via <workflow/run>"
 ```
 
-4. Attach the JSON (or its checksums table) to the GitHub Release (#194).
+4. `publish.yaml` validates the complete bundle and attaches the JSON to the
+   GitHub Release before the first registry write (#194).
 5. Post-release clean-env verification (#167) matches `sha256` values from this record.
 
 The generated document uses the same `graphforge-release-record-v1` schema

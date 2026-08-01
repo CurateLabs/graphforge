@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check release-notes package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -26,6 +26,9 @@ license-check:  ## Verify Apache-2.0 metadata and distributed copies
 
 release-version-check:  ## Verify Cargo/Python/Node/skills versions align
 	python3 scripts/set_release_version.py --check
+
+release-notes:  ## Extract the canonical CHANGELOG section for VERSION
+	python3 scripts/ci/release-notes.py $${VERSION:?set VERSION} --out $${OUT:-target/release-notes-v$${VERSION}.md}
 
 package-license-verify:  ## Verify packaged Cargo/npm/Python artifacts include LICENSE+NOTICE
 	python3 scripts/verify_package_licenses.py
@@ -292,9 +295,9 @@ bulk-construction-conformance:  ## Run same-SHA Rust/Python/Node bulk constructi
 
 .PHONY: bulk-construction-conformance-check bulk-construction-conformance
 
-.PHONY: m22-non-cypher-gate-check
-m22-non-cypher-gate-check:  ## Validate the final M22 non-Cypher aggregate gate
-	python3 scripts/ci/test-m22-non-cypher-surface-gate.py
+.PHONY: m1-release-certification-check
+m1-release-certification-check:  ## Validate the final M1 release certification aggregate gate
+	python3 scripts/ci/test-m1-release-certification.py
 
 cargo-check:  ## Type-check all Rust workspace crates (fast)
 	cargo check --workspace

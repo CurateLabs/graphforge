@@ -1,6 +1,6 @@
 # Release-certification only for #742 publication readiness.
 # Not a close gate for child implementation/construction issues (AGENTS.md).
-name: M22 Non-Cypher Surface Gate
+name: M1 Release Certification Gate
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: m22-non-cypher-${{ inputs.commit_sha }}
+  group: m1-release-certification-${{ inputs.commit_sha }}
   cancel-in-progress: true
 
 jobs:
@@ -62,7 +62,7 @@ jobs:
           mkdir -p component-validation
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > component-validation/rust-run.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > component-validation/binding-run.json
-          python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
+          python3 scripts/ci/m1-release-certification.py validate-runs \
             --rust-run component-validation/rust-run.json \
             --binding-run component-validation/binding-run.json \
             --expected-sha "$EXPECTED_SHA" \
@@ -84,7 +84,7 @@ jobs:
           requested = os.environ["REQUESTED_SHA"]
           identity = requested if re.fullmatch(r"[0-9a-f]{40}", requested) else "invalid-sha"
           report = {
-              "schema": "graphforge-m22-non-cypher-surface-gate/1",
+              "schema": "graphforge-m1-release-certification/1",
               "source_sha": identity,
               "status": "failed",
               "sanitized_failure": "current-main or component-run validation failed",
@@ -129,7 +129,7 @@ jobs:
         uses: useblacksmith/stickydisk@v1
         with:
           # Per-certification workspace; cleanup_load_disk deletes it after load.
-          key: ${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3
+          key: ${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3
           path: target
       - name: Install workspace dependencies
         run: pnpm install
@@ -156,7 +156,7 @@ jobs:
         shell: bash
         run: |
           python3 scripts/ci/prepare-rustc-wrapper.py \
-            --platform m22-load-linux --contract m22-native-load-contracts
+            --platform m1-release-load-linux --contract m1-release-native-load-contracts
       - name: Prepare native load artifacts
         shell: bash
         run: |
@@ -187,9 +187,9 @@ jobs:
       - name: Execute fail-closed release load matrix
         shell: bash
         env:
-          GF_LOAD_WORK: ${{ runner.temp }}/graphforge-m22-load-work
-          GF_LOAD_OUTPUT: ${{ github.workspace }}/m22-load-evidence/report.json
-          TMPDIR: ${{ runner.temp }}/graphforge-m22-load-tmp
+          GF_LOAD_WORK: ${{ runner.temp }}/graphforge-m1-release-load-work
+          GF_LOAD_OUTPUT: ${{ github.workspace }}/m1-release-load-evidence/report.json
+          TMPDIR: ${{ runner.temp }}/graphforge-m1-release-load-tmp
         run: |
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
@@ -202,22 +202,22 @@ jobs:
       - name: Save load report for aggregate job
         uses: actions/cache/save@v6
         with:
-          path: m22-load-evidence
-          key: m22-load-${{ github.run_id }}
+          path: m1-release-load-evidence
+          key: m1-release-load-${{ github.run_id }}
 
   cleanup_load_disk:
-    name: Delete one-run M22 build disk
+    name: Delete one-run M1 certification build disk
     if: always()
     needs: load
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - name: Delete M22 build disk
+      - name: Delete M1 certification build disk
         uses: useblacksmith/stickydisk-delete@v1
         with:
-          delete-key: ${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3
+          delete-key: ${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3
 
   aggregate:
-    name: Aggregate final M22 non-Cypher evidence
+    name: Aggregate final M1 release certification evidence
     if: always() && needs.validate_source.result == 'success'
     needs: [validate_source, load, cleanup_load_disk]
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -239,7 +239,7 @@ jobs:
           mkdir -p evidence/component-validation-final
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUST_RUN_ID" > evidence/component-validation-final/rust-run.json
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BINDING_RUN_ID" > evidence/component-validation-final/binding-run.json
-          python3 scripts/ci/m22-non-cypher-surface-gate.py validate-runs \
+          python3 scripts/ci/m1-release-certification.py validate-runs \
             --rust-run evidence/component-validation-final/rust-run.json \
             --binding-run evidence/component-validation-final/binding-run.json \
             --expected-sha "$EXPECTED_SHA" \
@@ -257,16 +257,16 @@ jobs:
       - uses: actions/cache/restore@v6
         if: needs.load.result == 'success'
         with:
-          path: m22-load-evidence
-          key: m22-load-${{ github.run_id }}
+          path: m1-release-load-evidence
+          key: m1-release-load-${{ github.run_id }}
           fail-on-cache-miss: true
       - name: Validate and aggregate every required component
         if: needs.load.result == 'success'
         run: >-
-          python3 scripts/ci/m22-non-cypher-surface-gate.py aggregate
+          python3 scripts/ci/m1-release-certification.py aggregate
           --rust-report non-cypher-evidence/report.json
           --binding-report binding-rc-aggregate/report.json
-          --load-report m22-load-evidence/report.json
+          --load-report m1-release-load-evidence/report.json
           --run-validation evidence/component-validation-final/report.json
           --expected-sha "${{ needs.validate_source.outputs.evidence_sha }}"
           --load-run-id "${{ github.run_id }}"
@@ -282,7 +282,7 @@ jobs:
           python3 - <<'PY'
           import json, os
           report = {
-              "schema": "graphforge-m22-non-cypher-surface-gate/1",
+              "schema": "graphforge-m1-release-certification/1",
               "source_sha": os.environ["SOURCE_SHA"],
               "status": "failed",
               "sanitized_failure": "load job did not succeed: " + os.environ["LOAD_RESULT"],

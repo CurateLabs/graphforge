@@ -11,6 +11,11 @@ _Nothing yet._
 
 ## [0.5.0] - 2026-07-31
 
+- Preserve one exact-SHA M1 release-candidate bundle for 30 days, record and
+  validate every Python/npm/crates.io checksum before publication, publish the
+  recorded Python/npm bytes without rebuilding, bind crates.io packaging to the
+  same record, and add a non-publishing credential preflight plus ordered
+  operator runbook (#192).
 - Rename the complete Cargo workspace from `gf-*` / `gf_*` to the public
   `graphforge-*` / `graphforge_*` namespace, publish the 14 Rust libraries plus
   `graphforge-cli` to crates.io in dependency order, and keep the Python/Node
@@ -89,7 +94,7 @@ _Nothing yet._
 
 - Minimize Blacksmith CI storage by removing speculative caches from infrequent
   gates, sharing dependency caches by lockfile identity, and deleting the
-  one-run M22 build disk after certification (#207).
+  one-run M1 certification build disk after certification (#207).
 - Remove unconsumed CI artifacts and move required cross-job transfers to
   Blacksmith-backed cache storage, eliminating GitHub artifact-quota failures
   from the required CI Gate (#205).
@@ -207,7 +212,7 @@ the authoritative runnable corpus enforced by the BDD gate.
 
 - Record local host-native release load-matrix evidence (144/144 passed on
   `ec81fd8f…`) in [Release Load Matrix Results](docs/reference/load-matrix-results.md);
-  CI `M22-Load-Matrix-<sha>` upload for #2765 remains pending.
+  CI `M1-Release-Load-Matrix-<sha>` upload for #2765 remains pending.
 
 - Align release-load probe result fingerprints across bindings: Node canonicalizes
   whole floats as `1.0` (matching Python/Rust JSON), and the Rust probe uses the
@@ -221,7 +226,7 @@ the authoritative runnable corpus enforced by the BDD gate.
   keep `engineering/` contributor docs and ADRs under **Engineering** (not
   Understand), alongside Guide / Book / Reference / development (#2772).
 
-- After manylinux maturin on the M22 load sticky disk, reclaim `target/`
+- After manylinux maturin on the M1 release load sticky disk, reclaim `target/`
   ownership for the host runner so Cargo can open `.cargo-build-lock` (#2765).
 
 - Place Architecture Decision Records under **Engineering** in the published
@@ -368,11 +373,11 @@ the authoritative runnable corpus enforced by the BDD gate.
   Arrow/IPC equality, structured `GF_WRITER_BUSY` rejection before staging, and
   pinned-reader reopen visibility (#2416).
 
-- Build M22 release-load fixtures through atomic `publish_bulk_nodes` /
+- Build M1 release-load fixtures through atomic `publish_bulk_nodes` /
   `publish_bulk_edges` on Rust, Python, and Node so dense L/XL cases stay inside
   the project recovery publication bound instead of exhausting disk (#2431).
 
-- Add the manual, exact-current-main M22 non-Cypher surface gate that validates
+- Add the manual, exact-current-main M1 release certification gate that validates
   immutable Rust and cross-platform binding evidence before executing the
   standardized 144-case host load matrix and emitting one fail-closed aggregate
   artifact (#2431).
@@ -505,7 +510,7 @@ the authoritative runnable corpus enforced by the BDD gate.
   exact tagged Node `{ "$uuid": "..." }` projections for graph identity predicates
   (#2580).
 
-- Add the versioned M22 release-workflow registry, static validator, deterministic
+- Add the versioned M1 release-workflow registry, static validator, deterministic
   selected/all orchestrator, ontology taxonomy, and SHA-bound evidence envelope
   scaffolding (#2582).
 

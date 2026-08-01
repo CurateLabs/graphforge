@@ -22,14 +22,15 @@ assert mod.VERSION == "0.5.0"
 
 commands: list[list[str]] = []
 waits: list[tuple[str, str, int]] = []
-mod.package_checksum = lambda _name: "abc123"
+mod.package_checksum = lambda _name, expected=None: expected or "abc123"
 mod.owner_logins = lambda _name: {"DecisionNerd"}
 mod.run = commands.append
 mod.wait_for_version = lambda name, checksum, timeout: waits.append((name, checksum, timeout))
 
 mod.version_record = lambda _name: {"checksum": "abc123"}
 assert (
-    mod.publish_one("graphforge-core", timeout_seconds=30) == "already published; checksum matches"
+    mod.publish_one("graphforge-core", timeout_seconds=30, expected_checksum="abc123")
+    == "already published; checksum matches"
 )
 assert commands == []
 assert waits == []

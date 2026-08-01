@@ -168,6 +168,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Save tested wheel for release-candidate assembly
+        uses: actions/upload-artifact@v7
+        with:
+          name: binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
   node:
     name: Node RC (${{ matrix.target }})
     needs: validate_source
@@ -339,6 +347,14 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Save tested addon for release-candidate assembly
+        uses: actions/upload-artifact@v7
+        with:
+          name: binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}
+          path: crates/graphforge-bindings-node/*.node
+          if-no-files-found: error
+          retention-days: 1
+
   aggregate:
     name: Aggregate binding RC evidence
     if: always() && needs.validate_source.result == 'success'
@@ -367,8 +383,147 @@ jobs:
           --expected-sha "${{ needs.validate_source.outputs.evidence_sha }}"
           --output binding-rc-aggregate/report.json
 
-      - name: Save fail-closed aggregate for M22
+      - name: Save fail-closed aggregate for M1 certification
         uses: actions/cache/save@v6
         with:
           path: binding-rc-aggregate/report.json
           key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
+
+      - name: Retain aggregate publication evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
+          path: binding-rc-aggregate/report.json
+          if-no-files-found: error
+          retention-days: 30
+
+  release_candidate:
+    name: Assemble immutable M1 release candidate
+    needs: [validate_source, aggregate]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 90
+    env:
+      EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
+      CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate_source.outputs.evidence_sha }}
+
+      - name: Verify immutable checkout
+        shell: bash
+        run: |
+          [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Download exact-run tested wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binding-rc-wheel-${{ github.run_id }}-*
+          path: candidate/release-artifacts/python
+          merge-multiple: true
+
+      - name: Download exact-run tested Node addons
+        uses: actions/download-artifact@v8
+        with:
+          pattern: binding-rc-addon-${{ github.run_id }}-*
+          path: candidate/release-artifacts/node-addons
+          merge-multiple: true
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Record publication dry-runs
+        run: >-
+          python3 scripts/publish_dry_run.py
+          --surface npm,docs,python,cargo-package
+          --report candidate/release-artifacts/evidence/publication-dry-run.json
+
+      - name: Build Python source distribution
+        run: >-
+          uv run maturin sdist
+          --manifest-path crates/graphforge-bindings-py/Cargo.toml
+          --out candidate/release-artifacts/python
+
+      - name: Assemble and pack every npm package
+        shell: bash
+        run: |
+          mkdir -p candidate/release-artifacts/npm
+          mkdir -p crates/graphforge-bindings-node/artifacts
+          cp candidate/release-artifacts/node-addons/*.node \
+            crates/graphforge-bindings-node/artifacts/
+          pushd crates/graphforge-bindings-node
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
+          python3 ../../../scripts/ci/validate-napi-artifacts.py \
+            --npm-dir npm --manifest package.json
+          pnpm exec napi pre-publish -t npm --skip-optional-publish
+          for package_dir in npm/*; do
+            npm pack "$package_dir" --ignore-scripts \
+              --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          done
+          npm pack . --ignore-scripts \
+            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          popd
+          npm pack packages/cli --ignore-scripts \
+            --pack-destination candidate/release-artifacts/npm
+          npm pack packages/agent-skills --ignore-scripts \
+            --pack-destination candidate/release-artifacts/npm
+
+      - name: Package the complete Rust surface
+        shell: bash
+        run: |
+          mkdir -p candidate/release-artifacts/crates
+          python3 scripts/ci/crate-publish-plan.py check
+          while IFS= read -r crate; do
+            cargo package -p "$crate" --allow-dirty --no-verify
+            cp "target/release-candidate/package/${crate}-0.5.0.crate" \
+              candidate/release-artifacts/crates/
+          done < <(python3 scripts/ci/crate-publish-plan.py list)
+
+      - name: Record license and package evidence
+        run: |
+          python3 scripts/license_check.py \
+            --report candidate/release-artifacts/evidence/license-compliance-report.json
+          python3 scripts/verify_package_licenses.py \
+            --report candidate/release-artifacts/evidence/package-license-report.json
+
+      - name: Create and validate the immutable checksum record
+        run: |
+          python3 scripts/record_release_artifacts.py \
+            --version 0.5.0 \
+            --dist-dir candidate/release-artifacts \
+            --out candidate/v0.5.0-artifacts.json \
+            --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
+          python3 scripts/ci/clean-env-verify.py validate-release-record \
+            candidate/v0.5.0-artifacts.json
+          python3 scripts/ci/release-candidate.py validate \
+            --record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$EVIDENCE_SHA" \
+            --version 0.5.0
+
+      - name: Retain the release candidate for publication
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 30
