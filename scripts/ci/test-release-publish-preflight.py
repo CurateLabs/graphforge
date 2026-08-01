@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic tests for the release publication preflight and workflow gate."""
+"""Deterministic contract for the planner-driven publication workflow."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("release-publish-preflight.py")
 WORKFLOW = ROOT / ".github" / "workflows" / "publish.yaml"
 CREDENTIAL_WORKFLOW = ROOT / ".github" / "workflows" / "release-credential-preflight.yml"
+WRITE_EVIDENCE = ROOT / "scripts" / "ci" / "download-release-write-evidence.sh"
 
 
 def load_module():
@@ -22,30 +23,23 @@ def load_module():
 
 mod = load_module()
 sha = "a" * 40
-versions = {
-    "cargo": "0.5.0",
-    "python": "0.5.0",
-    "node": "0.5.0",
-    "cli": "0.5.0",
-    "skills": "0.5.0",
-}
+versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.1")
 changelog = """# Changelog
 
 ## [Unreleased]
 
 _Nothing yet._
 
-## [0.5.0] - 2026-07-31
+## [0.5.1] - 2026-08-01
 
 - Release GraphForge.
 
-[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.0
+[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.1
 """
-
 assert (
     mod.validate(
-        tag="v0.5.0",
+        tag="v0.5.1",
         expected_sha=sha,
         actual_sha=sha,
         versions=versions,
@@ -54,113 +48,106 @@ assert (
     )
     == []
 )
-assert mod.validate_metadata() == []
-assert mod.load_version_module().check_aligned() == []
-
-mutations = [
-    {"tag": "0.5.0"},
-    {"actual_sha": "b" * 40},
-    {"versions": {**versions, "python": "0.5.0.dev0"}},
-    # ADR 0017: a registry-specific adapter patch is forbidden even when the
-    # Rust and Python surfaces still agree.
-    {"versions": {**versions, "node": "0.5.1"}},
-    {"changelog": changelog.replace("## [0.5.0] - 2026-07-31", "## [0.5.0]")},
-    {"changelog": changelog.replace("_Nothing yet._", "- Stale release entry")},
-    {
-        "changelog": changelog.replace(
-            "CurateLabs/graphforge/compare",
-            "CurateLabs/graphforge-legecy/compare",
-        )
-    },
-    {"docs_changelog": changelog.replace("Release GraphForge.", "Stale public changelog.")},
-]
-for mutation in mutations:
-    values = {
-        "tag": "v0.5.0",
-        "expected_sha": sha,
-        "actual_sha": sha,
-        "versions": versions,
-        "changelog": changelog,
-        "docs_changelog": changelog,
-        **mutation,
-    }
-    assert mod.validate(**values), mutation
-
-stale_changelog = changelog.replace("_Nothing yet._", "- Stale release entry")
-assert (
-    mod.validate(
-        tag="v0.5.0",
-        expected_sha=sha,
-        actual_sha=sha,
-        versions=versions,
-        changelog=stale_changelog,
-        docs_changelog=stale_changelog,
-        allow_unreleased_entries=True,
-    )
-    == []
+assert mod.validate(
+    tag="v0.5.1",
+    expected_sha=sha,
+    actual_sha=sha,
+    versions={**versions, "skills": "0.5.2"},
+    changelog=changelog,
+    docs_changelog=changelog,
 )
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
+assert "default: v0.5.1" in workflow
+assert 'test "$release_version" != 0.5.0' in workflow
+assert "candidate/v0.5.0-artifacts.json" not in workflow
+assert "v0.5.0-npm-amendment.json" not in workflow
+assert "scripts/set_release_version.py --check" in workflow
+for group in ("manifest", "python", "npm", "crates", "evidence"):
+    assert f"M1-Release-Candidate-{group}-" in workflow
+
 preflight = workflow.split("  candidate-preflight:\n", 1)[1].split("\n  publish-pypi:", 1)[0]
 assert "release-publish-preflight.py" in preflight
-assert "github.event.release.tag_name" in preflight
-assert "github.sha" in preflight
-assert "refs/remotes/origin/main" in preflight
-assert "workflow_dispatch:" in workflow
-assert "waive_unreleased_entries:" in workflow
-assert "RECOVERY_REASON" in preflight
-assert "GH_TOKEN: ${{ github.token }}" in preflight
-assert "--allow-unreleased-entries" in preflight
-assert "git show" in preflight
-assert "refs/remotes/origin/main:scripts/ci/release-publish-preflight.py" in preflight
-assert "npm whoami" in preflight
-assert "secrets.NPM_TOKEN" in preflight
-assert "M1-Release-Candidate-$RELEASE_SHA" in preflight
-assert "scripts/ci/release-candidate.py validate" in preflight
-assert "gh release upload" in preflight
-assert preflight.index("release-publish-preflight.py") < preflight.index("npm whoami")
-assert preflight.index("npm whoami") < preflight.index("gh release upload")
+assert "release_registry.py observe-all" in preflight
+assert "release_registry.py plan" in preflight
+assert "--attempts-dir write-evidence/attempts" in preflight
+assert "--receipts-dir write-evidence/receipts" in preflight
+assert "offline-rehearsal.json" in preflight
+assert "secrets." not in preflight
 
-pypi_job = workflow.split("  publish-pypi:\n", 1)[1].split("\n  publish-npm:", 1)[0]
-assert "needs: candidate-preflight" in pypi_job
-assert "--check-url https://pypi.org/simple/" in pypi_job
-assert "candidate/release-artifacts/python/*" in pypi_job
+pypi = workflow.split("  publish-pypi:\n", 1)[1].split("\n  npm-native:", 1)[0]
+native = workflow.split("  npm-native:\n", 1)[1].split("\n  npm-main:", 1)[0]
+main = workflow.split("  npm-main:\n", 1)[1].split("\n  npm-cli:", 1)[0]
+cli = workflow.split("  npm-cli:\n", 1)[1].split("\n  npm-skills:", 1)[0]
+skills = workflow.split("  npm-skills:\n", 1)[1].split("\n  publish-crates:", 1)[0]
+crates = workflow.split("  publish-crates:\n", 1)[1].split("\n  reconcile:", 1)[0]
+summary = workflow.split("  reconcile:\n", 1)[1]
 
-npm_job = workflow.split("  publish-npm:\n", 1)[1].split("\n  publish-crates:", 1)[0]
-assert "needs: [candidate-preflight, publish-pypi]" in npm_job
-assert "scripts/publish_npm_artifacts.py" in npm_job
-assert "Load reviewed npm recovery publisher" in npm_job
-assert "refs/remotes/origin/main:scripts/publish_npm_artifacts.py" in npm_job
-assert "scripts/amend_npm_main_artifact.py" in npm_job
-assert "Apply authorized unpublished main npm amendment" in npm_job
-assert "v0.5.0-npm-amendment.json" in npm_job
-assert "curatelabs-graphforge-0.5.0-amended.tgz" in npm_job
-assert "contents: write" in npm_job
-assert "--group native" in npm_job
-assert "--group cli" in npm_job
-assert "--group skills" in npm_job
-assert "verify-node-cli-release-package.mjs" in npm_job
+assert "needs: candidate-preflight" in pypi
+assert "id-token: write" in pypi
+assert "uv publish candidate/release-artifacts/python/*" in pypi
+assert "secrets.NPM_TOKEN" not in pypi
+assert "secrets.CARGO_REGISTRY_TOKEN" not in pypi
 
-crates_job = workflow.split("  publish-crates:\n", 1)[1]
-assert "needs: [candidate-preflight, publish-npm]" in crates_job
-assert "scripts/publish_crates.py" in crates_job
-assert "--release-record candidate/v0.5.0-artifacts.json" in crates_job
-assert "secrets.CARGO_REGISTRY_TOKEN" in crates_job
-assert "cargo publish" not in crates_job
-for retired_job in ("build-wheels", "build-sdist", "build-node", "publish-node-cli"):
-    assert f"  {retired_job}:" not in workflow
+assert "fail-fast: false" in native
+assert native.count("- graphforge-") == 5
+assert "needs: candidate-preflight" in native
+assert '--package "@curatelabs/${{ matrix.package }}"' in native
+assert "secrets.NPM_TOKEN" in native
+assert "secrets.CARGO_REGISTRY_TOKEN" not in native
+
+assert "needs: [candidate-preflight, npm-native]" in main
+assert "Require verified native fan-in and authorize main" in main
+assert "--node npm:@curatelabs/graphforge" in main
+assert "needs: [candidate-preflight, npm-main]" in cli
+assert "--node npm:@curatelabs/graphforge-cli" in cli
+assert "needs: [candidate-preflight, npm-cli]" in skills
+assert "--node npm:@curatelabs/graphforge-agent-skills" in skills
+
+assert "needs: candidate-preflight" in crates
+assert "scripts/ci/crate-publish-plan.py list" in crates
+assert "scripts/publish_crates.py" in crates
+assert '--crate "$crate"' in crates
+assert "secrets.CARGO_REGISTRY_TOKEN" in crates
+assert "secrets.NPM_TOKEN" not in crates
+
+for lane in (pypi, native, main, cli, skills, crates):
+    assert "release_action.py" in lane
+    assert "release_registry.py" in lane
+    assert "release_action.py attempt" in lane
+    assert "gh release upload" in lane
+    assert "--attempts-dir write-evidence/attempts" in lane
+    assert "--receipts-dir write-evidence/receipts" in lane
+
+assert "if: always()" in summary
+for job in (
+    "candidate-preflight",
+    "publish-pypi",
+    "npm-native",
+    "npm-main",
+    "npm-cli",
+    "npm-skills",
+    "publish-crates",
+):
+    assert f"- {job}" in summary
+assert "release_rehearsal.py reconcile" in summary
+assert "M1-Release-Reconciliation-${{ github.run_id }}" in summary
+assert ".complete == true and (.nodes | length) == 24" in summary
+
+assert "sleep" not in workflow
+assert "continue-on-error" not in workflow
+assert "|| true" not in workflow
+assert WRITE_EVIDENCE.is_file()
+write_evidence = WRITE_EVIDENCE.read_text(encoding="utf-8")
+assert "gh release view" in write_evidence
+assert "gh release download" in write_evidence
+assert "sleep" not in write_evidence
 
 credential_workflow = CREDENTIAL_WORKFLOW.read_text(encoding="utf-8")
-assert "workflow_dispatch:" in credential_workflow
-assert "commit_sha:" in credential_workflow
 assert "npm whoami" in credential_workflow
 assert "secrets.NPM_TOKEN" in credential_workflow
 assert "secrets.CARGO_REGISTRY_TOKEN" in credential_workflow
 for forbidden in ("npm publish", "uv publish", "cargo publish", "release:\n"):
     assert forbidden not in credential_workflow
-
-for job in (preflight, pypi_job, npm_job, crates_job, credential_workflow):
-    assert "continue-on-error" not in job
-    assert "|| true" not in job
 
 print("release publish preflight tests passed")

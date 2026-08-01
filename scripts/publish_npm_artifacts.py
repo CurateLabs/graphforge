@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -12,7 +13,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import time
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -20,6 +20,9 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CANDIDATE_SCRIPT = ROOT / "scripts" / "ci" / "release-candidate.py"
+sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+import release_action  # noqa: E402
+
 REGISTRY = "https://registry.npmjs.org"
 USER_AGENT = "GraphForge npm publisher (github.com/CurateLabs/graphforge)"
 GROUPS = {
@@ -92,7 +95,7 @@ def publish_archive(path: Path) -> None:
     )
 
 
-def publish_one(item: dict[str, Any], artifacts_dir: Path, timeout_seconds: int) -> str:
+def publish_one(item: dict[str, Any], artifacts_dir: Path) -> str:
     name = item["name"]
     version = item["version"]
     expected = item["sha256"]
@@ -107,19 +110,7 @@ def publish_one(item: dict[str, Any], artifacts_dir: Path, timeout_seconds: int)
         outcome = "already published; integrity matches"
     else:
         publish_archive(path)
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            existing = published_integrity(name, version)
-            if existing is not None:
-                break
-            time.sleep(3)
-        if existing is None:
-            raise RuntimeError(f"timed out waiting for npm to index {name}@{version}")
-        if not archive_matches_integrity(path, existing):
-            raise RuntimeError(
-                f"npm indexed different bytes for {name}@{version}; candidate sha256 is {expected}"
-            )
-        outcome = "published"
+        outcome = "accepted; public verification required"
     print(f"{name}@{version}: {outcome}")
     return outcome
 
@@ -130,24 +121,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifacts-dir", type=Path, required=True)
     parser.add_argument("--expected-sha", required=True)
     parser.add_argument("--version", required=True)
-    parser.add_argument("--group", choices=tuple(GROUPS), required=True)
-    parser.add_argument("--index-timeout", type=int, default=300)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--group", choices=tuple(GROUPS))
+    selection.add_argument("--package")
     args = parser.parse_args(argv)
     if not os.environ.get("NODE_AUTH_TOKEN", "").strip():
         print("NODE_AUTH_TOKEN is required", file=sys.stderr)
         return 2
 
     candidate = load_candidate_module()
-    record = candidate.validate(
-        args.release_record,
+    try:
+        record = json.loads(args.release_record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"cannot read candidate manifest: {error}", file=sys.stderr)
+        return 2
+    release_action.validate_partition(
+        record,
         args.artifacts_dir,
-        args.expected_sha,
-        args.version,
+        "npm",
+        expected_sha=args.expected_sha,
+        version=args.version,
+        checked_at=datetime.now(timezone.utc).isoformat(),
     )
     by_name = {item["name"]: item for item in record["artifacts"] if item.get("surface") == "npm"}
-    names = candidate.NPM_PACKAGES[GROUPS[args.group]]
+    names = candidate.NPM_PACKAGES[GROUPS[args.group]] if args.group else (args.package,)
+    if any(name not in candidate.NPM_PACKAGES for name in names):
+        print("requested npm package is outside the candidate", file=sys.stderr)
+        return 2
     for name in names:
-        publish_one(by_name[name], args.artifacts_dir, args.index_timeout)
+        if args.package:
+            publish_archive(args.artifacts_dir / by_name[name]["path"])
+            print(f"{name}@{args.version}: accepted; public verification required")
+        else:
+            publish_one(by_name[name], args.artifacts_dir)
     return 0
 
 

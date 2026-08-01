@@ -1,102 +1,83 @@
-# Publication order and rollback (v0.5.0)
+# Publication and recovery order (v0.5.1)
 
-This is the written publication order and stop/rollback policy for GraphForge
-registry publication. §6 executors follow this document; do not invent a
-different order at publish time.
+GraphForge v0.5.1 is one 24-node release: 15 crates.io crates, one PyPI
+project, five native npm packages, the npm main package, CLI, and agent skills.
+[ADR 0017](../adr/0017-unified-release-version.md) forbids a registry-specific
+version. Existing v0.5.0 tags, records, supplements, and published packages are
+immutable incident evidence; the v2 workflow rejects v0.5.0 rather than
+mutating or reinterpreting those records.
 
-Tracks the human release-close issue
-[#192](https://github.com/CurateLabs/graphforge/issues/192) and its ordered
-native publication children [#193](https://github.com/CurateLabs/graphforge/issues/193)
-through [#199](https://github.com/CurateLabs/graphforge/issues/199).
+This document describes the executable order in
+`.github/workflows/publish.yaml`. It does not authorize a tag, GitHub Release,
+or registry write.
 
-Related operational docs:
-[`PUBLISHING.md`](../engineering/PUBLISHING.md),
-[`release-process.md`](release-process.md),
-`.github/workflows/publish.yaml`.
+## Candidate preconditions
 
-## Shared-version invariant
+Before a maintainer authorizes publication:
 
-[ADR 0017](../adr/0017-unified-release-version.md) applies to every normal and
-recovery path. The 15 public crates, PyPI package, npm main/native packages,
-CLI, and agent skills form one release set with one exact version. Package jobs
-may resume independently, but package versions may not.
+1. The intended tag resolves to the current reviewed `main` commit and the root
+   version is aligned across Cargo, PyPI, Node/native npm, CLI, and agent skills.
+2. A successful same-SHA Binding Release Candidate run retains five 30-day
+   artifacts: `manifest`, `python`, `npm`, `crates`, and `evidence`.
+3. The v2 manifest validates the complete file inventory and dependency graph.
+   A matching checksum alone is not sufficient.
+4. `evidence/offline-rehearsal.json` proves the exact partitions passed clean
+   Python, Node/native, CLI, and skills consumers and crate/dependency checks
+   with zero registry writes.
+5. PyPI trusted publishing is configured for `CurateLabs/graphforge` and
+   `publish.yaml`; the npm token has scoped public-package write access and
+   Bypass 2FA; the crates.io token belongs to `DecisionNerd`.
+6. The maintainer explicitly decides to create the immutable v0.5.1 tag and
+   GitHub Release. Implementation CI and ordinary issue close do not run a
+   release-certification cascade.
 
-A partial publication has only two valid dispositions: resume an absent
-artifact from the same immutable candidate, or prepare one coordinated new
-version for the complete release set. A plan that advances only an adapter,
-registry, native package, CLI, skills package, or crate fails before every
-write. Existing tags, release records, and registry artifacts remain immutable
-historical evidence.
+## Planner-driven execution
 
-## Preconditions (must be true before step 1)
+Every lane downloads the small manifest and only its registry partition,
+revalidates those exact bytes, obtains fresh public registry observations, and
+asks the pure recovery planner to authorize one node. `verified` nodes are
+skipped. Only an authoritatively `absent`, dependency-ready node with an
+unexpired partition receives a write action. Conflict, indeterminate state,
+failed observation, pending visibility, missing artifacts, or unverified
+dependencies stop the lane.
 
-1. §5 version freeze is complete: Cargo workspace, Python binding, Node binding,
-   NPX CLI/skills, and generated metadata all report `0.5.0` (not `0.5.0-dev` /
-   `0.5.0.dev0`) on the intended RC commit.
-2. A successful same-SHA `Binding Release Candidate` run has retained
-   `M1-Release-Candidate-<sha>` for 30 days. That bundle contains the tested
-   wheels/addons, Python sdist, all npm tarballs, all 15 `.crate` archives,
-   publication dry-run evidence, license reports, and
-   `v0.5.0-artifacts.json`. Publication consumes this bundle; it does not
-   rebuild Python/npm bytes.
-3. First-party packages declare `Apache-2.0` with `LICENSE` / `NOTICE` (and
-   third-party notices intact), and the public legal surface in
-   [#200](https://github.com/CurateLabs/graphforge/issues/200) is complete.
-4. Dry-runs are green for applicable surfaces: Python sdist/wheel packaging and
-   clean install, `npm publish --dry-run` for Node + CLI + skills, and docs
-   preview. All 15 Rust crates pass package inventory checks; the topological
-   publish plan passes before any crates.io write.
-5. Required release-certification evidence for the RC SHA is assembled per
-   `AGENTS.md` / `#192` (Binding RC, load matrix, gates as required for
-   **publication**, not for ordinary child-issue close).
-6. The embedded write modes in
-   [#211](https://github.com/CurateLabs/graphforge/issues/211) and the
-   Apache-2.0 outcome in
-   [#218](https://github.com/CurateLabs/graphforge/issues/218) are complete.
-7. Secrets, trusted-publisher configuration, registry ownership, and explicit
-   maintainer publication authorization are in place (see Human blockers).
+The independent work is:
 
-## Ordered execution
+- PyPI may run independently with OIDC and the Python partition.
+- crates.io may run independently with only its token and the crates partition;
+  crates remain in the checked topological order below.
+- the five native npm packages run as a fail-slow parallel matrix with only the
+  npm token and npm partition.
 
-Execute **in this order**. Do not start a later step until the prior step has
-deterministic success evidence (or an explicit maintainer disposition to skip).
+The npm dependency fan-in is strict:
 
-| Step | Action | Issue | Evidence |
-| --- | --- | --- | --- |
-| 1 | Annotate tag `v0.5.0` on the verified RC commit on `main` | [#193](https://github.com/CurateLabs/graphforge/issues/193) | `git rev-parse v0.5.0^{}` == RC SHA |
-| 2 | Publish GitHub Release for `v0.5.0` with final CHANGELOG notes + checksum links/attachments | [#194](https://github.com/CurateLabs/graphforge/issues/194) | Release URL; notes match CHANGELOG; `Publish to PyPI, npm, and crates.io` run starts |
-| 3 | `publish.yaml` builds and publishes **Python** to PyPI | [#195](https://github.com/CurateLabs/graphforge/issues/195) | Workflow green; `graphforge==0.5.0` on PyPI; checksums match RC record |
-| 4 | Same workflow publishes **Node** `@curatelabs/graphforge` and platform packages to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; target inventory and checksums match |
-| 5 | Same workflow publishes **NPX CLI** `@curatelabs/graphforge-cli` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; clean-consumer handoff passed |
-| 6 | Same workflow publishes **NPX skills** `@curatelabs/graphforge-agent-skills` to npm | [#198](https://github.com/CurateLabs/graphforge/issues/198) | npm `0.5.0`; packed offline contract passed |
-| 7 | Same workflow publishes the complete 15-crate **Rust** surface to crates.io in dependency order | [#196](https://github.com/CurateLabs/graphforge/issues/196) | Workflow green; all packages at `0.5.0`; checksums match; `DecisionNerd` owns each crate |
-| 8 | Deploy / confirm documentation for the release commit/tag | [#197](https://github.com/CurateLabs/graphforge/issues/197) | Pages run green; live anonymous URLs serve the RC docs set |
-| 9 | Verify registry/package **metadata** (repo, license, docs, tag) | [#199](https://github.com/CurateLabs/graphforge/issues/199) | Concise surface checklist on #199 |
+```text
+five native packages (parallel)
+            ↓ fresh public verification of all five
+@curatelabs/graphforge
+            ↓ fresh public verification
+@curatelabs/graphforge-cli
+            ↓ fresh public verification
+@curatelabs/graphforge-agent-skills
+```
 
-Notes:
+A successful upload response creates a sanitized accepted-write receipt. The
+lane performs exactly one immediate public observation. It never polls, sleeps,
+blindly retries, or repeats a pending write. If propagation has not completed,
+the observation is `accepted_pending_visibility`; a later recovery dispatch
+performs another bounded observation rather than another upload.
 
-- Steps 3–7 are automated by `.github/workflows/publish.yaml` once the GitHub
-  Release is published. It resolves the successful, unexpired same-SHA
-  `Binding Release Candidate` run, validates every recorded checksum, and
-  attaches the checksum record before its first registry write. Python and npm
-  publish the exact retained files. The crates.io publisher re-packages the
-  immutable tagged tree only after proving each deterministic `.crate`
-  checksum equals the retained record. Maintainers watch that run; they do not
-  rebuild different bytes under `0.5.0` if a job fails.
-- Before any registry write, the workflow requires the release tag, current
-  `main` SHA, five version surfaces, dated CHANGELOG section, Apache-2.0 policy,
-  and npm publishing identity to pass its fail-closed preflight.
-- Docs deploy today follows `docs.yml` on `main` (GitHub Pages). Step 8 confirms
-  the release SHA’s docs set is what is live (or redeploys that SHA); it does
-  not authorize inventing a second docs tree under the same version label.
-- Clean-environment verification after publication is tracked by
-  [#167](https://github.com/CurateLabs/graphforge/issues/167), not this order.
+Immediately before a write, the lane persists an immutable attempt record on
+the same GitHub Release. A successful registry response adds a separate
+accepted receipt. Later preflight and reconciliation runs load both before
+observing. A 404 after an accepted receipt is pending; a 404 after an attempt
+without an accepted receipt is indeterminate because a cancelled or timed-out
+job may have crossed the registry boundary. Neither state permits a repeat
+write. Exhausted evidence requires a human decision.
 
-## Crates.io dependency order
+## Crates.io order
 
-Rust crates publish in topological order of workspace path dependencies. The
-Python and Node binding implementation crates remain private to Cargo because
-their public artifacts ship through PyPI/npm; the Rust CLI is public:
+The finite order is generated by `scripts/ci/crate-publish-plan.py`:
 
 1. `graphforge-core`
 2. `graphforge-ast`
@@ -114,95 +95,52 @@ their public artifacts ship through PyPI/npm; the Rust CLI is public:
 14. `graphforge-api`
 15. `graphforge-cli`
 
-Generate or verify this list with:
+Each invocation validates the retained `.crate` checksum before `cargo publish`.
+After an accepted write it observes the public version once. A verified result
+may unlock the next crate; pending or unsafe truth stops the finite loop.
 
-```bash
-python3 scripts/ci/crate-publish-plan.py list
-python3 scripts/ci/crate-publish-plan.py check
-```
+## Always-running reconciliation
 
-`check` fails closed on non-`graphforge-*` names, missing `version` alongside
-normal path dependencies (required for `cargo publish`), and cycles. Workspace
-dev-dependencies remain path-only so Cargo excludes those test-only edges from
-published manifests, preventing first-publication cycles.
+The final job uses `if: always()` and records every lane conclusion, including
+failure, cancellation, timeout, and skip. When the candidate is available it
+re-observes all three registries and produces one stable 24-node summary. Job
+history is operator context only; registry state and the next safe actions come
+from the immutable candidate plus live registry truth.
 
-### Crates.io publication decision (v0.5.0)
+If candidate preflight failed before a manifest was available, reconciliation
+still emits all 24 node identities as `indeterminate` and identifies the
+candidate blocker. The workflow is green only when all 24 nodes are publicly
+`verified`. The summary is retained for 30 days and contains no credentials,
+headers, cookies, tokens, or raw registry bodies.
 
-**Final maintainer decision:** GraphForge v0.5.0 publishes the complete
-15-crate Rust surface above to crates.io under `graphforge-*` names. This is
-tracked by [#196](https://github.com/CurateLabs/graphforge/issues/196); no
-partial alternative package set is permitted.
+## Recovery and stop conditions
 
-The previous `gf-*` names were abandoned because `gf-core` and `gf-cli` are
-owned by unrelated projects. On 2026-07-31 the official crates.io API returned
-not-found for all 15 `graphforge-*` names. Every normal workspace path
-dependency declares both `path` and version `0.5.0` so Cargo can publish the
-runtime graph; path-only dev-dependencies are intentionally not published.
+Re-run `publish.yaml` only for the same immutable v0.5.1 tag and provide a
+public recovery reason. The new run re-observes the registries, skips verified
+nodes without downloading unrelated partitions, and schedules only eligible
+absent work.
 
-The evidence command remains:
+Stop and require a human decision when:
 
-```bash
-python3 scripts/ci/crate-publish-plan.py check
-```
+- an existing public identity has different bytes, metadata, dependency
+  versions, license, ownership, or file inventory (`conflict`);
+- registry truth is unavailable, stale, rate-limited, malformed, or past the
+  bounded visibility window (`indeterminate`);
+- retained artifacts are missing or expired;
+- a credential or trusted-publisher configuration fails; or
+- correction would require different bytes or a different version.
 
-The release workflow invokes `scripts/publish_crates.py` after the npm surfaces.
-That publisher packages each crate, checks its SHA-256, publishes once, waits
-for crates.io indexing, verifies `DecisionNerd` ownership, and resumes only
-when an existing `0.5.0` checksum matches the local archive.
+Never move a tag, replace a release asset with different bytes, weaken a check,
+or advance only an adapter. For incorrect public bytes, use the registry's
+yank/deprecate mechanism and prepare one coordinated later GraphForge version.
 
-## Stop conditions
+## Remaining human decisions
 
-Stop the release train immediately if any of the following occur:
+Automation stops before these actions unless separately authorized:
 
-1. Any step fails (tag, GitHub Release, PyPI, npm Node, npm skills, crates.io,
-   docs deploy, or metadata verification).
-2. Published bytes would differ from the RC artifact record / checksums for
-   `0.5.0`.
-3. A registry rejects the package for license, ownership, name conflict, or
-   trusted-publishing misconfiguration.
-4. Legal or maintainer halt.
-
-**Hard rule:** do not rebuild different bytes and re-publish under the same
-version. Yank or deprecate per registry rules if needed; cut a new patch
-version for corrected bits.
-
-## Rollback
-
-| Surface | Recovery |
-| --- | --- |
-| Annotated tag | Do **not** move `v0.5.0` to another commit. Leave the tag; cut `v0.5.1` (or later) for corrections. |
-| GitHub Release | Edit notes only if text-only; do not replace attached artifacts with different checksums under the same tag. |
-| PyPI | Yank the bad file(s) if policy allows; publish a new version for fixed bits. |
-| npm | Deprecate or unpublish per npm policy; publish a new version for fixed bits. |
-| crates.io | Yank the bad version; publish a new version for fixed bits. |
-| Docs site | Redeploy last known-good commit from `main` / Pages history. |
-
-Agents assemble evidence and automation; maintainers authorize execution and
-final #192 close.
-
-## Human blockers (checklist)
-
-- [ ] Version freeze PR merged on the RC commit and every SHA-bound release
-      certification workflow passes for that exact commit
-- [ ] The same-SHA `Binding Release Candidate` run contains an unexpired
-      `M1-Release-Candidate-<sha>` bundle and its release record validates
-- [x] The owned npm organization is `@curatelabs`; do not publish the retired
-      `@graphforge/*` candidate names
-- [ ] `NPM_TOKEN` is a granular token with read/write package and scope access
-      to `@curatelabs`, has **Bypass 2FA** enabled, is stored as a repository
-      Actions secret, and passes the workflow's `npm whoami` preflight
-- [ ] After the first publish, configure trusted publishing for each npm package
-      before removing the token path; npm requires an existing package and a
-      supported GitHub-hosted runner
-- [ ] PyPI trusted publishing OIDC is configured for
-      `CurateLabs/graphforge`, workflow `publish.yaml`, with no environment name
-- [x] All 15 `graphforge-*` names were available on crates.io when checked
-- [x] The crates.io credential is stored in Pulumi ESC
-      `curatelabs/graphforge/release` and projected to the repository's
-      encrypted `CARGO_REGISTRY_TOKEN` Actions secret
-- [x] Public Apache-2.0 legal and contribution docs are deployed (#200)
-- [ ] Maintainer authorization to create annotated tag + GitHub Release
-- [x] Repository and release documentation are publicly readable
-
-The exact operator commands, evidence queries, and stop points are in
-[`v0.5.0-release-operator-runbook.md`](v0.5.0-release-operator-runbook.md).
+- choose the final v0.5.1 commit after normal exact-head PR CI;
+- create the immutable v0.5.1 tag and GitHub Release;
+- allow the release-triggered publication workflow to make registry writes;
+- decide any registry-specific yank/deprecation if reconciliation finds a
+  conflict; and
+- close the human release tracker only after the 24-node summary is complete.

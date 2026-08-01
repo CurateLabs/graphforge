@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Partition the immutable candidate into independently retained Python, npm,
+  crates, evidence, and manifest artifacts; authorize every write from fresh
+  registry truth; parallelize only the five native npm packages with verified
+  main/CLI/skills fan-in; isolate registry credentials; remove polling sleeps;
+  and always reconcile all 24 public nodes across partial job outcomes (#296).
 - Add a deterministic pre-write release rehearsal that installs and executes
   the exact candidate through clean Python, Node/native, CLI, and agent-skills
   consumers, validates all crate packages and dependencies, and proves the

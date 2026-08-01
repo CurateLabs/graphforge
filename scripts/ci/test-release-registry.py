@@ -237,8 +237,10 @@ def main() -> None:
     assert_state(observed(manifest, "crates:graphforge-core", crates_conflict), "conflict")
 
     receipt = {
+        "schema": "graphforge-release-accepted-receipt-v1",
         "node_id": "npm:@curatelabs/graphforge",
         "version": VERSION,
+        "candidate_sha": SHA,
         "accepted_at": "2030-01-01T12:00:00+00:00",
         "visibility_deadline": "2030-01-01T12:10:00+00:00",
         "observation_count": 0,

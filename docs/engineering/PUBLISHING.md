@@ -30,9 +30,9 @@ multi-tenant service. Operational detail:
   [`../development/release-process.md`](../development/release-process.md).
 - Commit messages follow Conventional Commit–style scopes used in the repo history; do not
   add new enforcement without maintainer agreement.
-- Release close-out for v0.5.0 is human-authorized on
-  [#192](https://github.com/CurateLabs/graphforge/issues/192);
-  docs/legal trackers stay open until manual approval.
+- M1 release close-out now targets one coordinated v0.5.1 publication on
+  [#192](https://github.com/CurateLabs/graphforge/issues/192). The partial
+  v0.5.0 records remain immutable historical evidence.
 
 ## Build and continuous delivery
 
@@ -55,10 +55,12 @@ make publish-dry-run-cargo
 # Node / CLI / skills: npm publish --dry-run
 ```
 
-The release-event workflow runs `release-publish-preflight.py` and `npm whoami`
-before any registry write. The release tag must resolve to the current certified
-`main` SHA; Cargo, Python, Node, CLI, and skills versions must match the tag;
-the dated CHANGELOG section must be cut; and the npm token must authenticate.
+The release-event workflow runs `release-publish-preflight.py`, validates the
+complete partitioned candidate and offline rehearsal, and obtains fresh public
+registry truth before any registry write. The release tag must resolve to the
+reviewed `main` SHA; Cargo, Python, Node, CLI, and skills versions must match
+the tag; and the dated CHANGELOG section must be cut. `npm whoami` runs only in
+an npm write step so registry credentials remain isolated.
 
 Required TESTING.md gates (TCK, contract gates applicable to the release, binding RC evidence)
 must be green on the **same SHA** that is tagged for publication.
@@ -68,7 +70,7 @@ must be green on the **same SHA** that is tagged for publication.
 | From | To | Required evidence / approval |
 | --- | --- | --- |
 | PR branch | `main` | Focused PR, green CI Gate, clean review threads |
-| `main` SHA | Release candidate | Milestone gates for the release issue (#192 for v0.5.0) |
+| `main` SHA | Release candidate | Complete v0.5.1 candidate manifest and offline rehearsal for #192 |
 | Release candidate | Registries + GitHub Release | Dry-runs, checksums/SBOM where configured, human release execution |
 | Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
@@ -97,8 +99,8 @@ Authoritative stop/rollback table:
 - **GitHub Release / tag:** do not move an annotated release tag to a different commit; cut a
   new patch version if needed.
 - **Docs site:** redeploy last known-good commit from `main` / hosting history.
-- Authority: maintainers executing the release plan; agents assemble evidence but do not
-  authorize final #192 closure.
+- Authority: maintainers explicitly authorize the immutable tag, GitHub
+  Release, registry writes, and final #192 closure.
 
 ## Official references
 

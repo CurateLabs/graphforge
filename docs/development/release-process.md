@@ -207,7 +207,7 @@ GraphForge is currently in **0.x.x** (pre-1.0.0):
 
 ## Creating a Release
 
-For v0.5.0 registry sequencing, stop conditions, and rollback, follow
+For current v0.5.1 registry sequencing, stop conditions, and rollback, follow
 [`publication-order.md`](publication-order.md) (authoritative for §5/§6).
 
 ### Step-by-Step Guide
