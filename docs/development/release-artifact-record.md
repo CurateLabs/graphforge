@@ -55,6 +55,77 @@ workflow job result: `not_attempted`, `absent`, `accepted_pending_visibility`,
 recovery planning define how those states are reached; the candidate only fixes
 their meanings and the bytes being observed.
 
+## Registry truth contracts
+
+Registry observations are fresh, bounded evidence about one manifest node. A
+GitHub Actions job conclusion is never a package state.
+
+| Registry | Authoritative public observation | Verified identity and metadata | Digest comparison |
+| --- | --- | --- | --- |
+| PyPI | `GET https://pypi.org/pypi/{name}/{version}/json` | project name/version, Apache-2.0, and the exact wheel/sdist filename set | every `urls[].digests.sha256` equals the candidate |
+| npm | `GET https://registry.npmjs.org/{encoded-name}/{version}` | package name/version, Apache-2.0, and exact first-party dependency versions | a supported `dist.integrity` SHA-256 or SHA-512 token equals the candidate |
+| crates.io | `GET https://crates.io/api/v1/crates/{name}/{version}` plus `/owners` | crate name/version, Apache-2.0, not yanked, and `DecisionNerd` ownership | `version.checksum` equals the candidate SHA-256 |
+
+The adapters classify results consistently:
+
+- an authoritative 404 with no accepted-write receipt is `absent`;
+- an existing identity with different bytes, metadata, dependencies, owner, or
+  file set is `conflict`;
+- authorization failure or another deterministic invalid operation is `failed`;
+- rate limiting, service failure, timeout, malformed evidence, or stale evidence
+  is `indeterminate`;
+- exact public identity, bytes, and required metadata is `verified`.
+
+An accepted registry write is not yet public verification. Its sanitized receipt
+records the node, root version, acceptance time, a visibility deadline no more
+than 15 minutes later, and an observation count. One invocation performs one
+authoritative observation—there is no internal retry loop or sleep. An absent or
+incomplete public response before the deadline becomes
+`accepted_pending_visibility`; four observations or the deadline exhaust the
+bound and become `indeterminate`. Verification-only continuation can never emit
+another write action.
+
+## Recovery planning
+
+`scripts/ci/release_registry.py` creates a machine-readable plan from only:
+
+1. the immutable candidate manifest;
+2. fresh normalized registry observations; and
+3. current retained-group availability.
+
+Only `absent` nodes whose dependencies are already `verified` and whose exact
+artifact group is available can receive a `publish` action. `not_attempted`
+nodes receive an observation action, accepted-but-not-visible nodes receive a
+visibility-verification action, and `verified` nodes are skipped without an
+artifact download. Conflict, indeterminate, failed, stale, dependency-blocked,
+or expired-artifact nodes fail closed.
+
+The graph preserves crate topological order and npm native → main → CLI → skills
+gates. A registry-scoped recovery plan does not download or schedule unrelated
+surfaces. Extra workflow-job history is ignored, and normalized output contains
+no response bodies, credentials, authorization headers, cookies, or tokens.
+
+Fixture-driven commands are safe for offline planning:
+
+```bash
+python3 scripts/ci/release_registry.py observe \
+  --manifest candidate/vX.Y.Z-artifacts.json \
+  --node npm:@curatelabs/graphforge \
+  --response npm-response.json \
+  --observed-at 2030-01-01T12:00:00Z \
+  --out npm-observation.json
+
+python3 scripts/ci/release_registry.py plan \
+  --manifest candidate/vX.Y.Z-artifacts.json \
+  --observations registry-observations.json \
+  --availability artifact-availability.json \
+  --planned-at 2030-01-01T12:01:00Z \
+  --out recovery-plan.json
+```
+
+`observe --live` performs the same public, read-only registry requests. Neither
+command has a registry-write path.
+
 ## Build and validate offline
 
 After the binding workflow has assembled the four directories, it creates the
