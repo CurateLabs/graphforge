@@ -132,6 +132,25 @@ def test_authorization() -> None:
     else:
         raise AssertionError("dependency-blocked npm main was authorized")
 
+    stale = copy.deepcopy(verified)
+    stale_obs = registry_fixture.observed(manifest, "crates:graphforge-search", {"status": 404})
+    stale_obs["observed_at"] = "2029-12-31T00:00:00+00:00"
+    registry_fixture.replace_observation(stale, stale_obs)
+    try:
+        action.authorize(
+            manifest,
+            stale,
+            availability,
+            "crates:graphforge-search",
+            planned_at=registry_fixture.NOW,
+        )
+    except action.ActionError as error:
+        message = str(error)
+        assert "blocked_registry_state" in message
+        assert "observation_stale" in message
+    else:
+        raise AssertionError("stale crate observation was authorized")
+
     receipt = action.accepted_receipt(
         manifest, "pypi:graphforge", accepted_at="2030-01-01T12:00:00Z"
     )
