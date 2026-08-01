@@ -1,0 +1,8 @@
+# Visualization example dependencies (install GraphForge separately).
+# Python: pip install -r requirements.txt
+# GraphForge: pip install graphforge   # or a local maturin wheel
+plotly>=5.18
+pyvis>=0.3.2
+jaal>=0.1.9
+pandas>=2.0
+pyarrow>=15.0

@@ -54,6 +54,7 @@ const PAGES = [
   'guide/cypher-guide.md',
   'guide/graph-construction.md',
   'guide/analytics-integration.md',
+  'guide/visualization.md',
   'guide/exploratory-analyst.md',
   'guides/repository-integration.md',
   'guide/datasets/overview.md',

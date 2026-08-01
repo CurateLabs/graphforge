@@ -274,6 +274,7 @@ print(forge.schema())              # Arrow Table — labels, property names, typ
 
 ## Next Steps
 
+- [Visualization examples](visualization.md) — Plotly, Jaal, PyVis, Cytoscape.js, and Sigma.js over one shared real-data projection
 - [Network Analysis use case](../book/use-cases/network-analysis.md) — worked examples on the SNAP ego-Facebook dataset
 - [Knowledge Graph Construction](../book/use-cases/knowledge-graph-construction.md) — LangChain integration and MERGE patterns
 - [API Reference](../reference/api.md) — full method signatures
