@@ -77,6 +77,11 @@ target, and produces one fail-closed aggregate report. Missing targets,
 mixed SHAs or per-language versions, fallback execution, failed or unclassified
 cases, and parity differences reject the candidate. This workflow does not
 create a tag or release and does not publish to PyPI or npm.
+Its final assembly derives one aligned root version, packs the complete PyPI,
+npm, and crates.io surfaces, records four non-overlapping artifact groups, and
+reopens every archive with `graphforge-release-candidate-v2` completeness
+validation. A checksum-valid archive with missing entrypoints, types, native
+modules, dependency metadata, or legal files is rejected.
 After the maturin wheel build, the workflow verifies that any inherited Rust
 compiler wrapper is still executable before Python contracts may launch Cargo;
 an unavailable wrapper is cleared without printing the job environment or PATH.
@@ -135,11 +140,10 @@ construction issues; those close on outcomes (see `AGENTS.md` § Issue close).
 
 ### `binding-release-candidate.yml`, `release-credential-preflight.yml`, and `publish.yaml`
 
-The exact-SHA Binding RC retains tested release bytes and their checksum record
-for 30 days. Credential preflight verifies the npm/crates.io secret projections
-without publishing. The release-event workflow consumes the retained candidate,
-attaches its record, and publishes PyPI, npm, then crates.io in fail-closed order;
-ordinary PRs do not repeat that certification.
+The exact-SHA Binding RC retains tested release bytes and their partitioned v2
+candidate manifest for 30 days. Credential preflight verifies the npm/crates.io
+secret projections without publishing. The release-event workflow consumes the
+retained candidate; ordinary PRs do not repeat that certification.
 
 ### `clean-env-verify.yml`
 
@@ -148,7 +152,9 @@ PyPI/npm only and runs the #167 lanes (pip quickstart, npm
 smoke, NPX CLI and skills compatibility, create/close/reopen Arrow
 rows, docs/package URL resolve, optional checksum match against a
 `graphforge-release-record-v1` file). Preflight fails closed when the requested
-version is unpublished. Ordinary PRs run only the harness unit tests via
+version is unpublished. Candidate v2 manifests and historical
+`graphforge-release-record-v1` files are both accepted for checksum lookup.
+Ordinary PRs run only the harness unit tests via
 Repository Policy — they never claim clean-env success against missing packages.
 See [`docs/development/clean-environment-verification.md`](../../docs/development/clean-environment-verification.md).
 

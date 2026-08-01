@@ -27,6 +27,8 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SCHEMA = "graphforge-clean-env-evidence-v1"
 RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
+RELEASE_CANDIDATE_SCHEMA = "graphforge-release-candidate-v2"
+RELEASE_RECORD_SCHEMAS = (RELEASE_RECORD_SCHEMA, RELEASE_CANDIDATE_SCHEMA)
 DEFAULT_VERSION = "0.5.0"
 DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
 DEFAULT_CRATES = (
@@ -109,9 +111,10 @@ def parse_json(data: bytes, *, context: str) -> Any:
 
 
 def validate_release_record(record: dict[str, Any]) -> dict[str, Any]:
-    if record.get("schema") != RELEASE_RECORD_SCHEMA:
+    if record.get("schema") not in RELEASE_RECORD_SCHEMAS:
         raise VerifyError(
-            f"release record schema must be {RELEASE_RECORD_SCHEMA!r}, got {record.get('schema')!r}"
+            "release record schema must be one of "
+            f"{RELEASE_RECORD_SCHEMAS!r}, got {record.get('schema')!r}"
         )
     version = record.get("version")
     if not isinstance(version, str) or not version:
@@ -897,7 +900,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--crate", action="append", default=[])
     run.add_argument("--lane", action="append", choices=list(ALL_LANES))
     run.add_argument("--all", action="store_true")
-    run.add_argument("--release-record", help=f"Path to {RELEASE_RECORD_SCHEMA} JSON")
+    run.add_argument("--release-record", help="Path to release record or candidate manifest JSON")
     run.add_argument("--work", help="Work directory (default: temp dir)")
     run.add_argument("--output", help="Write evidence JSON to this path")
     run.add_argument(
@@ -917,7 +920,9 @@ def build_parser() -> argparse.ArgumentParser:
     ve.add_argument("--require-ok", action="store_true")
     ve.set_defaults(func=cmd_validate_evidence)
 
-    vr = sub.add_parser("validate-release-record", help=f"Validate {RELEASE_RECORD_SCHEMA}")
+    vr = sub.add_parser(
+        "validate-release-record", help="Validate a release record or candidate manifest"
+    )
     vr.add_argument("path")
     vr.set_defaults(func=cmd_validate_release_record)
 

@@ -1,67 +1,84 @@
-# Release artifact record
+# Release candidate manifest
 
-This page is the §5 checklist home for **checksums, SBOM/provenance, licenses, and
-contents** of v0.5.0 release-candidate artifacts
-([M1 #192](https://github.com/CurateLabs/graphforge/issues/192)).
+GraphForge publication consumes one immutable, partitioned candidate. The
+candidate manifest is the authority for release identity, package inventory,
+dependency order, exact bytes, and retained-artifact availability. A matching
+checksum proves byte identity; it does **not** prove that a package contains its
+required runtime, metadata, and legal files.
 
-It does **not** replace the authoritative publication order / stop conditions in
-[`publication-order.md`](publication-order.md).
+This page does not authorize publication or replace the operator stop conditions
+in [`publication-order.md`](publication-order.md).
 
-## Same-tagged-commit rule
+## Canonical contract
 
-Every first-party publishable artifact for version `0.5.0` must be built from one
-verified commit (the eventual `v0.5.0` tag target) or have an explicit reproducible
-link to that commit recorded in the artifact JSON. Do not mix bytes from different
-commits under the same version.
+`graphforge-release-candidate-v2` has one root `version` and no per-node version
+field. The public node set is fixed:
 
-## How to record
+- 15 `graphforge-*` crates on crates.io;
+- `graphforge` on PyPI (three tested wheels and one source distribution);
+- five native npm packages and `@curatelabs/graphforge`;
+- `@curatelabs/graphforge-cli` and
+  `@curatelabs/graphforge-agent-skills`.
 
-1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #192).
-2. Dispatch `Binding Release Candidate` for that exact current `main` SHA. Its
-   final job builds `M1-Release-Candidate-<sha>` from the tested wheels/addons,
-   then adds the sdist, npm tarballs, all 15 `.crate` archives, dry-run evidence,
-   and license reports.
-3. The workflow runs the equivalent of:
+Every archive records its byte length, SHA-256, SHA-256/SHA-512 SRI integrities,
+package identity, required files, member count, and an inventory digest. Validation reopens the
+exact archive and compares those facts. It rejects missing Python import/native
+surfaces, Node entrypoints or types, native addons, CLI/skills entrypoints, crate
+sources, legal files, or exact-version first-party dependency metadata—even when
+the recorded checksum matches the incomplete archive.
+
+The dependency graph includes crate-to-crate publication prerequisites, all five
+native npm packages before the npm main package, main before CLI, and CLI before
+agent skills. It must be complete, refer only to declared nodes, and be acyclic.
+
+## Artifact groups and retention
+
+Candidate bytes are routed into four non-overlapping groups:
+
+| Group | Contents |
+| --- | --- |
+| `python` | Three tested wheels and one sdist |
+| `npm` | Five native packages, main package, CLI, and agent skills |
+| `crates` | All 15 `.crate` archives |
+| `evidence` | Five tested Node addons plus dry-run and legal reports |
+
+The small manifest lives beside those partitions. Each group declares its
+retention period and expiry. Missing, expired, overlapping, unrecorded, or
+wrongly routed files fail closed. Later recovery may download only a needed
+partition, but it may never rebuild or substitute candidate bytes.
+
+## Publication states
+
+The manifest names the release state vocabulary without deriving state from a
+workflow job result: `not_attempted`, `absent`, `accepted_pending_visibility`,
+`verified`, `conflict`, `indeterminate`, and `failed`. Registry observation and
+recovery planning define how those states are reached; the candidate only fixes
+their meanings and the bytes being observed.
+
+## Build and validate offline
+
+After the binding workflow has assembled the four directories, it creates the
+manifest and immediately validates the complete candidate before any registry
+write:
 
 ```bash
 python3 scripts/record_release_artifacts.py \
-  --version 0.5.0 \
-  --dist-dir path/to/artifacts \
-  --out docs/releases/records/v0.5.0-artifacts.json \
-  --notes "RC sha=<40-char> built via <workflow/run>"
+  --version "$RELEASE_VERSION" \
+  --dist-dir candidate/release-artifacts \
+  --out "candidate/v${RELEASE_VERSION}-artifacts.json" \
+  --recorded-at "$RECORDED_AT"
+
+python3 scripts/ci/release-candidate.py validate \
+  --record "candidate/v${RELEASE_VERSION}-artifacts.json" \
+  --artifacts-dir candidate/release-artifacts \
+  --expected-sha "$RELEASE_SHA" \
+  --version "$RELEASE_VERSION"
 ```
 
-4. `publish.yaml` validates the complete bundle and attaches the JSON to the
-   GitHub Release before the first registry write (#194).
-5. Post-release clean-env verification (#167) matches `sha256` values from this record.
+The recorder produces stable JSON for the same version, SHA, timestamp, notes,
+and exact partitions. The validator uses only local bytes; it performs no
+registry access, tag creation, release creation, or publication.
 
-The generated document uses the same `graphforge-release-record-v1` schema
-consumed by `clean-env-verify.py`. Validate it before attaching:
-
-```bash
-python3 scripts/ci/clean-env-verify.py validate-release-record \
-  docs/releases/records/v0.5.0-artifacts.json
-```
-
-Template-only (no files yet):
-
-```bash
-python3 scripts/record_release_artifacts.py \
-  --version 0.5.0 \
-  --dist-dir target/release-artifacts \
-  --allow-empty \
-  --out docs/releases/records/v0.5.0-artifacts.template.json
-```
-
-## License / third-party pointers
-
-- First-party: `Apache-2.0`, shipped `LICENSE` + `NOTICE` (`make package-license-verify` / #218).
-- Third-party inventory: [`legal/THIRD_PARTY_NOTICES.md`](../../legal/THIRD_PARTY_NOTICES.md) (#218).
-
-## SBOM / provenance
-
-When the release process emits SBOM or provenance files, place them in the same
-`--dist-dir` so `record_release_artifacts.py` classifies them (`sbom` /
-`provenance`). If none are configured for a surface, the record’s
-`sbom_provenance.configured` stays false — that is an explicit disposition, not a
-silent skip.
+`clean-env-verify.py` continues to accept historical
+`graphforge-release-record-v1` documents while also reading the v2 artifact list.
+Historical v0.5.0 records remain immutable.

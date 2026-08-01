@@ -411,6 +411,25 @@ jobs:
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
 
+      - name: Derive the one root release version
+        shell: bash
+        run: |
+          python3 scripts/set_release_version.py --check
+          release_version="$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version = "([^"]+)"$', text)
+          if match is None:
+              raise SystemExit("workspace release version is missing")
+          print(match.group(1))
+          PY
+          )"
+          case "$release_version" in
+            *dev*) echo "release candidate requires a non-development version" >&2; exit 1 ;;
+          esac
+          printf 'RELEASE_VERSION=%s\n' "$release_version" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
@@ -469,6 +488,8 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json
           pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
+          python3 "$GITHUB_WORKSPACE/scripts/ci/prepare-napi-packages.py" \
+            --npm-dir npm --legal-dir .
           for package_dir in npm/*; do
             npm pack "./$package_dir" --ignore-scripts \
               --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
@@ -476,10 +497,10 @@ jobs:
           npm pack . --ignore-scripts \
             --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
           popd
-          npm pack ./packages/cli --ignore-scripts \
-            --pack-destination candidate/release-artifacts/npm
-          npm pack ./packages/agent-skills --ignore-scripts \
-            --pack-destination candidate/release-artifacts/npm
+          pnpm --dir packages/cli pack \
+            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          pnpm --dir packages/agent-skills pack \
+            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
 
       - name: Package the complete Rust surface
         shell: bash
@@ -494,7 +515,7 @@ jobs:
           done < <(python3 scripts/ci/crate-publish-plan.py list)
           cargo package "${package_args[@]}" --allow-dirty --no-verify
           for crate in "${crates[@]}"; do
-            cp "target/release-candidate/package/${crate}-0.5.0.crate" \
+            cp "target/release-candidate/package/${crate}-${RELEASE_VERSION}.crate" \
               candidate/release-artifacts/crates/
           done
 
@@ -507,18 +528,20 @@ jobs:
 
       - name: Create and validate the immutable checksum record
         run: |
+          recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           python3 scripts/record_release_artifacts.py \
-            --version 0.5.0 \
+            --version "$RELEASE_VERSION" \
             --dist-dir candidate/release-artifacts \
-            --out candidate/v0.5.0-artifacts.json \
+            --out "candidate/v${RELEASE_VERSION}-artifacts.json" \
+            --recorded-at "$recorded_at" \
             --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
           python3 scripts/ci/clean-env-verify.py validate-release-record \
-            candidate/v0.5.0-artifacts.json
+            "candidate/v${RELEASE_VERSION}-artifacts.json"
           python3 scripts/ci/release-candidate.py validate \
-            --record candidate/v0.5.0-artifacts.json \
+            --record "candidate/v${RELEASE_VERSION}-artifacts.json" \
             --artifacts-dir candidate/release-artifacts \
             --expected-sha "$EVIDENCE_SHA" \
-            --version 0.5.0
+            --version "$RELEASE_VERSION"
 
       - name: Retain the release candidate for publication
         uses: actions/upload-artifact@v7

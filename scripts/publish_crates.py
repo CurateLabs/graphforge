@@ -158,7 +158,10 @@ def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str
         record = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"cannot read release record {record_path}: {error}") from error
-    if record.get("schema") != "graphforge-release-record-v1":
+    if record.get("schema") not in {
+        "graphforge-release-record-v1",
+        "graphforge-release-candidate-v2",
+    }:
         raise RuntimeError("unexpected release record schema")
     if record.get("version") != VERSION or record.get("tag") != f"v{VERSION}":
         raise RuntimeError("release record version/tag does not match the Cargo version")
@@ -212,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--release-record",
         type=Path,
-        help="Certified graphforge-release-record-v1 JSON",
+        help="Certified release record or candidate-manifest JSON",
     )
     parser.add_argument(
         "--artifacts-dir",

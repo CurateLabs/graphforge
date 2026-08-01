@@ -59,6 +59,9 @@ def test_reject_dev_version() -> None:
 
 def test_validate_release_record_ok() -> None:
     cev.validate_release_record(sample_record())
+    candidate = sample_record()
+    candidate["schema"] = cev.RELEASE_CANDIDATE_SCHEMA
+    cev.validate_release_record(candidate)
 
 
 def test_validate_release_record_bad_digest() -> None:

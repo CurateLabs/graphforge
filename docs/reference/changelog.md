@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Replace checksum-only release records with a deterministic, partitioned
+  candidate manifest that enforces the complete 24-node public package set,
+  one root version, exact dependency edges, archive entrypoints/legal files,
+  retention, and an explicit registry-independent publication state model
+  before any write (#293).
 - Adopt ADR 0017's single-version release invariant: all public Rust crates,
   Python and Node/native adapters, CLI, and agent skills must publish one exact
   GraphForge version, and partial-publication recovery may not introduce
