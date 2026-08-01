@@ -57,7 +57,7 @@ dependency (not bundled inside the `graphforge` wheel). See
 
 ---
 
-## Node package (`@curatelabs/graphforge`)
+## Node package (@curatelabs/graphforge, v0.5.1 — being shipped)
 
 **Requirements:** a current Node.js LTS (CI covers the binding’s supported
 targets).

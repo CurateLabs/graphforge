@@ -50,7 +50,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | Embedded package (v0.5.1 publishing) | Run a server |
+| **Setup** | `pip install` | Embedded package (v0.5.1 being shipped) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
