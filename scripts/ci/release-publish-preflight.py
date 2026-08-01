@@ -105,6 +105,7 @@ def validate(
     versions: dict[str, str],
     changelog: str,
     docs_changelog: str,
+    allow_unreleased_entries: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     version = release_version(tag)
@@ -130,7 +131,7 @@ def validate(
     body = unreleased_body(changelog)
     if body is None:
         errors.append("CHANGELOG lacks an [Unreleased] section before the release section")
-    elif re.search(r"(?m)^\s*[-*]\s+", body):
+    elif re.search(r"(?m)^\s*[-*]\s+", body) and not allow_unreleased_entries:
         errors.append("CHANGELOG [Unreleased] still contains release-note entries")
 
     current_repo = "https://github.com/CurateLabs/graphforge"
@@ -147,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True, help="Release tag, e.g. v0.5.0")
     parser.add_argument("--expected-sha", required=True, help="Release-event commit SHA")
+    parser.add_argument(
+        "--allow-unreleased-entries",
+        action="store_true",
+        help="Waive only the [Unreleased] entry check for an immutable-tag recovery",
+    )
     args = parser.parse_args(argv)
 
     version_module = load_version_module()
@@ -157,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         versions=version_module.read_current(),
         changelog=CHANGELOG.read_text(encoding="utf-8"),
         docs_changelog=DOCS_CHANGELOG.read_text(encoding="utf-8"),
+        allow_unreleased_entries=args.allow_unreleased_entries,
     )
     errors.extend(version_module.check_aligned())
     errors.extend(validate_metadata())
