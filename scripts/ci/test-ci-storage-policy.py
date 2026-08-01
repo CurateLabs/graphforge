@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
