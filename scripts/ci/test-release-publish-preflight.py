@@ -130,7 +130,8 @@ for lane in (pypi, native, main, cli, skills, crates):
     assert "release_action.py" in lane
     assert "release_registry.py" in lane
     assert "release_action.py attempt" in lane
-    assert "gh release upload" in lane
+    assert 'gh release upload "$RELEASE_TAG" "$attempt" --clobber' in lane
+    assert 'gh release upload "$RELEASE_TAG" "$receipt" --clobber' in lane
     assert "--attempts-dir write-evidence/attempts" in lane
     assert "--receipts-dir write-evidence/receipts" in lane
 

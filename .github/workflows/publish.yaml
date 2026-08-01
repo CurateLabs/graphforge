@@ -249,7 +249,7 @@ jobs:
         run: |
           attempt="v$RELEASE_VERSION-attempt-pypi-graphforge.json"
           python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt"
+          gh release upload "$RELEASE_TAG" "$attempt" --clobber
       - name: Publish exact Python artifacts once
         if: steps.authorize.outputs.publish == 'true'
         run: uv publish candidate/release-artifacts/python/*
@@ -264,7 +264,7 @@ jobs:
           accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           receipt="v$RELEASE_VERSION-accepted-pypi-graphforge.json"
           python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt"
+          gh release upload "$RELEASE_TAG" "$receipt" --clobber
           python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node pypi:graphforge --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
           jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
 
@@ -328,7 +328,7 @@ jobs:
         run: |
           attempt="v$RELEASE_VERSION-attempt-npm-${{ matrix.package }}.json"
           python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt"
+          gh release upload "$RELEASE_TAG" "$attempt" --clobber
       - name: Publish one exact native tarball
         if: steps.authorize.outputs.publish == 'true'
         env:
@@ -351,7 +351,7 @@ jobs:
           accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           receipt="v$RELEASE_VERSION-accepted-npm-${{ matrix.package }}.json"
           python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt"
+          gh release upload "$RELEASE_TAG" "$receipt" --clobber
           python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$NODE_ID" --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
           jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
 
@@ -404,7 +404,7 @@ jobs:
         run: |
           attempt="v$RELEASE_VERSION-attempt-npm-graphforge.json"
           python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-          gh release upload "$RELEASE_TAG" "$attempt"
+          gh release upload "$RELEASE_TAG" "$attempt" --clobber
       - name: Publish exact npm main tarball once
         if: steps.authorize.outputs.publish == 'true'
         env:
@@ -426,7 +426,7 @@ jobs:
           accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           receipt="v$RELEASE_VERSION-accepted-npm-graphforge.json"
           python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --accepted-at "$accepted_at" --out "$receipt"
-          gh release upload "$RELEASE_TAG" "$receipt"
+          gh release upload "$RELEASE_TAG" "$receipt" --clobber
           python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
           jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
 
@@ -466,13 +466,13 @@ jobs:
           if test "$(jq -r .publish authorization.json)" = true; then
             attempt="v$RELEASE_VERSION-attempt-npm-graphforge-cli.json"
             python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt"
+            gh release upload "$RELEASE_TAG" "$attempt" --clobber
             npm whoami
             python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package @curatelabs/graphforge-cli
             accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             receipt="v$RELEASE_VERSION-accepted-npm-graphforge-cli.json"
             python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt"
+            gh release upload "$RELEASE_TAG" "$receipt" --clobber
             python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
             jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -513,13 +513,13 @@ jobs:
           if test "$(jq -r .publish authorization.json)" = true; then
             attempt="v$RELEASE_VERSION-attempt-npm-graphforge-agent-skills.json"
             python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt"
+            gh release upload "$RELEASE_TAG" "$attempt" --clobber
             npm whoami
             python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package @curatelabs/graphforge-agent-skills
             accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             receipt="v$RELEASE_VERSION-accepted-npm-graphforge-agent-skills.json"
             python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt"
+            gh release upload "$RELEASE_TAG" "$receipt" --clobber
             python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
             jq '{node_id,state,reason}' post-write.json >> "$GITHUB_STEP_SUMMARY"
           fi
@@ -613,12 +613,12 @@ jobs:
             fi
             attempt="v$RELEASE_VERSION-attempt-crates-$crate.json"
             python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node "$node" --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
-            gh release upload "$RELEASE_TAG" "$attempt"
+            gh release upload "$RELEASE_TAG" "$attempt" --clobber
             python3 scripts/publish_crates.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --crate "$crate"
             accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             receipt="v$RELEASE_VERSION-accepted-crates-$crate.json"
             python3 scripts/ci/release_action.py receipt --manifest "candidate/$MANIFEST_NAME" --node "$node" --accepted-at "$accepted_at" --out "$receipt"
-            gh release upload "$RELEASE_TAG" "$receipt"
+            gh release upload "$RELEASE_TAG" "$receipt" --clobber
             python3 scripts/ci/release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live --accepted-receipt "$receipt" --observed-at "$accepted_at" --out post-write.json
             jq --arg node "$node" --slurpfile current post-write.json '.observations = ([.observations[] | select(.node_id != $node)] + $current)' observations.json > observations.next.json
             mv observations.next.json observations.json
