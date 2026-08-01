@@ -1,6 +1,7 @@
 {
   "name": "graphforge-visualization-examples",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Node visualization examples over a shared GraphForge projection (#298)",
   "engines": {
