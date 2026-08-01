@@ -38,6 +38,12 @@ try:
 except ValueError as exc:
     assert "non-printable" in str(exc)
     assert "\x00" not in str(exc)
+try:
+    mod.normalize_registry_token("abc\x85def")
+    raise AssertionError("expected ISO-8859-1 C1 control to fail")
+except ValueError as exc:
+    assert "non-printable" in str(exc)
+    assert "\x85" not in str(exc)
 
 commands: list[list[str]] = []
 mod.package_checksum = lambda _name, expected=None: expected or "abc123"

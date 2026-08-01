@@ -51,8 +51,8 @@ def normalize_registry_token(raw: str) -> str:
     token = raw.strip()
     if not token:
         raise ValueError("CARGO_REGISTRY_TOKEN is empty after trim")
-    # Printable ISO-8859-1: exclude C0 controls, DEL, and code points above 255.
-    if any(ord(ch) < 32 or ord(ch) == 127 or ord(ch) > 255 for ch in token):
+    # Printable ISO-8859-1 only: 0x20-0x7E and 0xA0-0xFF (not C0/C1/DEL).
+    if any(not (0x20 <= ord(ch) <= 0x7E or 0xA0 <= ord(ch) <= 0xFF) for ch in token):
         raise ValueError("CARGO_REGISTRY_TOKEN contains non-printable or non-ISO-8859-1 characters")
     return token
 
