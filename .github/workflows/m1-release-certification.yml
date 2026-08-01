@@ -199,11 +199,13 @@ jobs:
           uv run --isolated --no-project --with "${wheels[0]}" \
             python scripts/ci/release-load-matrix.py run \
               --sha "$EVIDENCE_SHA" --work "$GF_LOAD_WORK" --output "$GF_LOAD_OUTPUT"
-      - name: Save load report for aggregate job
-        uses: actions/cache/save@v6
+      - name: Retain load report for aggregate job
+        uses: actions/upload-artifact@v7
         with:
+          name: M1-Release-Load-${{ github.run_id }}
           path: m1-release-load-evidence
-          key: m1-release-load-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
 
   cleanup_load_disk:
     name: Delete one-run M1 certification build disk
@@ -244,22 +246,28 @@ jobs:
             --binding-run evidence/component-validation-final/binding-run.json \
             --expected-sha "$EXPECTED_SHA" \
             --output evidence/component-validation-final/report.json
-      - uses: actions/cache/restore@v6
+      - name: Download exact-run Rust evidence
+        uses: actions/download-artifact@v8
         with:
+          name: M1-Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}
           path: non-cypher-evidence
-          key: rust-non-cypher-${{ needs.validate_source.outputs.evidence_sha }}
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.rust_run_id }}
+      - name: Download exact-run binding evidence
+        uses: actions/download-artifact@v8
         with:
+          name: M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
           path: binding-rc-aggregate
-          key: binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}
-          fail-on-cache-miss: true
-      - uses: actions/cache/restore@v6
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.binding_rc_run_id }}
+      - name: Download exact-run load evidence
+        uses: actions/download-artifact@v8
         if: needs.load.result == 'success'
         with:
+          name: M1-Release-Load-${{ github.run_id }}
           path: m1-release-load-evidence
-          key: m1-release-load-${{ github.run_id }}
-          fail-on-cache-miss: true
       - name: Validate and aggregate every required component
         if: needs.load.result == 'success'
         run: >-

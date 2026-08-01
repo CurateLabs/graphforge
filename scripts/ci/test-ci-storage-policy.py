@@ -14,7 +14,9 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
         "binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
         "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Load-${{ github.run_id }}": 1,
         "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
     }
 )
@@ -23,6 +25,9 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-*": 1,
         "binding-rc-wheel-${{ github.run_id }}-*": 1,
         "binding-rc-addon-${{ github.run_id }}-*": 1,
+        "M1-Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Load-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -46,7 +51,6 @@ EXPECTED_STICKY_DELETES = Counter(
 )
 EXPECTED_SAVES = Counter(
     {
-        "binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
@@ -56,13 +60,10 @@ EXPECTED_SAVES = Counter(
         "m21-transfer-${{ github.run_id }}-rust": 1,
         "m21-transfer-${{ github.run_id }}-python": 1,
         "m21-transfer-${{ github.run_id }}-node": 1,
-        "m1-release-load-${{ github.run_id }}": 1,
-        "rust-non-cypher-${{ env.EVIDENCE_SHA }}": 1,
     }
 )
 EXPECTED_RESTORES = Counter(
     {
-        "binding-release-candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
@@ -72,8 +73,6 @@ EXPECTED_RESTORES = Counter(
         "m21-transfer-${{ github.run_id }}-rust": 1,
         "m21-transfer-${{ github.run_id }}-python": 1,
         "m21-transfer-${{ github.run_id }}-node": 1,
-        "m1-release-load-${{ github.run_id }}": 1,
-        "rust-non-cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
     }
 )
 
@@ -145,7 +144,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "binding-rc-reports/${{ matrix.report_target }}.json",
             "dist/*.whl",
             "crates/graphforge-bindings-node/*.node",
+            "non-cypher-evidence/",
             "binding-rc-aggregate/report.json",
+            "m1-release-load-evidence",
             "candidate/",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
@@ -153,16 +154,49 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         uses = field(step, "uses")
         assert uses == "actions/download-artifact@v8", f"unapproved artifact action: {uses}"
         pattern = field(step, "pattern")
-        assert pattern is not None, "artifact download has no exact-run pattern"
-        assert field(step, "path") in {
+        name = field(step, "name")
+        selector = pattern if pattern is not None else name
+        assert selector is not None
+        path = field(step, "path")
+        assert path in {
             "binding-rc-reports",
             "candidate/release-artifacts/python",
             "candidate/release-artifacts/node-addons",
-        }, f"artifact download path drift: {pattern}"
-        assert field(step, "merge-multiple") == "true", (
-            f"artifact reports are not merged: {pattern}"
-        )
-        downloaded.append(pattern)
+            "non-cypher-evidence",
+            "binding-rc-aggregate",
+            "m1-release-load-evidence",
+        }, f"artifact download path drift: {selector}"
+        if pattern is not None:
+            assert field(step, "merge-multiple") == "true", (
+                f"artifact reports are not merged: {pattern}"
+            )
+            assert field(step, "run-id") is None, (
+                f"same-run artifact pattern unexpectedly crosses runs: {pattern}"
+            )
+        else:
+            assert field(step, "merge-multiple") is None, (
+                f"single artifact unexpectedly merged: {name}"
+            )
+            cross_run = name != "M1-Release-Load-${{ github.run_id }}"
+            if cross_run:
+                assert field(step, "github-token") == "${{ github.token }}", (
+                    f"cross-run artifact has no token: {name}"
+                )
+                assert field(step, "repository") == "${{ github.repository }}", (
+                    f"cross-run artifact repository drift: {name}"
+                )
+                expected_run_id = {
+                    "non-cypher-evidence": "${{ inputs.rust_run_id }}",
+                    "binding-rc-aggregate": "${{ inputs.binding_rc_run_id }}",
+                }[path]
+                assert field(step, "run-id") == expected_run_id, (
+                    f"cross-run artifact run ID drift: {name}"
+                )
+            else:
+                assert field(step, "run-id") is None, (
+                    f"same-run load artifact unexpectedly crosses runs: {name}"
+                )
+        downloaded.append(selector)
     return uploaded, downloaded
 
 

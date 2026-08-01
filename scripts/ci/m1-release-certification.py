@@ -71,17 +71,17 @@ def validate_component_runs(
             "rust",
             rust_run,
             ".github/workflows/non-cypher-surface-gate.yml",
-            "rust-non-cypher-" + expected_sha,
+            "M1-Rust-Non-Cypher-" + expected_sha,
         ),
         (
             "binding",
             binding_run,
             ".github/workflows/binding-release-candidate.yml",
-            "binding-release-candidate-" + expected_sha,
+            "M1-Binding-Release-Candidate-" + expected_sha,
         ),
     )
     components: dict[str, Any] = {}
-    for owner, run, workflow_path, cache_key in specifications:
+    for owner, run, workflow_path, artifact_name in specifications:
         run_id = _run_id(run.get("id"), owner)
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             raise ValueError(f"{owner}: referenced run is not completed successfully")
@@ -107,7 +107,7 @@ def validate_component_runs(
             "run_url": expected_url,
             "run_attempt": run["run_attempt"],
             "workflow_path": workflow_path,
-            "cache_key": cache_key,
+            "artifact_name": artifact_name,
         }
     return {"source_sha": expected_sha, "components": components}
 
@@ -325,7 +325,7 @@ def aggregate(
         "run_url",
         "run_attempt",
         "workflow_path",
-        "cache_key",
+        "artifact_name",
     }
     for name, component in components.items():
         if not isinstance(component, dict) or set(component) != component_keys:
@@ -333,14 +333,14 @@ def aggregate(
         run_id = _run_id(component["run_id"], f"{name} run")
         run_attempt = _run_id(component["run_attempt"], f"{name} attempt")
         expected_url = f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"
-        expected_cache = {
-            "rust": "rust-non-cypher-" + expected_sha,
-            "binding": "binding-release-candidate-" + expected_sha,
+        expected_artifact = {
+            "rust": "M1-Rust-Non-Cypher-" + expected_sha,
+            "binding": "M1-Binding-Release-Candidate-" + expected_sha,
         }[name]
         if (
             component["run_url"] != expected_url
             or component["workflow_path"] != expected_workflows[name]
-            or component["cache_key"] != expected_cache
+            or component["artifact_name"] != expected_artifact
         ):
             raise ValueError(f"{name}: component-run provenance drift")
         normalized_components[name] = {
@@ -348,7 +348,7 @@ def aggregate(
             "run_url": expected_url,
             "run_attempt": run_attempt,
             "workflow_path": expected_workflows[name],
-            "cache_key": expected_cache,
+            "artifact_name": expected_artifact,
         }
     rust_report, binding_report, load_report = (
         load_json(rust_path),
