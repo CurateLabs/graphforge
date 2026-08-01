@@ -21,13 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sigma.js) with a frozen size ladder, dispatch-only CI-class evidence
   workflow, and honest comparison report — never a PR/push/scheduled/required/
   release gate (#299).
-- Align public installation guidance and registry-status wording with the
-  **v0.5.1** release being shipped; pin install examples to `0.5.1` without
-  claiming live PyPI/npm presence until CurateLabs publishes (#197).
+- Align public installation guidance with **v0.5.1**; pin install examples to
+  `graphforge==0.5.1` / `@curatelabs/graphforge@0.5.1` (#197).
 - Polish M1-facing reader journeys: retire unexplained milestone/analyst
   shorthand on entry points and nav labels, reorder contribute/operate next
   steps, and keep audit terminology where operators need exact workflow names
   (#301).
+- Use final shipped voice for v0.5.1 install and release wording (no
+  pre-publish hedges in public docs) (#301).
 
 ## [0.5.1] - 2026-08-01
 

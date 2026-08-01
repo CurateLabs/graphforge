@@ -15,11 +15,10 @@ results, and Parquet persistence. It brings openCypher and analyst-intent verbs 
 scripts, repositories, and editor workflows without requiring a database server. The current
 v0.5 engine passes all **3,897 openCypher TCK scenarios**.
 
-> **Registry status:** CurateLabs will publish GraphForge **v0.5.1** to PyPI (`graphforge`)
-> and npm (`@curatelabs/graphforge`, `@curatelabs/graphforge-cli`) as part of this release.
-> Until **0.5.1** appears, prefer a [source install](guide/installation.md). PyPI still lists
-> an unrelated pure-Python `graphforge` **0.4.0**; pin the CurateLabs release version and do
-> not assume an unpinned install resolves to the native engine.
+> **Install tip:** Pin GraphForge **v0.5.1** from PyPI (`graphforge==0.5.1`) or npm
+> (`@curatelabs/graphforge@0.5.1`). PyPI also lists an unrelated pure-Python `graphforge`
+> **0.4.0**; do not assume an unpinned install resolves to the CurateLabs native engine.
+> See [Installation](guide/installation.md).
 
 ```python
 from graphforge import GraphForge
@@ -46,7 +45,7 @@ they never replace or fall back from the Rust engine.
 
 | Page | Job |
 |---|---|
-| [Installation](guide/installation.md) | Check registry status and build Python or Node from source |
+| [Installation](guide/installation.md) | Install Python or Node packages, or build from source |
 | [Quick Start](guide/quickstart.md) | Create, query, and persist your first graph |
 | [Tutorial](guide/tutorial.md) | Work through a complete citation-network example |
 | [CLI and repository integration](guides/repository-integration.md) | Initialize, validate, synchronize, checkpoint, export, and import a project |

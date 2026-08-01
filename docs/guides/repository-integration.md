@@ -4,10 +4,9 @@ GraphForge uses one `.graphforge/` directory. Definitions in `graphforge.yaml`,
 `ontology/`, `schemas/`, `seeds/`, and `migrations/` are ordinary reviewable Git
 content. Runtime state, imports, and exports are data and must not be committed.
 
-> **Registry status:** The v0.5 Python and npm packages are not published yet. From a source
-> checkout, run the native CLI with `cargo run -p graphforge-cli -- <arguments>`. The `uvx` and `npx`
-> forms below document the package entry points that become available when v0.5 is published;
-> they do not currently resolve to the v0.5 engine from public registries.
+> **CLI entry points:** Use the published packages (`uvx graphforge`,
+> `npx @curatelabs/graphforge-cli`) or, from a source checkout, run
+> `cargo run -p graphforge-cli -- <arguments>`.
 
 The Python and Node packages project the same native lifecycle contract:
 

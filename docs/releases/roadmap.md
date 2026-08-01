@@ -1,7 +1,7 @@
 # GraphForge Roadmap
 
 **Last Updated:** 2026-08-01
-**Current release line:** v0.5.1 (being shipped; see [installation](../guide/installation.md) for registry status)
+**Current release line:** v0.5.1 (see [installation](../guide/installation.md))
 
 ---
 
@@ -14,19 +14,19 @@ plain-language purpose there; this page stays version- and outcome-oriented.
 
 ---
 
-## v0.5.1 — Coordinated release (shipping)
+## v0.5.1 — Coordinated release (current)
 
-GraphForge **v0.5.1** is the release being shipped across Rust crates, PyPI,
-npm bindings/CLI/skills, and public docs. Until **0.5.1** appears on the public
-registries, prefer a [source install](../guide/installation.md). The incomplete
-v0.5.0 registry publication remains documented historical incident evidence and
-is not the completion target.
+GraphForge **v0.5.1** is the current coordinated release across Rust crates,
+PyPI, npm bindings/CLI/skills, and public docs. Install from the published
+packages (see [installation](../guide/installation.md)). The incomplete v0.5.0
+registry publication remains documented historical incident evidence and is not
+the completion target.
 
 Capability surface matches the shipped v0.5 engine: openCypher, seven
 analyst-intent verbs, Parquet projects, and thin Python/Node bindings.
 
 Swift and Kotlin UniFFI bindings remain **planned** after this coordinated
-publication; they are not part of the v0.5.1 core package set.
+release; they are not part of the v0.5.1 core package set.
 
 See [Publishing](../engineering/PUBLISHING.md) for artifact destinations and
 [release process](../development/release-process.md) for operator sequence.
@@ -113,5 +113,5 @@ The `0.x` series signals that the API is still maturing.
 - **Patch** (`0.5.y`): Bug fixes, small improvements, no intentional API breaks
 - **Minor** (`0.x.0`): New features; backwards-compatible where practical
 
-**v0.5.1** is the coordinated release being shipped. A `v1.0` release will happen when
+**v0.5.1** is the current coordinated release. A `v1.0` release will happen when
 the API is stable enough to commit to long-term compatibility.

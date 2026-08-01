@@ -50,7 +50,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | Embedded package (v0.5.1 being shipped) | Run a server |
+| **Setup** | `pip install` | Embedded package (`graphforge==0.5.1`) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
@@ -71,24 +71,19 @@ aggregations remain edge-count bound. See scale limits for measured ceilings.*
 
 ## Installation
 
-GraphForge **v0.5.1** is the release being shipped. CurateLabs will publish that
-version to PyPI and npm; until **0.5.1** appears on those registries, build the
-Rust-owned engine from source (pin examples use `0.5.1` as the release version —
-do not assume live registry presence yet). An unrelated pure-Python `graphforge`
-**0.4.0** remains on PyPI; do not confuse it with the CurateLabs native engine.
+Install GraphForge **v0.5.1** from PyPI or npm. Pin the release version — PyPI
+also lists an unrelated pure-Python `graphforge` **0.4.0**; do not confuse it
+with the CurateLabs native engine.
 
 ```bash
-git clone https://github.com/CurateLabs/graphforge.git
-cd graphforge
-uv sync --dev
-maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+pip install "graphforge==0.5.1"
 python -c "import graphforge; print(graphforge.__version__)"  # 0.5.1…
 ```
 
 **Requirements:** Python 3.10–3.14
 
-See the [installation guide](docs/guide/installation.md) for pinned registry
-install commands, Node setup, source-build requirements, and verification.
+See the [installation guide](docs/guide/installation.md) for Node setup,
+source builds, and verification.
 
 ### Ways to use GraphForge
 
@@ -320,8 +315,8 @@ heads and stale commits before any platform matrix build starts.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| **v0.5.1** | Coordinated release across crates, PyPI, npm, CLI, and docs | **Being shipped** |
-| v0.5.x | Swift + Kotlin bindings (UniFFI) and follow-on surfaces | Planned after core publication |
+| **v0.5.1** | Coordinated release across crates, PyPI, npm, CLI, and docs | **Current** |
+| v0.5.x | Swift + Kotlin bindings (UniFFI) and follow-on surfaces | Planned |
 | v1.0 | Long-term API stability commitment | Future |
 
 **Next steps:** [install](docs/guide/installation.md) → [quick start](docs/guide/quickstart.md)

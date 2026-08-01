@@ -9,7 +9,7 @@ trees.
 
 | Page | Purpose |
 | --- | --- |
-| [Installation](installation.md) | Check v0.5.1 registry status; install via source, pip, or npm when published |
+| [Installation](installation.md) | Install v0.5.1 via pip, npm, or source |
 | [Quick Start](quickstart.md) | First graph in five minutes |
 | [Tutorial](tutorial.md) | Step-by-step walkthrough |
 | [VS Code extension](vscode-extension/) | Explore projects, run Cypher, and pair with coding agents inside your editor |

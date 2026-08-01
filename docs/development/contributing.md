@@ -2,9 +2,9 @@
 
 Thank you for your interest in contributing to GraphForge!
 
-GraphForge is a Rust core with thin Python and Node bindings. The coordinated
-**v0.5.1** release is being shipped; until registries list that version, develop
-and verify from source. All product work targets `main`.
+GraphForge is a Rust core with thin Python and Node bindings. The current
+public release is **v0.5.1**. Develop and verify from source on `main` for
+engine and binding work.
 
 | Branch | Role |
 |--------|------|
@@ -253,9 +253,9 @@ When adding features, update:
 
 ## Releases and Versioning
 
-GraphForge follows [Semantic Versioning](https://semver.org/). The coordinated
-public release being shipped is **v0.5.1** (see
-[installation](../guide/installation.md) for registry presence).
+GraphForge follows [Semantic Versioning](https://semver.org/). The current
+coordinated public release is **v0.5.1** (see
+[installation](../guide/installation.md)).
 
 When submitting PRs, update the `[Unreleased]` section of `CHANGELOG.md`:
 

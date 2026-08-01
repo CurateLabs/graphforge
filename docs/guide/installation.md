@@ -1,31 +1,27 @@
 # Installation
 
 GraphForge **v0.5.1** ships as thin native bindings over a Rust core
-(Python via maturin; Node via N-API). When registries carry this release,
-install from the published packages for normal use; otherwise build from
-source on `main` when developing the engine or bindings.
+(Python via maturin; Node via N-API). Install the published packages for
+normal use; build from source on `main` when developing the engine or
+bindings.
 
 Prefer an editor workflow? The optional [GraphForge VS Code extension](vscode-extension/install.md)
 detects Node- and Python-first workspaces, helps configure the appropriate native binding, and
 uses the same Rust-owned engine described below.
 
-> **Name collision:** PyPI currently lists an unrelated pure-Python package
+> **Name collision:** PyPI also lists an unrelated pure-Python package
 > named `graphforge` at **0.4.0** (~279 KB). CurateLabs GraphForge
-> **0.5.1** is the native engine (Rust `.so` / `.node`). CurateLabs will
-> publish **0.5.1** to PyPI and npm as part of this release; until those
-> packages appear, prefer source/dev installs from this repository (or pin
-> an already-published **0.5.0** only if you intentionally stay on that
-> line). Do not assume `pip install graphforge` without a pin resolves to
-> the CurateLabs native wheel.
+> **0.5.1** is the native engine (Rust `.so` / `.node`) on PyPI and npm.
+> Pin the release version (`graphforge==0.5.1`) — do not assume an unpinned
+> `pip install graphforge` resolves to the CurateLabs native wheel.
 
 ---
 
-## Python package (v0.5.1 — being shipped)
+## Python package (v0.5.1)
 
 **Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
 
 ```bash
-# After CurateLabs publishes 0.5.1 (pin the release version):
 pip install "graphforge==0.5.1"
 
 # uv (recommended)
@@ -57,13 +53,12 @@ dependency (not bundled inside the `graphforge` wheel). See
 
 ---
 
-## Node package (@curatelabs/graphforge, v0.5.1 — being shipped)
+## Node package (@curatelabs/graphforge, v0.5.1)
 
 **Requirements:** a current Node.js LTS (CI covers the binding’s supported
 targets).
 
 ```bash
-# After CurateLabs publishes 0.5.1:
 npm install @curatelabs/graphforge@0.5.1
 # or
 pnpm add @curatelabs/graphforge@0.5.1
@@ -73,9 +68,8 @@ pnpm add @curatelabs/graphforge@0.5.1
 import { GraphForge } from "@curatelabs/graphforge";
 ```
 
-Until **0.5.1** is published to npm, install from a local release build or
-path dependency in this repository (published **0.5.0** packages may already
-exist under `@curatelabs/graphforge` if you intentionally stay on that line).
+For local engine work, install from a release build or path dependency in
+this repository (see [Install from source](#install-from-source-main)).
 
 ---
 
