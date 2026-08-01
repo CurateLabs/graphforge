@@ -177,10 +177,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts/python/",
             "candidate/release-artifacts/npm/",
             "candidate/release-artifacts/crates/",
-            (
-                "candidate/release-artifacts/evidence/\n"
-                "candidate/release-artifacts/node-addons/"
-            ),
+            ("candidate/release-artifacts/evidence/\ncandidate/release-artifacts/node-addons/"),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
         }, f"artifact upload contains unapproved bytes: {path}"
