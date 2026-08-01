@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -121,11 +122,32 @@ const resultField = (result, field, row = 0) => {
 };
 
 try {
-  assert.equal(
-    readdirSync(nativeRoot).some((name) => name.endsWith(".node")),
-    true,
+  const nativeBinary = readdirSync(nativeRoot).find((name) =>
+    name.endsWith(".node"),
+  );
+  assert.ok(
+    nativeBinary,
     "build @curatelabs/graphforge before running the native lifecycle acceptance",
   );
+  const platformSuffix = nativeBinary
+    .replace(/^graphforge\./, "")
+    .replace(/\.node$/, "");
+  const platformRoot = join(fixture, platformSuffix);
+  mkdirSync(platformRoot);
+  copyFileSync(
+    join(nativeRoot, nativeBinary),
+    join(platformRoot, nativeBinary),
+  );
+  writeFileSync(
+    join(platformRoot, "package.json"),
+    `${JSON.stringify({
+      name: `@curatelabs/graphforge-${platformSuffix}`,
+      version: packageMetadata.version,
+      files: [nativeBinary],
+      main: nativeBinary,
+    })}\n`,
+  );
+  const platformTarball = pack(platformRoot);
   const nativeTarball = pack(nativeRoot);
   const cliTarball = pack(packageRoot, true);
   writeFileSync(
@@ -140,6 +162,7 @@ try {
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
+      platformTarball,
       nativeTarball,
       cliTarball,
     ],

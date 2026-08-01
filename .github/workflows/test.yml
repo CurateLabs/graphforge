@@ -122,6 +122,7 @@ jobs:
           python3 scripts/ci/test-release-candidate.py
           python3 scripts/ci/test-release-notes.py
           python3 scripts/ci/test-publish-npm-artifacts.py
+          python3 scripts/ci/test-amend-npm-main-artifact.py
 
       - name: Test CI storage policy
         run: python3 scripts/ci/test-ci-storage-policy.py
