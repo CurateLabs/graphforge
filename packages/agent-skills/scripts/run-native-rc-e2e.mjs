@@ -120,7 +120,10 @@ execFileSync(
 
 const installedWorkflows = await import(
   pathToFileURL(
-    join(consumer, "node_modules/@curatelabs/graphforge-agent-skills/workflows/index.js"),
+    join(
+      consumer,
+      "node_modules/@curatelabs/graphforge-agent-skills/workflows/index.js",
+    ),
   ).href
 );
 for (const name of [

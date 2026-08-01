@@ -20,7 +20,9 @@ export async function run(
 
   const binding = native ?? (await import("@curatelabs/graphforge"));
   if (typeof binding.runCli !== "function") {
-    throw new TypeError("@curatelabs/graphforge does not expose the runCli contract");
+    throw new TypeError(
+      "@curatelabs/graphforge does not expose the runCli contract",
+    );
   }
 
   const result = await binding.runCli([
@@ -30,7 +32,9 @@ export async function run(
   ]);
   const exitCode = result.exitCode ?? result.exit_code;
   if (!Number.isInteger(exitCode) || exitCode < 0 || exitCode > 255) {
-    throw new TypeError("@curatelabs/graphforge returned an invalid CLI exit code");
+    throw new TypeError(
+      "@curatelabs/graphforge returned an invalid CLI exit code",
+    );
   }
 
   write(stdout, result.stdout);
