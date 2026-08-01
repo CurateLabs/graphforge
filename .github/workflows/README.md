@@ -2,14 +2,15 @@
 
 GraphForge uses one stable required `CI Gate`. A deterministic classifier runs
 only the policy, language, and binding jobs relevant to the pull request.
-Release certification remains in `publish.yaml`.
+Release certification is manual and SHA-bound; `publish.yaml` consumes its
+retained candidate only after a GitHub Release is published.
 
 Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. Native PR
 jobs use Blacksmith sticky disks for job-isolated Cargo `target/` directories,
 while registry and pnpm dependencies use the colocated cache through upstream
 `actions/cache@v6` and `actions/setup-node@v6`. Cargo-lock changes create fresh
-sticky disks; inactive disks expire under Blacksmith's retention policy. The
-M22 host-native load matrix also mounts a sticky `target/` so maturin, Cargo,
+sticky disks; inactive disks expire under Blacksmith's retention policy.
+The M1 host-native release load matrix also mounts a sticky `target/` so maturin, Cargo,
 and napi share one build volume instead of a second root-disk tree.
 
 ## Pull-request contract
@@ -115,7 +116,7 @@ reports without rebuilding the same surfaces on every pull request. Green runs
 are not close criteria for child or construction issues that already met their
 acceptance criteria on ordinary CI.
 
-### `m22-non-cypher-surface-gate.yml`
+### `m1-release-certification.yml`
 
 A maintainer manually dispatches this **release-certification** workflow with
 the exact current `main` SHA and the successful Rust-surface and Binding RC run
@@ -125,18 +126,20 @@ duplicate, or expired component artifacts before any native build. One Linux
 release-machine job then builds one same-SHA Rust probe, Python wheel, and Node
 addon and executes the existing 144-case XS-XL matrix. The final job revalidates
 the Rust, binding, and load ledgers and uploads one
-`M22-Non-Cypher-Surface-Gate-<sha>` artifact. The workflow is manual-only,
+`M1-Release-Certification-<sha>` artifact. The workflow is manual-only,
 non-publishing, and cancels an obsolete duplicate dispatch for the same SHA.
 
 The required Rust + Binding RC run IDs are an input contract for this workflow
 only. They do **not** make the cascade a close gate for child implementation or
 construction issues; those close on outcomes (see `AGENTS.md` § Issue close).
 
-### `fuzz.yml` and `publish.yaml`
+### `binding-release-candidate.yml`, `release-credential-preflight.yml`, and `publish.yaml`
 
-Fuzzing is scheduled/manual. Publishing retains the cross-platform and
-multi-version artifact matrix required for release readiness; ordinary PRs do
-not repeat that certification.
+The exact-SHA Binding RC retains tested release bytes and their checksum record
+for 30 days. Credential preflight verifies the npm/crates.io secret projections
+without publishing. The release-event workflow consumes the retained candidate,
+attaches its record, and publishes PyPI, npm, then crates.io in fail-closed order;
+ordinary PRs do not repeat that certification.
 
 ### `clean-env-verify.yml`
 

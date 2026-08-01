@@ -19,8 +19,12 @@ Related operational docs:
 1. §5 version freeze is complete: Cargo workspace, Python binding, Node binding,
    NPX CLI/skills, and generated metadata all report `0.5.0` (not `0.5.0-dev` /
    `0.5.0.dev0`) on the intended RC commit.
-2. Artifact checksum / SBOM / license record exists for that same commit
-   and is retained with the #192 release evidence.
+2. A successful same-SHA `Binding Release Candidate` run has retained
+   `M1-Release-Candidate-<sha>` for 30 days. That bundle contains the tested
+   wheels/addons, Python sdist, all npm tarballs, all 15 `.crate` archives,
+   publication dry-run evidence, license reports, and
+   `v0.5.0-artifacts.json`. Publication consumes this bundle; it does not
+   rebuild Python/npm bytes.
 3. First-party packages declare `Apache-2.0` with `LICENSE` / `NOTICE` (and
    third-party notices intact), and the public legal surface in
    [#200](https://github.com/CurateLabs/graphforge/issues/200) is complete.
@@ -58,8 +62,13 @@ deterministic success evidence (or an explicit maintainer disposition to skip).
 Notes:
 
 - Steps 3–7 are automated by `.github/workflows/publish.yaml` once the GitHub
-  Release is published. Maintainers watch that run; they do not re-build
-  different bytes under `0.5.0` if a job fails.
+  Release is published. It resolves the successful, unexpired same-SHA
+  `Binding Release Candidate` run, validates every recorded checksum, and
+  attaches the checksum record before its first registry write. Python and npm
+  publish the exact retained files. The crates.io publisher re-packages the
+  immutable tagged tree only after proving each deterministic `.crate`
+  checksum equals the retained record. Maintainers watch that run; they do not
+  rebuild different bytes under `0.5.0` if a job fails.
 - Before any registry write, the workflow requires the release tag, current
   `main` SHA, five version surfaces, dated CHANGELOG section, Apache-2.0 policy,
   and npm publishing identity to pass its fail-closed preflight.
@@ -161,6 +170,8 @@ final #192 close.
 
 - [ ] Version freeze PR merged on the RC commit and every SHA-bound release
       certification workflow passes for that exact commit
+- [ ] The same-SHA `Binding Release Candidate` run contains an unexpired
+      `M1-Release-Candidate-<sha>` bundle and its release record validates
 - [ ] `@graphforge` npm organization exists and the publishing maintainer can
       create public organization-scoped packages
 - [ ] `NPM_TOKEN` is a granular token authorized for the `@graphforge` scope,
@@ -178,3 +189,6 @@ final #192 close.
 - [x] Public Apache-2.0 legal and contribution docs are deployed (#200)
 - [ ] Maintainer authorization to create annotated tag + GitHub Release
 - [x] Repository and release documentation are publicly readable
+
+The exact operator commands, evidence queries, and stop points are in
+[`v0.5.0-release-operator-runbook.md`](v0.5.0-release-operator-runbook.md).

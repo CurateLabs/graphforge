@@ -99,8 +99,8 @@ jobs:
           python3 scripts/ci/test-release-load-matrix.py
           python3 scripts/ci/test-release-load-executor.py
 
-      - name: Test final M22 non-Cypher surface gate
-        run: python3 scripts/ci/test-m22-non-cypher-surface-gate.py
+      - name: Test final M1 release certification gate
+        run: python3 scripts/ci/test-m1-release-certification.py
 
       - name: Test clean-environment verification harness
         run: python3 scripts/ci/test-clean-env-verify.py
@@ -117,7 +117,11 @@ jobs:
         run: python3 scripts/ci/test-crate-publish-plan.py
 
       - name: Test release publication preflight
-        run: python3 scripts/ci/test-release-publish-preflight.py
+        run: |
+          python3 scripts/ci/test-release-publish-preflight.py
+          python3 scripts/ci/test-release-candidate.py
+          python3 scripts/ci/test-release-notes.py
+          python3 scripts/ci/test-publish-npm-artifacts.py
 
       - name: Test CI storage policy
         run: python3 scripts/ci/test-ci-storage-policy.py

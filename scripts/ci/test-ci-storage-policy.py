@@ -12,9 +12,19 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
     {
         "binding-rc-report-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
+        "binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}": 1,
+        "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
     }
 )
-EXPECTED_ARTIFACT_DOWNLOADS = Counter({"binding-rc-report-${{ github.run_id }}-*": 1})
+EXPECTED_ARTIFACT_DOWNLOADS = Counter(
+    {
+        "binding-rc-report-${{ github.run_id }}-*": 1,
+        "binding-rc-wheel-${{ github.run_id }}-*": 1,
+        "binding-rc-addon-${{ github.run_id }}-*": 1,
+    }
+)
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 7,
@@ -28,11 +38,11 @@ EXPECTED_STICKY_KEYS = Counter(
             "${{ github.repository }}-daily-fuzz-"
             "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
         ): 1,
-        "${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3": 1,
+        "${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3": 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
-    {"${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3": 1}
+    {"${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3": 1}
 )
 EXPECTED_SAVES = Counter(
     {
@@ -46,10 +56,7 @@ EXPECTED_SAVES = Counter(
         "m21-transfer-${{ github.run_id }}-rust": 1,
         "m21-transfer-${{ github.run_id }}-python": 1,
         "m21-transfer-${{ github.run_id }}-node": 1,
-        "m22-load-${{ github.run_id }}": 1,
-        "publish-node-${{ github.run_id }}-${{ matrix.settings.target }}": 1,
-        "publish-python-${{ github.run_id }}-${{ matrix.os }}": 1,
-        "publish-python-${{ github.run_id }}-sdist": 1,
+        "m1-release-load-${{ github.run_id }}": 1,
         "rust-non-cypher-${{ env.EVIDENCE_SHA }}": 1,
     }
 )
@@ -65,16 +72,7 @@ EXPECTED_RESTORES = Counter(
         "m21-transfer-${{ github.run_id }}-rust": 1,
         "m21-transfer-${{ github.run_id }}-python": 1,
         "m21-transfer-${{ github.run_id }}-node": 1,
-        "m22-load-${{ github.run_id }}": 1,
-        "publish-node-${{ github.run_id }}-x86_64-apple-darwin": 1,
-        "publish-node-${{ github.run_id }}-aarch64-apple-darwin": 1,
-        "publish-node-${{ github.run_id }}-x86_64-unknown-linux-gnu": 1,
-        "publish-node-${{ github.run_id }}-aarch64-unknown-linux-gnu": 1,
-        "publish-node-${{ github.run_id }}-x86_64-pc-windows-msvc": 1,
-        "publish-python-${{ github.run_id }}-blacksmith-4vcpu-ubuntu-2404": 1,
-        "publish-python-${{ github.run_id }}-blacksmith-6vcpu-macos-15": 1,
-        "publish-python-${{ github.run_id }}-blacksmith-4vcpu-windows-2025": 1,
-        "publish-python-${{ github.run_id }}-sdist": 1,
+        "m1-release-load-${{ github.run_id }}": 1,
         "rust-non-cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
     }
 )
@@ -136,11 +134,19 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         assert field(step, "if-no-files-found") == "error", (
             f"artifact upload is not fail-closed: {name}"
         )
-        assert field(step, "retention-days") == "1", f"artifact retention is not one day: {name}"
+        publication = name.startswith("M1-")
+        expected_retention = "30" if publication else "1"
+        assert field(step, "retention-days") == expected_retention, (
+            f"artifact retention drift: {name}"
+        )
         path = field(step, "path")
         assert path in {
             "binding-rc-reports/${{ matrix.target }}.json",
             "binding-rc-reports/${{ matrix.report_target }}.json",
+            "dist/*.whl",
+            "crates/graphforge-bindings-node/*.node",
+            "binding-rc-aggregate/report.json",
+            "candidate/",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
@@ -148,9 +154,11 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         assert uses == "actions/download-artifact@v8", f"unapproved artifact action: {uses}"
         pattern = field(step, "pattern")
         assert pattern is not None, "artifact download has no exact-run pattern"
-        assert field(step, "path") == "binding-rc-reports", (
-            f"artifact download path drift: {pattern}"
-        )
+        assert field(step, "path") in {
+            "binding-rc-reports",
+            "candidate/release-artifacts/python",
+            "candidate/release-artifacts/node-addons",
+        }, f"artifact download path drift: {pattern}"
         assert field(step, "merge-multiple") == "true", (
             f"artifact reports are not merged: {pattern}"
         )
@@ -272,7 +280,7 @@ def main() -> None:
         f"{len(artifact_downloads)} consumer, {len(saved)} cache transfer producers, "
         f"{len(restored)} consumers, "
         f"{len(dependency_keys)} dependency caches, {len(sticky_keys)} bounded sticky disks, "
-        "one-day binding-report artifact retention"
+        "one-day transfer and 30-day publication artifact retention"
     )
 
 

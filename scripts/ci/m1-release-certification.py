@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and aggregate the exact-SHA M22 non-Cypher release gate."""
+"""Validate and aggregate the exact-SHA M1 release certification release gate."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ LOAD_MATRIX = ROOT / "tests/contracts/load-workload-matrix.json"
 BINDING_TARGETS = ROOT / "tests/contracts/binding-release-candidate-targets.json"
 REPOSITORY = "CurateLabs/graphforge"
 
-SCHEMA = "graphforge-m22-non-cypher-surface-gate/1"
+SCHEMA = "graphforge-m1-release-certification/1"
 RUST_SCHEMA = "graphforge-rust-non-cypher-evidence/1"
 BINDING_SCHEMA = "graphforge-binding-rc-aggregate/1"
 LOAD_SCHEMA = "graphforge-load-evidence/1"
@@ -197,7 +197,7 @@ def validate_binding(report: dict[str, Any], expected_sha: str) -> dict[str, Any
     if report.get("source_sha") != expected_sha:
         raise ValueError("binding component SHA drift")
     validator = import_script(
-        "m22_binding_validator", ROOT / "scripts/ci/validate-binding-release-candidate.py"
+        "m1_binding_validator", ROOT / "scripts/ci/validate-binding-release-candidate.py"
     )
     targets = report.get("targets")
     if not isinstance(targets, list):
@@ -237,7 +237,7 @@ def validate_load(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         raise ValueError("load taxonomy digest drift")
     if report.get("matrix_sha256") != digest(LOAD_MATRIX):
         raise ValueError("load workload matrix digest drift")
-    load_validator = import_script("m22_load_validator", ROOT / "scripts/ci/release-load-matrix.py")
+    load_validator = import_script("m1_load_validator", ROOT / "scripts/ci/release-load-matrix.py")
     matrix = load_json(LOAD_MATRIX)
     _surface, selectors = load_validator.inventory(matrix)
     expected_inventory = {name: sorted(values) for name, values in sorted(selectors.items())}
@@ -438,7 +438,7 @@ def main() -> int:
             }
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(canonical(failure))
-        print(f"M22 non-Cypher surface gate failed: {error}")
+        print(f"M1 release certification gate failed: {error}")
         return 1
     return 0
 

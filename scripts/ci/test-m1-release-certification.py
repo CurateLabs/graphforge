@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation-sensitive tests for the final M22 non-Cypher surface gate."""
+"""Mutation-sensitive tests for the final M1 release certification gate."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/ci/m22-non-cypher-surface-gate.py"
+SCRIPT = ROOT / "scripts/ci/m1-release-certification.py"
 LOAD_TEST = ROOT / "scripts/ci/test-release-load-matrix.py"
-WORKFLOW = ROOT / ".github/workflows/m22-non-cypher-surface-gate.yml"
+WORKFLOW = ROOT / ".github/workflows/m1-release-certification.yml"
 SHA = "a" * 40
 
 
@@ -25,11 +25,11 @@ def import_file(name: str, path: Path):
     return module
 
 
-GATE = import_file("m22_surface_gate", SCRIPT)
-LOAD_TESTS = import_file("m22_load_test_helpers", LOAD_TEST)
+GATE = import_file("m1_release_certification", SCRIPT)
+LOAD_TESTS = import_file("m1_release_load_test_helpers", LOAD_TEST)
 
 
-class M22SurfaceGateTests(unittest.TestCase):
+class M1ReleaseCertificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.rust_run = {
             "id": 101,
@@ -90,7 +90,7 @@ class M22SurfaceGateTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", header)
         for forbidden in ("push:", "pull_request:", "schedule:"):
             self.assertNotIn(forbidden, header)
-        self.assertIn("group: m22-non-cypher-${{ inputs.commit_sha }}", header)
+        self.assertIn("group: m1-release-certification-${{ inputs.commit_sha }}", header)
         self.assertIn("cancel-in-progress: true", header)
         self.assertNotIn("gh workflow run", text)
         validate = jobs.index("  validate_source:")
@@ -115,7 +115,7 @@ class M22SurfaceGateTests(unittest.TestCase):
         self.assertIn("release-load-matrix.py run", load_job)
         self.assertIn("useblacksmith/stickydisk@v1", load_job)
         self.assertIn(
-            "${{ github.repository }}-m22-load-${{ inputs.commit_sha }}-target-v3",
+            "${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3",
             load_job,
         )
         self.assertIn("useblacksmith/stickydisk-delete@v1", load_job)
@@ -127,8 +127,8 @@ class M22SurfaceGateTests(unittest.TestCase):
             load_job,
         )
         self.assertIn("Reclaim root-disk headroom before the matrix", load_job)
-        self.assertIn("TMPDIR: ${{ runner.temp }}/graphforge-m22-load-tmp", load_job)
-        self.assertNotIn("graphforge-m22-load-target", load_job)
+        self.assertIn("TMPDIR: ${{ runner.temp }}/graphforge-m1-release-load-tmp", load_job)
+        self.assertNotIn("graphforge-m1-release-load-target", load_job)
         maturin_step = load_job.index("- name: Build one exact-SHA Python wheel")
         reclaim_step = load_job.index("- name: Reclaim sticky-disk ownership after maturin")
         wrapper_step = load_job.index(
@@ -218,7 +218,7 @@ class M22SurfaceGateTests(unittest.TestCase):
 
     def binding_report(self) -> dict:
         validator = GATE.import_script(
-            "m22_test_binding", ROOT / "scripts/ci/validate-binding-release-candidate.py"
+            "m1_test_binding", ROOT / "scripts/ci/validate-binding-release-candidate.py"
         )
         contract = GATE.load_json(GATE.BINDING_TARGETS)
         reports = []

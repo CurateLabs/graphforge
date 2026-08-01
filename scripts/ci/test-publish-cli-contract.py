@@ -8,26 +8,21 @@ WORKFLOW = ROOT / ".github" / "workflows" / "publish.yaml"
 VERIFY = ROOT / "scripts" / "ci" / "verify-node-cli-release-package.mjs"
 
 
-def section(text: str, start: str, end: str) -> str:
-    _, found, tail = text.partition(start)
-    assert found, f"missing workflow marker: {start.strip()}"
-    body, found, _ = tail.partition(end)
-    assert found, f"missing workflow marker: {end.strip()}"
-    return body
-
-
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    native = section(text, "  publish-node:\n", "  # ---- NPX lifecycle CLI")
-    cli = section(text, "  publish-node-cli:\n", "  # ---- NPX agent skills")
-
-    assert "needs: [build-node, publish]" in native
-    assert "needs: [publish, publish-node]" in cli
-    assert "pnpm --filter @graphforge/cli test:offline" in cli
-    assert "node scripts/ci/verify-node-cli-release-package.mjs" in cli
-    assert cli.index("verify-node-cli-release-package.mjs") < cli.index("Publish @graphforge/cli")
-    assert "continue-on-error" not in cli
-    assert "|| true" not in cli
+    _, found, tail = text.partition("  publish-npm:\n")
+    assert found
+    npm_job, found, _ = tail.partition("\n  publish-crates:\n")
+    assert found
+    assert "needs: [candidate-preflight, publish-pypi]" in npm_job
+    assert "pnpm --filter @graphforge/cli test:offline" in npm_job
+    assert "node scripts/ci/verify-node-cli-release-package.mjs" in npm_job
+    assert npm_job.count("scripts/publish_npm_artifacts.py") == 3
+    assert npm_job.index("--group native") < npm_job.index("verify-node-cli-release-package.mjs")
+    assert npm_job.index("verify-node-cli-release-package.mjs") < npm_job.index("--group cli")
+    assert npm_job.index("--group cli") < npm_job.index("--group skills")
+    assert "continue-on-error" not in npm_job
+    assert "|| true" not in npm_job
     assert VERIFY.is_file()
     print("publish CLI contract tests passed")
 

@@ -151,10 +151,10 @@ GraphForge is currently in **0.x.x** (pre-1.0.0):
       release-candidate SHA and retain the accepted evidence bundle in the
       publication record
 - [ ] After the exact-SHA Rust surface and Binding Release Candidate runs pass,
-      dispatch `M22 Non-Cypher Surface Gate` with the current `main` SHA and
+      dispatch `M1 Release Certification Gate` with the current `main` SHA and
       those two immutable run IDs. Confirm its 144-case load job and final
-      `M22-Non-Cypher-Surface-Gate-<sha>` aggregate artifact for the v0.5.0 publication close-out issue
-      publication readiness. This cascade is release certification; it is not a
+      `M1-Release-Certification-<sha>` aggregate artifact for v0.5.0 publication
+      readiness. This cascade is release certification; it is not a
       close criterion for child implementation or construction issues (see
       `AGENTS.md` § Issue close)
 - [ ] Test installation from built package: `uv build && uv tool install dist/graphforge-*.whl`
