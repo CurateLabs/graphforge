@@ -319,6 +319,10 @@ def main() -> None:
         rejected(write_mutation(root, mutated), artifacts, "unsafe path")
 
         mutated = copy.deepcopy(manifest)
+        mutated["artifacts"][0]["integrities"][1] = "sha512-incorrect"
+        rejected(write_mutation(root, mutated), artifacts, "integrity mismatch")
+
+        mutated = copy.deepcopy(manifest)
         mutated["artifact_groups"][1]["artifact_paths"].append(
             mutated["artifact_groups"][0]["artifact_paths"][0]
         )
