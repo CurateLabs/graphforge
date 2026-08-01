@@ -595,10 +595,16 @@ def main() -> None:
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in release_candidate_job
     assert "--skip-optional-publish --no-gh-release" in release_candidate_job
     assert 'npm pack "./$package_dir"' in release_candidate_job
-    assert "npm pack ./packages/cli" in release_candidate_job
-    assert "npm pack ./packages/agent-skills" in release_candidate_job
+    assert "scripts/ci/prepare-napi-packages.py" in release_candidate_job
+    assert "pnpm --dir packages/cli pack" in release_candidate_job
+    assert "pnpm --dir packages/agent-skills pack" in release_candidate_job
     assert 'cargo package "${package_args[@]}" --allow-dirty --no-verify' in (release_candidate_job)
     assert 'cargo package -p "$crate"' not in release_candidate_job
+    assert "scripts/set_release_version.py --check" in release_candidate_job
+    assert "${crate}-${RELEASE_VERSION}.crate" in release_candidate_job
+    assert '--version "$RELEASE_VERSION"' in release_candidate_job
+    assert "--version 0.5.0" not in release_candidate_job
+    assert "${crate}-0.5.0.crate" not in release_candidate_job
     assert "scripts/ci/release-candidate.py validate" in rc_workflow_text
     assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
         rc_workflow_text

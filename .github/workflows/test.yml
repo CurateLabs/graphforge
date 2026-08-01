@@ -120,6 +120,7 @@ jobs:
         run: |
           python3 scripts/ci/test-release-publish-preflight.py
           python3 scripts/ci/test-release-candidate.py
+          python3 scripts/ci/test-prepare-napi-packages.py
           python3 scripts/ci/test-release-notes.py
           python3 scripts/ci/test-publish-npm-artifacts.py
           python3 scripts/ci/test-amend-npm-main-artifact.py
