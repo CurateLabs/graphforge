@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Align the Starlight docs theme (backgrounds, accents, links, sidebar) with
+  the graphforge-nextjs brand color tokens (Refs #301).
 - Add a Node Plotly.js visualization example over the shared karate projection,
   matching the Python Plotly adapter (circular layout seed `42`, CDN HTML +
   figure JSON) so Plotly is covered in both runtimes (Refs #298).

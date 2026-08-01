@@ -1,7 +1,87 @@
 /* GraphForge Starlight tweaks (ported lightly from MkDocs extra.css) */
+/*
+ * Brand colors mirrored from graphforge-nextjs/app/globals.css
+ * (:root light / .dark). Hex values are copied verbatim — no third palette.
+ */
 
 :root {
   --sl-font-system-mono: 'Roboto Mono', 'Courier New', ui-monospace, monospace;
+
+  /* Dark mode (Starlight default) ← nextjs .dark */
+  --sl-color-white: #f7f9fb; /* --ink / --foreground */
+  --sl-color-gray-1: #e8e9f8; /* --indigo-pale / --accent-foreground */
+  --sl-color-gray-2: #94a3b8; /* --ink-muted / --muted-foreground */
+  --sl-color-gray-3: #94a3b8; /* --ink-dim */
+  --sl-color-gray-4: #3d4559; /* --line-strong / --input */
+  --sl-color-gray-5: #2a3142; /* --line / --border */
+  --sl-color-gray-6: #161e2e; /* --surface-raised / --card */
+  --sl-color-black: #080c15; /* --surface / --background */
+
+  --sl-color-accent-low: #0f1520; /* --secondary / --surface-strong */
+  --sl-color-accent: #6368c2; /* --primary / --indigo-mid */
+  --sl-color-accent-high: #8c91e4; /* --indigo-light */
+
+  --sl-color-text: var(--sl-color-gray-2);
+  --sl-color-text-accent: var(--sl-color-accent-high);
+  --sl-color-bg: var(--sl-color-black);
+  --sl-color-bg-nav: var(--sl-color-gray-6);
+  --sl-color-bg-sidebar: var(--sl-color-gray-6);
+  --sl-color-bg-inline-code: var(--sl-color-gray-5);
+  --sl-color-bg-accent: var(--sl-color-accent-high);
+  --sl-color-hairline-light: var(--sl-color-gray-5);
+  --sl-color-hairline: var(--sl-color-gray-6);
+  --sl-color-hairline-shade: var(--sl-color-black);
+
+  /* Status hues aligned to nextjs --orange / --green / --destructive */
+  --sl-hue-orange: 37;
+  --sl-color-orange-low: #0f1520;
+  --sl-color-orange: #f6a623; /* --orange (dark) */
+  --sl-color-orange-high: #f6a623;
+  --sl-hue-green: 142;
+  --sl-color-green-low: #0f1520;
+  --sl-color-green: #22c55e; /* --green */
+  --sl-color-green-high: #22c55e;
+  --sl-hue-red: 0;
+  --sl-color-red-low: #0f1520;
+  --sl-color-red: #ef4444; /* --destructive */
+  --sl-color-red-high: #ef4444;
+}
+
+:root[data-theme='light'] {
+  /* Light mode ← nextjs :root */
+  --sl-color-white: #070b14; /* --ink / --foreground */
+  --sl-color-gray-1: #070b14; /* --ink */
+  /* Body text matches nextjs --foreground for readable parity with the site */
+  --sl-color-gray-2: #070b14; /* --foreground */
+  --sl-color-gray-3: #5b6b80; /* --ink-dim */
+  --sl-color-gray-4: #94a3b8; /* --line-strong */
+  --sl-color-gray-5: #cbd5e1; /* --line / --border */
+  --sl-color-gray-6: #f1f5f9; /* --surface-raised / --muted / --card */
+  --sl-color-gray-7: #f8fafc; /* --surface / --background */
+  --sl-color-black: #f8fafc; /* --surface / --background */
+
+  --sl-color-accent-high: #44488c; /* --accent-foreground */
+  --sl-color-accent: #5559a7; /* --primary / --indigo */
+  --sl-color-accent-low: #e8e9f8; /* --accent / --indigo-pale */
+
+  --sl-color-text: var(--sl-color-gray-2);
+  --sl-color-text-accent: var(--sl-color-accent);
+  --sl-color-bg-nav: var(--sl-color-gray-7);
+  --sl-color-bg-sidebar: var(--sl-color-bg);
+  --sl-color-bg-inline-code: var(--sl-color-gray-6);
+  --sl-color-bg-accent: var(--sl-color-accent);
+  --sl-color-hairline-light: var(--sl-color-gray-6);
+  --sl-color-hairline-shade: var(--sl-color-gray-6);
+
+  --sl-color-orange-high: #9a6200; /* --orange (light) */
+  --sl-color-orange: #9a6200;
+  --sl-color-orange-low: #e8e9f8;
+  --sl-color-green-high: #22c55e;
+  --sl-color-green: #22c55e;
+  --sl-color-green-low: #e8e9f8;
+  --sl-color-red-high: #ef4444;
+  --sl-color-red: #ef4444;
+  --sl-color-red-low: #e8e9f8;
 }
 
 starlight-file-tree,
