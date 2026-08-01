@@ -52,6 +52,22 @@ NATIVE_NPM_PACKAGES = (
     "@curatelabs/graphforge-linux-x64-gnu",
     "@curatelabs/graphforge-win32-x64-msvc",
 )
+# Exact napi platform package.json constraints (os/cpu[/libc]).
+NATIVE_PLATFORM_CONSTRAINTS: dict[str, dict[str, list[str]]] = {
+    "@curatelabs/graphforge-darwin-arm64": {"os": ["darwin"], "cpu": ["arm64"]},
+    "@curatelabs/graphforge-darwin-x64": {"os": ["darwin"], "cpu": ["x64"]},
+    "@curatelabs/graphforge-linux-arm64-gnu": {
+        "os": ["linux"],
+        "cpu": ["arm64"],
+        "libc": ["glibc"],
+    },
+    "@curatelabs/graphforge-linux-x64-gnu": {
+        "os": ["linux"],
+        "cpu": ["x64"],
+        "libc": ["glibc"],
+    },
+    "@curatelabs/graphforge-win32-x64-msvc": {"os": ["win32"], "cpu": ["x64"]},
+}
 NPM_PACKAGES = (
     *NATIVE_NPM_PACKAGES,
     "@curatelabs/graphforge",
@@ -249,6 +265,14 @@ def _validate_npm(view: ArchiveView, version: str) -> dict[str, Any]:
         }
         if not isinstance(files, list) or not expected_files.issubset(set(files)):
             raise CandidateError(f"npm native package {name} files metadata is incomplete")
+        expected_platform = NATIVE_PLATFORM_CONSTRAINTS[name]
+        for field, expected in expected_platform.items():
+            if metadata.get(field) != expected:
+                raise CandidateError(
+                    f"npm native package {name} {field} metadata must be {expected}"
+                )
+        if "libc" not in expected_platform and "libc" in metadata:
+            raise CandidateError(f"npm native package {name} must not declare libc")
     elif name == "@curatelabs/graphforge":
         required += [
             "package/index.js",

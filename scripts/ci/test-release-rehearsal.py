@@ -310,6 +310,46 @@ def test_compatible_native_npm_and_npm_errors() -> None:
     assert "EBADPLATFORM" in detail
     assert "complete log" not in detail
 
+    original_platform = rehearsal.sys.platform
+    original_machine = rehearsal.platform.machine
+    original_libc = rehearsal.platform.libc_ver
+    try:
+        cases = [
+            ("darwin", "arm64", ("", ""), "@curatelabs/graphforge-darwin-arm64"),
+            ("darwin", "x86_64", ("", ""), "@curatelabs/graphforge-darwin-x64"),
+            ("linux", "x86_64", ("glibc", "2.39"), "@curatelabs/graphforge-linux-x64-gnu"),
+            ("linux", "aarch64", ("glibc", "2.39"), "@curatelabs/graphforge-linux-arm64-gnu"),
+            ("win32", "AMD64", ("", ""), "@curatelabs/graphforge-win32-x64-msvc"),
+        ]
+        for system, machine, libc, expected in cases:
+            rehearsal.sys.platform = system
+            rehearsal.platform.machine = lambda machine=machine: machine
+            rehearsal.platform.libc_ver = lambda libc=libc: libc
+            assert rehearsal._compatible_native_npm_name() == expected
+
+        rehearsal.sys.platform = "linux"
+        rehearsal.platform.machine = lambda: "x86_64"
+        rehearsal.platform.libc_ver = lambda: ("", "")
+        try:
+            rehearsal._compatible_native_npm_name()
+        except rehearsal.RehearsalError as error:
+            assert "unsupported rehearsal platform" in str(error)
+        else:
+            raise AssertionError("musl Linux host was accepted")
+
+        rehearsal.sys.platform = "darwin"
+        rehearsal.platform.machine = lambda: "powerpc"
+        try:
+            rehearsal._compatible_native_npm_name()
+        except rehearsal.RehearsalError as error:
+            assert "unsupported rehearsal platform" in str(error)
+        else:
+            raise AssertionError("unsupported Darwin arch was accepted")
+    finally:
+        rehearsal.sys.platform = original_platform
+        rehearsal.platform.machine = original_machine
+        rehearsal.platform.libc_ver = original_libc
+
 
 def main() -> None:
     test_artifact_rehearsal()

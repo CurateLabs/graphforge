@@ -119,17 +119,24 @@ def _compatible_native_npm_name() -> str:
     system = sys.platform
     machine = platform.machine().lower()
     if system == "darwin":
-        name = (
-            "@curatelabs/graphforge-darwin-arm64"
-            if machine == "arm64"
-            else "@curatelabs/graphforge-darwin-x64"
-        )
+        if machine == "arm64":
+            name = "@curatelabs/graphforge-darwin-arm64"
+        elif machine == "x86_64":
+            name = "@curatelabs/graphforge-darwin-x64"
+        else:
+            raise RehearsalError(f"unsupported rehearsal platform: {system}/{machine}")
     elif system.startswith("linux"):
-        name = (
-            "@curatelabs/graphforge-linux-arm64-gnu"
-            if machine in {"aarch64", "arm64"}
-            else "@curatelabs/graphforge-linux-x64-gnu"
-        )
+        libc_name, _ = platform.libc_ver()
+        if libc_name.lower() != "glibc":
+            raise RehearsalError(
+                f"unsupported rehearsal platform: {system}/{machine} libc={libc_name or 'unknown'}"
+            )
+        if machine in {"aarch64", "arm64"}:
+            name = "@curatelabs/graphforge-linux-arm64-gnu"
+        elif machine == "x86_64":
+            name = "@curatelabs/graphforge-linux-x64-gnu"
+        else:
+            raise RehearsalError(f"unsupported rehearsal platform: {system}/{machine}")
     elif system == "win32":
         if machine not in {"amd64", "x86_64"}:
             raise RehearsalError(f"unsupported rehearsal platform: {system}/{machine}")
