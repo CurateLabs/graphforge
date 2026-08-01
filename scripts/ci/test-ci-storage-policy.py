@@ -170,6 +170,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") == "true", (
                 f"artifact reports are not merged: {pattern}"
             )
+            assert field(step, "run-id") is None, (
+                f"same-run artifact pattern unexpectedly crosses runs: {pattern}"
+            )
         else:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
