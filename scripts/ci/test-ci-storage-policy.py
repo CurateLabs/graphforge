@@ -126,11 +126,26 @@ def cache_steps(text: str) -> list[list[str]]:
 
 
 def field(step: list[str], name: str) -> str | None:
-    for line in reversed(step):
+    matched: str | None = None
+    for index, line in enumerate(step):
         stripped = line.strip().removeprefix("- ")
-        if stripped.startswith(name + ":"):
-            return stripped.split(":", 1)[1].strip().strip("'\"")
-    return None
+        if not stripped.startswith(name + ":"):
+            continue
+        value = stripped.split(":", 1)[1].strip().strip("'\"")
+        if value in {"|", "|-", ">", ">-"}:
+            indent = len(line) - len(line.lstrip())
+            collected: list[str] = []
+            for follow in step[index + 1 :]:
+                if not follow.strip():
+                    continue
+                follow_indent = len(follow) - len(follow.lstrip())
+                if follow_indent <= indent:
+                    break
+                collected.append(follow.strip())
+            matched = "\n".join(collected)
+        else:
+            matched = value
+    return matched
 
 
 def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
@@ -162,7 +177,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts/python/",
             "candidate/release-artifacts/npm/",
             "candidate/release-artifacts/crates/",
-            "candidate/release-artifacts/{evidence,node-addons}/",
+            (
+                "candidate/release-artifacts/evidence/\n"
+                "candidate/release-artifacts/node-addons/"
+            ),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
         }, f"artifact upload contains unapproved bytes: {path}"
