@@ -101,6 +101,7 @@ assert "timeout-minutes: 180" in crates
 assert "Use main-branch crates publisher for recovery" in crates
 assert "refs/remotes/origin/main:scripts/publish_crates.py" in crates
 assert "refs/remotes/origin/main:scripts/ci/release_action.py" in crates
+assert "refs/remotes/origin/main:scripts/ci/crate-authorize-refresh-nodes.py" in crates
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
@@ -109,11 +110,11 @@ assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
 assert "Never print the value" in crates
 assert "secrets.NPM_TOKEN" not in crates
 assert "Refresh this node and its crates dependencies before authorize" in crates
+assert "scripts/ci/crate-authorize-refresh-nodes.py" in crates
 assert (
     'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" '
     '--node "$refresh_node" --live' in crates
 )
-assert "edge.get('from') == node" in crates
 observe_marker = (
     'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" '
     '--node "$refresh_node" --live'
