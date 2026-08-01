@@ -140,6 +140,13 @@ def check_aligned() -> list[str]:
             "skills compatibility graphforge_release: got "
             f"{compatibility.get('graphforge_release')!r}, expected {expected['skills']!r}"
         )
+    skills_meta = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))
+    skills_release = (skills_meta.get("graphforgeCompatibility") or {}).get("release")
+    if skills_release != expected["skills"]:
+        errors.append(
+            "skills package graphforgeCompatibility.release: got "
+            f"{skills_release!r}, expected {expected['skills']!r}"
+        )
     for path in native_npm_packages():
         meta = json.loads(path.read_text(encoding="utf-8"))
         got = meta.get("version")
@@ -198,6 +205,9 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     ):
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected[key]
+        if path == SKILLS_PACKAGE:
+            compatibility_meta = meta.setdefault("graphforgeCompatibility", {})
+            compatibility_meta["release"] = expected[key]
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     for path in native_npm_packages():
