@@ -30,9 +30,10 @@ multi-tenant service. Operational detail:
   [`../development/release-process.md`](../development/release-process.md).
 - Commit messages follow Conventional Commit–style scopes used in the repo history; do not
   add new enforcement without maintainer agreement.
-- M1 release close-out now targets one coordinated v0.5.1 publication on
-  [#192](https://github.com/CurateLabs/graphforge/issues/192). The partial
-  v0.5.0 records remain immutable historical evidence.
+- The coordinated **v0.5.1** publication (GitHub milestone **M1**, tracked on
+  [#192](https://github.com/CurateLabs/graphforge/issues/192)) is the current
+  release close-out target. Partial v0.5.0 registry records remain immutable
+  historical evidence and must not be overwritten.
 
 ## Build and continuous delivery
 
@@ -70,7 +71,7 @@ must be green on the **same SHA** that is tagged for publication.
 | From | To | Required evidence / approval |
 | --- | --- | --- |
 | PR branch | `main` | Focused PR, green CI Gate, clean review threads |
-| `main` SHA | Release candidate | Complete v0.5.1 candidate manifest and offline rehearsal for #192 |
+| `main` SHA | Release candidate | Complete v0.5.1 candidate manifest and offline rehearsal (tracker [#192](https://github.com/CurateLabs/graphforge/issues/192)) |
 | Release candidate | Registries + GitHub Release | Dry-runs, checksums/SBOM where configured, human release execution |
 | Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
@@ -100,7 +101,8 @@ Authoritative stop/rollback table:
   new patch version if needed.
 - **Docs site:** redeploy last known-good commit from `main` / hosting history.
 - Authority: maintainers explicitly authorize the immutable tag, GitHub
-  Release, registry writes, and final #192 closure.
+  Release, registry writes, and final closure of the v0.5.1 publication
+  tracker ([#192](https://github.com/CurateLabs/graphforge/issues/192)).
 
 ## Official references
 

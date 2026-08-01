@@ -166,9 +166,11 @@ GraphForge is currently in **0.x.x** (pre-1.0.0):
       release-candidate SHA and retain the accepted evidence bundle in the
       publication record
 - [ ] After the exact-SHA Rust surface and Binding Release Candidate runs pass,
-      dispatch `M1 Release Certification Gate` with the current `main` SHA and
-      those two immutable run IDs. Confirm its 144-case load job and final
-      `M1-Release-Certification-<sha>` aggregate artifact for v0.5.0 publication
+      dispatch the release certification workflow named
+      `M1 Release Certification Gate` (milestone **M1** = coordinated v0.5.1
+      publication) with the current `main` SHA and those two immutable run IDs.
+      Confirm its 144-case load job and final
+      `M1-Release-Certification-<sha>` aggregate artifact for publication
       readiness. This cascade is release certification; it is not a
       close criterion for child implementation or construction issues (see
       `AGENTS.md` § Issue close)

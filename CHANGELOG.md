@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Align public installation guidance and registry-status wording with the
   **v0.5.1** release being shipped; pin install examples to `0.5.1` without
   claiming live PyPI/npm presence until CurateLabs publishes (#197).
+- Polish M1-facing reader journeys: retire unexplained milestone/analyst
+  shorthand on entry points and nav labels, reorder contribute/operate next
+  steps, and keep audit terminology where operators need exact workflow names
+  (#301).
 
 ## [0.5.1] - 2026-08-01
 

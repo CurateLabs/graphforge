@@ -130,9 +130,10 @@ knowledge, checkpoint, and compatibility contracts.
 | Page | Job |
 |---|---|
 | [Documentation map](README.md) | Understand the public information architecture |
-| [Contributing](development/contributing.md) | Develop and send focused changes |
+| [Contributing](development/contributing.md) | Prerequisites, validation, and focused PRs |
 | [Testing](engineering/TESTING.md) | See how GraphForge proves behavior |
-| [Publishing](engineering/PUBLISHING.md) | Follow package and release boundaries |
 | [Roadmap](releases/roadmap.md) | Review current and planned product surfaces |
+| [Publishing](engineering/PUBLISHING.md) | Package destinations and release sequence |
+| [Release process](development/release-process.md) | Operator checklist for cutting a release |
 
 GraphForge is open source under the [Apache License 2.0](legal/licensing.md).

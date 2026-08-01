@@ -74,7 +74,7 @@ extension documents are eligible for publication.
 | [`book/README.md`](book/README.md) | Book map |
 | [`book/architecture/`](book/architecture/overview.md) | Pipeline, storage, execution, algorithms, contracts |
 | [`book/use-cases/`](book/use-cases/README.md) | Deeper usage narratives |
-| [`book/research/`](book/research/README.md) | Present-tense v0.5.0 research notes behind the use cases |
+| [`book/research/`](book/research/README.md) | Present-tense v0.5 research notes behind the use cases |
 
 ### Engineering (public contributor lifecycle)
 
@@ -94,7 +94,7 @@ extension documents are eligible for publication.
 | [`reference/`](reference/api.md) | API, compatibility, TCK, scale limits |
 | [`development/`](development/contributing.md) | Contributor and release process detail |
 | [`legal/licensing.md`](legal/licensing.md) | Licensing copy |
-| [`adr/`](adr/) | ADR bodies (v0.5.0 keepers `0001`–`0014`) |
+| [`adr/`](adr/) | ADR bodies (keepers through `0017`) |
 | [`releases/roadmap.md`](releases/roadmap.md) | Public product roadmap |
 
 ## Conventions

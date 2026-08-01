@@ -2,12 +2,18 @@
 
 Thank you for your interest in contributing to GraphForge!
 
-GraphForge **v0.5.0** is a Rust core with thin Python and Node bindings. All
-product work targets `main`.
+GraphForge is a Rust core with thin Python and Node bindings. The coordinated
+**v0.5.1** release is being shipped; until registries list that version, develop
+and verify from source. All product work targets `main`.
 
 | Branch | Role |
 |--------|------|
 | `main` | Current product line (Rust core, Arrow results, Parquet projects, analyst verbs) |
+
+**Next steps for contributors:** set up the environment below → run the validation
+suite → open a focused PR against `main`. For release operators, start at
+[Publishing](../engineering/PUBLISHING.md) and
+[release process](release-process.md).
 
 ---
 
@@ -92,7 +98,7 @@ graphforge/
 │   ├── graphforge-rel/                  # relational lowering
 │   ├── graphforge-exec/                 # execution + analyst verbs
 │   ├── graphforge-storage/              # StorageProvider + Parquet
-│   ├── graphforge-knowledge/            # M20/M21 record domains
+│   ├── graphforge-knowledge/            # knowledge + epistemic record domains
 │   ├── graphforge-bindings-py/          # PyO3 Python binding
 │   ├── graphforge-bindings-node/        # napi-rs Node binding
 │   └── graphforge-bindings-uniffi/      # UniFFI shared binding (Swift + Kotlin)
@@ -136,9 +142,9 @@ mod tests {
 - Deterministic: same input = same output
 - Named descriptively
 
-See [`../engineering/TESTING.md`](../engineering/TESTING.md) for the v0.5.0 /
-release-prep testing strategy (layered gates, TCK posture, Binding RC), and
-[testing.md](testing.md) for command recipes and suite layout.
+See [`../engineering/TESTING.md`](../engineering/TESTING.md) for the release-prep
+testing strategy (layered gates, TCK posture, binding release-candidate evidence),
+and [testing.md](testing.md) for command recipes and suite layout.
 
 ---
 
@@ -247,8 +253,9 @@ When adding features, update:
 
 ## Releases and Versioning
 
-GraphForge follows [Semantic Versioning](https://semver.org/). The current public
-product line is **v0.5.0**.
+GraphForge follows [Semantic Versioning](https://semver.org/). The coordinated
+public release being shipped is **v0.5.1** (see
+[installation](../guide/installation.md) for registry presence).
 
 When submitting PRs, update the `[Unreleased]` section of `CHANGELOG.md`:
 

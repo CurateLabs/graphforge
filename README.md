@@ -320,9 +320,14 @@ heads and stale commits before any platform matrix build starts.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| **v0.5.0** | Rust core, Arrow results, Parquet projects, seven analyst verbs | **Development line** |
-| v0.5.1 | Swift + Kotlin bindings (UniFFI) | Planned |
+| **v0.5.1** | Coordinated release across crates, PyPI, npm, CLI, and docs | **Being shipped** |
+| v0.5.x | Swift + Kotlin bindings (UniFFI) and follow-on surfaces | Planned after core publication |
 | v1.0 | Long-term API stability commitment | Future |
+
+**Next steps:** [install](docs/guide/installation.md) → [quick start](docs/guide/quickstart.md)
+→ [docs site](https://docs.graphforge.sh/). Contributors start at
+[Contributing](docs/development/contributing.md); operators at
+[Publishing](docs/engineering/PUBLISHING.md).
 
 See [docs/releases/roadmap.md](docs/releases/roadmap.md) for delivery detail.
 Release notes accumulate in [CHANGELOG.md](CHANGELOG.md).
