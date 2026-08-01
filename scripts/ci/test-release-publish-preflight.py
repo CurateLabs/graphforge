@@ -102,6 +102,7 @@ assert "Use main-branch crates publisher for recovery" in crates
 assert "refs/remotes/origin/main:scripts/publish_crates.py" in crates
 assert "refs/remotes/origin/main:scripts/ci/release_action.py" in crates
 assert "refs/remotes/origin/main:scripts/ci/crate-authorize-refresh-nodes.py" in crates
+assert "refs/remotes/origin/main:scripts/ci/release_registry.py" in crates
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates

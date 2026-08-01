@@ -846,15 +846,34 @@ def main(argv: list[str] | None = None) -> int:
                     accepted_receipt=receipts.get(node_id),
                 )
                 if result["state"] == "absent" and node_id in attempts and node_id not in receipts:
-                    result = {
-                        **result,
-                        "state": "indeterminate",
-                        "reason": "write_attempt_outcome_unknown",
-                        "evidence": {
-                            **result["evidence"],
-                            "attempt_started_at": attempts[node_id]["started_at"],
-                        },
+                    attempt_started = _parse_time(
+                        attempts[node_id]["started_at"],
+                        field=f"{node_id}.attempt.started_at",
+                    )
+                    observed_at = _parse_time(args.observed_at, field="observed_at")
+                    evidence = {
+                        **result["evidence"],
+                        "attempt_started_at": attempts[node_id]["started_at"],
                     }
+                    # Authoritative 404 within the visibility bound may still be
+                    # index lag after a successful upload. After the bound, a
+                    # still-absent node means the prior attempt did not land
+                    # (e.g. verify failed before upload) and may be retried.
+                    if observed_at - attempt_started <= timedelta(seconds=MAX_VISIBILITY_SECONDS):
+                        result = {
+                            **result,
+                            "state": "indeterminate",
+                            "reason": "write_attempt_outcome_unknown",
+                            "evidence": evidence,
+                        }
+                    else:
+                        result = {
+                            **result,
+                            "evidence": {
+                                **evidence,
+                                "attempt_visibility_bound_exhausted": True,
+                            },
+                        }
                 return result
 
             result = {

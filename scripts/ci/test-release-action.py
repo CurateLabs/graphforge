@@ -306,6 +306,39 @@ def test_observe_all() -> None:
             assert unknown[0]["reason"] == "write_attempt_outcome_unknown"
             assert unknown[0]["evidence"]["attempt_started_at"] == ("2030-01-01T11:59:00+00:00")
 
+            (attempts / "pypi.json").write_text(
+                json.dumps(
+                    action.write_attempt(
+                        manifest,
+                        "pypi:graphforge",
+                        started_at="2030-01-01T11:46:00Z",
+                    )
+                ),
+                encoding="utf-8",
+            )
+            assert (
+                registry.main(
+                    [
+                        "observe-all",
+                        "--manifest",
+                        str(manifest_path),
+                        "--registry",
+                        "pypi",
+                        "--attempts-dir",
+                        str(attempts),
+                        "--observed-at",
+                        registry_fixture.NOW,
+                        "--out",
+                        str(output),
+                    ]
+                )
+                == 0
+            )
+            exhausted = json.loads(output.read_text(encoding="utf-8"))["observations"]
+            assert exhausted[0]["state"] == "absent"
+            assert exhausted[0]["reason"] == "pypi_authoritative_not_found"
+            assert exhausted[0]["evidence"]["attempt_visibility_bound_exhausted"] is True
+
             receipts.mkdir(exist_ok=True)
             bad_receipt = action.accepted_receipt(
                 manifest,
