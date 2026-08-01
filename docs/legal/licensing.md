@@ -1,6 +1,6 @@
 # GraphForge Licensing
 
-GraphForge `main` and the v0.5.0 release line are open source under the
+GraphForge `main` and the v0.5.x release line are open source under the
 Apache License 2.0 (`Apache-2.0`). The repository-root [LICENSE](../../LICENSE)
 contains the authoritative terms.
 

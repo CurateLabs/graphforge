@@ -1,7 +1,7 @@
 <h1 align="center">GraphForge</h1>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg" alt="GraphForge v0.5 development line" /></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5.1-F59E0B.svg" alt="GraphForge v0.5.1" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
   <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
@@ -50,7 +50,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | Embedded package (v0.5 registries pending) | Run a server |
+| **Setup** | `pip install` | Embedded package (v0.5.1 publishing) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
@@ -71,21 +71,24 @@ aggregations remain edge-count bound. See scale limits for measured ceilings.*
 
 ## Installation
 
-GraphForge v0.5 packages are not published yet. The `graphforge` package currently
-visible on PyPI is the legacy v0.4.0 line, and the v0.5 Node and CLI packages are
-not yet available from npm. Build the current Rust-owned engine from source:
+GraphForge **v0.5.1** is the release being shipped. CurateLabs will publish that
+version to PyPI and npm; until **0.5.1** appears on those registries, build the
+Rust-owned engine from source (pin examples use `0.5.1` as the release version —
+do not assume live registry presence yet). An unrelated pure-Python `graphforge`
+**0.4.0** remains on PyPI; do not confuse it with the CurateLabs native engine.
 
 ```bash
 git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
 uv sync --dev
 maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+python -c "import graphforge; print(graphforge.__version__)"  # 0.5.1…
 ```
 
 **Requirements:** Python 3.10–3.14
 
-See the [installation guide](docs/guide/installation.md) for Node setup, source-build
-requirements, verification, and registry status.
+See the [installation guide](docs/guide/installation.md) for pinned registry
+install commands, Node setup, source-build requirements, and verification.
 
 ### Ways to use GraphForge
 
