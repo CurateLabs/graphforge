@@ -21,9 +21,10 @@ multi-tenant service. Operational detail:
 | Source archive / GitHub Release | GitHub | Annotated tag | Maintainers |
 | Documentation site | Astro Starlight (`docs-site/`; CI via `docs.yml`) | Commit / release | Maintainers |
 
-## Suggested versioning and change history
+## Versioning and release history
 
-- The project already uses **Semantic Versioning** and Keep a Changelog (`CHANGELOG.md`).
+- The project uses **Semantic Versioning**; release history lives in immutable
+  GitHub Releases and their generated or explicitly supplied notes.
 - Pre-1.0 (`0.x`) may include breaking changes; v0.5 documents explicit lack of pre-v1
   project-format compatibility.
 - Patch vs minor conventions and checklists:
@@ -59,9 +60,9 @@ make publish-dry-run-cargo
 The release-event workflow runs `release-publish-preflight.py`, validates the
 complete partitioned candidate and offline rehearsal, and obtains fresh public
 registry truth before any registry write. The release tag must resolve to the
-reviewed `main` SHA; Cargo, Python, Node, CLI, and skills versions must match
-the tag; and the dated CHANGELOG section must be cut. `npm whoami` runs only in
-an npm write step so registry credentials remain isolated.
+reviewed `main` SHA, and Cargo, Python, Node, CLI, and skills versions must match
+the tag. `npm whoami` runs only in an npm write step so registry credentials
+remain isolated.
 
 Required TESTING.md gates (TCK, contract gates applicable to the release, binding RC evidence)
 must be green on the **same SHA** that is tagged for publication.
@@ -108,7 +109,6 @@ Authoritative stop/rollback table:
 
 - [Semantic Versioning 2.0.0](https://semver.org/)
 - [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
-- [Keep a Changelog](https://keepachangelog.com/)
 - [`../development/publication-order.md`](../development/publication-order.md)
 - [`../development/release-process.md`](../development/release-process.md)
 - [`../development/release-workflows.md`](../development/release-workflows.md)

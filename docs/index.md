@@ -160,7 +160,6 @@ knowledge, checkpoint, and compatibility contracts.
 | [Algorithm catalog](book/architecture/algorithms.md) | Choose rank, cluster, paths, analyze, or similar algorithms |
 | [OpenCypher compatibility](reference/opencypher-compatibility.md) | Inspect supported language behavior |
 | [TCK compliance](reference/tck-compliance.md) | Review the 3,897 / 3,897 language gate |
-| [Changelog](reference/changelog.md) | Track current behavior changes |
 
 ---
 

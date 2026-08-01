@@ -8,7 +8,7 @@
 > - `RETURN n` now produces column "n" (not "col_0")
 > - `RETURN n AS alias` produces column "alias" (unchanged)
 > - `RETURN n.property` produces column "col_0" (unchanged)
-> See CHANGELOG.md for details.
+> See the applicable GitHub Release notes for version-specific details.
 
 ## Overview
 

@@ -134,5 +134,5 @@ artifact. Until then that page stays an explicit pending placeholder.
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
 - [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce
-- [CHANGELOG.md](https://github.com/CurateLabs/graphforge/blob/main/CHANGELOG.md) — release notes
+- [GitHub Releases](https://github.com/CurateLabs/graphforge/releases) — release notes
 - [Architecture Overview](../book/architecture/overview.md) — Rust core design and DataFusion execution model

@@ -179,7 +179,6 @@ WITH 123 AS n MATCH (n) RETURN n
 - [ ] Update `docs/reference/opencypher-compatibility.md` with WITH examples
 - [ ] Add tutorial section on WITH clause usage
 - [ ] Document validation errors in error reference
-- [ ] Update CHANGELOG.md for v0.4.0
 
 ---
 

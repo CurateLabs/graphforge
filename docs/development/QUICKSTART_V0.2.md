@@ -238,7 +238,6 @@ uv run pytest --cov=src/graphforge tests/
 
 ### 4. Document
 - [ ] Update `README.md` feature list if needed
-- [ ] Update `CHANGELOG.md` under `[Unreleased]`
 - [ ] Add docstrings to new functions
 - [ ] Update examples if applicable
 
@@ -266,7 +265,6 @@ gh pr create \
 ## Checklist
 - [x] Tests passing
 - [x] Coverage >85%
-- [x] CHANGELOG updated
 - [x] Documentation updated" \
   --label "enhancement,v0.2"
 ```
@@ -432,7 +430,6 @@ def test_new_feature_basic(db):
 Track progress:
 - [ ] 9/9 issues completed
 - [ ] Test coverage >85% maintained
-- [ ] CHANGELOG.md updated
 - [ ] README.md features list updated
 - [ ] TCK compliance measured (~950 scenarios target)
 - [ ] Release notes drafted

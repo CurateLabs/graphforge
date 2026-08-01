@@ -247,7 +247,6 @@ When adding features, update:
 
 - `docs/book/architecture/` — if the change affects the compiler pipeline, storage, or execution model
 - `docs/reference/` — if the public API changes
-- `CHANGELOG.md` (`[Unreleased]` section)
 
 ---
 
@@ -256,18 +255,6 @@ When adding features, update:
 GraphForge follows [Semantic Versioning](https://semver.org/). The current
 coordinated public release is **v0.5.1** (see
 [installation](../guide/installation.md)).
-
-When submitting PRs, update the `[Unreleased]` section of `CHANGELOG.md`:
-
-```markdown
-## [Unreleased]
-
-### Added
-- New feature you implemented
-
-### Fixed
-- Bug you fixed
-```
 
 See [release-process.md](release-process.md) for the full release procedure and
 [roadmap.md](../releases/roadmap.md) for delivery sequencing.

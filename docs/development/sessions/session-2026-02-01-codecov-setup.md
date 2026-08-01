@@ -52,17 +52,7 @@ Successfully integrated Codecov for automated code coverage tracking in the Grap
 - Component tracking setup
 - Best practices
 
-### 4. CHANGELOG Update
-
-**File:** `CHANGELOG.md`
-
-Added entry under `[Unreleased]`:
-- Codecov integration documentation
-- Component-level coverage tracking
-- Configuration details
-- Coverage targets (85% project, 80% patch)
-
-### 5. README Badge
+### 4. README Badge
 
 **File:** `README.md`
 
@@ -205,7 +195,6 @@ uv run coverage report --fail-under=85
 
 ### Modified
 - ✅ `.github/workflows/test.yml` - Added Codecov uploads with token
-- ✅ `CHANGELOG.md` - Documented integration
 - ✅ `README.md` - Verified badge URL
 
 ## Benefits
@@ -257,7 +246,7 @@ Once coverage is uploaded, visit:
 
 2. ✅ **Commit and push changes**
    ```bash
-   git add .github/workflows/test.yml .codecov.yml CHANGELOG.md README.md docs/
+   git add .github/workflows/test.yml .codecov.yml README.md docs/
    git commit -m "feat: integrate Codecov for automated coverage tracking"
    git push
    ```

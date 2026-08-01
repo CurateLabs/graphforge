@@ -10,11 +10,6 @@ on:
         required: true
         default: v0.5.1
         type: string
-      waive_unreleased_entries:
-        description: Waive only the tagged CHANGELOG Unreleased-entry check
-        required: true
-        default: false
-        type: boolean
       recovery_reason:
         description: Public maintainer reason for the recovery dispatch
         required: true
@@ -49,7 +44,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           EVENT_SHA: ${{ github.sha }}
-          WAIVE_UNRELEASED_ENTRIES: ${{ inputs.waive_unreleased_entries || false }}
           RECOVERY_REASON: ${{ inputs.recovery_reason || '' }}
         run: |
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -59,12 +53,10 @@ jobs:
           test "$release_version" != 0.5.0
           test "$(git rev-parse HEAD)" = "$release_sha"
           test "$(git rev-parse "$RELEASE_TAG^{}")" = "$release_sha"
-          preflight_args=(--tag "$RELEASE_TAG" --expected-sha "$release_sha")
           if test "$GITHUB_EVENT_NAME" = release; then
             test "$EVENT_SHA" = "$release_sha"
             test "$(git rev-parse refs/remotes/origin/main)" = "$release_sha"
           else
-            test "$WAIVE_UNRELEASED_ENTRIES" = true
             test -n "$RECOVERY_REASON"
             gh release view "$RELEASE_TAG" >/dev/null
             git merge-base --is-ancestor "$release_sha" refs/remotes/origin/main
@@ -72,10 +64,11 @@ jobs:
               > "$RUNNER_TEMP/release-publish-preflight.py"
             install -m 0755 "$RUNNER_TEMP/release-publish-preflight.py" \
               scripts/ci/release-publish-preflight.py
-            preflight_args+=(--allow-unreleased-entries)
             printf 'Recovery reason: %s\n' "$RECOVERY_REASON"
           fi
-          python3 scripts/ci/release-publish-preflight.py "${preflight_args[@]}"
+          python3 scripts/ci/release-publish-preflight.py \
+            --tag "$RELEASE_TAG" \
+            --expected-sha "$release_sha"
           python3 scripts/set_release_version.py --check
           printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_OUTPUT"
           printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"

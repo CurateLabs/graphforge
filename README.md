@@ -348,7 +348,8 @@ heads and stale commits before any platform matrix build starts.
 [Publishing](docs/engineering/PUBLISHING.md).
 
 See [docs/releases/roadmap.md](docs/releases/roadmap.md) for delivery detail.
-Release notes accumulate in [CHANGELOG.md](CHANGELOG.md).
+Release notes are attached to each immutable
+[GitHub Release](https://github.com/CurateLabs/graphforge/releases).
 
 ---
 

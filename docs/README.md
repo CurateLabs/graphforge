@@ -5,7 +5,7 @@ The **published Starlight site** is organized around **reader journeys** (Diáta
 1. **Get started** — install, quickstart, tutorial
 2. **Use every day** — Cypher, construction, analytics, datasets
 3. **Understand** — architecture Book, use cases, research
-4. **Reference** — API, compatibility, TCK, changelog
+4. **Reference** — API, compatibility, TCK, and release records
 5. **Contribute & operate** — development, testing, release, this map
 6. **Engineering** — contributor lifecycle summaries and ADRs
 7. **Community** — licensing, security, code of conduct

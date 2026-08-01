@@ -24,27 +24,12 @@ def load_module():
 mod = load_module()
 sha = "a" * 40
 versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.1")
-changelog = """# Changelog
-
-## [Unreleased]
-
-_Nothing yet._
-
-## [0.5.1] - 2026-08-01
-
-- Release GraphForge.
-
-[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.1...HEAD
-[0.5.1]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.1
-"""
 assert (
     mod.validate(
         tag="v0.5.1",
         expected_sha=sha,
         actual_sha=sha,
         versions=versions,
-        changelog=changelog,
-        docs_changelog=changelog,
     )
     == []
 )
@@ -53,8 +38,6 @@ assert mod.validate(
     expected_sha=sha,
     actual_sha=sha,
     versions={**versions, "skills": "0.5.2"},
-    changelog=changelog,
-    docs_changelog=changelog,
 )
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -63,8 +46,17 @@ assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
 assert "scripts/set_release_version.py --check" in workflow
+assert "waive_unreleased" not in workflow
+assert "allow-unreleased-entries" not in workflow
+assert "CHANGELOG" not in workflow
 for group in ("manifest", "python", "npm", "crates", "evidence"):
     assert f"M1-Release-Candidate-{group}-" in workflow
+
+preflight_source = SCRIPT.read_text(encoding="utf-8")
+assert "CHANGELOG" not in preflight_source
+assert "Unreleased" not in preflight_source
+assert "docs/reference/changelog.md" not in preflight_source
+assert "allow_unreleased_entries" not in preflight_source
 
 preflight = workflow.split("  candidate-preflight:\n", 1)[1].split("\n  publish-pypi:", 1)[0]
 assert "release-publish-preflight.py" in preflight

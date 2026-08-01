@@ -257,7 +257,7 @@ All issues follow this template:
 ### Acceptance Criteria
 - **Implementation:** Specific implementation requirements
 - **Testing:** Unit tests, integration tests, TCK pass rate, 90% coverage minimum
-- **Documentation:** Update all relevant docs, add examples, update CHANGELOG
+- **Documentation:** Update all relevant docs and add examples
 
 ### Notes
 - Context and priority information

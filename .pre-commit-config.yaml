@@ -71,7 +71,7 @@ repos:
     hooks:
       - id: markdownlint
         args: [--fix]
-        exclude: ^(docs/session-.*\.md|CHANGELOG\.md)
+        exclude: ^docs/session-.*\.md
 
   # YAML formatting
   - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks

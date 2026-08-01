@@ -168,7 +168,6 @@ export default defineConfig({
                 { label: 'Cypher Script Loading', slug: 'guide/datasets/cypher-script-loading' },
               ],
             },
-            { label: 'Changelog', slug: 'reference/changelog' },
           ],
         },
         {
@@ -184,7 +183,6 @@ export default defineConfig({
             { label: 'Release Process', slug: 'development/release-process' },
             { label: 'Publication Order', slug: 'development/publication-order' },
             { label: 'Release Workflows', slug: 'development/release-workflows' },
-            { label: 'Release Strategy', slug: 'development/release-strategy' },
             { label: 'Release Load Matrix', slug: 'development/release-load-matrix' },
             {
               label: 'Clean-environment verification',

@@ -102,7 +102,6 @@ const PAGES = [
   'reference/scale-limits.md',
   'reference/load-matrix-results.md',
   'reference/column-naming-behavior.md',
-  'reference/changelog.md',
   'development/contributing.md',
   'development/workflow.md',
   'development/testing.md',
@@ -110,7 +109,6 @@ const PAGES = [
   'development/release-process.md',
   'development/publication-order.md',
   'development/clean-environment-verification.md',
-  'development/release-strategy.md',
   'development/release-workflows.md',
   // Accepted ADRs after #2725 cull/renumber.
   'adr/README.md',

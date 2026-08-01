@@ -311,16 +311,14 @@ Advanced but valuable:
    - Example: `feature/20-unwind-clause`
 3. **Implement** following checklist in issue
 4. **Test** maintaining >85% coverage
-5. **Update** CHANGELOG.md
-6. **Create PR** with `Closes #{issue-number}`
-7. **Merge** after CI passes and review
+5. **Create PR** with `Closes #{issue-number}`
+6. **Merge** after CI passes and review
 8. **Automatic:** Issue closes, milestone updates
 
 ### Best Practices
 
 - Follow implementation checklist in each issue
 - Maintain test coverage >85%
-- Update CHANGELOG.md for each feature
 - Reference issues in commits: `Part of `
 - Final commit: `Fixes #<issue-number>` or `Closes #<issue-number>`
 
@@ -354,7 +352,6 @@ Advanced but valuable:
 Track progress via:
 - [ ] 9/9 issues completed
 - [ ] >85% test coverage maintained
-- [ ] CHANGELOG.md updated
 - [ ] README.md updated with new features
 - [ ] TCK compliance measured (~950 scenarios target)
 - [ ] Release notes drafted
