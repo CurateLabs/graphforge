@@ -13,10 +13,10 @@ format-check:  ## Check code formatting
 	uv run ruff format --check .
 
 type-check:  ## Run mypy type checker
-	uv run mypy crates/gf-bindings-py/python/graphforge --strict-optional --show-error-codes
+	uv run mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes
 
 security:  ## Run Bandit security scanner
-	uv run bandit -c pyproject.toml -r crates/gf-bindings-py/python
+	uv run bandit -c pyproject.toml -r crates/graphforge-bindings-py/python
 
 workflow-lint:  ## Validate GitHub Actions workflows with pinned actionlint
 	scripts/check-workflows.sh
@@ -38,7 +38,7 @@ publish-dry-run-docs:  ## Docs preview build (pnpm docs:build)
 	python3 scripts/publish_dry_run.py --surface docs
 publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)
 	python3 scripts/publish_dry_run.py --surface python
-publish-dry-run-cargo:  ## cargo package --list for crates.io plan order (skip gf-core conflict)
+publish-dry-run-cargo:  ## cargo package --list for all 15 crates.io packages in plan order
 	python3 scripts/publish_dry_run.py --surface cargo-package
 
 record-release-artifacts:  ## Hash artifacts in DIST_DIR into a release record JSON
@@ -54,7 +54,7 @@ cargo-deny-licenses:  ## Allowlist third-party Rust dependency SPDX licenses
 	cargo deny check licenses
 
 docstring-coverage:  ## Check docstring coverage (90% minimum)
-	uv run interrogate crates/gf-bindings-py/python/graphforge --fail-under 90 --quiet
+	uv run interrogate crates/graphforge-bindings-py/python/graphforge --fail-under 90 --quiet
 
 test:  ## Run all tests in parallel (excludes snap/network downloads)
 	uv run pytest tests/ -n $${PYTEST_WORKERS:-4} -m "not snap"
@@ -63,7 +63,7 @@ test-unit:  ## Run unit tests in parallel
 	uv run pytest tests/unit -n $${PYTEST_WORKERS:-4}
 
 test-tck:  ## Run TCK compliance tests via Rust BDD runner
-	cargo test -p gf-core --test bdd
+	cargo test -p graphforge-core --test bdd
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
 COVERAGE_FAIL_UNDER_RUST ?= 85
@@ -71,13 +71,13 @@ COVERAGE_FAIL_UNDER_PYTHON ?= 85
 COVERAGE_FAIL_UNDER_NODE ?= 85
 # Back-compat alias used by coverage-python.
 COVERAGE_FAIL_UNDER ?= $(COVERAGE_FAIL_UNDER_PYTHON)
-# Thin Python wrapper under crates/gf-bindings-py/python/graphforge (not Rust).
-PYTHON_COVERAGE_SRC := crates/gf-bindings-py/python/graphforge
+# Thin Python wrapper under crates/graphforge-bindings-py/python/graphforge (not Rust).
+PYTHON_COVERAGE_SRC := crates/graphforge-bindings-py/python/graphforge
 
 _ensure-graphforge:  ## Fail fast unless the native graphforge package is importable
 	@uv run python -c "import graphforge" 2>/dev/null || \
 		(echo "❌ graphforge is not importable. Build the native binding first:"; \
-		 echo "   maturin develop --release -m crates/gf-bindings-py/Cargo.toml"; \
+		 echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \
 		 exit 1)
 
 coverage:  ## Rust + Python + Node coverage with per-surface thresholds
@@ -90,7 +90,7 @@ coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Coverage complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "Rust:   build/coverage-rust/ (lcov + html + summary)"
 	@echo "Python: coverage.xml + htmlcov/"
-	@echo "Node:   crates/gf-bindings-node/coverage/"
+	@echo "Node:   crates/graphforge-bindings-node/coverage/"
 	@echo "✅ All surfaces collected; thresholds enforced per surface"
 
 coverage-python:  ## Run unit tests with Python wrapper coverage (requires maturin develop)
@@ -169,7 +169,7 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 	@echo "Checking patch coverage for changed files..."
 	@DIFF_OUT=$$(git diff --name-only origin/main... 2>&1) || \
 		{ echo "❌ git diff failed — check that origin/main is accessible"; exit 1; }; \
-	CHANGED_FILES=$$(printf '%s\n' "$$DIFF_OUT" | grep '^crates/gf-bindings-py/python/.*\.py$$' || true); \
+	CHANGED_FILES=$$(printf '%s\n' "$$DIFF_OUT" | grep '^crates/graphforge-bindings-py/python/.*\.py$$' || true); \
 	if [ -z "$$CHANGED_FILES" ]; then \
 		echo "ℹ️  No source files changed - skipping patch coverage check"; \
 	else \
@@ -212,7 +212,7 @@ clean:  ## Clean up cache files
 	find . -type d -name .mypy_cache -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	rm -f test-results*.xml coverage.xml .coverage 2>/dev/null || true
-	rm -rf htmlcov/ build/coverage-rust/ crates/gf-bindings-node/coverage/ 2>/dev/null || true
+	rm -rf htmlcov/ build/coverage-rust/ crates/graphforge-bindings-node/coverage/ 2>/dev/null || true
 
 docs-serve:  ## Serve Starlight docs locally (http://localhost:4321/)
 	pnpm docs:dev
@@ -242,14 +242,14 @@ coverage-rust:  ## Workspace Rust coverage via cargo-llvm-cov (term + lcov + htm
 	@$(MAKE) check-coverage-rust
 
 bench-traversal:  ## Run the #767 traversal scaling benchmark (release, manual; see benchmarks/traversal_scaling.md)
-	cargo test -p gf-exec --release --test bench_traversal_scaling -- --ignored --nocapture --test-threads=1
+	cargo test -p graphforge-exec --release --test bench_traversal_scaling -- --ignored --nocapture --test-threads=1
 
 bench-fixed-hop-limit:  ## Run the #1248 fixed-hop LIMIT benchmark (release, 1M/10M edges)
-	cargo test -p gf-api --release --test fixed_hop_limit release_fixed_hop_limit_1m_10m -- --ignored --nocapture --test-threads=1
+	cargo test -p graphforge-api --release --test fixed_hop_limit release_fixed_hop_limit_1m_10m -- --ignored --nocapture --test-threads=1
 
 bench-fixed-hop-livejournal:  ## Run the #1269/#1271 cached LiveJournal LIMIT matrix (requires GF_LIVEJOURNAL_PROJECT)
 	@test -n "$$GF_LIVEJOURNAL_PROJECT" || (echo "GF_LIVEJOURNAL_PROJECT is required" && exit 2)
-	cargo test -p gf-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
+	cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
 
 native-consumers:  ## Run audited M18/M19 consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py
@@ -330,21 +330,21 @@ pnpm-test-bdd:  ## Run BDD tests across Node workspace packages
 # Node JS API coverage via c8 over hand-written lib/*.mjs (and exercised loader).
 # Requires a built native addon (*.node); does not build it here (heavy — see AGENTS.md).
 coverage-node:  ## Run @graphforge/node JS API tests under c8 (requires *.node)
-	@set -- crates/gf-bindings-node/*.node; \
+	@set -- crates/graphforge-bindings-node/*.node; \
 	if [ ! -e "$$1" ]; then \
-	  echo "❌ Native addon missing under crates/gf-bindings-node/*.node"; \
+	  echo "❌ Native addon missing under crates/graphforge-bindings-node/*.node"; \
 	  echo "   Build first: pnpm --filter @graphforge/node exec napi build --platform --release"; \
 	  exit 1; \
 	fi
 	pnpm --filter @graphforge/node run test:coverage
-	@test -s crates/gf-bindings-node/coverage/lcov.info || \
-		(echo "❌ crates/gf-bindings-node/coverage/lcov.info missing or empty" && exit 1)
+	@test -s crates/graphforge-bindings-node/coverage/lcov.info || \
+		(echo "❌ crates/graphforge-bindings-node/coverage/lcov.info missing or empty" && exit 1)
 	@$(MAKE) check-coverage-node
 
 check-coverage-node:  ## Validate Node c8 summary meets ≥85% lines (lib/ surface)
-	@test -f crates/gf-bindings-node/coverage/coverage-summary.json || \
+	@test -f crates/graphforge-bindings-node/coverage/coverage-summary.json || \
 		(echo "❌ Missing coverage-summary.json — run make coverage-node first"; exit 1)
-	@node -e "const s=require('./crates/gf-bindings-node/coverage/coverage-summary.json').total; \
+	@node -e "const s=require('./crates/graphforge-bindings-node/coverage/coverage-summary.json').total; \
 		const min=Number(process.env.COVERAGE_FAIL_UNDER_NODE||'$(COVERAGE_FAIL_UNDER_NODE)'); \
 		const pct=s.lines.pct; console.log('Node lines:', pct+'%'); \
 		if (!(pct >= min)) { console.error('❌ Node coverage below '+min+'%'); process.exit(1); } \

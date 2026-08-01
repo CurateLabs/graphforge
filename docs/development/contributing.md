@@ -27,7 +27,7 @@ cd graphforge
 uv sync --dev
 
 # Build and install the native Python extension
-maturin develop --release -m crates/gf-bindings-py/Cargo.toml
+maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 
 # Verify
 cargo test --workspace
@@ -58,7 +58,7 @@ make pre-push
 ```bash
 # Rust
 cargo test --workspace                  # all crates
-cargo test -p gf-cypher                 # one crate
+cargo test -p graphforge-cypher                 # one crate
 cargo test --workspace -- --nocapture   # with output
 
 # Python binding / workspace checks
@@ -86,16 +86,16 @@ make type-check
 ```
 graphforge/
 ├── crates/                      # Rust workspace
-│   ├── gf-api/                  # public Rust facade
-│   ├── gf-cypher/               # openCypher parser
-│   ├── gf-ir/                   # graph IR
-│   ├── gf-rel/                  # relational lowering
-│   ├── gf-exec/                 # execution + analyst verbs
-│   ├── gf-storage/              # StorageProvider + Parquet
-│   ├── gf-knowledge/            # M20/M21 record domains
-│   ├── gf-bindings-py/          # PyO3 Python binding
-│   ├── gf-bindings-node/        # napi-rs Node binding
-│   └── gf-bindings-uniffi/      # UniFFI shared binding (Swift + Kotlin)
+│   ├── graphforge-api/                  # public Rust facade
+│   ├── graphforge-cypher/               # openCypher parser
+│   ├── graphforge-ir/                   # graph IR
+│   ├── graphforge-rel/                  # relational lowering
+│   ├── graphforge-exec/                 # execution + analyst verbs
+│   ├── graphforge-storage/              # StorageProvider + Parquet
+│   ├── graphforge-knowledge/            # M20/M21 record domains
+│   ├── graphforge-bindings-py/          # PyO3 Python binding
+│   ├── graphforge-bindings-node/        # napi-rs Node binding
+│   └── graphforge-bindings-uniffi/      # UniFFI shared binding (Swift + Kotlin)
 ├── packages/                    # Node packaging and agent skills
 ├── docs/                        # Markdown sources (Starlight syncs an allowlist)
 ├── docs-site/                   # Astro Starlight site
@@ -104,7 +104,7 @@ graphforge/
 └── pyproject.toml               # workspace tooling (not the published wheel)
 ```
 
-The published `graphforge` wheel is built from `crates/gf-bindings-py`. Python and
+The published `graphforge` wheel is built from `crates/graphforge-bindings-py`. Python and
 Node are thin bindings — never fallback engines.
 
 ---
@@ -177,10 +177,10 @@ Keep PRs small and focused. CI tools work best with small, reviewable diffs.
 **Example — breaking up a Rust feature:**
 
 ```
-PR 1: "gf-cypher: add WITH clause grammar and AST node"
-PR 2: "gf-ir: add WithOp graph IR operator"
-PR 3: "gf-rel: lower WITH to DataFusion logical plan"
-PR 4: "gf-exec: integrate WITH in execution pipeline"
+PR 1: "graphforge-cypher: add WITH clause grammar and AST node"
+PR 2: "graphforge-ir: add WithOp graph IR operator"
+PR 3: "graphforge-rel: lower WITH to DataFusion logical plan"
+PR 4: "graphforge-exec: integrate WITH in execution pipeline"
 PR 5: "tests: WITH clause unit + integration + TCK"
 ```
 

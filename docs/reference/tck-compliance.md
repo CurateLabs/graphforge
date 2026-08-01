@@ -32,7 +32,7 @@ cucumber-expanded corpus — the count the BDD harness runs and gates on every C
 
 ## How it works — advisory whole-corpus run
 
-- **Runner.** The cucumber-rs harness in `crates/gf-api/tests/bdd/` runs **every** scenario of the
+- **Runner.** The cucumber-rs harness in `crates/graphforge-api/tests/bdd/` runs **every** scenario of the
   vendored corpus — no `@skip-rust` filter — via cucumber `run()`, which does **not** exit on
   failures. So an unsupported scenario failing does **not** break CI (the run is *advisory*).
 - **The gate is per-scenario (set-based, not a count).** `tests/tck/passing_baseline.txt` lists the
@@ -180,7 +180,7 @@ acceptance comparison.
 Run the deterministic scaling gate with:
 
 ```bash
-cargo test -p gf-api --test xor_scaling
+cargo test -p graphforge-api --test xor_scaling
 ```
 
 ### Dependent CREATE correction
@@ -215,7 +215,7 @@ with zero regressions, XPASS, or performance warnings and measured the scenario 
 Run the deterministic scaling and atomicity gate with:
 
 ```bash
-cargo test -p gf-api --test create_scaling
+cargo test -p graphforge-api --test create_scaling
 ```
 
 ### Quantifier-invariant correction
@@ -275,8 +275,8 @@ performance warnings; its TCK sum was 21.215 seconds and the affected eight meas
 Run the deterministic and focused gates with:
 
 ```bash
-cargo test -p gf-rel --lib
-TCK_ONLY=Quantifier cargo test -p gf-api --test bdd -- --no-fail-fast
+cargo test -p graphforge-rel --lib
+TCK_ONLY=Quantifier cargo test -p graphforge-api --test bdd -- --no-fail-fast
 ```
 
 ### Multi-label predicate correction
@@ -313,8 +313,8 @@ XPASS, or timing warnings; its TCK sum was **27.962 seconds** and the affected s
 Run the deterministic and focused gates with:
 
 ```bash
-cargo test -p gf-api --test multi_label_scaling
-TCK_ONLY=Match3 cargo test -p gf-api --test bdd -- --no-fail-fast
+cargo test -p graphforge-api --test multi_label_scaling
+TCK_ONLY=Match3 cargo test -p graphforge-api --test bdd -- --no-fail-fast
 ```
 
 ### Post-M17 v0.5.0 performance baseline
@@ -351,7 +351,7 @@ only after another complete Ubuntu run compares cleanly against it.
 When the advisory run reports XPASS, lock the new passes in by re-blessing:
 
 ```bash
-BLESS_TCK_BASELINE=1 cargo test -p gf-api --test bdd
+BLESS_TCK_BASELINE=1 cargo test -p graphforge-api --test bdd
 ```
 
 This rewrites `tests/tck/passing_baseline.txt` to the current passing set. `_meta.scenarios_passing`
@@ -365,8 +365,8 @@ The full corpus is ~3,900 scenarios. While iterating on one feature, restrict th
 files whose path contains a substring:
 
 ```bash
-TCK_ONLY=Temporal cargo test -p gf-api --test bdd   # only tests/tck/features/**/Temporal*.feature
-TCK_ONLY=Comparison1 cargo test -p gf-api --test bdd # one feature → seconds (after compile)
+TCK_ONLY=Temporal cargo test -p graphforge-api --test bdd   # only tests/tck/features/**/Temporal*.feature
+TCK_ONLY=Comparison1 cargo test -p graphforge-api --test bdd # one feature → seconds (after compile)
 ```
 
 When `TCK_ONLY` is set the whole-corpus **baseline gate is skipped** (a subset can't satisfy it) —

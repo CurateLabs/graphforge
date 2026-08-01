@@ -51,7 +51,7 @@ def main() -> None:
     mutated = json.loads(GATE.MATRIX_PATH.read_text(encoding="utf-8"))
     for case in mutated["cases"]:
         if case["id"] == "python-bulk-acceptance":
-            case["argv"] = ["python", "crates/gf-bindings-py/tests/missing.py"]
+            case["argv"] = ["python", "crates/graphforge-bindings-py/tests/missing.py"]
             break
     else:
         raise AssertionError("python-bulk-acceptance case missing")

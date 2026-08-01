@@ -22,7 +22,7 @@ README = ROOT / "README.md"
 PUBLISH_WORKFLOW = ROOT / ".github/workflows/publish.yaml"
 ARTIFACT_VALIDATOR = ROOT / "scripts/ci/validate-napi-artifacts.py"
 WRAPPER_PREPARER = ROOT / "scripts/ci/prepare-rustc-wrapper.py"
-STRICT_ADD_NODE = ROOT / "crates/gf-bindings-py/tests/strict_add_node.py"
+STRICT_ADD_NODE = ROOT / "crates/graphforge-bindings-py/tests/strict_add_node.py"
 SHA = "a" * 40
 ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir npm"
 
@@ -173,7 +173,7 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
         "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
         f"GRAPHFORGE_PYTHON_PARITY_REPORT={report} \\",
         'uv run --isolated --no-project --with "${wheels[0]}" \\',
-        "python crates/gf-bindings-py/tests/non_cypher_release.py \\",
+        "python crates/graphforge-bindings-py/tests/non_cypher_release.py \\",
         "--classification-only",
     )
     assert "GRAPHFORGE_PYTHON_PARITY_REPORT=dist/" not in native
@@ -337,7 +337,7 @@ def main() -> None:
         in " ".join(readme_text.split())
     )
     assert "proves user-facing use of the installed wheel" in workflows_readme_text
-    assert "Windows gf-storage Locks" in workflows_readme_text
+    assert "Windows graphforge-storage Locks" in workflows_readme_text
     assert "second MSVC" in workflows_readme_text
     # Binding RC must not re-host the Rust lock suite; Test Suite does (#2700).
     binding_rc_readme = required_section(
@@ -346,7 +346,7 @@ def main() -> None:
         "### `Concurrency Matrix` job in `test.yml`",
     )
     assert "project_generation::tests::" not in binding_rc_readme
-    assert "Windows gf-storage Locks" in binding_rc_readme
+    assert "Windows graphforge-storage Locks" in binding_rc_readme
     assert "Test Suite" in binding_rc_readme
     validate_post_merge_source_policy(rc_workflow_text)
     for original, invalid in (
@@ -471,7 +471,7 @@ def main() -> None:
             '"$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \\',
         ),
         (native_marker, 'uv run --isolated --no-project --with "${wheels[0]}" \\'),
-        (native_marker, "python crates/gf-bindings-py/tests/non_cypher_release.py \\"),
+        (native_marker, "python crates/graphforge-bindings-py/tests/non_cypher_release.py \\"),
         (native_marker, "--classification-only"),
         (write_marker, "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence"),
         (write_marker, "python3 scripts/ci/write-binding-parity-evidence.py \\"),
@@ -533,18 +533,18 @@ def main() -> None:
     assert "target: python-macos" in rc_workflow_text
     assert "target: python-windows" in rc_workflow_text
     # python-windows proves installed-wheel use for users, not a second MSVC
-    # gf-storage release cargo-test on the Binding RC critical path (#2699).
+    # graphforge-storage release cargo-test on the Binding RC critical path (#2699).
     # The #[cfg(windows)] lock suite lives in Test Suite (#2700).
     python_job = rc_workflow_text.split("  python:", 1)[1].split("  node:", 1)[0]
     assert "Prove Windows project-root lock contract" not in python_job
-    assert "cargo test --release -p gf-storage" not in python_job
+    assert "cargo test --release -p graphforge-storage" not in python_job
     assert "project_generation::tests::" not in python_job
     assert "Clean-install and execute native contract" in python_job
     assert "uses: PyO3/maturin-action@v1" in python_job
     test_workflow_text = (ROOT / ".github/workflows/test.yml").read_text()
     windows_locks_job = required_section(
         test_workflow_text,
-        "  windows-gf-storage-locks:\n",
+        "  windows-graphforge-storage-locks:\n",
         "  ci-gate:\n",
     )
     assert_active_lines(
@@ -552,15 +552,15 @@ def main() -> None:
         "runs-on: blacksmith-4vcpu-windows-2025",
         "needs: changes",
         "if: needs.changes.outputs.rust == 'true'",
-        "cargo test -p gf-storage project_generation::tests:: --lib",
+        "cargo test -p graphforge-storage project_generation::tests:: --lib",
         "--no-fail-fast",
     )
     _, ci_gate_found, ci_gate = test_workflow_text.partition("  ci-gate:\n")
     assert ci_gate_found, "missing workflow marker:   ci-gate:"
     assert_active_lines(
         ci_gate,
-        "- windows-gf-storage-locks",
-        '"${{ needs.windows-gf-storage-locks.result }}"',
+        "- windows-graphforge-storage-locks",
+        '"${{ needs.windows-graphforge-storage-locks.result }}"',
     )
     assert "macos-latest" not in rc_workflow_text
     assert "macos-15-intel" not in rc_workflow_text
@@ -574,7 +574,7 @@ def main() -> None:
         1
     ].split("- name: Write target evidence", 1)[0]
     validator_from_workspace = 'python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py"'
-    assert "working-directory: crates/gf-bindings-node" in package_validation_step
+    assert "working-directory: crates/graphforge-bindings-node" in package_validation_step
     assert package_validation_step.count(validator_from_workspace) == 1
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in package_validation_step
     assert (ROOT / "scripts/ci/validate-napi-artifacts.py").samefile(ARTIFACT_VALIDATOR)

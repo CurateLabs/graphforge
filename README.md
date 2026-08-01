@@ -3,7 +3,7 @@
 <p align="center">
   <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg" alt="GraphForge v0.5 development line" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
-  <a href="crates/gf-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
+  <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
   <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
   <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
@@ -79,7 +79,7 @@ not yet available from npm. Build the current Rust-owned engine from source:
 git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
 uv sync --dev
-maturin develop --release -m crates/gf-bindings-py/Cargo.toml
+maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 ```
 
 **Requirements:** Python 3.10–3.14
@@ -91,8 +91,8 @@ requirements, verification, and registry status.
 
 | Surface | Current role |
 |---|---|
-| [Python](crates/gf-bindings-py/README.md) | Thin PyO3 binding, Arrow results, and the `graphforge` CLI launcher |
-| [Node](crates/gf-bindings-node/README.md) | Thin N-API binding over the same Rust-owned behavior |
+| [Python](crates/graphforge-bindings-py/README.md) | Thin PyO3 binding, Arrow results, and the `graphforge` CLI launcher |
+| [Node](crates/graphforge-bindings-node/README.md) | Thin N-API binding over the same Rust-owned behavior |
 | [CLI](packages/cli/README.md) | Repository lifecycle, configuration, checkpoints, and portable import/export |
 | [VS Code extension](https://docs.graphforge.sh/guide/vscode-extension/) | Project exploration, Cypher, analyst verbs, result views, and agent interop |
 
@@ -266,8 +266,8 @@ forge.find(...)                  → Search path → Arrow Table
 The Cypher path is four independent Rust layers:
 
 ```
-gf-cypher → gf-ir → gf-rel → gf-exec
-                                      ↘ gf-storage (Parquet)
+graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec
+                                      ↘ graphforge-storage (Parquet)
 ```
 
 Algorithm verbs bypass the Cypher parser and dispatch directly to typed Rust

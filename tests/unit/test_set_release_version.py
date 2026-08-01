@@ -37,6 +37,7 @@ def test_expected_mapping() -> None:
 
 
 def test_current_tree_is_aligned() -> None:
+    assert len(set_release_version.cargo_lock_versions()) == 17
     assert set_release_version.check_aligned() == []
 
 

@@ -26,7 +26,7 @@
         "cargo",
         "test",
         "-p",
-        "gf-api",
+        "graphforge-api",
         "--lib",
         "bulk_construction::",
         "--",
@@ -40,7 +40,7 @@
         "cargo",
         "test",
         "-p",
-        "gf-api",
+        "graphforge-api",
         "--test",
         "release_load_construction",
         "--",
@@ -50,7 +50,7 @@
     {
       "id": "python-bulk-acceptance",
       "surface": "python",
-      "argv": ["python", "crates/gf-bindings-py/tests/bulk_construction.py"]
+      "argv": ["python", "crates/graphforge-bindings-py/tests/bulk_construction.py"]
     },
     {
       "id": "node-bulk-acceptance",

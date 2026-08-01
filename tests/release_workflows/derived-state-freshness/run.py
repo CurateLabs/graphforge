@@ -11,7 +11,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 BUNDLE = Path(__file__).resolve().parent
-RUST_EXAMPLE = ROOT / "crates/gf-api/examples/derived_state_freshness_workflow.rs"
+RUST_EXAMPLE = ROOT / "crates/graphforge-api/examples/derived_state_freshness_workflow.rs"
 GENERATOR = BUNDLE / "generator.yaml"
 TIMEOUT = 900
 BARRIER = (
@@ -294,8 +294,10 @@ def main() -> None:
     env = os.environ.copy()
     env.setdefault("CARGO_TARGET_DIR", str(ROOT / "target/release-workflows/cargo-derived-state"))
     execute([sys.executable, str(BUNDLE / "test_runner.py"), "--quiet"], env)
-    execute(["cargo", "test", "-p", "gf-api", "--lib", BARRIER, "--", "--exact"], env)
-    rust_text = execute(["cargo", "run", "-p", "gf-api", "--example", RUST_EXAMPLE.stem], env)
+    execute(["cargo", "test", "-p", "graphforge-api", "--lib", BARRIER, "--", "--exact"], env)
+    rust_text = execute(
+        ["cargo", "run", "-p", "graphforge-api", "--example", RUST_EXAMPLE.stem], env
+    )
     rust = parse_rust_evidence(rust_text)
     rust_summary = validate_rust(rust)
 
@@ -311,7 +313,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",
@@ -360,7 +362,7 @@ def main() -> None:
             env,
         )
         (node_dir / "package.json").write_text(
-            (ROOT / "crates/gf-bindings-node/package.json").read_text()
+            (ROOT / "crates/graphforge-bindings-node/package.json").read_text()
         )
         modules = list(node_dir.glob("index.js"))
         if len(modules) != 1:

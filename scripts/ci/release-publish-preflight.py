@@ -69,7 +69,7 @@ def validate_metadata() -> list[str]:
 
     for path in (
         ROOT / "pyproject.toml",
-        ROOT / "crates" / "gf-bindings-py" / "pyproject.toml",
+        ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml",
     ):
         text = path.read_text(encoding="utf-8")
         if f'Homepage = "{DOCS_URL}"' not in text:
@@ -82,7 +82,7 @@ def validate_metadata() -> list[str]:
             errors.append(f"{path.relative_to(ROOT)} Documentation does not target {DOCS_URL}")
 
     for path in (
-        ROOT / "crates" / "gf-bindings-node" / "package.json",
+        ROOT / "crates" / "graphforge-bindings-node" / "package.json",
         ROOT / "packages" / "cli" / "package.json",
         ROOT / "packages" / "agent-skills" / "package.json",
     ):

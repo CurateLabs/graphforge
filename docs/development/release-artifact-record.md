@@ -17,8 +17,8 @@ commits under the same version.
 ## How to record
 
 1. Freeze the RC SHA and surface versions (`scripts/set_release_version.py` / #192).
-2. Build or collect artifacts for that SHA into a directory (wheels, sdists, npm
-   tarballs, SBOM/provenance if emitted). v0.5.0 has no crates.io artifacts.
+2. Build or collect artifacts for that SHA into a directory (wheels, sdists,
+   npm tarballs, all 15 `.crate` archives, and SBOM/provenance if emitted).
 3. Run:
 
 ```bash

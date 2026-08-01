@@ -147,7 +147,7 @@ def main() -> None:
     env["GF_CYBER_EVIDENCE_PATH"] = str(rust_evidence)
     env["GF_RELEASE_WORKFLOW_SHA"] = sha
     run(
-        ["cargo", "run", "-p", "gf-api", "--example", "cyber_intrusion_workflow"],
+        ["cargo", "run", "-p", "graphforge-api", "--example", "cyber_intrusion_workflow"],
         env,
     )
 
@@ -164,7 +164,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",

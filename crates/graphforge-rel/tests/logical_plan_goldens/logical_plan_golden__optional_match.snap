@@ -1,0 +1,11 @@
+---
+source: crates/graphforge-rel/tests/logical_plan_golden.rs
+assertion_line: 336
+---
+Projection: Int64(1) AS one [one:Int64]
+  OptionalMatch: keys=1 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC"), edge_uuid:FixedSizeBinary(16);N, src_uuid:FixedSizeBinary(16);N, dst_uuid:FixedSizeBinary(16);N, edge_id:UInt64;N, src_id:UInt64;N, dst_id:UInt64;N, created_at:Timestamp(µs, "UTC");N, node_uuid:FixedSizeBinary(16);N, node_id:UInt64;N, type_id:UInt32;N, type_ids:List(non-null UInt32);N, created_at:Timestamp(µs, "UTC");N, updated_at:Timestamp(µs, "UTC");N]
+    Filter: array_has(var_0.type_ids, UInt32(1)) [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+      TableScan: var_0 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+    Filter: array_has(var_2.type_ids, UInt32(2)) [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC"), edge_uuid:FixedSizeBinary(16), src_uuid:FixedSizeBinary(16), dst_uuid:FixedSizeBinary(16), edge_id:UInt64, src_id:UInt64, dst_id:UInt64, created_at:Timestamp(µs, "UTC"), node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+      Expand: rel=REPORTS_TO, dir=->, edge=var_1 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC"), edge_uuid:FixedSizeBinary(16), src_uuid:FixedSizeBinary(16), dst_uuid:FixedSizeBinary(16), edge_id:UInt64, src_id:UInt64, dst_id:UInt64, created_at:Timestamp(µs, "UTC"), node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]
+        TableScan: var_0 [node_uuid:FixedSizeBinary(16), node_id:UInt64, type_id:UInt32, type_ids:List(non-null UInt32), created_at:Timestamp(µs, "UTC"), updated_at:Timestamp(µs, "UTC")]

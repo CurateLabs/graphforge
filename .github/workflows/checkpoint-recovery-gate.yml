@@ -26,10 +26,10 @@ jobs:
         run: python3 scripts/ci/checkpoint-recovery-gate.py
       - name: Execute Rust and CLI matrix
         run: |
-          cargo test -p gf-storage --lib project_checkpoints::tests --no-fail-fast
-          cargo test -p gf-api --lib checkpoints::tests --no-fail-fast
-          cargo test -p gf-cli --no-fail-fast
-          cargo build -p gf-cli
+          cargo test -p graphforge-storage --lib project_checkpoints::tests --no-fail-fast
+          cargo test -p graphforge-api --lib checkpoints::tests --no-fail-fast
+          cargo test -p graphforge-cli --no-fail-fast
+          cargo build -p graphforge-cli
       - name: Record Rust and CLI artifacts
         run: |
           mkdir -p checkpoint-fragments
@@ -42,8 +42,8 @@ jobs:
               return hashlib.sha256(path.read_bytes()).hexdigest()
 
           root = Path.cwd()
-          tests = sorted((root / "target/debug/deps").glob("gf_storage-*"))
-          tests.extend(sorted((root / "target/debug/deps").glob("gf_api-*")))
+          tests = sorted((root / "target/debug/deps").glob("graphforge_storage-*"))
+          tests.extend(sorted((root / "target/debug/deps").glob("graphforge_api-*")))
           test_sha = hashlib.sha256(
               "".join(digest(path) for path in tests if path.is_file()).encode()
           ).hexdigest()
@@ -81,10 +81,10 @@ jobs:
           python-version: "3.13"
       - name: Build and prove isolated same-SHA wheel
         run: |
-          uv run --with maturin maturin build --manifest-path crates/gf-bindings-py/Cargo.toml --out dist
+          uv run --with maturin maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
           uv venv /tmp/gf-checkpoint --python 3.13
           uv pip install --python /tmp/gf-checkpoint/bin/python dist/*.whl
-          /tmp/gf-checkpoint/bin/python crates/gf-bindings-py/tests/checkpoints.py
+          /tmp/gf-checkpoint/bin/python crates/graphforge-bindings-py/tests/checkpoints.py
       - name: Record Python artifact
         run: |
           mkdir -p checkpoint-fragments

@@ -10,8 +10,8 @@ Surfaces:
 
 Never publishes to production registries.
 
-Crate order prefers ``scripts/ci/crate-publish-plan.py list`` (from #2820) when
-present; otherwise uses a conservative fallback that excludes bindings/CLI.
+Crate order prefers ``scripts/ci/crate-publish-plan.py list`` (from #269) when
+present; otherwise uses a conservative fallback that excludes bindings.
 
 Usage:
     python3 scripts/publish_dry_run.py --surface npm,docs --report /tmp/dry-run.json
@@ -33,26 +33,28 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CRATE_PLAN = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 
-# Fallback when crate-publish-plan.py is not on the branch yet (pre-#2820).
-# Keep in sync with CRATES_IO_EXCLUDED there: no bindings/CLI.
+# Fallback when crate-publish-plan.py is not on the branch yet (pre-#269).
+# Keep in sync with CRATES_IO_EXCLUDED there: no binding implementation crates.
 FALLBACK_CARGO_ORDER = (
-    "gf-ast",
-    "gf-knowledge",
-    "gf-ontology",
-    "gf-provenance",
-    "gf-ir",
-    "gf-plan",
-    "gf-storage",
-    "gf-io",
-    "gf-rel",
-    "gf-search",
-    "gf-cypher",
-    "gf-exec",
-    "gf-api",
+    "graphforge-core",
+    "graphforge-ast",
+    "graphforge-knowledge",
+    "graphforge-ontology",
+    "graphforge-provenance",
+    "graphforge-ir",
+    "graphforge-plan",
+    "graphforge-storage",
+    "graphforge-io",
+    "graphforge-rel",
+    "graphforge-search",
+    "graphforge-cypher",
+    "graphforge-exec",
+    "graphforge-api",
+    "graphforge-cli",
 )
 
 NPM_PACKAGES = (
-    ROOT / "crates" / "gf-bindings-node",
+    ROOT / "crates" / "graphforge-bindings-node",
     ROOT / "packages" / "cli",
     ROOT / "packages" / "agent-skills",
 )
@@ -106,8 +108,6 @@ def cargo_publish_order() -> tuple[list[str], str]:
         )
         if result.returncode == 0:
             names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            # Skip known foreign conflicts that check would fail closed on.
-            names = [name for name in names if name != "gf-core"]
             return names, "crate-publish-plan.py"
     return list(FALLBACK_CARGO_ORDER), "fallback"
 
@@ -206,7 +206,7 @@ def dry_run_python_sdist() -> list[dict[str, Any]]:
                 "maturin",
                 "sdist",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--out",
                 str(out),
             ]

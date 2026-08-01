@@ -22,7 +22,7 @@ needs `List<Struct{…, __het_list: List<Struct{…}>}>` built to exactly that l
 feasible.
 
 This matters because the downstream comparison machinery is **already nested-capable**: `cypher_value_eq`
-→ `cypher_seq_eq`/`cypher_struct_eq` (`crates/gf-rel/src/expr.rs:2059`, `:3275`, `:3296`) recurse over
+→ `cypher_seq_eq`/`cypher_struct_eq` (`crates/graphforge-rel/src/expr.rs:2059`, `:3275`, `:3296`) recurse over
 `List`/`Struct` `ScalarValue`s with three-valued, cross-type semantics. The only missing piece was a
 well-formed nested value to feed them. So nested support needs **no serde, no canonical-string encoding,
 and no second comparator** — just construction, IN routing, rendering, and (for `max`/`min` over mixed)

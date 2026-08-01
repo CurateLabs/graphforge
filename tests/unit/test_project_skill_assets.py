@@ -10,7 +10,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "project-skills"
-PYTHON_COPY = ROOT / "crates" / "gf-bindings-py" / "python" / "graphforge" / "_project_skills"
+PYTHON_COPY = (
+    ROOT / "crates" / "graphforge-bindings-py" / "python" / "graphforge" / "_project_skills"
+)
 NPM_COPY = ROOT / "packages" / "cli" / "project-skills"
 
 

@@ -6,7 +6,7 @@
   "version": 1,
   "domain": "hypothesis-driven-evidence-review",
   "owning_issue": 2472,
-  "implementation": "crates/gf-api/examples/knowledge_evolution_workflow.rs",
+  "implementation": "crates/graphforge-api/examples/knowledge_evolution_workflow.rs",
   "analytical_question": "Can evidence and interpretations evolve without changing neutral graph execution or implicitly adjudicating truth?",
   "observable_outcome": "Two unresolved alternatives remain neutral until explicit select, change, and clear events; only explicit belief projections reflect those interpretations.",
   "generator": {"identity":"knowledge-evolution-generator-v1","seed":2472001,"fixture_fingerprint":"sha256:91a976e00d111972332db4429d5a7685873da909c8cb76f5b98fca05d5ae9cfb"},

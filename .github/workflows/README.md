@@ -23,7 +23,7 @@ and napi share one build volume instead of a second root-disk tree.
 - Rust changes run formatting and Clippy in one clean job and workspace tests
   in another. The workspace test already contains the Rust BDD target, so CI
   does not compile it twice. The same Rust classification also runs the Windows
-  `gf-storage` `project_generation` lock unit tests on
+  `graphforge-storage` `project_generation` lock unit tests on
   `blacksmith-4vcpu-windows-2025` (Linux workspace tests cannot execute those
   `#[cfg(windows)]` cases).
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
@@ -50,8 +50,8 @@ and napi share one build volume instead of a second root-disk tree.
 Runs the change classifier, repository policy, and only the applicable Rust,
 Python, Gherkin, native binding, Pulumi, or Terraform jobs. Pull-request native
 acceptance is Linux-only and uses Cargo's `dev` profile.
-When Rust surfaces change, `Windows gf-storage Locks` runs
-`cargo test -p gf-storage project_generation::tests:: --lib` on
+When Rust surfaces change, `Windows graphforge-storage Locks` runs
+`cargo test -p graphforge-storage project_generation::tests:: --lib` on
 `blacksmith-4vcpu-windows-2025` so the `#[cfg(windows)]` project-root lock unit
 tests stay covered outside Binding RC.
 
@@ -88,9 +88,9 @@ Intel macOS Node lane installs an x64 Node runtime and verifies `process.arch`
 before loading the x86_64 addon on the Apple Silicon runner.
 The Windows Python lane proves user-facing use of the installed wheel: build the
 native abi3 wheel, clean-install it, and run native Python contracts. It does
-not run a second MSVC `gf-storage` release `cargo test` as Binding RC evidence.
+not run a second MSVC `graphforge-storage` release `cargo test` as Binding RC evidence.
 Windows `#[cfg(windows)]` project-root lock unit tests run in the Test Suite
-job `Windows gf-storage Locks` instead.
+job `Windows graphforge-storage Locks` instead.
 
 ### `Concurrency Matrix` job in `test.yml`
 

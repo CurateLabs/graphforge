@@ -41,7 +41,7 @@ let prepareSearchIndex;
 if (native) {
   const modulePath =
     process.env.GRAPHFORGE_NODE_MODULE ??
-    join(packageRoot, "../../crates/gf-bindings-node/index.js");
+    join(packageRoot, "../../crates/graphforge-bindings-node/index.js");
   ({ GraphForge } = await import(pathToFileURL(modulePath).href));
   const require = createRequire(join(dirname(modulePath), "package.json"));
   ({ tableFromIPC } = require("apache-arrow"));

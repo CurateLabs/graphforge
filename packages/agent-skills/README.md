@@ -156,7 +156,7 @@ pnpm --filter @graphforge/agent-skills example:analyst
 pnpm --filter @graphforge/agent-skills example:developer
 
 # Optional native evidence against a local @graphforge/node build
-GRAPHFORGE_NODE_MODULE=$PWD/crates/gf-bindings-node/index.js \
+GRAPHFORGE_NODE_MODULE=$PWD/crates/graphforge-bindings-node/index.js \
   pnpm --filter @graphforge/agent-skills test:rc-native -- \
     --commit-sha "$(git rev-parse HEAD)" \
     --evidence target/release-workflows/agent-skills/rc-e2e.json

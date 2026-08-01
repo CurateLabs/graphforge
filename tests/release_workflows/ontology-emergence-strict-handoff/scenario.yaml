@@ -13,7 +13,7 @@
   "version": 1,
   "domain": "exploratory-research-and-governed-handoff",
   "owning_issue": 2469,
-  "implementation": "crates/gf-api/examples/ontology_emergence_strict_handoff.rs",
+  "implementation": "crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs",
   "analytical_question": "Which observed infrastructure findings are sufficiently supported and mapped for governed handoff?",
   "observable_outcome": "An analyst-approved subset remains traceable from an ontology-free source into a separate strict target without claiming inferred truth or in-place migration.",
   "generator": {

@@ -522,7 +522,7 @@ class TestFind:
 
 # Remaining unimplemented v0.5 methods stay present with their real
 # signatures and raise NotImplementedError. Bulk construction methods are
-# covered by crates/gf-bindings-py/tests/bulk_construction.py.
+# covered by crates/graphforge-bindings-py/tests/bulk_construction.py.
 _UNIMPLEMENTED = [
     ("begin", lambda f: f.begin()),
     ("commit", lambda f: f.commit()),

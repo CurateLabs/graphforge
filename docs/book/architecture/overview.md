@@ -7,7 +7,7 @@
 > tested on `main`; **Partially built** = some paths real, others stubbed; **Designed** = specified,
 > not yet a complete public capability; **Deferred** = intentionally after v0.5.0 (for example
 > Swift/Kotlin bindings). For v0.5.0: the Cypher pipeline
-> (`gf-cypher → gf-ir → gf-rel → gf-exec`), analyst verbs, Parquet project storage, thin Python/Node
+> (`graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`), analyst verbs, Parquet project storage, thin Python/Node
 > bindings, and the knowledge layer (immutable provenance ledger + epistemic model) are **Shipped**.
 ---
 
@@ -27,7 +27,7 @@ The project (not the graph) is the primary unit of work:
 Project = Knowledge Graph + Documents + Provenance + Embeddings + Workflows + Artifacts + Sync State
 ```
 
-Behavior lives in a **Rust core**. Python and Node are thin bindings over `gf-api` — never fallback
+Behavior lives in a **Rust core**. Python and Node are thin bindings over `graphforge-api` — never fallback
 engines. v0.5.0 exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as
 the stable in-memory and FFI contract, Parquet for durable graph data).
 ---
@@ -74,9 +74,9 @@ knowledge or workbench concerns**.
 
 | Layer | Owns | Where it lives |
 | ------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| **Graph** | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency | `gf-cypher`, `gf-ir`, `gf-rel`, `gf-exec`, `gf-storage` (`topology/`, `properties/`, `indexes/adjacency/`) |
-| **Knowledge** | Provenance, confidence, evidence, epistemic assertions/status/supersession/valid-time | `gf-provenance` + `gf-knowledge`; `provenance/`, `knowledge/` |
-| **Workbench** | Analyst verbs, hybrid search, workflows, exploration, project envelope | `gf-api`, bindings, search modules |
+| **Graph** | Nodes, edges, properties, traversal, pattern matching, graph algorithms, adjacency | `graphforge-cypher`, `graphforge-ir`, `graphforge-rel`, `graphforge-exec`, `graphforge-storage` (`topology/`, `properties/`, `indexes/adjacency/`) |
+| **Knowledge** | Provenance, confidence, evidence, epistemic assertions/status/supersession/valid-time | `graphforge-provenance` + `graphforge-knowledge`; `provenance/`, `knowledge/` |
+| **Workbench** | Analyst verbs, hybrid search, workflows, exploration, project envelope | `graphforge-api`, bindings, search modules |
 
 **Boundary rule:** knowledge attaches to the graph by UUID reference, never by embedding columns on
 graph tables. Cypher/traversal/algorithms read only the graph layer, so the presence or absence of
@@ -107,7 +107,7 @@ Project = Graph (topology + properties)          ← graph layer
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────────┐
-│                               GraphForge API (gf-api)                             │
+│                               GraphForge API (graphforge-api)                             │
 │   Thin bindings: Python (PyO3/maturin)  ·  Node (napi-rs)                         │
 │   Swift/Kotlin: deferred to v0.5.1                                                │
 │                                                                                   │
@@ -120,27 +120,27 @@ Project = Graph (topology + properties)          ← graph layer
 │   Cypher Path    │                                  ▼
 │                  │              ┌──────────────────────────────────┐
 │  RD+Pratt parser │              │   Analyst Verbs                  │
-│  (gf-cypher)     │              │   rank / cluster / paths /       │
+│  (graphforge-cypher)     │              │   rank / cluster / paths /       │
 │       ↓          │              │   analyze / similar / find       │
 │  Binder +        │              │   — bypass parser/planner        │
 │  ontology        │              │   Export adjacency or index      │
 │       ↓          │              │   Dispatch algorithm or search   │
 │  Graph IR        │              │   Produce scored Arrow batches   │
-│  (gf-ir)         │              │                                  │
+│  (graphforge-ir)         │              │                                  │
 │       ↓          │              │                                  │
 │  Relational      │              │                                  │
 │  lowering        │              │                                  │
-│  (gf-rel)        │              │                                  │
+│  (graphforge-rel)        │              │                                  │
 │       ↓          │              │                                  │
 │  DataFusion      │◄─────────────────────────────────┘
-│  (gf-exec)       │         (all paths converge to DataFusion)
+│  (graphforge-exec)       │         (all paths converge to DataFusion)
 │       ↓          │
 │  Arrow batches   │
 └──────────────────┘
           │
           ▼
 ┌──────────────────────────────────────┐
-│          Storage (gf-storage)         │
+│          Storage (graphforge-storage)         │
 │              Parquet + JSON           │
 └──────────────────────────────────────┘
 ```
@@ -151,22 +151,22 @@ Project = Graph (topology + properties)          ← graph layer
 
 ```
 crates/
-  gf-api/              # public Rust facade (lifecycle, Cypher, verbs, knowledge)
-  gf-core/             # engine facade helpers used by gf-api
-  gf-ast/              # AST + spans + syntax diagnostics
-  gf-cypher/           # hand-written lexer + recursive-descent/Pratt parser
-  gf-ontology/         # runtime ontology model, validation, migration
-  gf-ir/               # graph IR + serde DTOs
-  gf-rel/              # graph IR → relational lowering
-  gf-plan/             # DataFusion integration, optimizer rules, custom nodes
-  gf-exec/             # execution session, algorithms, search, result streaming
-  gf-storage/          # generic generations, participants, Parquet I/O
-  gf-io/               # CSV/JSON/Parquet/IPC sinks and loaders
-  gf-provenance/       # knowledge-layer provenance events + lineage domain
-  gf-knowledge/        # knowledge-layer immutable + epistemic record domains
-  gf-bindings-py/      # thin PyO3 + maturin Python binding
-  gf-bindings-node/    # thin napi-rs Node binding
-  gf-cli/              # command-line interface
+  graphforge-api/              # public Rust facade (lifecycle, Cypher, verbs, knowledge)
+  graphforge-core/             # engine facade helpers used by graphforge-api
+  graphforge-ast/              # AST + spans + syntax diagnostics
+  graphforge-cypher/           # hand-written lexer + recursive-descent/Pratt parser
+  graphforge-ontology/         # runtime ontology model, validation, migration
+  graphforge-ir/               # graph IR + serde DTOs
+  graphforge-rel/              # graph IR → relational lowering
+  graphforge-plan/             # DataFusion integration, optimizer rules, custom nodes
+  graphforge-exec/             # execution session, algorithms, search, result streaming
+  graphforge-storage/          # generic generations, participants, Parquet I/O
+  graphforge-io/               # CSV/JSON/Parquet/IPC sinks and loaders
+  graphforge-provenance/       # knowledge-layer provenance events + lineage domain
+  graphforge-knowledge/        # knowledge-layer immutable + epistemic record domains
+  graphforge-bindings-py/      # thin PyO3 + maturin Python binding
+  graphforge-bindings-node/    # thin napi-rs Node binding
+  graphforge-cli/              # command-line interface
 ```
 
 Feature flags: `default = ["datafusion", "parquet"]`. Optional: `polars`, `python`, `node`.
@@ -219,9 +219,9 @@ the correct contract rather than a Polars or Python-specific result type.
 
 | Language | Mechanism | Crate / Package | Result contract | v0.5.0 |
 | ---------- | ---------------- | ----------------------------------------- | -------------------------------------------- | -------- |
-| **Rust** | Native crate API | `gf-api` / `gf-core` | Arrow batches via the facade | **Shipped** |
-| **Python** | PyO3 + maturin | `gf-bindings-py` | `pyarrow.Table` or `RecordBatchReader` | **Shipped** (thin) |
-| **Node** | napi-rs | `gf-bindings-node` | Arrow IPC `Buffer` → `tableFromIPC(buf)` | **Shipped** (thin) |
+| **Rust** | Native crate API | `graphforge-api` / `graphforge-core` | Arrow batches via the facade | **Shipped** |
+| **Python** | PyO3 + maturin | `graphforge-bindings-py` | `pyarrow.Table` or `RecordBatchReader` | **Shipped** (thin) |
+| **Node** | napi-rs | `graphforge-bindings-node` | Arrow IPC `Buffer` → `tableFromIPC(buf)` | **Shipped** (thin) |
 | **Swift** | UniFFI (planned) | deferred | Arrow IPC | **Deferred** (v0.5.1) |
 | **Kotlin** | UniFFI (planned) | deferred | Arrow IPC | **Deferred** (v0.5.1) |
 

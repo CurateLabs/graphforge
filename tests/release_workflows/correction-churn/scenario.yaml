@@ -6,7 +6,7 @@
   "version": 1,
   "domain": "long-running-data-curation",
   "owning_issue": 2471,
-  "implementation": "crates/gf-api/examples/correction_churn_workflow.rs",
+  "implementation": "crates/graphforge-api/examples/correction_churn_workflow.rs",
   "analytical_question": "Can repeated graph, ontology, knowledge, and epistemic corrections produce one authoritative current view without rewriting earlier views?",
   "observable_outcome": "Three distinct correction cycles converge deterministically while checkpoints, algorithm runs, assertions, reasoning, and hypothesis events remain append-only and reopenable.",
   "generator": {"identity":"correction-churn-generator-v1","seed":2471001,"fixture_fingerprint":"sha256:cad42f0e28a754e4b2190366944cafa4f6327de19614e80975b74928a9fcfbf6"},

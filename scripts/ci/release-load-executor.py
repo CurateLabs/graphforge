@@ -108,7 +108,7 @@ def rust_target_dir() -> Path:
 
 def default_preflight(language: str) -> tuple[list[str], dict[str, str] | None]:
     if language == "rust":
-        return (["cargo", "test", "-p", "gf-api"], None)
+        return (["cargo", "test", "-p", "graphforge-api"], None)
     if language == "python":
         return (
             [sys.executable, str(ROOT / "scripts/ci/run-python-binding-contract.py")],
@@ -140,7 +140,7 @@ def default_probe(language: str, *, preflight_timeout: int) -> tuple[list[str], 
                 "build",
                 "--release",
                 "-p",
-                "gf-api",
+                "graphforge-api",
                 "--example",
                 "release_load_probe",
             ],
@@ -159,8 +159,8 @@ def default_probe(language: str, *, preflight_timeout: int) -> tuple[list[str], 
             text=True,
         ).strip()
         return ([sys.executable, str(script)], Path(extension))
-    script = ROOT / "crates/gf-bindings-node/tests/release-load-probe.mjs"
-    addons = sorted((ROOT / "crates/gf-bindings-node").glob("*.node"))
+    script = ROOT / "crates/graphforge-bindings-node/tests/release-load-probe.mjs"
+    addons = sorted((ROOT / "crates/graphforge-bindings-node").glob("*.node"))
     if len(addons) != 1:
         raise ValueError(f"Node executor requires exactly one freshly built addon, found {addons}")
     return (["node", str(script)], addons[0])
@@ -210,7 +210,7 @@ def preflight(
 
 def package_version(language: str) -> str:
     if language == "node":
-        return str(load(ROOT / "crates/gf-bindings-node/package.json")["version"])
+        return str(load(ROOT / "crates/graphforge-bindings-node/package.json")["version"])
     cargo = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
     for line in cargo.splitlines():
         if line.strip().startswith("version ="):
@@ -279,9 +279,9 @@ def main() -> int:
                 args.language, preflight_timeout=preflight_timeout
             )
             probe_path = {
-                "rust": ROOT / "crates/gf-api/examples/release_load_probe.rs",
+                "rust": ROOT / "crates/graphforge-api/examples/release_load_probe.rs",
                 "python": ROOT / "scripts/ci/release-load-python-probe.py",
-                "node": ROOT / "crates/gf-bindings-node/tests/release-load-probe.mjs",
+                "node": ROOT / "crates/graphforge-bindings-node/tests/release-load-probe.mjs",
             }[args.language]
         if not artifact.is_file():
             raise ValueError(f"native artifact is missing: {artifact}")
@@ -382,9 +382,11 @@ def main() -> int:
             "sanitized_error": None,
             "parity_diff": [],
             "package": {
-                "name": {"rust": "gf-api", "python": "graphforge", "node": "@graphforge/node"}[
-                    args.language
-                ],
+                "name": {
+                    "rust": "graphforge-api",
+                    "python": "graphforge",
+                    "node": "@graphforge/node",
+                }[args.language],
                 "version": package_version(args.language),
                 "artifact_sha256": digest_file(artifact),
             },

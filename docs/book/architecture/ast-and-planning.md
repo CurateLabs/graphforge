@@ -15,25 +15,25 @@ OpenCypher text
 ┌─────────────────────────┐
 │  Hand-written Tok lexer │
 │  Recursive-descent +    │
-│  Pratt expression parser│  ← gf-cypher
+│  Pratt expression parser│  ← graphforge-cypher
 │  → AST with spans       │
 └─────────────────────────┘
       ↓
 ┌─────────────────────────┐
 │  Binder                 │
-│  Ontology resolution    │  ← gf-ontology
+│  Ontology resolution    │  ← graphforge-ontology
 │  Scope validation       │
 └─────────────────────────┘
       ↓
 ┌─────────────────────────┐
-│  Graph IR               │  ← gf-ir
+│  Graph IR               │  ← graphforge-ir
 │  Semantic graph ops     │
 │  Versioned envelope     │
 └─────────────────────────┘
       ↓
 ┌─────────────────────────┐
-│  Relational lowering    │  ← gf-rel
-│  DataFusion LogicalPlan │  ← gf-plan
+│  Relational lowering    │  ← graphforge-rel
+│  DataFusion LogicalPlan │  ← graphforge-plan
 │  Optimizer              │
 │  Physical plan          │
 └─────────────────────────┘
@@ -60,11 +60,11 @@ The openCypher grammar artifacts (ISO WG3 BNF, ANTLR grammar, EBNF, TCK) are the
 
 ### Key parser files
 
-- `crates/gf-cypher/src/parser/mod.rs` — `TokenStream` struct; public `parse()` entry point
-- `crates/gf-cypher/src/parser/expr.rs` — Pratt expression parser
-- `crates/gf-cypher/src/parser/clauses.rs` — recursive descent clause rules
-- `crates/gf-cypher/src/parser/patterns.rs` — node, relationship, and path pattern parsing
-- `crates/gf-cypher/src/lexer.rs` — hand-written `Tok` lexer; emits compound tokens for multi-word predicates
+- `crates/graphforge-cypher/src/parser/mod.rs` — `TokenStream` struct; public `parse()` entry point
+- `crates/graphforge-cypher/src/parser/expr.rs` — Pratt expression parser
+- `crates/graphforge-cypher/src/parser/clauses.rs` — recursive descent clause rules
+- `crates/graphforge-cypher/src/parser/patterns.rs` — node, relationship, and path pattern parsing
+- `crates/graphforge-cypher/src/lexer.rs` — hand-written `Tok` lexer; emits compound tokens for multi-word predicates
 
 ---
 
@@ -190,7 +190,7 @@ The AST version is internal only. The IR version is the cross-layer contract. Su
 
 ## Relational Lowering
 
-The relational lowering stage (`gf-rel`) translates graph IR operators into DataFusion `LogicalPlan` nodes:
+The relational lowering stage (`graphforge-rel`) translates graph IR operators into DataFusion `LogicalPlan` nodes:
 
 - Simple scans, filters, projections, and aggregations lower cleanly to DataFusion relational operators
 - DataFusion then optimizes projections and filters and chooses physical scan strategies

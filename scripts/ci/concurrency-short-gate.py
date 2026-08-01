@@ -20,8 +20,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/concurrency-short-matrix.json"
 LEDGER_PATH = ROOT / "tests/contracts/concurrency-recovery-matrix.json"
-PYTHON_TEST = ROOT / "crates/gf-bindings-py/tests/concurrency_parity.py"
-NODE_TEST = ROOT / "crates/gf-bindings-node/tests/concurrency-parity.test.mjs"
+PYTHON_TEST = ROOT / "crates/graphforge-bindings-py/tests/concurrency_parity.py"
+NODE_TEST = ROOT / "crates/graphforge-bindings-node/tests/concurrency-parity.test.mjs"
 CASE_TIMEOUT_SECONDS = 300
 FORBIDDEN_TIMING = re.compile(r"\b(?:time\.sleep|asyncio\.sleep|setTimeout)\s*\(")
 
@@ -33,7 +33,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "same_process_concurrency_tests::independent_instances_and_one_instance_reads_are_deterministic",
             "--",
@@ -46,7 +46,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "same_process_concurrency_tests::cross_session_reads_are_canonically_equal",
             "--",
@@ -59,7 +59,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "same_process_concurrency_tests::synchronous_calls_complete_inside_existing_tokio_runtime",
             "--",
@@ -72,7 +72,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "stream_cancellation_isolation_tests::early_stream_drop_does_not_truncate_concurrent_peer",
             "--",
@@ -85,7 +85,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "stream_cancellation_isolation_tests::cooperative_token_cancellation_does_not_cancel_concurrent_peer",
             "--",
@@ -98,7 +98,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "shared_directory_semantics_tests::shared_directory_reads_pin_complete_generations_and_reopen_sees_commit",
             "--",
@@ -111,7 +111,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "shared_directory_semantics_tests::competing_writer_fails_before_its_staging_or_publication",
             "--",
@@ -124,7 +124,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "multi_process_publication_tests::killed_staged_child_releases_lock_and_recovers_without_partial_generation",
             "--",
@@ -137,7 +137,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "multi_process_publication_tests::published_child_is_visible_only_to_fresh_current_reader",
             "--",
@@ -150,7 +150,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "composite_recovery_tests::composite_kill_reopen_matrix_never_exposes_mixed_state",
             "--",
@@ -159,7 +159,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
     ),
     "python-concurrency-parity": (
         "python",
-        ["python", "crates/gf-bindings-py/tests/concurrency_parity.py"],
+        ["python", "crates/graphforge-bindings-py/tests/concurrency_parity.py"],
     ),
     "node-concurrency-parity": (
         "node",

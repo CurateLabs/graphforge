@@ -185,11 +185,11 @@ jobs:
 
       - name: Type-check Python binding
         run: >-
-          uv run mypy crates/gf-bindings-py/python/graphforge
+          uv run mypy crates/graphforge-bindings-py/python/graphforge
           --strict-optional --show-error-codes
 
       - name: Scan Python binding
-        run: uv run bandit -c pyproject.toml -r crates/gf-bindings-py/python
+        run: uv run bandit -c pyproject.toml -r crates/graphforge-bindings-py/python
 
   gherkin-lint:
     name: Gherkin Syntax
@@ -467,7 +467,7 @@ jobs:
         shell: bash
         run: >-
           uvx maturin build
-          --manifest-path crates/gf-bindings-py/Cargo.toml
+          --manifest-path crates/graphforge-bindings-py/Cargo.toml
           --profile dev
           --out dist
 
@@ -478,7 +478,7 @@ jobs:
           test "${#wheels[@]}" -eq 1
           uvx --from "${wheels[0]}" graphforge --version
           GRAPHFORGE_UVX_WHEEL="${wheels[0]}" \
-            python3 crates/gf-bindings-py/tests/cli_lifecycle.py
+            python3 crates/graphforge-bindings-py/tests/cli_lifecycle.py
           uv venv /tmp/gf-native --python 3.13
           uv pip install --python /tmp/gf-native/bin/python "${wheels[0]}"
           /tmp/gf-native/bin/python - <<'PY'
@@ -487,12 +487,12 @@ jobs:
           assert importlib.util.find_spec("networkx") is None
           assert importlib.util.find_spec("igraph") is None
           PY
-          for test_file in crates/gf-bindings-py/tests/*.py; do
+          for test_file in crates/graphforge-bindings-py/tests/*.py; do
             /tmp/gf-native/bin/python "$test_file"
           done
           GRAPHFORGE_PYTHON_PARITY_REPORT=dist/python-non-cypher-classification.json \
             /tmp/gf-native/bin/python \
-            crates/gf-bindings-py/tests/non_cypher_release.py \
+            crates/graphforge-bindings-py/tests/non_cypher_release.py \
             --classification-only
 
       - name: Install test dependencies and wheel
@@ -537,7 +537,7 @@ jobs:
             --language python \
             --artifact "${wheels[0]}" \
             --classification dist/python-non-cypher-classification.json \
-            --package-manifest crates/gf-bindings-py/pyproject.toml \
+            --package-manifest crates/graphforge-bindings-py/pyproject.toml \
             --case check_surface_projection \
             --case check_native_artifact_and_no_fallback \
             --case check_lifecycle_checkpoint_errors_and_reopen \
@@ -619,17 +619,17 @@ jobs:
       - name: Record and upload addon parity evidence
         shell: bash
         run: |
-          addons=(crates/gf-bindings-node/*.node)
+          addons=(crates/graphforge-bindings-node/*.node)
           test "${#addons[@]}" -eq 1
           python3 scripts/ci/write-binding-parity-evidence.py \
             --language node \
             --artifact "${addons[0]}" \
-            --classification crates/gf-bindings-node/tests/non-cypher-parity-policy.json \
-            --package-manifest crates/gf-bindings-node/package.json \
+            --classification crates/graphforge-bindings-node/tests/non-cypher-parity-policy.json \
+            --package-manifest crates/graphforge-bindings-node/package.json \
             --case "the Node classification is total, frozen, and backed by non-skipped native tests" \
             --case "the native Node facade preserves deterministic IPC through persistence and reopen" \
             --case "a future project format fails structurally without mutating the project" \
-            --output crates/gf-bindings-node/node-binding-parity-evidence.json
+            --output crates/graphforge-bindings-node/node-binding-parity-evidence.json
 
   concurrency-matrix:
     name: Concurrency Matrix
@@ -690,7 +690,7 @@ jobs:
         shell: bash
         run: |
           uvx maturin build \
-            --manifest-path crates/gf-bindings-py/Cargo.toml \
+            --manifest-path crates/graphforge-bindings-py/Cargo.toml \
             --profile dev \
             --out dist
           uv venv /tmp/gf-concurrency --python 3.13
@@ -705,10 +705,10 @@ jobs:
           scripts/ci/concurrency-short-gate.py run
           --output "${{ runner.temp }}/concurrency-short-evidence"
 
-  # #[cfg(windows)] project-root lock unit tests in gf-storage do not run on
+  # #[cfg(windows)] project-root lock unit tests in graphforge-storage do not run on
   # Linux rust-test. Host them here — not on Binding RC python-windows (#2700).
-  windows-gf-storage-locks:
-    name: Windows gf-storage Locks
+  windows-graphforge-storage-locks:
+    name: Windows graphforge-storage Locks
     runs-on: blacksmith-4vcpu-windows-2025
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -736,7 +736,7 @@ jobs:
       - name: Run Windows project-root lock unit tests
         shell: bash
         run: >-
-          cargo test -p gf-storage project_generation::tests:: --lib
+          cargo test -p graphforge-storage project_generation::tests:: --lib
           --no-fail-fast
 
   ci-gate:
@@ -756,7 +756,7 @@ jobs:
       - python-binding
       - node-binding
       - concurrency-matrix
-      - windows-gf-storage-locks
+      - windows-graphforge-storage-locks
     steps:
       - name: Checkout gate implementation
         uses: actions/checkout@v7
@@ -776,4 +776,4 @@ jobs:
           "${{ needs.python-binding.result }}"
           "${{ needs.node-binding.result }}"
           "${{ needs.concurrency-matrix.result }}"
-          "${{ needs.windows-gf-storage-locks.result }}"
+          "${{ needs.windows-graphforge-storage-locks.result }}"

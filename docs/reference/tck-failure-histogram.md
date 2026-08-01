@@ -9,7 +9,7 @@
 ## Method
 
 The BDD runner records only the *passing* set, so failure reasons were unavailable. We added an
-env-gated dump (`TCK_DUMP_FAILURES=<path>`, see `crates/gf-api/tests/bdd/main.rs`) that writes one
+env-gated dump (`TCK_DUMP_FAILURES=<path>`, see `crates/graphforge-api/tests/bdd/main.rs`) that writes one
 JSON record per failing scenario — failing step, error message, query — **before** the baseline gate.
 All 2716 failures were then bucketed by cause, refined to construct-level clusters by reading the
 queries, and each candidate target was **adversarially verified**: would implementing *only* it flip
@@ -18,7 +18,7 @@ the scenarios, or do they have secondary blockers?
 Re-run with:
 
 ```bash
-TCK_DUMP_FAILURES=/tmp/tck_failures.jsonl cargo test -p gf-api --test bdd
+TCK_DUMP_FAILURES=/tmp/tck_failures.jsonl cargo test -p graphforge-api --test bdd
 ```
 
 ## A. Histogram by primary cause (all 2716)
@@ -41,14 +41,14 @@ TCK_DUMP_FAILURES=/tmp/tck_failures.jsonl cargo test -p gf-api --test bdd
 
 | Rank | Target | Claimed | **Verified** | Conf | Fix surface |
 |-----:|--------|--------:|-------------:|------|-------------|
-| 1 | **Temporal `*.truncate()`** | 271 | **271** | med | function-lib (`gf-rel/expr.rs`): 4 typed returns + override logic. Infra proven; sole gate. |
+| 1 | **Temporal `*.truncate()`** | 271 | **271** | med | function-lib (`graphforge-rel/expr.rs`): 4 typed returns + override logic. Infra proven; sole gate. |
 | 2 | **Quantifier predicate `WHERE`** | 442–652 | **~368** | med | parser **+ binder + evaluator** (element-scoped predicate; shares machinery w/ list-comprehension). NOT a parser one-liner. |
 | 3 | **TCK harness renderer fix** | ~104 | **~100** | high | **test-harness only** (`tck_steps.rs`). No engine change. Cheapest win. |
 | 4 | Temporal `duration.*` | 122 | ~51 | med | function-lib + **typed Duration value type** |
 | 5 | Binder: identifier **case-folding** | 77 | (bug) | — | binder: stop lowercasing identifiers |
 | 6 | Parameterized-query harness | 62 | ~31 | med | harness step + write-path params + SKIP/LIMIT-as-expr + list/map IrLiteral |
 | 7 | Typed/list property **storage** | 65 | ~49 | low | executor/storage; overlaps renderer + list-orderability |
-| 8 | Binder: composite-var reference after projection | 71 | (bug) | — | `gf-rel/lowerer.rs` |
+| 8 | Binder: composite-var reference after projection | 71 | (bug) | — | `graphforge-rel/lowerer.rs` |
 | 9 | SET/REMOVE `<label>` | 25 | 25\* | high | \*needs full multi-label storage+exec+ledger (4 layers) |
 | 10 | Aggregation in `WITH` | 60 | ~15 | med | binder; blocked by read-after-write for write-area scenarios |
 | 11 | MERGE (node only) | 32 | ~5 | high | binder stub + IR; ON-clauses & rel-MERGE are separate |
@@ -57,7 +57,7 @@ TCK_DUMP_FAILURES=/tmp/tck_failures.jsonl cargo test -p gf-api --test bdd
 
 ## C. The sleeper: the harness renderer is a hidden ~100-scenario blocker
 
-In `crates/gf-api/tests/bdd/tck_steps.rs`, scenarios the engine **computes correctly** fail on
+In `crates/graphforge-api/tests/bdd/tck_steps.rs`, scenarios the engine **computes correctly** fail on
 formatting/comparison:
 
 - `render_node_struct` sorts props with an alphabetical `BTreeMap` — TCK expects **insertion order**;

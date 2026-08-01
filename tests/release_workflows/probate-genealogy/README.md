@@ -13,7 +13,7 @@ python3 tests/release_workflows/probate-genealogy/run.py \
 ```
 
 The bounded command validates the bundle and step mapping, runs the opt-in
-Rust-owned `gf-api` example, builds and clean-installs the Python wheel, repeats the logical
+Rust-owned `graphforge-api` example, builds and clean-installs the Python wheel, repeats the logical
 selection/clear/reopen path through the binding, and writes SHA-bound evidence.
 It has a 15-minute timeout and is intentionally not a required pull-request or
 aggregate CI check.

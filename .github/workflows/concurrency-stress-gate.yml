@@ -52,7 +52,7 @@ jobs:
       - name: Build native Python wheel for mixed workload
         run: |
           uvx maturin build \
-            --manifest-path crates/gf-bindings-py/Cargo.toml \
+            --manifest-path crates/graphforge-bindings-py/Cargo.toml \
             --profile dev \
             --out dist
           uv venv /tmp/gf-concurrency-stress --python 3.13

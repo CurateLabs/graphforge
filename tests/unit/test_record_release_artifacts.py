@@ -54,3 +54,17 @@ def test_cli_writes_json(tmp_path: Path) -> None:
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["artifacts"][0]["class"] == "npm-tarball"
     assert payload["artifacts"][0]["surface"] == "npm"
+
+
+def test_crate_artifact_uses_crates_surface(tmp_path: Path) -> None:
+    archive = tmp_path / "graphforge-core-0.5.0.crate"
+    archive.write_bytes(b"crate")
+    record = record_release_artifacts.build_record(
+        version="0.5.0",
+        dist_dir=tmp_path,
+        notes="crate test",
+    )
+    artifact = record["artifacts"][0]
+    assert artifact["class"] == "rust-crate"
+    assert artifact["surface"] == "crates"
+    assert artifact["name"] == "graphforge-core"

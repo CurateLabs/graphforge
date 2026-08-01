@@ -192,7 +192,7 @@ validation, idempotency, and publication stay Rust-owned; bindings only convert
 at the boundary.
 
 ```rust
-// Rust — publish_bulk_nodes / publish_bulk_edges on gf_api::GraphForge
+// Rust — publish_bulk_nodes / publish_bulk_edges on graphforge_api::GraphForge
 ```
 
 ```js

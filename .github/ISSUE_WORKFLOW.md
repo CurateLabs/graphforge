@@ -51,7 +51,7 @@ make pre-push
 This runs:
 - `ruff format --check.` - Code formatting
 - `ruff check.` - Linting
-- `mypy crates/gf-bindings-py/python/graphforge --strict-optional --show-error-codes` - Type checking
+- `mypy crates/graphforge-bindings-py/python/graphforge --strict-optional --show-error-codes` - Type checking
 - `pytest` - Full test suite with coverage
 
 **All checks must pass before creating a PR.**

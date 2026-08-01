@@ -22,7 +22,7 @@ The public API is seven analyst-intent verbs on a single `forge` instance (`exec
 
 ## Decision
 
-GraphForge is a **Rust core** with multi-language bindings. Rust owns behavior; Python, Node, and UniFFI surfaces are thin projections of `gf-api`.
+GraphForge is a **Rust core** with multi-language bindings. Rust owns behavior; Python, Node, and UniFFI surfaces are thin projections of `graphforge-api`.
 
 ---
 

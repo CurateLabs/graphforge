@@ -648,7 +648,7 @@ See [ADR 0005](../adr/0005-layered-architecture.md).
 See [ADR 0005](../adr/0005-layered-architecture.md). **(v0.5.0)**
 
 - Provenance events MUST be recorded for derived facts (not left NULL) via the shipped
-  `gf-provenance` write path during execute/CREATE.
+  `graphforge-provenance` write path during execute/CREATE.
 - Confidence MUST be computed and propagated through execution per a **pluggable policy**, default
   `conservative_min` (a derived fact's confidence = min of its inputs).
 - Evidence MUST remain attached to assertions/observations regardless of later conclusions; refuting

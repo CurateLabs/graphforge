@@ -1,0 +1,17 @@
+[package]
+name = "graphforge-plan"
+description = "GraphForge DataFusion integration, optimizer rules, and custom plan nodes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+graphforge-ir = { version = "0.5.0", path = "../graphforge-ir" }
+datafusion = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

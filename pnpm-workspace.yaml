@@ -1,5 +1,5 @@
 packages:
-  - crates/gf-bindings-node
+  - crates/graphforge-bindings-node
   - packages/cli
   - packages/agent-skills
   - tests/features/node

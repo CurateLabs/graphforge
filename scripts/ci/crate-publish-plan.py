@@ -6,14 +6,14 @@ Usage:
     python3 scripts/ci/crate-publish-plan.py check
     python3 scripts/ci/crate-publish-plan.py dry-run-commands
 
-Language bindings and the CLI are not published to crates.io (they ship via
-PyPI / npm). Known foreign crates.io name conflicts fail `check` closed.
+Language-binding implementation crates are not published to crates.io; their
+public distributions ship through PyPI and npm. The Rust CLI is part of the
+crates.io surface.
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 from pathlib import Path
 import re
 import sys
@@ -21,32 +21,16 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 CRATES_DIR = ROOT / "crates"
 
-# Published via language registries / binary distribution — not crates.io.
+# Implementation crates published through language registries, not crates.io.
 CRATES_IO_EXCLUDED = frozenset(
     {
-        "gf-bindings-py",
-        "gf-bindings-node",
-        "gf-cli",
+        "graphforge-bindings-py",
+        "graphforge-bindings-node",
     }
 )
 
-# Verified foreign ownership on crates.io (do not attempt to publish).
-# Update this map when maintainers rename or acquire names.
-KNOWN_NAME_CONFLICTS = {
-    "gf-core": {
-        "owner": "cryptopatrick",
-        "repository": "https://github.com/cryptopatrick/gf-core",
-        "note": "Grammatical Framework runtime — unrelated to GraphForge",
-    },
-    "gf-cli": {
-        "owner": "justinwangx",
-        "repository": "https://github.com/justinwangx/gf-cli",
-        "note": "Unrelated CLI — also excluded from crates.io publish set",
-    },
-}
-
 PATH_DEP_RE = re.compile(
-    r"^(?P<name>gf-[a-z0-9-]+)\s*=\s*\{(?P<body>[^}]*)\}",
+    r"^(?P<name>graphforge-[a-z0-9-]+)\s*=\s*\{(?P<body>[^}]*)\}",
     re.MULTILINE,
 )
 PACKAGE_NAME_RE = re.compile(r'^name\s*=\s*"(?P<name>[^"]+)"', re.MULTILINE)
@@ -88,7 +72,7 @@ def load_workspace() -> dict[str, set[str]]:
 
 
 def topological_publish_order(crates: dict[str, set[str]]) -> list[str]:
-    """Return crates.io candidates in dependency order (bindings/cli excluded)."""
+    """Return crates.io candidates in dependency order (bindings excluded)."""
     remaining = {
         name: {dep for dep in deps if dep in crates and dep not in CRATES_IO_EXCLUDED}
         for name, deps in crates.items()
@@ -124,11 +108,6 @@ def path_deps_missing_versions() -> dict[str, list[str]]:
     return missing
 
 
-def conflicting_publish_names(order: Iterable[str]) -> dict[str, dict[str, str]]:
-    """Return known crates.io name conflicts for crates in the publish set."""
-    return {name: KNOWN_NAME_CONFLICTS[name] for name in order if name in KNOWN_NAME_CONFLICTS}
-
-
 def cmd_list(_: argparse.Namespace) -> int:
     order = topological_publish_order(load_workspace())
     for name in order:
@@ -141,12 +120,9 @@ def cmd_check(_: argparse.Namespace) -> int:
     order = topological_publish_order(crates)
     errors: list[str] = []
 
-    conflicts = conflicting_publish_names(order)
-    for name, meta in conflicts.items():
-        errors.append(
-            f"{name}: crates.io name conflict "
-            f"(owner={meta['owner']}; {meta['repository']}; {meta['note']})"
-        )
+    unexpected = sorted(name for name in order if not name.startswith("graphforge-"))
+    for name in unexpected:
+        errors.append(f"{name}: publishable package must use the graphforge-* namespace")
 
     missing = path_deps_missing_versions()
     for name, deps in missing.items():
@@ -159,7 +135,7 @@ def cmd_check(_: argparse.Namespace) -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         print(
-            "See docs/development/publication-order.md (crates.io disposition).",
+            "See docs/development/publication-order.md (crates.io publication plan).",
             file=sys.stderr,
         )
         return 1
@@ -172,15 +148,6 @@ def cmd_check(_: argparse.Namespace) -> int:
 
 def cmd_dry_run_commands(_: argparse.Namespace) -> int:
     order = topological_publish_order(load_workspace())
-    conflicts = conflicting_publish_names(order)
-    if conflicts:
-        print(
-            "# Refusing dry-run commands while crates.io name conflicts exist:",
-            file=sys.stderr,
-        )
-        for name in conflicts:
-            print(f"#   {name}", file=sys.stderr)
-        return 1
     for name in order:
         print(f"cargo publish -p {name} --dry-run --locked")
     return 0

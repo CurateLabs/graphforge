@@ -40,7 +40,7 @@ Shipped capabilities (present tense — this is the product):
 | --- | --- | --- |
 | Compiler + ontology + Graph IR + relational lowering | Shipped | openCypher path into DataFusion |
 | Execution + adjacency index | Shipped | Parquet-backed execution; derived CSR adjacency under `indexes/adjacency/` ([ADR 0004](../adr/0004-adjacency-index.md)) |
-| Python + Node bindings | Shipped | Thin bindings over `gf-api`; Arrow / IPC results |
+| Python + Node bindings | Shipped | Thin bindings over `graphforge-api`; Arrow / IPC results |
 | Conformance hardening | Shipped | openCypher TCK, fuzzing, and semantic gates |
 | Analyst verbs | Shipped | `rank` / `cluster` / `similar` / `paths` / `analyze` → Arrow |
 | Find / index | Shipped | `find` + `index` — text, vector, hybrid |

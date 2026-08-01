@@ -94,8 +94,8 @@
         "RepositoryContext.validate_infra_target"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/repository.rs", "symbol": "checked_in_fixture_resolves_to_the_contract_golden"},
-        {"path": "crates/gf-api/src/repository.rs", "symbol": "target_semantics_fail_closed_before_state_or_secret_materialization"}
+        {"path": "crates/graphforge-api/src/repository.rs", "symbol": "checked_in_fixture_resolves_to_the_contract_golden"},
+        {"path": "crates/graphforge-api/src/repository.rs", "symbol": "target_semantics_fail_closed_before_state_or_secret_materialization"}
       ]
     },
     "repository-sync": {
@@ -103,9 +103,9 @@
         "RepositoryContext.sync"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_checks_applies_replays_conflicts_and_preserves_authority"},
-        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_rechecks_definitions_at_publication_boundary"},
-        {"path": "crates/gf-api/src/repository.rs", "symbol": "repository_sync_failure_boundaries_recover_to_one_authoritative_state"}
+        {"path": "crates/graphforge-api/src/repository.rs", "symbol": "repository_sync_checks_applies_replays_conflicts_and_preserves_authority"},
+        {"path": "crates/graphforge-api/src/repository.rs", "symbol": "repository_sync_rechecks_definitions_at_publication_boundary"},
+        {"path": "crates/graphforge-api/src/repository.rs", "symbol": "repository_sync_failure_boundaries_recover_to_one_authoritative_state"}
       ]
     },
     "ontology-lifecycle": {
@@ -114,15 +114,15 @@
         "GraphForge.suggest_ontology", "GraphForge.validate_ontology"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "snapshot_hides_runtime_identity_and_orders_entries"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "catalog_inspection_reports_poisoned_lock_and_schema_mismatch"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "equivalent_observation_order_produces_identical_suggestion"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "yaml_and_json_exports_are_atomic_valid_documents"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "suggested_source_is_canonicalized_before_serialization"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "export_round_trip_preserves_migration_route_tie_breaking"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "validation_and_failed_export_do_not_replace_destination"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "loaded_and_adopted_sources_are_explicit_and_leave_authority_unchanged"},
-        {"path": "crates/gf-api/src/ontology_lifecycle.rs", "symbol": "filesystem_failure_preserves_destination_and_cleans_temporary_file"}
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "snapshot_hides_runtime_identity_and_orders_entries"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "catalog_inspection_reports_poisoned_lock_and_schema_mismatch"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "equivalent_observation_order_produces_identical_suggestion"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "yaml_and_json_exports_are_atomic_valid_documents"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "suggested_source_is_canonicalized_before_serialization"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "export_round_trip_preserves_migration_route_tie_breaking"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "validation_and_failed_export_do_not_replace_destination"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "loaded_and_adopted_sources_are_explicit_and_leave_authority_unchanged"},
+        {"path": "crates/graphforge-api/src/ontology_lifecycle.rs", "symbol": "filesystem_failure_preserves_destination_and_cleans_temporary_file"}
       ]
     },
     "lifecycle-construction": {
@@ -133,11 +133,11 @@
         "GraphForge.relationship_types", "GraphForge.workspace_configuration", "GraphForge.workspace_ontology"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/tests/public_lifecycle_conformance.rs", "symbol": "persisted_construction_reopens_with_exact_uuid_properties_and_order"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"},
-        {"path": "crates/gf-api/tests/release_load_construction.rs", "symbol": "bulk_load_construction_stays_within_recovery_bound"},
-        {"path": "crates/gf-api/src/workspace_ontology.rs", "symbol": "clear_ontology_publishes_explicit_absence"},
-        {"path": "crates/gf-api/src/checkpoint_graph_diff.rs", "symbol": "extracts_uuid_ordered_logical_nodes_and_edges_from_pinned_generation"}
+        {"path": "crates/graphforge-api/tests/public_lifecycle_conformance.rs", "symbol": "persisted_construction_reopens_with_exact_uuid_properties_and_order"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"},
+        {"path": "crates/graphforge-api/tests/release_load_construction.rs", "symbol": "bulk_load_construction_stays_within_recovery_bound"},
+        {"path": "crates/graphforge-api/src/workspace_ontology.rs", "symbol": "clear_ontology_publishes_explicit_absence"},
+        {"path": "crates/graphforge-api/src/checkpoint_graph_diff.rs", "symbol": "extracts_uuid_ordered_logical_nodes_and_edges_from_pinned_generation"}
       ]
     },
     "checkpoint-view": {
@@ -157,25 +157,25 @@
         "GraphForge.diff_checkpoints", "GraphForge.list_checkpoints", "GraphForge.open_checkpoint", "GraphForge.revert_to_checkpoint"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/tests/public_lifecycle_conformance.rs", "symbol": "checkpoint_lifecycle_is_persisted_pinned_read_only_and_revertible"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "checkpoint_view_inventory_covers_all_read_wrappers"},
-        {"path": "crates/gf-api/src/checkpoints.rs", "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"},
-        {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"},
-        {"path": "crates/gf-api/src/embedding_spaces.rs", "symbol": "aliases_defaults_replacement_removal_and_reopen_are_deterministic"},
-        {"path": "crates/gf-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"},
-        {"path": "crates/gf-api/src/algorithm_runs.rs", "symbol": "recorded_dispatch_commits_start_and_completed_before_return"},
-        {"path": "crates/gf-api/src/capabilities.rs", "symbol": "initial_project_reports_mandatory_graph_and_workspace_capabilities"},
-        {"path": "crates/gf-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"},
-        {"path": "crates/gf-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
-        {"path": "crates/gf-api/src/embedding_refresh.rs", "symbol": "defaults_and_space_overrides_are_durable_and_content_free"},
-        {"path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "every_verb_prepares_and_dispatches_through_the_direct_executor"},
-        {"path": "crates/gf-api/src/provenance.rs", "symbol": "enabled_project_commits_graph_and_provenance_in_one_generation"},
-        {"path": "crates/gf-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"}
+        {"path": "crates/graphforge-api/tests/public_lifecycle_conformance.rs", "symbol": "checkpoint_lifecycle_is_persisted_pinned_read_only_and_revertible"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "checkpoint_view_inventory_covers_all_read_wrappers"},
+        {"path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "checkpoint_view_stays_pinned_and_rejects_writes"},
+        {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"},
+        {"path": "crates/graphforge-api/src/embedding_spaces.rs", "symbol": "aliases_defaults_replacement_removal_and_reopen_are_deterministic"},
+        {"path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"},
+        {"path": "crates/graphforge-api/src/algorithm_runs.rs", "symbol": "recorded_dispatch_commits_start_and_completed_before_return"},
+        {"path": "crates/graphforge-api/src/capabilities.rs", "symbol": "initial_project_reports_mandatory_graph_and_workspace_capabilities"},
+        {"path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"},
+        {"path": "crates/graphforge-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
+        {"path": "crates/graphforge-api/src/embedding_refresh.rs", "symbol": "defaults_and_space_overrides_are_durable_and_content_free"},
+        {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "every_verb_prepares_and_dispatches_through_the_direct_executor"},
+        {"path": "crates/graphforge-api/src/provenance.rs", "symbol": "enabled_project_commits_graph_and_provenance_in_one_generation"},
+        {"path": "crates/graphforge-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"}
       ]
     },
     "m18": {
@@ -189,12 +189,12 @@
         "crate.algorithm_descriptor_contracts"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/tests/m22_m18_public_surface.rs", "symbol": "all_94_public_algorithm_contracts_are_unique_typed_and_repeatable"},
-        {"path": "crates/gf-api/tests/m22_m18_public_surface.rs", "symbol": "descriptor_byte_and_embedding_dispatch_are_publicly_covered"},
-        {"path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "every_verb_prepares_and_dispatches_through_the_direct_executor"},
-        {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
-        {"path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
-        {"path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "prepared_rank_dispatch_is_arrow_equivalent_and_detects_projection_change"}
+        {"path": "crates/graphforge-api/tests/m22_m18_public_surface.rs", "symbol": "all_94_public_algorithm_contracts_are_unique_typed_and_repeatable"},
+        {"path": "crates/graphforge-api/tests/m22_m18_public_surface.rs", "symbol": "descriptor_byte_and_embedding_dispatch_are_publicly_covered"},
+        {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "every_verb_prepares_and_dispatches_through_the_direct_executor"},
+        {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
+        {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
+        {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "prepared_rank_dispatch_is_arrow_equivalent_and_detects_projection_change"}
       ]
     },
     "m19-provider-rerank": {
@@ -210,26 +210,26 @@
         "OpenRouterProviderSession.publish_embeddings", "OpenRouterProviderSession.refresh_embeddings"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
-        {"path": "crates/gf-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
-        {"path": "crates/gf-api/tests/m22_provider_public_surface.rs", "symbol": "openrouter_session_refresh_embeddings_rejects_drift_without_transport"},
-        {"path": "crates/gf-api/src/provider_rerank.rs", "symbol": "default_error_and_explicit_canonical_fallback_are_distinct"},
-        {"path": "crates/gf-api/src/embedding_spaces.rs", "symbol": "aliases_defaults_replacement_removal_and_reopen_are_deterministic"},
-        {"path": "crates/gf-api/src/embedding_refresh.rs", "symbol": "defaults_and_space_overrides_are_durable_and_content_free"},
-        {"path": "crates/gf-api/src/search_index.rs", "symbol": "adjacency_is_explicit_and_never_treats_a_search_label_as_magic"},
-        {"path": "crates/gf-api/src/search_index.rs", "symbol": "adjacency_rebuild_cancellation_preserves_prior_authoritative_artifact"},
-        {"path": "crates/gf-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"},
-        {"path": "crates/gf-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
-        {"path": "crates/gf-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
-        {"path": "crates/gf-api/src/embedding_spaces.rs", "symbol": "explicit_deletion_removes_one_lineage_all_aliases_and_default"},
-        {"path": "crates/gf-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"},
-        {"path": "crates/gf-api/src/provider_embedding.rs", "symbol": "inspection_is_order_independent_content_free_and_openrouter_explicit"},
-        {"path": "crates/gf-api/src/provider_embedding_execution.rs", "symbol": "cancellation_is_structured_before_provider_or_alias_mutation"},
-        {"path": "crates/gf-api/src/provider_find.rs", "symbol": "ordinary_find_resolves_and_replaces_exact_configured_runtime"},
-        {"path": "crates/gf-api/src/provider_find.rs", "symbol": "alias_lineage_change_retries_once_and_second_change_fails_structurally"},
-        {"path": "crates/gf-api/src/provider_rerank.rs", "symbol": "detailed_find_keeps_omission_neutral_and_reranks_explicitly"},
-        {"path": "crates/gf-api/src/provider_rerank.rs", "symbol": "inspection_is_payload_free_and_execution_reorders_canonical_arrow"},
-        {"path": "crates/gf-api/src/search_index.rs", "symbol": "text_receipt_tracks_stale_rebuild_incompatible_and_reopen_transitions"}
+        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
+        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "openrouter_session_refresh_embeddings_rejects_drift_without_transport"},
+        {"path": "crates/graphforge-api/src/provider_rerank.rs", "symbol": "default_error_and_explicit_canonical_fallback_are_distinct"},
+        {"path": "crates/graphforge-api/src/embedding_spaces.rs", "symbol": "aliases_defaults_replacement_removal_and_reopen_are_deterministic"},
+        {"path": "crates/graphforge-api/src/embedding_refresh.rs", "symbol": "defaults_and_space_overrides_are_durable_and_content_free"},
+        {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "adjacency_is_explicit_and_never_treats_a_search_label_as_magic"},
+        {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "adjacency_rebuild_cancellation_preserves_prior_authoritative_artifact"},
+        {"path": "crates/graphforge-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"},
+        {"path": "crates/graphforge-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
+        {"path": "crates/graphforge-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
+        {"path": "crates/graphforge-api/src/embedding_spaces.rs", "symbol": "explicit_deletion_removes_one_lineage_all_aliases_and_default"},
+        {"path": "crates/graphforge-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"},
+        {"path": "crates/graphforge-api/src/provider_embedding.rs", "symbol": "inspection_is_order_independent_content_free_and_openrouter_explicit"},
+        {"path": "crates/graphforge-api/src/provider_embedding_execution.rs", "symbol": "cancellation_is_structured_before_provider_or_alias_mutation"},
+        {"path": "crates/graphforge-api/src/provider_find.rs", "symbol": "ordinary_find_resolves_and_replaces_exact_configured_runtime"},
+        {"path": "crates/graphforge-api/src/provider_find.rs", "symbol": "alias_lineage_change_retries_once_and_second_change_fails_structurally"},
+        {"path": "crates/graphforge-api/src/provider_rerank.rs", "symbol": "detailed_find_keeps_omission_neutral_and_reranks_explicitly"},
+        {"path": "crates/graphforge-api/src/provider_rerank.rs", "symbol": "inspection_is_payload_free_and_execution_reorders_canonical_arrow"},
+        {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "text_receipt_tracks_stale_rebuild_incompatible_and_reopen_transitions"}
       ]
     },
     "m20": {
@@ -244,22 +244,22 @@
         "GraphForge.record_assertion_validity", "GraphForge.record_reasoning"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_publication_is_atomic_idempotent_and_reopenable"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_history_list_surfaces_are_exact"},
-        {"path": "crates/gf-api/src/provenance.rs", "symbol": "enabled_project_commits_graph_and_provenance_in_one_generation"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"},
-        {"path": "crates/gf-api/src/capabilities.rs", "symbol": "enabled_capability_is_selected_after_persistent_reopen"},
-        {"path": "crates/gf-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"},
-        {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "assertion_with_evidence_is_one_atomic_idempotent_generation"},
-        {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "publish_composite_is_one_generation_with_canonical_receipt"},
-        {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "cancelled_public_composite_publish_never_mutates"},
-        {"path": "crates/gf-api/src/composite_publish.rs", "symbol": "invalid_composite_request_does_not_mutate"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_publication_is_atomic_idempotent_and_reopenable"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_history_list_surfaces_are_exact"},
+        {"path": "crates/graphforge-api/src/provenance.rs", "symbol": "enabled_project_commits_graph_and_provenance_in_one_generation"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "confidence_publication_is_atomic_idempotent_deterministic_and_reopenable"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_status_is_explicit_append_only_idempotent_and_reopenable"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "evidence_publication_is_atomic_idempotent_filterable_and_reopenable"},
+        {"path": "crates/graphforge-api/src/capabilities.rs", "symbol": "enabled_capability_is_selected_after_persistent_reopen"},
+        {"path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "reasoning_is_append_only_exact_idempotent_and_reopenable"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_lists_filter_and_page_with_generation_bound_tokens"},
+        {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "assertion_with_evidence_is_one_atomic_idempotent_generation"},
+        {"path": "crates/graphforge-api/src/composite_publish.rs", "symbol": "publish_composite_is_one_generation_with_canonical_receipt"},
+        {"path": "crates/graphforge-api/src/composite_publish.rs", "symbol": "cancelled_public_composite_publish_never_mutates"},
+        {"path": "crates/graphforge-api/src/composite_publish.rs", "symbol": "invalid_composite_request_does_not_mutate"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
       ]
     },
     "m21": {
@@ -273,15 +273,15 @@
         "GraphForge.supersede_assertion"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_history_list_surfaces_are_exact"},
-        {"path": "crates/gf-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"},
-        {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
-        {"path": "crates/gf-api/tests/belief_subject_contract.rs", "symbol": "public_belief_subject_contract_is_exact_temporal_and_reopenable"},
-        {"path": "crates/gf-api/tests/belief_subject_contract.rs", "symbol": "public_belief_subject_is_stable_across_independent_event_order"},
-        {"path": "crates/gf-api/src/belief_projection.rs", "symbol": "subject_snapshot_and_projection_hold_one_generation_guard"},
-        {"path": "crates/gf-api/src/algorithm_runs.rs", "symbol": "recorded_dispatch_commits_start_and_completed_before_return"},
-        {"path": "crates/gf-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
+        {"path": "crates/graphforge-api/src/hypotheses.rs", "symbol": "explicit_selection_and_atomic_selected_member_removal_survive_reopen"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_history_list_surfaces_are_exact"},
+        {"path": "crates/graphforge-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"},
+        {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
+        {"path": "crates/graphforge-api/tests/belief_subject_contract.rs", "symbol": "public_belief_subject_contract_is_exact_temporal_and_reopenable"},
+        {"path": "crates/graphforge-api/tests/belief_subject_contract.rs", "symbol": "public_belief_subject_is_stable_across_independent_event_order"},
+        {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "subject_snapshot_and_projection_hold_one_generation_guard"},
+        {"path": "crates/graphforge-api/src/algorithm_runs.rs", "symbol": "recorded_dispatch_commits_start_and_completed_before_return"},
+        {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
       ]
     },
     "streaming-errors-maintenance": {
@@ -291,22 +291,22 @@
         "GraphForge.execute_with_params", "GraphForge.explain", "GraphForge.register_procedure", "GraphForge.runtime_catalog", "GraphForge.schema"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/lib.rs", "symbol": "registered_procedure_missing_parameter_matches_streaming_path"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "parameterized_stream_and_parquet_surfaces_are_exact"},
-        {"path": "crates/gf-api/src/lib.rs", "symbol": "clear_resets_in_memory_state_after_partial_filesystem_failure"},
-        {"path": "crates/gf-api/tests/e2e_baseline.rs", "symbol": "execute_stream_yields_shaped_batches"},
-        {"path": "crates/gf-api/tests/facade_methods.rs", "symbol": "explain_is_side_effect_free_on_the_shared_catalog"},
-        {"path": "crates/gf-api/src/lib.rs", "symbol": "parameter_binding_filters_by_value"},
-        {"path": "crates/gf-api/tests/e2e_baseline.rs", "symbol": "execute_stream_owned_guard_outlives_dropped_forge"},
-        {"path": "crates/gf-api/tests/facade_methods.rs", "symbol": "execute_to_parquet_roundtrips"}
+        {"path": "crates/graphforge-api/src/lib.rs", "symbol": "registered_procedure_missing_parameter_matches_streaming_path"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "parameterized_stream_and_parquet_surfaces_are_exact"},
+        {"path": "crates/graphforge-api/src/lib.rs", "symbol": "clear_resets_in_memory_state_after_partial_filesystem_failure"},
+        {"path": "crates/graphforge-api/tests/e2e_baseline.rs", "symbol": "execute_stream_yields_shaped_batches"},
+        {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "explain_is_side_effect_free_on_the_shared_catalog"},
+        {"path": "crates/graphforge-api/src/lib.rs", "symbol": "parameter_binding_filters_by_value"},
+        {"path": "crates/graphforge-api/tests/e2e_baseline.rs", "symbol": "execute_stream_owned_guard_outlives_dropped_forge"},
+        {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "execute_to_parquet_roundtrips"}
       ]
     },
     "compatibility": {
       "ids": ["GraphForge.begin", "GraphForge.commit", "GraphForge.index", "GraphForge.load_ontology", "GraphForge.rollback"],
       "test_refs": [
-        {"path": "crates/gf-api/tests/facade_methods.rs", "symbol": "load_ontology_applies_and_promotes_mode"},
-        {"path": "crates/gf-api/tests/m22_m19_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"},
-        {"path": "crates/gf-api/tests/public_facade_remaining_conformance.rs", "symbol": "transaction_stubs_return_exact_stable_errors"}
+        {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "load_ontology_applies_and_promotes_mode"},
+        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "transaction_stubs_return_exact_stable_errors"}
       ]
     }
   },
@@ -320,8 +320,8 @@
         "similar.cosine", "similar.filtered_knn", "similar.filtered_node_similarity", "similar.knn", "similar.node_similarity"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
-        {"path": "crates/gf-api/tests/knowledge_isolation.rs", "symbol": "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"}
+        {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
+        {"path": "crates/graphforge-api/tests/knowledge_isolation.rs", "symbol": "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"}
       ]
     }
   },
@@ -349,26 +349,26 @@
         "rerank.failure.error", "rerank.failure.canonical_unreranked",
         "rerank.advisory.emit", "rerank.advisory.suppress"
       ],
-      "test_refs": [{"path": "crates/gf-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
+      "test_refs": [{"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
     }
   },
   "m19_evidence_groups": {
     "find-modes": {
       "ids": ["find.mode.text", "find.mode.vector", "find.mode.hybrid"],
-      "test_refs": [{"path": "crates/gf-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
+      "test_refs": [{"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
     },
     "freshness": {
       "ids": ["find.freshness.default", "find.freshness.force_stale"],
       "test_refs": [
-        {"path": "crates/gf-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
-        {"path": "crates/gf-api/src/embedding_freshness.rs", "symbol": "proven_small_mutation_is_mildly_stale_and_serveable"}
+        {"path": "crates/graphforge-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
+        {"path": "crates/graphforge-api/src/embedding_freshness.rs", "symbol": "proven_small_mutation_is_mildly_stale_and_serveable"}
       ]
     },
     "indexes": {
       "ids": ["index.text.create", "index.vector.publish", "index.adjacency.create"],
       "test_refs": [
-        {"path": "crates/gf-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
-        {"path": "crates/gf-api/src/search_index.rs", "symbol": "adjacency_is_explicit_and_never_treats_a_search_label_as_magic"}
+        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
+        {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "adjacency_is_explicit_and_never_treats_a_search_label_as_magic"}
       ]
     },
     "embedding-contract": {
@@ -377,16 +377,16 @@
         "embedding.normalization.none", "embedding.normalization.l2", "embedding.distance.cosine"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
-        {"path": "crates/gf-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
-        {"path": "crates/gf-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"}
+        {"path": "crates/graphforge-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
+        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"}
       ]
     },
     "provider-workflows": {
       "ids": ["provider.workflow.plan", "provider.workflow.publish", "provider.workflow.refresh", "provider.workflow.find"],
       "test_refs": [
-        {"path": "crates/gf-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
-        {"path": "crates/gf-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"}
+        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"}
       ]
     },
     "rerank-policies": {
@@ -395,8 +395,8 @@
         "rerank.advisory.emit", "rerank.advisory.suppress"
       ],
       "test_refs": [
-        {"path": "crates/gf-api/src/provider_rerank.rs", "symbol": "default_error_and_explicit_canonical_fallback_are_distinct"},
-        {"path": "crates/gf-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"}
+        {"path": "crates/graphforge-api/src/provider_rerank.rs", "symbol": "default_error_and_explicit_canonical_fallback_are_distinct"},
+        {"path": "crates/graphforge-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"}
       ]
     }
   }

@@ -14,8 +14,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
-API_SRC = ROOT / "crates/gf-api/src"
-ALGORITHMS = ROOT / "crates/gf-core/src/algorithms.rs"
+API_SRC = ROOT / "crates/graphforge-api/src"
+ALGORITHMS = ROOT / "crates/graphforge-core/src/algorithms.rs"
 ALLOWED_CLASSIFICATIONS = {
     "release-tested",
     "internal-helper",
@@ -39,7 +39,7 @@ def _matching_brace(text: str, opening: int) -> int:
 
 
 def public_methods() -> set[str]:
-    """Return receiver-qualified public methods from every gf-api impl block."""
+    """Return receiver-qualified public methods from every graphforge-api impl block."""
     found: set[str] = set()
     impl_re = re.compile(r"\bimpl(?:\s*<[^>{}]*>)?\s+([A-Za-z_][\w:]*)[^{}]*\{")
     fn_re = re.compile(r"\bpub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>{}]*>)?\s*\(")

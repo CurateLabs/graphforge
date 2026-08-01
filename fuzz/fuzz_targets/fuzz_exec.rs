@@ -1,4 +1,4 @@
-//! Fuzz target: end-to-end execution via `gf_api::GraphForge::execute` (#603).
+//! Fuzz target: end-to-end execution via `graphforge_api::GraphForge::execute` (#603).
 //!
 //! Drives the full pipeline — parse → bind → lower → execute — against a fresh
 //! in-memory (temp-dir-backed) instance per input. Executing arbitrary
@@ -7,7 +7,7 @@
 //! iterations (and is dropped — temp dir cleaned — at the end of each).
 #![no_main]
 
-use gf_api::GraphForge;
+use graphforge_api::GraphForge;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

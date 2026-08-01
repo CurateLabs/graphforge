@@ -1,0 +1,31 @@
+[package]
+name = "graphforge-bindings-node"
+description = "GraphForge Node.js bindings (napi-rs)"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+graphforge-api = { version = "0.5.0", path = "../graphforge-api" }
+graphforge-cli = { version = "0.5.0", path = "../graphforge-cli" }
+# `ipc` (default in arrow 58) serializes execute() results to an Arrow IPC
+# stream Buffer for the JS side to decode with apache-arrow.
+arrow = { workspace = true }
+# `serde-json` lets `#[napi]` methods accept a JS object as
+# `HashMap<String, serde_json::Value>` query parameters.
+napi = { workspace = true, features = ["serde-json"] }
+napi-derive = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[lints]
+workspace = true

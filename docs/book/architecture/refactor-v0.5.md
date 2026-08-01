@@ -23,30 +23,30 @@ This document is the authoritative reference for architectural decisions made be
          │  Cypher / GQL Path                              │  Analyst Verbs Path
          ▼                                                 │
    ┌─────────────┐                                         │  rank / cluster / paths /
-   │   Parser    │  (gf-cypher)                            │  analyze / similar / find
+   │   Parser    │  (graphforge-cypher)                            │  analyze / similar / find
    │ RD + Pratt  │                                         │  — bypass parser/binder
    └──────┬──────┘                                         │  — export adjacency or index
           ▼                                                 │  — dispatch algorithm backend
    ┌─────────────┐                                         │  — return scored Arrow batches
-   │     AST     │  (gf-ast)                               │
+   │     AST     │  (graphforge-ast)                               │
    │  spans +    │                                         │
    │  syntax     │                                         │
    └──────┬──────┘                                         │
           ▼                                                 │
    ┌─────────────┐                                         │
-   │   Binder    │  (gf-ir)                                │
+   │   Binder    │  (graphforge-ir)                                │
    │  ontology   │  Resolves names → TypeId/PropId         │
    │  resolution │  Variable scope validation              │
    └──────┬──────┘                                         │
           ▼                                                 │
    ┌─────────────┐                                         │
-   │  Graph IR   │  (gf-ir)  ← stable semantic contract   │
+   │  Graph IR   │  (graphforge-ir)  ← stable semantic contract   │
    │  GraphPlan  │  DataFusion-independent                 │
    │  + ExprArena│                                         │
    └──────┬──────┘                                         │
           ▼                                                 │
    ┌─────────────┐                                         │
-   │  Relational │  (gf-rel)                               │
+   │  Relational │  (graphforge-rel)                               │
    │  Lowering   │  GraphOp → DataFusion LogicalPlan        │
    └──────┬──────┘                                         │
           ▼                                                 │
@@ -182,7 +182,7 @@ Also present in exploratory mode:
 
 ## 3. Ontology Model
 
-The ontology is already implemented in `gf-ontology` (ontology runtime). This section documents how it integrates with the new storage architecture.
+The ontology is already implemented in `graphforge-ontology` (ontology runtime). This section documents how it integrates with the new storage architecture.
 
 The `ontology.yaml` file in the project root is the schema authority. It drives:
 
@@ -309,7 +309,7 @@ Transitions are always the analyst's choice. Moving to a stricter mode never del
 
 ## 4. Graph IR Model
 
-The Graph IR (`gf-ir`) is the **stable semantic contract** between the compiler and the execution engine. It is deliberately DataFusion-independent — the IR can be serialized, stored, inspected, and replayed without DataFusion being present.
+The Graph IR (`graphforge-ir`) is the **stable semantic contract** between the compiler and the execution engine. It is deliberately DataFusion-independent — the IR can be serialized, stored, inspected, and replayed without DataFusion being present.
 
 ### Operators
 
@@ -430,7 +430,7 @@ Identity is permanent.
 
 > **Layer + status (ADR 0005 / ADR 0006).** Provenance is a **knowledge-layer** concern, not a
 > graph-layer one. Graph objects may carry UUID references; events and lineage live in
-> `gf-provenance` / `gf-knowledge` and are produced/interpreted there — never as graph semantics.
+> `graphforge-provenance` / `graphforge-knowledge` and are produced/interpreted there — never as graph semantics.
 > **Status:** knowledge-layer immutable ledger and epistemic append-only epistemic interpretation are **Shipped** for
 > v0.5.0 (see [knowledge-ledger.md](knowledge-ledger.md) and
 > [ADR 0006](../../adr/0006-epistemic-model.md)). The illustrative parquet schemas below remain a

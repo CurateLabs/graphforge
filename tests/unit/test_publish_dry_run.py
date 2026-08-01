@@ -10,13 +10,13 @@ publish_dry_run = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(publish_dry_run)
 
 
-def test_cargo_order_skips_gf_core_conflict() -> None:
+def test_cargo_order_contains_complete_public_surface() -> None:
     order, _source = publish_dry_run.cargo_publish_order()
-    assert order
-    assert "gf-core" not in order
-    assert "gf-bindings-py" not in order
-    assert "gf-bindings-node" not in order
-    assert "gf-cli" not in order
+    assert len(order) == 15
+    assert order[0] == "graphforge-core"
+    assert order[-1] == "graphforge-cli"
+    assert "graphforge-bindings-py" not in order
+    assert "graphforge-bindings-node" not in order
 
 
 def test_npm_dry_run_surfaces_ok() -> None:

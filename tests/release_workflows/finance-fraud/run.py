@@ -134,7 +134,7 @@ def main() -> None:
     env.setdefault("CARGO_TARGET_DIR", str(ROOT / "target/release-workflow-build/finance-fraud"))
     env["GF_FINANCE_EVIDENCE_PATH"] = str(rust_path)
     env["GF_RELEASE_WORKFLOW_SHA"] = sha
-    run(["cargo", "run", "-p", "gf-api", "--example", "finance_fraud_workflow"], env)
+    run(["cargo", "run", "-p", "graphforge-api", "--example", "finance_fraud_workflow"], env)
 
     with tempfile.TemporaryDirectory(prefix="gf-finance-python-") as temporary:
         temporary_path = Path(temporary)
@@ -149,7 +149,7 @@ def main() -> None:
                 "maturin",
                 "build",
                 "--manifest-path",
-                "crates/gf-bindings-py/Cargo.toml",
+                "crates/graphforge-bindings-py/Cargo.toml",
                 "--profile",
                 "dev",
                 "--out",

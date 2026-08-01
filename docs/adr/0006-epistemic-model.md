@@ -24,13 +24,13 @@ knowledge UUIDs. A knowledge assertion is valid without any epistemic status eve
 
 ## Decision
 
-The epistemic model is an additive, append-only interpretation layer owned by `gf-knowledge`
-and assembled through `gf-api`. It never changes a knowledge schema, row,
+The epistemic model is an additive, append-only interpretation layer owned by `graphforge-knowledge`
+and assembled through `graphforge-api`. It never changes a knowledge schema, row,
 fingerprint, ordering rule, or identity.
 
 The authoritative machine-readable contract is the generated
 [Epistemic schema inventory](../reference/m21-schema-inventory.json). It is generated
-only from the `gf-knowledge` registry; its checked SHA-256 digest makes
+only from the `graphforge-knowledge` registry; its checked SHA-256 digest makes
 undocumented registry drift fail CI. All epistemic records use contract version `1`.
 
 ### Record families
@@ -150,15 +150,15 @@ rejected. Cancellation after publication begins cannot promise rollback.
 The implementation contract is exercised at the public Rust API and through
 the native Python and Node bindings:
 
-- `gf-knowledge` tests validate each Arrow schema, canonical fingerprint,
+- `graphforge-knowledge` tests validate each Arrow schema, canonical fingerprint,
   ordering rule—including identical-time UUID tie-breaking—idempotency rule,
   and conflict path.
-- `gf-api::belief_projection` tests cover statusless assertions, retraction,
+- `graphforge-api::belief_projection` tests cover statusless assertions, retraction,
   supersession branches, competing hypothesis
   groups, half-open valid time, generation pinning, all five analyst-verb families,
   reopen determinism, graph-only isolation, and attachment retry.
-- `crates/gf-bindings-py/tests/smoke.py` and
-  `crates/gf-bindings-node/tests/belief-projection.test.mjs` execute the native
+- `crates/graphforge-bindings-py/tests/smoke.py` and
+  `crates/graphforge-bindings-node/tests/belief-projection.test.mjs` execute the native
   binding examples against built artifacts.
 - the repository-policy CI job verifies the generated epistemic inventory and digest.
 

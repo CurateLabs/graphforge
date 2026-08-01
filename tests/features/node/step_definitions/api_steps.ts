@@ -22,11 +22,11 @@ import * as path from "path";
 // ---------------------------------------------------------------------------
 // Import the native binding (built by `napi build`; see the node-native-build
 // CI job). napi-rs cannot export JS Error subclasses, so the fault domain is
-// carried on `err.code` (see crates/gf-bindings-node/src/error.rs); assertions
+// carried on `err.code` (see crates/graphforge-bindings-node/src/error.rs); assertions
 // below match on that code. Construction handles are native and UUID-only;
 // EdgeHandle values remain pending until the Rust construction path lands.
 // ---------------------------------------------------------------------------
-const { GraphForge, NodeHandle, EdgeHandle, version } = require("../../../../crates/gf-bindings-node/index.js");
+const { GraphForge, NodeHandle, EdgeHandle, version } = require("../../../../crates/graphforge-bindings-node/index.js");
 void version;
 
 /** The fault-domain code on a thrown native error (`err.code`). */

@@ -1,0 +1,24 @@
+[package]
+name = "graphforge-search"
+description = "GraphForge graph-native text search backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+graphforge-storage = { version = "0.5.0", path = "../graphforge-storage" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tantivy = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+graphforge-core = { path = "../graphforge-core" }
+graphforge-ir = { path = "../graphforge-ir" }
+tempfile = "3"
+
+[lints]
+workspace = true

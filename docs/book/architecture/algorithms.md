@@ -39,7 +39,7 @@ semijoins) are added as needed without breaking the verb design.
 ## Rust Algorithm Dispatch
 
 Production algorithms register one `RustAlgorithm` handler per typed catalog value in
-`gf-exec`. Dispatch, limits, cancellation, and Arrow result shaping are shared across the
+`graphforge-exec`. Dispatch, limits, cancellation, and Arrow result shaping are shared across the
 five verbs. igraph and NetworkX are optional development parity oracles only: they are not
 runtime backends, fallbacks, packaging dependencies, or recovery paths.
 
@@ -1453,7 +1453,7 @@ node/edge/output/iteration limits, and cooperative cancellation are enforced in 
 code. Internal execution surrogates never escape, and results do not depend on a knowledge
 layer being present.
 
-The implementation and dispatch owner is `gf-exec`; Python and Node only coerce inputs and
+The implementation and dispatch owner is `graphforge-exec`; Python and Node only coerce inputs and
 convert its Arrow output. Official Neo4j Graph Data Science documentation is an optional
 development parity reference only. GraphForge has no igraph, NetworkX, Neo4j, SciPy, or
 external path-service runtime backend, fallback, packaging dependency, or recovery path.
@@ -1485,7 +1485,7 @@ batch. Shared node, edge, iteration, and output limits plus cooperative cancella
 complete invocation.
 
 Projection, validation, execution, deterministic tie resolution, limits, and shaping are owned
-by Rust in `gf-exec`; Python and Node are thin argument/Arrow adapters. Results are independent
+by Rust in `graphforge-exec`; Python and Node are thin argument/Arrow adapters. Results are independent
 of knowledge-layer presence. Official
 [Neo4j GDS all-pairs shortest path documentation][gds-apsp] is an optional catalog and
 development reference only. GraphForge has no igraph, NetworkX, Neo4j, SciPy, external path
@@ -1516,7 +1516,7 @@ non-negative on every selected edge. `k` must be `1`. Equal-cost candidates use 
 full-path topology/UUID order and then edge order, so repeated Rust, Python, and Node calls
 agree. Shared graph, iteration, output, and cancellation limits apply.
 
-Projection, validation, execution, and Arrow shaping are owned by Rust in `gf-exec`; bindings
+Projection, validation, execution, and Arrow shaping are owned by Rust in `graphforge-exec`; bindings
 only adapt arguments and output. Results are independent of the knowledge layer.
 Official graph-library material is an optional catalog/development reference only: GraphForge
 has no igraph, NetworkX, Neo4j, SciPy, external path service, fallback, packaging dependency,
@@ -1549,7 +1549,7 @@ Equal-cost routes resolve by the lexicographically smallest complete node topolo
 sequence and then edge topology order. Canonical Bellman-Ford requires `k=1`. Shared node,
 edge, iteration, and output limits plus cooperative cancellation bound relaxation and the
 negative-cycle scan. Selector validation, projection, execution, tie resolution, and Arrow
-shaping are owned by typed Rust in `gf-exec`; Python and Node only adapt arguments and output.
+shaping are owned by typed Rust in `graphforge-exec`; Python and Node only adapt arguments and output.
 
 Results are independent of knowledge-layer presence, preserving the graph/knowledge boundary. External graph-library documentation is an optional development reference only.
 GraphForge has no igraph, NetworkX, Neo4j, SciPy, external path service, runtime fallback,
@@ -1592,7 +1592,7 @@ distance-only bound. Shared node, edge, work-iteration, and output limits plus c
 cancellation cover projection, matrix initialization and relaxation, negative-cycle checks,
 path reconstruction, and Arrow shaping.
 
-Typed Rust in `gf-exec` owns projection, validation, execution, deterministic ties, limits,
+Typed Rust in `graphforge-exec` owns projection, validation, execution, deterministic ties, limits,
 cancellation, and UUID-only Arrow shaping. Python and Node only adapt arguments and output.
 Results are independent of knowledge-layer presence.
 External graph-library documentation is an optional catalog and development reference only;
@@ -1635,7 +1635,7 @@ overflow, limit violations, cancellation, execution errors, and Arrow shaping fa
 the invocation without partial output.
 
 Projection, validation, bucket execution, deterministic tie resolution, limits, cancellation,
-and Arrow shaping are Rust-owned in `gf-exec`. Python and Node are argument/Arrow adapters
+and Arrow shaping are Rust-owned in `graphforge-exec`. Python and Node are argument/Arrow adapters
 only. Exploratory operation without a knowledge layer produces the same graph result,
 satisfying the graph/knowledge boundary. External algorithm documentation and libraries may be used
 as development parity references only; no igraph, NetworkX, Neo4j, SciPy, service, runtime
@@ -1682,7 +1682,7 @@ overflow, limit violations, cancellation, execution errors, and Arrow shaping fa
 the invocation without partial output.
 
 Projection, validation, loopless path-state execution, deterministic candidate selection,
-limits, cancellation, and Arrow shaping are Rust-owned in `gf-exec`. Python and Node are
+limits, cancellation, and Arrow shaping are Rust-owned in `graphforge-exec`. Python and Node are
 argument/Arrow adapters only. The result depends only on selected graph topology and weights
 and does not consume or require knowledge-layer state, preserving the graph/knowledge boundary.
 External algorithm documentation and libraries may be development references only; no
@@ -1734,7 +1734,7 @@ Selector and option validation, strict-capacity loading, checked finite arithmet
 cancellation, execution, and Arrow shaping are atomic: failures return structured Rust
 errors and no partial result.
 
-Typed Rust in `gf-exec` owns projection, normalization, the shared flow kernel, canonical
+Typed Rust in `graphforge-exec` owns projection, normalization, the shared flow kernel, canonical
 assignment, controls, and Arrow shaping. Python and Node only adapt arguments and native
 Arrow/Arrow IPC; no external graph runtime, fallback, service, packaging dependency, or
 recovery path participates. Maximum flow consumes only resolved graph topology, properties,
@@ -1779,7 +1779,7 @@ Selector and option validation, strict-capacity loading, finite checked arithmet
 canonical-cut construction, limits, cancellation, execution, and Arrow shaping are atomic:
 failures return structured Rust errors and no partial result.
 
-Typed Rust in `gf-exec` owns projection, normalization, the shared cut solution, deterministic
+Typed Rust in `graphforge-exec` owns projection, normalization, the shared cut solution, deterministic
 tie-breaking, controls, and Arrow shaping. Python and Node only adapt arguments and native
 Arrow/Arrow IPC; no external graph runtime, fallback, service, packaging dependency, or
 recovery path participates. Minimum cut consumes only resolved graph topology, properties,
@@ -1793,9 +1793,9 @@ interpretations afterward without changing the algorithm result.
 #### Canonical `gomory_hu_tree` contract
 
 > **Status:** shipped. The classic parent-update Rust kernel, graph-wide source-free invocation,
-> `gf-api` dispatch, knowledge-isolation coverage, and fresh-wheel/fresh-addon Python and Node
+> `graphforge-api` dispatch, knowledge-isolation coverage, and fresh-wheel/fresh-addon Python and Node
 > acceptance are merged. Evidence: kernel
-> [PR 2169](https://github.com/CurateLabs/graphforge-legecy/pull/2169), dispatch and `gf-api`
+> [PR 2169](https://github.com/CurateLabs/graphforge-legecy/pull/2169), dispatch and `graphforge-api`
 > [PR 2364](https://github.com/CurateLabs/graphforge-legecy/pull/2364), isolation
 > [PR 2365](https://github.com/CurateLabs/graphforge-legecy/pull/2365), and native bindings
 > [PR 2366](https://github.com/CurateLabs/graphforge-legecy/pull/2366).
@@ -1860,7 +1860,7 @@ backends, fallbacks, services, packaging dependencies, or recovery paths.
 
 #### Canonical `min_cost_max_flow` and `min_cost_max_flow_edges` contract
 
-> **Status:** shipped through Rust, `gf-api`, and the thin Python and Node bindings. Both native
+> **Status:** shipped through Rust, `graphforge-api`, and the thin Python and Node bindings. Both native
 > bindings accept explicit capacity and cost property names and return the Rust-produced Arrow
 > result without an external runtime backend or fallback.
 
@@ -1910,8 +1910,8 @@ Selector and typed-option validation, strict property loading, residual-cycle de
 checked finite flow/cost accumulation, limits, cancellation, execution, and Arrow shaping are
 atomic: failures return structured Rust errors and no partial result.
 
-Typed Rust in `gf-exec` owns projection, normalization, the shared solution, deterministic tie
-refinement, controls, and Arrow shaping. `gf-api` owns typed property resolution and dispatch;
+Typed Rust in `graphforge-exec` owns projection, normalization, the shared solution, deterministic tie
+refinement, controls, and Arrow shaping. `graphforge-api` owns typed property resolution and dispatch;
 Python and Node only coerce arguments and convert the Rust-produced Arrow result. They provide
 no external graph runtime or fallback. The operation consumes only resolved graph-native
 topology, properties, selectors, and typed options. It never reads knowledge/epistemic knowledge tables or
@@ -1987,7 +1987,7 @@ invalid input, overflow, unreachable terminals, exhaustion, cancellation, or exe
 returns a structured Rust error and no partial batch.
 
 Rust owns normalization, projection, exact optimization, controls, deterministic selection, and
-Arrow shaping. `gf-api` resolves graph-native properties and dispatches the typed invocation;
+Arrow shaping. `graphforge-api` resolves graph-native properties and dispatches the typed invocation;
 Python and Node only construct options and decode the freshly built native addon's Arrow IPC.
 There is no external graph runtime or fallback.
 
@@ -2128,7 +2128,7 @@ projection, validation, execution, and Arrow-shaping failures return
 structured Rust errors without partial output.
 
 Catalog registration, graph projection, execution, limits, cancellation,
-deduplication, ordering, and Arrow shaping are Rust-owned in `gf-exec`.
+deduplication, ordering, and Arrow shaping are Rust-owned in `graphforge-exec`.
 Python and Node only adapt selectors/options and the native Arrow result; they
 contain no traversal, external backend, fallback, service, packaging
 dependency, or recovery path. The result consumes only graph topology and is
@@ -2186,7 +2186,7 @@ entries, 10,000,000 output rows, and 10,000 cooperative iteration checkpoints. P
 candidate ordering, union-find selection, output shaping, limit failures, and cancellation
 abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, validation, Kruskal/DSU execution, canonical ordering,
+Typed Rust in `graphforge-exec` owns projection, validation, Kruskal/DSU execution, canonical ordering,
 limits, cancellation, and Arrow shaping. Python and Node only adapt arguments and Arrow IPC.
 Exploratory operation without a knowledge layer produces the same result, satisfying the
 graph/knowledge boundary. External algorithm libraries and documentation are development parity
@@ -2237,7 +2237,7 @@ rows, and 10,000 cooperative iteration checkpoints. Projection, validation,
 candidate ordering, union-find selection, output shaping, limit failures, and
 cancellation abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, validation, maximizing Kruskal/DSU
+Typed Rust in `graphforge-exec` owns projection, validation, maximizing Kruskal/DSU
 execution, canonical ordering, limits, cancellation, and Arrow shaping.
 Python and Node only adapt arguments and native Arrow/Arrow IPC. Exploratory
 operation without a knowledge layer produces the same topology-and-property
@@ -2371,7 +2371,7 @@ limits count only newly inserted canonical cycles, and validation, storage,
 limit, cancellation, and shaping failures abort atomically without partial
 output.
 
-Typed Rust in `gf-exec` owns projection, identity validation, iterative
+Typed Rust in `graphforge-exec` owns projection, identity validation, iterative
 enumeration, canonicalization, deduplication, ordering, limits, cancellation,
 and Arrow shaping. Python and Node only adapt arguments and native Arrow/Arrow
 IPC. Results depend only on selected topology and remain unchanged by
@@ -2415,7 +2415,7 @@ structured Rust errors without partial output.
 
 Catalog registration, projection, Kahn execution, deterministic ready
 selection, limits, cancellation, and Arrow shaping are Rust-owned in
-`gf-exec`. Python and Node only adapt arguments and the native Arrow result;
+`graphforge-exec`. Python and Node only adapt arguments and the native Arrow result;
 they contain no sorting implementation, external runtime backend, fallback,
 service, packaging dependency, or recovery path. Results consume only graph
 topology and are unchanged by knowledge-layer presence, preserving the
@@ -2468,7 +2468,7 @@ cooperative work checkpoints. Projection, identity validation, normalization,
 cycle detection, arithmetic, limit, cancellation, execution, and Arrow-shaping
 failures abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, normalization, topology, longest-path
+Typed Rust in `graphforge-exec` owns projection, normalization, topology, longest-path
 execution, deterministic tie-breaking, controls, and Arrow shaping. Python and
 Node only adapt arguments and the native Arrow result. They contain no graph
 algorithm, sorting implementation, external runtime backend, fallback,
@@ -2540,7 +2540,7 @@ cooperative work checkpoints. Projection, weight and identity validation,
 normalization, cycle detection, finite arithmetic, limit, cancellation,
 execution, and Arrow-shaping failures abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, weight validation, normalization,
+Typed Rust in `graphforge-exec` owns projection, weight validation, normalization,
 topology, maximum-path execution, deterministic tie-breaking, controls, and
 Arrow shaping. Python and Node only adapt arguments and the native Arrow
 result. They contain no graph algorithm, external runtime backend, fallback,
@@ -2599,7 +2599,7 @@ cooperative work checkpoints. Projection, identity validation, normalization,
 coloring, checked arithmetic, limit, cancellation, execution, and
 Arrow-shaping failures abort atomically without partial rows.
 
-Typed Rust in `gf-exec` owns projection, normalization, greedy coloring,
+Typed Rust in `graphforge-exec` owns projection, normalization, greedy coloring,
 deterministic ordering, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result. They contain no coloring algorithm,
 external graph runtime, fallback, service, packaging dependency, or recovery
@@ -2666,7 +2666,7 @@ cooperative work checkpoints. Projection, normalization, validation, checked
 arithmetic, resource-limit, cancellation, execution, and Arrow-shaping
 failures abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, normalization, coloring, deterministic
+Typed Rust in `graphforge-exec` owns projection, normalization, coloring, deterministic
 ordering, controls, and Arrow shaping. Python and Node only adapt arguments and
 the native Arrow result; neither binding contains coloring logic. There is no
 external graph runtime, fallback, service, packaging dependency, or recovery
@@ -2728,7 +2728,7 @@ cooperative work checkpoints. Projection, normalization, coloring, checked
 arithmetic, limit, cancellation, execution, and Arrow-shaping failures abort
 atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, normalization, coloring,
+Typed Rust in `graphforge-exec` owns projection, normalization, coloring,
 deterministic ordering, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result; neither binding contains an edge-color
 algorithm. Knowledge-layer presence cannot affect this topology-only result,
@@ -2782,7 +2782,7 @@ entries, 10,000,000 output rows, and 10,000 cooperative work checkpoints.
 Projection, normalization, search, checked arithmetic, limit, cancellation,
 execution, and Arrow-shaping failures abort atomically without a scalar row.
 
-Typed Rust in `gf-exec` owns projection, normalization, exact search,
+Typed Rust in `graphforge-exec` owns projection, normalization, exact search,
 deterministic choices, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result; neither contains a coloring algorithm.
 Knowledge-layer presence cannot affect this topology-only scalar, preserving the topology-only knowledge isolation boundary. No external
@@ -2851,7 +2851,7 @@ A deterministic blossom/primal-dual implementation runs in `O(V^3)` time and
 weight validation, blossom search, optimum tie resolution, output shaping,
 limit failures, and cancellation abort atomically without partial output.
 
-Typed, dependency-free Rust in `gf-exec` owns projection, validation,
+Typed, dependency-free Rust in `graphforge-exec` owns projection, validation,
 blossom/primal-dual execution, deterministic choices, controls, and Arrow
 shaping. Python and Node only adapt arguments and native Arrow/Arrow IPC.
 Knowledge-layer presence cannot affect this topology-and-property operation,
@@ -2911,7 +2911,7 @@ normalization, blossom search, optimum tie resolution, checked arithmetic,
 output shaping, limit failures, and cancellation abort atomically without
 partial output.
 
-Typed, dependency-free Rust in `gf-exec` owns projection, exact matching,
+Typed, dependency-free Rust in `graphforge-exec` owns projection, exact matching,
 deterministic choices, controls, and Arrow shaping. It may reuse the private
 shared matching/blossom core used by other exact matching handlers, but that
 core is not a public API and cannot change this cardinality-primary, unweighted
@@ -3177,7 +3177,7 @@ checkpoints. Projection, normalization, degree overflow, traversal, limit,
 cancellation, execution, and Arrow-shaping failures abort atomically without
 a Boolean row.
 
-Typed Rust in `gf-exec` owns projection, normalization, degree accounting,
+Typed Rust in `graphforge-exec` owns projection, normalization, degree accounting,
 connectivity, controls, and Arrow shaping. Python and Node only adapt arguments
 and the native Arrow result; neither contains an Eulerian implementation.
 Knowledge-layer presence cannot affect this topology-only predicate,
@@ -3261,7 +3261,7 @@ Shipped evidence is finite and layer-specific. The two
 brute-force small-graph equivalence, UUID-renaming invariance, overflow,
 cancellation, depth, matrix, search-state, iteration, allocation, and malformed
 projection boundaries. `algorithm_analyze.rs` proves registered dispatch,
-canonical families, schema, replay, and atomic controls. The `gf-api`
+canonical families, schema, replay, and atomic controls. The `graphforge-api`
 acceptance tests prove persisted reopen, exact metadata and nullability,
 closed options, overflow, and graph-property independence.
 `knowledge_isolation.rs` proves reserved-sidecar and equivalent resolved
@@ -3332,7 +3332,7 @@ dispatch. Neither layer changes algorithm options, computation, or schema.
 #### Canonical `modularity` contract
 
 > **Status:** The Rust kernel, canonical schema, graph-native partition-property
-> resolution, and `gf-api` dispatch are shipped. Fresh-native Python and Node
+> resolution, and `graphforge-api` dispatch are shipped. Fresh-native Python and Node
 > acceptance coverage is also shipped; both bindings remain thin adapters over
 > the Rust-owned result.
 
@@ -3434,7 +3434,7 @@ normalized graph uses `O(V + E)` working memory. Shared limits allow at most
 and every projection, limit, execution, storage, or Arrow-shaping failure abort
 atomically before a Boolean row is returned.
 
-Typed Rust in `gf-exec` owns selection, normalization, validation, planarity,
+Typed Rust in `graphforge-exec` owns selection, normalization, validation, planarity,
 controls, and Arrow shaping. Python and Node only adapt arguments and the
 native Arrow result. Knowledge-layer presence cannot affect this topology-only
 predicate, preserving the topology-only knowledge isolation boundary. No external
@@ -3485,7 +3485,7 @@ Cancellation is checked during projection and counting, and validation,
 arithmetic, storage, limit, cancellation, execution, and Arrow-shaping
 failures abort atomically without partial output.
 
-Typed Rust in `gf-exec` owns projection, validation, normalization, checked
+Typed Rust in `graphforge-exec` owns projection, validation, normalization, checked
 counting, controls, and Arrow shaping. Python and Node only adapt arguments and
 native Arrow/Arrow IPC. The result depends only on selected topology and is
 unchanged by knowledge-layer presence. No
@@ -3552,7 +3552,7 @@ projection, normalization, and counting. Validation, arithmetic, storage,
 limit, cancellation, execution, and Arrow-shaping failures abort atomically
 without partial rows.
 
-Typed Rust in `gf-exec` owns projection, validation, normalization, exact
+Typed Rust in `graphforge-exec` owns projection, validation, normalization, exact
 classification, checked counting, controls, and Arrow shaping. Python and Node
 only adapt arguments and native Arrow/Arrow IPC. The topology-only result is
 unchanged by knowledge-layer presence, preserving the graph/knowledge boundary. No
@@ -3595,7 +3595,7 @@ cancellation, execution, and Arrow-shaping failures abort atomically without
 partial output.
 
 Catalog dispatch, projection, low-link execution, ordering, limits,
-cancellation, and Arrow shaping are Rust-owned in `gf-exec`. Python and Node
+cancellation, and Arrow shaping are Rust-owned in `graphforge-exec`. Python and Node
 only adapt arguments and the native Arrow result. The topology-only result is
 unchanged by knowledge-layer presence, preserving the topology-only knowledge isolation boundary. No external
 graph runtime, fallback, service, packaging dependency, or recovery path
@@ -3632,7 +3632,7 @@ entries, 10,000,000 output rows, and 10,000 cooperative work checkpoints.
 Projection, traversal, shaping, limit, and cancellation failures abort
 atomically without partial output.
 
-Rust in `gf-exec` owns projection, low-link execution, ordering, limits,
+Rust in `graphforge-exec` owns projection, low-link execution, ordering, limits,
 cancellation, and Arrow shaping. Python and Node only adapt arguments and the
 native result. Knowledge-layer presence cannot change this topology-only
 result, preserving the topology-only knowledge isolation boundary.
@@ -3682,7 +3682,7 @@ neighbors; the dense worst case is `O(V^3 log V)`. Shared limits allow at most
 normalization, counting, checked arithmetic, limit, cancellation, execution,
 and Arrow-shaping failures are atomic and return no partial scalar.
 
-Typed Rust in `gf-exec` owns projection, normalization, exact counting,
+Typed Rust in `graphforge-exec` owns projection, normalization, exact counting,
 deterministic ordering, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result. They contain no triangle algorithm,
 external graph runtime, fallback, service, packaging dependency, or recovery
@@ -3735,7 +3735,7 @@ non-loop endpoint pairs. Deterministic projection and normalization use
 checked arithmetic, limit, cancellation, execution, and Arrow-shaping
 failures abort atomically without partial rows.
 
-Typed Rust in `gf-exec` owns projection, normalization, exact counting,
+Typed Rust in `graphforge-exec` owns projection, normalization, exact counting,
 deterministic ordering, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result; neither contains a census algorithm.
 Knowledge-layer presence cannot affect this topology-only result, preserving the topology-only knowledge isolation boundary. The
@@ -3925,9 +3925,9 @@ instead exposes `k` and `vector_property`. All return Arrow Tables.
 
 ## Implementation Notes
 
-- Typed catalog ownership and stable schemas live in `gf-core::algorithms`.
-- Rust handler registration and dispatch live in `gf-exec::algorithm_dispatch` and the
-  verb-specific `gf-exec::algorithm_*` modules.
+- Typed catalog ownership and stable schemas live in `graphforge-core::algorithms`.
+- Rust handler registration and dispatch live in `graphforge-exec::algorithm_dispatch` and the
+  verb-specific `graphforge-exec::algorithm_*` modules.
 - The shared adjacency export maps Parquet topology to internal execution IDs; the result
   shaper maps those back to UUID-only Arrow columns.
 - Python and Node only coerce public arguments and convert the same Rust-produced Arrow result.

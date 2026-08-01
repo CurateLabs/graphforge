@@ -1970,269 +1970,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gf-api"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "cucumber",
- "datafusion",
- "fs4",
- "futures",
- "gf-core",
- "gf-cypher",
- "gf-exec",
- "gf-ir",
- "gf-knowledge",
- "gf-ontology",
- "gf-provenance",
- "gf-rel",
- "gf-search",
- "gf-storage",
- "parquet",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "gf-ast"
-version = "0.5.0"
-dependencies = [
- "gf-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-bindings-node"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-api",
- "gf-cli",
- "napi",
- "napi-build",
- "napi-derive",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "gf-bindings-py"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "futures",
- "gf-api",
- "gf-cli",
- "pyo3",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "gf-cli"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "clap",
- "gf-api",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "gf-core"
-version = "0.5.0"
-dependencies = [
- "serde",
- "serde_yaml_ng",
- "sha2",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "gf-cypher"
-version = "0.5.0"
-dependencies = [
- "gf-ast",
- "gf-core",
- "gf-ir",
- "gf-rel",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-exec"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "arrow",
- "async-trait",
- "datafusion",
- "datafusion-datasource",
- "futures",
- "gf-core",
- "gf-cypher",
- "gf-ir",
- "gf-ontology",
- "gf-plan",
- "gf-rel",
- "gf-storage",
- "insta",
- "parquet",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "gf-io"
-version = "0.5.0"
-dependencies = [
- "gf-core",
- "gf-storage",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-ir"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-ast",
- "gf-core",
- "gf-cypher",
- "gf-ontology",
- "insta",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-knowledge"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "unicode-normalization",
- "uuid",
-]
-
-[[package]]
-name = "gf-ontology"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-core",
- "parquet",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-plan"
-version = "0.5.0"
-dependencies = [
- "datafusion",
- "gf-core",
- "gf-ir",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-provenance"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-core",
- "serde",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "gf-rel"
-version = "0.5.0"
-dependencies = [
- "arrow-data",
- "chrono",
- "chrono-tz",
- "datafusion",
- "datafusion-functions-aggregate",
- "gf-core",
- "gf-cypher",
- "gf-ir",
- "gf-ontology",
- "gf-plan",
- "gf-storage",
- "insta",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "gf-search"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "gf-core",
- "gf-ir",
- "gf-storage",
- "serde",
- "serde_json",
- "tantivy",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "gf-storage"
-version = "0.5.0"
-dependencies = [
- "arrow",
- "async-trait",
- "atomicwrites",
- "datafusion",
- "datafusion-catalog",
- "fs4",
- "gf-core",
- "gf-ir",
- "gf-ontology",
- "libc",
- "named-lock",
- "parquet",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "unicode-normalization",
- "uuid",
- "wait-timeout",
-]
-
-[[package]]
 name = "gherkin"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2277,6 +2014,269 @@ dependencies = [
  "bitflags",
  "ignore",
  "walkdir",
+]
+
+[[package]]
+name = "graphforge-api"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "cucumber",
+ "datafusion",
+ "fs4",
+ "futures",
+ "graphforge-core",
+ "graphforge-cypher",
+ "graphforge-exec",
+ "graphforge-ir",
+ "graphforge-knowledge",
+ "graphforge-ontology",
+ "graphforge-provenance",
+ "graphforge-rel",
+ "graphforge-search",
+ "graphforge-storage",
+ "parquet",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-ast"
+version = "0.5.0"
+dependencies = [
+ "graphforge-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-bindings-node"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-api",
+ "graphforge-cli",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-bindings-py"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "futures",
+ "graphforge-api",
+ "graphforge-cli",
+ "pyo3",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-cli"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "graphforge-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-core"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_yaml_ng",
+ "sha2",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-cypher"
+version = "0.5.0"
+dependencies = [
+ "graphforge-ast",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-rel",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-exec"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "datafusion",
+ "datafusion-datasource",
+ "futures",
+ "graphforge-core",
+ "graphforge-cypher",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "graphforge-plan",
+ "graphforge-rel",
+ "graphforge-storage",
+ "insta",
+ "parquet",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "graphforge-io"
+version = "0.5.0"
+dependencies = [
+ "graphforge-core",
+ "graphforge-storage",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-ir"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-ast",
+ "graphforge-core",
+ "graphforge-cypher",
+ "graphforge-ontology",
+ "insta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-knowledge"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-ontology"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-core",
+ "parquet",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-plan"
+version = "0.5.0"
+dependencies = [
+ "datafusion",
+ "graphforge-core",
+ "graphforge-ir",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-provenance"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-core",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "graphforge-rel"
+version = "0.5.0"
+dependencies = [
+ "arrow-data",
+ "chrono",
+ "chrono-tz",
+ "datafusion",
+ "datafusion-functions-aggregate",
+ "graphforge-core",
+ "graphforge-cypher",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "graphforge-plan",
+ "graphforge-storage",
+ "insta",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "graphforge-search"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-storage",
+ "serde",
+ "serde_json",
+ "tantivy",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "graphforge-storage"
+version = "0.5.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "atomicwrites",
+ "datafusion",
+ "datafusion-catalog",
+ "fs4",
+ "graphforge-core",
+ "graphforge-ir",
+ "graphforge-ontology",
+ "libc",
+ "named-lock",
+ "parquet",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "unicode-normalization",
+ "uuid",
+ "wait-timeout",
 ]
 
 [[package]]

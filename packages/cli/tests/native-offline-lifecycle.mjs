@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const checkoutRoot = fileURLToPath(new URL("../../..", import.meta.url));
-const nativeRoot = join(checkoutRoot, "crates", "gf-bindings-node");
+const nativeRoot = join(checkoutRoot, "crates", "graphforge-bindings-node");
 const lifecycleContract = JSON.parse(
   readFileSync(
     join(checkoutRoot, "tests", "contracts", "repository-cli-lifecycle.json"),

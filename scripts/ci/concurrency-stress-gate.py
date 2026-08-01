@@ -71,7 +71,7 @@ def run_rust_case(case: str, env: dict[str, str], timeout: int) -> dict[str, Any
         "cargo",
         "test",
         "-p",
-        "gf-api",
+        "graphforge-api",
         "--lib",
         case,
         "--",

@@ -21,7 +21,7 @@ graph-native semantics.
 
 The v0.5.0 unified API exposes seven entry points — `execute`, `rank`, `cluster`, `paths`,
 `analyze`, `similar`, and `find` — all producing Arrow Tables. `execute` travels the full
-Cypher compiler pipeline (`gf-cypher → gf-ir → gf-rel → gf-exec`); the analyst verbs bypass the
+Cypher compiler pipeline (`graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`); the analyst verbs bypass the
 parser and planner but converge on the same DataFusion execution layer. All seven entry points
 are **Shipped** (see the per-algorithm status in [Algorithm Verbs](algorithms.md)). Their
 graph-native execution is a **graph-layer** capability under
@@ -54,7 +54,7 @@ no additional conversion is needed before returning through the thin Python or N
 GraphPlan (Graph IR)
       ↓
 ┌────────────────────────────┐
-│  gf-rel: relational lower  │
+│  graphforge-rel: relational lower  │
 │  Simple ops → LogicalPlan  │
 │  Graph ops → custom nodes  │
 └────────────────────────────┘
@@ -72,7 +72,7 @@ GraphPlan (Graph IR)
       ↓
   SendableRecordBatchStream   ← Arrow columnar batches
       ↓
-  gf-bindings-py / gf-bindings-node / Rust API
+  graphforge-bindings-py / graphforge-bindings-node / Rust API
 ```
 
 ---
@@ -254,7 +254,7 @@ fn result_schema(fields: Vec<Field>, query_id: &str, ontology_ver: &str) -> Sche
 }
 ```
 
-Topology node schema (the shipped layout — see `crates/gf-storage/src/schemas.rs`):
+Topology node schema (the shipped layout — see `crates/graphforge-storage/src/schemas.rs`):
 
 ```rust
 // topology/nodes.parquet — identity + labels only (the GRAPH LAYER hot path)
@@ -282,7 +282,7 @@ let node_schema = Schema::new(vec![
 The shipped typed edge schema contains neither engine-owned `confidence` nor
 `provenance_uuid`. A domain property named `confidence` remains an ordinary
 graph property with no special execution semantics. Provenance and knowledge
-records use the independent `gf-provenance`/`gf-knowledge` ledgers owned by
+records use the independent `graphforge-provenance`/`graphforge-knowledge` ledgers owned by
 [ADR 0012](../../adr/0012-m20-domain-ownership.md); no historical project is
 imported or converted.
 
@@ -306,9 +306,9 @@ bytes over UniFFI without becoming semantic owners.
 
 Graph execution emits a neutral mutation/inference receipt containing operation
 semantics and affected UUIDs. It does not construct domain rows or open
-knowledge tables. `gf-api` converts the receipt into `gf-provenance` events and
-lineage, validates any `gf-knowledge` confidence/assertion references, and
-publishes all participants through one generic `gf-storage` generation.
+knowledge tables. `graphforge-api` converts the receipt into `graphforge-provenance` events and
+lineage, validates any `graphforge-knowledge` confidence/assertion references, and
+publishes all participants through one generic `graphforge-storage` generation.
 
 Confidence is immutable knowledge metadata. It is not a Cypher,
 traversal, rank, cluster, paths, analyze, similar, or find option and never

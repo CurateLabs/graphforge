@@ -1,4 +1,4 @@
-# ADR 0002: Recursive Descent + Pratt Parser for gf-cypher
+# ADR 0002: Recursive Descent + Pratt Parser for graphforge-cypher
 
 **Date:** 2026-05-28
 **Status:** Accepted
@@ -8,7 +8,7 @@
 
 ## Context
 
-The Cypher parser in `gf-cypher` was evaluated first as a LALRPOP grammar. Two approaches were attempted in sequence; both were abandoned in favor of the hand-written parser below.
+The Cypher parser in `graphforge-cypher` was evaluated first as a LALRPOP grammar. Two approaches were attempted in sequence; both were abandoned in favor of the hand-written parser below.
 
 ### Attempt 1: LALR(1) with `#[precedence]`
 
@@ -30,7 +30,7 @@ Removing `#[LALR]` and rewriting `Expr` as a hierarchy of named nonterminals (on
 
 ## Decision
 
-`gf-cypher` uses a **hand-written recursive-descent clause parser** with a **Pratt expression parser** subroutine.
+`graphforge-cypher` uses a **hand-written recursive-descent clause parser** with a **Pratt expression parser** subroutine.
 
 This is the architecture used by Neo4j's production Cypher parser, PostgreSQL, SQLite, GQL, and virtually every other production SQL/query-language parser. It is conflict-free by construction: there is no parser table, no state merging, and no FOLLOW set contamination.
 
@@ -145,6 +145,6 @@ Optional suffixes (`WHERE`, `ORDER BY`, `SKIP`, `LIMIT`) are handled by explicit
 
 ## References
 
-- [ADR 0001: Rust Core](0001-rust-core.md) — Rust-core architecture that hosts `gf-cypher`
+- [ADR 0001: Rust Core](0001-rust-core.md) — Rust-core architecture that hosts `graphforge-cypher`
 - [AST & Planning](../book/architecture/ast-and-planning.md) — parser pipeline and file layout
 - openCypher grammar specification — ISO WG3 BNF / ANTLR grammar

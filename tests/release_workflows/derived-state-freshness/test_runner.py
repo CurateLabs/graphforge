@@ -252,8 +252,8 @@ class RunnerContract(unittest.TestCase):
 
     def test_cargo_timeouts_are_distinct_and_attributable(self) -> None:
         commands = [
-            ["cargo", "test", "-p", "gf-api", "--lib", RUNNER.BARRIER, "--", "--exact"],
-            ["cargo", "run", "-p", "gf-api", "--example", RUNNER.RUST_EXAMPLE.stem],
+            ["cargo", "test", "-p", "graphforge-api", "--lib", RUNNER.BARRIER, "--", "--exact"],
+            ["cargo", "run", "-p", "graphforge-api", "--example", RUNNER.RUST_EXAMPLE.stem],
         ]
         messages = []
         for command in commands:
@@ -280,7 +280,7 @@ class RunnerContract(unittest.TestCase):
         )
         source = (BUNDLE / "run.py").read_text()
         self.assertIn(
-            '["cargo", "test", "-p", "gf-api", "--lib", BARRIER, "--", "--exact"]',
+            '["cargo", "test", "-p", "graphforge-api", "--lib", BARRIER, "--", "--exact"]',
             source,
         )
 

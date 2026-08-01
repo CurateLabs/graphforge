@@ -18,7 +18,7 @@ LCOV_PATH="${OUT_DIR}/lcov.info"
 # cargo-llvm-cov appends /html under --output-dir
 HTML_DIR="${OUT_DIR}/html"
 SUMMARY_PATH="${OUT_DIR}/summary.txt"
-# Default: whole workspace. Override for focused runs, e.g. COVERAGE_RUST_ARGS='-p gf-api'
+# Default: whole workspace. Override for focused runs, e.g. COVERAGE_RUST_ARGS='-p graphforge-api'
 COVERAGE_RUST_ARGS="${COVERAGE_RUST_ARGS:---workspace}"
 
 if ! command -v cargo-llvm-cov >/dev/null 2>&1 && ! cargo llvm-cov --version >/dev/null 2>&1; then

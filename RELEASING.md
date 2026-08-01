@@ -57,7 +57,7 @@ Before running the release commands:
 - [ ] All tests passing: `pytest tests/` (against the native `graphforge` wheel)
 - [ ] Multi-surface coverage green: `make coverage` (Rust llvm-cov + Python wrapper + Node c8, ≥85% lines each)
 - [ ] No lint errors: `ruff check .`
-- [ ] Type checking passes: `mypy crates/gf-bindings-py/python/graphforge`
+- [ ] Type checking passes: `mypy crates/graphforge-bindings-py/python/graphforge`
 - [ ] Documentation updated
 - [ ] All PRs merged to main
 - [ ] No open critical bugs

@@ -21,9 +21,9 @@ Narrow sub-issues may split a canonical issue only to satisfy existing acceptanc
 
 Rust owns behavior. Python and Node are thin bindings—never fallback engines.
 
-- Cypher: `gf-cypher → gf-ir → gf-rel → gf-exec`.
-- Public API: `gf-api`.
-- Storage: `gf-storage`.
+- Cypher: `graphforge-cypher → graphforge-ir → graphforge-rel → graphforge-exec`.
+- Public API: `graphforge-api`.
+- Storage: `graphforge-storage`.
 - Results are Arrow; graph data is Parquet; metadata is JSON.
 - Analyst verbs bypass the Cypher parser.
 - Runtime catalog IDs and ontology IDs are distinct. Never substitute one for the other.

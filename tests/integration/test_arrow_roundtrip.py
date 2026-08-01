@@ -5,7 +5,7 @@ values, nullability, schema metadata, multi-column order, a large batch, and a
 zero-row schema. The v0.5 result contract is plain Apache Arrow — there are no
 `CypherValue` wrappers, so every assertion uses `.as_py()` / Arrow comparisons
 (the old CypherValue accessor is never used). The Node binding mirrors these in
-``crates/gf-bindings-node/tests/arrow_roundtrip.test.mjs``.
+``crates/graphforge-bindings-node/tests/arrow_roundtrip.test.mjs``.
 """
 
 from __future__ import annotations

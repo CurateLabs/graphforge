@@ -8,7 +8,7 @@
 /crates/ @DecisionNerd
 
 # Python binding — the canonical `graphforge` package
-/crates/gf-bindings-py/ @DecisionNerd
+/crates/graphforge-bindings-py/ @DecisionNerd
 
 # Tests
 /tests/ @DecisionNerd

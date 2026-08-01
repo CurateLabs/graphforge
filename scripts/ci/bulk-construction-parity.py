@@ -25,7 +25,7 @@ import pyarrow as pa
 import graphforge as g
 
 ROOT = Path(__file__).resolve().parents[2]
-NODE_PKG = ROOT / "crates" / "gf-bindings-node"
+NODE_PKG = ROOT / "crates" / "graphforge-bindings-node"
 
 NODE_A = uuid.UUID("018f0f4e-7b8c-7000-8000-00000000d001")
 NODE_B = uuid.UUID("018f0f4e-7b8c-7000-8000-00000000d002")

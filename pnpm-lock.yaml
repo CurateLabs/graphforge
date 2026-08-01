@@ -12,7 +12,7 @@ importers:
         specifier: 3.9.5
         version: 3.9.5
 
-  crates/gf-bindings-node:
+  crates/graphforge-bindings-node:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.6.0
@@ -42,13 +42,13 @@ importers:
     dependencies:
       '@graphforge/node':
         specifier: workspace:*
-        version: link:../../crates/gf-bindings-node
+        version: link:../../crates/graphforge-bindings-node
 
   tests/features/node:
     dependencies:
       '@graphforge/node':
         specifier: workspace:*
-        version: link:../../../crates/gf-bindings-node
+        version: link:../../../crates/graphforge-bindings-node
     devDependencies:
       '@cucumber/cucumber':
         specifier: ^11.0.0

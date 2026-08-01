@@ -28,7 +28,9 @@ class Contract(unittest.TestCase):
             "expected/phases/final-view.json",
         ]
         self.assertEqual([], [name for name in required if not (BUNDLE / name).is_file()])
-        self.assertTrue((ROOT / "crates/gf-api/examples/knowledge_evolution_workflow.rs").is_file())
+        self.assertTrue(
+            (ROOT / "crates/graphforge-api/examples/knowledge_evolution_workflow.rs").is_file()
+        )
         scenario = json.loads((BUNDLE / "scenario.yaml").read_text())
         generator = json.loads((BUNDLE / "generator.yaml").read_text())
         self.assertEqual(2472, scenario["owning_issue"])

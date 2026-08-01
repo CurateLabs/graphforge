@@ -21,8 +21,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/bulk-construction-conformance.json"
-PYTHON_TEST = ROOT / "crates/gf-bindings-py/tests/bulk_construction.py"
-NODE_TEST = ROOT / "crates/gf-bindings-node/tests/bulk_construction.test.mjs"
+PYTHON_TEST = ROOT / "crates/graphforge-bindings-py/tests/bulk_construction.py"
+NODE_TEST = ROOT / "crates/graphforge-bindings-node/tests/bulk_construction.test.mjs"
 PARITY_TEST = ROOT / "scripts/ci/bulk-construction-parity.py"
 CASE_TIMEOUT_SECONDS = 900
 
@@ -33,7 +33,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--lib",
             "bulk_construction::",
             "--",
@@ -46,7 +46,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
             "cargo",
             "test",
             "-p",
-            "gf-api",
+            "graphforge-api",
             "--test",
             "release_load_construction",
             "--",
@@ -55,7 +55,7 @@ REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
     ),
     "python-bulk-acceptance": (
         "python",
-        ["python", "crates/gf-bindings-py/tests/bulk_construction.py"],
+        ["python", "crates/graphforge-bindings-py/tests/bulk_construction.py"],
     ),
     "node-bulk-acceptance": (
         "node",

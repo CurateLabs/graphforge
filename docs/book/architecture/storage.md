@@ -24,7 +24,7 @@ pub trait StorageProvider: Send + Sync {
 Parquet is the sole storage provider for the Rust core. It:
 
 - Stores graph tables and opaque domain-owned participants as columnar Parquet
-  files; `gf-storage` does not define provenance or knowledge semantics
+  files; `graphforge-storage` does not define provenance or knowledge semantics
 - Carries GraphForge metadata at the file level (ontology version, IR version, query ID)
 - Persists the compiled ontology runtime tables for rapid startup
 
@@ -208,7 +208,7 @@ indexes/
     └── _all.in.csr
 ```
 
-The builder (`gf_storage::adjacency::build_adjacency_index`) writes one `{out, in}` pair per
+The builder (`graphforge_storage::adjacency::build_adjacency_index`) writes one `{out, in}` pair per
 relation type plus the `_all` union pair, then the manifest **last**. Relation names unusable
 as file stems (path separators, `..`, the reserved `_all`) are skipped — those relations are
 served by scan-build, but their rows still flow into the union index. The
@@ -248,10 +248,10 @@ Conventions:
 - **Node with no neighbors**: an empty list (`offsets[i] == offsets[i+1]`).
 - CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count` simply
   have no entries.
-- In-memory consumers (`gf_exec::AdjacencyProvider` — scan-build via
+- In-memory consumers (`graphforge_exec::AdjacencyProvider` — scan-build via
   `ScanBuildAdjacencyProvider` until the persistent loader) see the logical
   `offsets`/`targets` model; the list encoding is a file-format detail
-  (`gf_storage::adjacency::CsrIndex` on the storage side).
+  (`graphforge_storage::adjacency::CsrIndex` on the storage side).
 
 ### Rebuild and versioning semantics
 
@@ -282,7 +282,7 @@ Conventions:
   `built_at` is excluded from the determinism guarantee.
 - **Build ordering.** Builders write all CSR files first and `index_manifest.parquet`
   **last**, so a torn build reads as stale (absent/old manifest), never as fresh.
-- **Loader semantics** (`gf_exec::PersistentAdjacencyProvider`).
+- **Loader semantics** (`graphforge_exec::PersistentAdjacencyProvider`).
   Freshness requires a non-empty manifest whose graph source fingerprint
   equals the pinned graph participant. Fresh + row present ⇒ load
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
@@ -372,13 +372,13 @@ Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`.
 storage does not own their records or schemas. Under
 [ADR 0012](../../adr/0012-m20-domain-ownership.md):
 
-- `gf-provenance` owns provenance events and lineage;
-- `gf-knowledge` owns knowledge assertions, assertion graph references, confidence
+- `graphforge-provenance` owns provenance events and lineage;
+- `graphforge-knowledge` owns knowledge assertions, assertion graph references, confidence
   assessments, evidence links, algorithm runs/events, and every additive epistemic
   epistemic record;
-- `gf-api` validates cross-domain UUID references and assembles composite
+- `graphforge-api` validates cross-domain UUID references and assembles composite
   writes; and
-- `gf-storage` receives validated Arrow batches as opaque generation
+- `graphforge-storage` receives validated Arrow batches as opaque generation
   participants and owns only their paths, checksums, persistence, publication,
   and recovery.
 
@@ -390,7 +390,7 @@ knowledge assertions.
 
 The legacy pre-knowledge `PROVENANCE_EVENTS_SCHEMA`, `PROVENANCE_LINEAGE_SCHEMA`, and
 graph-embedded edge `confidence`/`provenance_uuid` fields have been removed
-from `gf-storage`. They are not the knowledge-layer contract, and no historical project
+from `graphforge-storage`. They are not the knowledge-layer contract, and no historical project
 data is imported or converted.
 
 Graph-only readers resolve the committed generation and graph-required
@@ -484,8 +484,8 @@ A new ontology version does not require a new IR version, and vice versa. Persis
 
 | System | Purpose | Format |
 |---|---|---|
-| **Arrow / Parquet** (`gf-storage`) | Graph topology/properties and generic persistence of domain-owned participants | Binary columnar (Arrow IPC / Parquet) |
-| **JSON / YAML** (`gf-ontology`) | Ontology definitions and metadata | Text (human-readable, validatable) |
+| **Arrow / Parquet** (`graphforge-storage`) | Graph topology/properties and generic persistence of domain-owned participants | Binary columnar (Arrow IPC / Parquet) |
+| **JSON / YAML** (`graphforge-ontology`) | Ontology definitions and metadata | Text (human-readable, validatable) |
 
 Graph data → Arrow/Parquet. Ontology/metadata → JSON or YAML. Arrow schema metadata carries version and provenance annotations across language boundaries.
 

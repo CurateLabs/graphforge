@@ -182,7 +182,7 @@ actor_uuid_bytes_if_present)`. The checkpoint UUID is the RFC 9562 UUIDv8
 projection of
 `SHA-256("graphforge-checkpoint-uuid/1" || create_operation_uuid_bytes ||
 create_request_sha256)`: take the first 16 digest bytes, set version to 8 and
-the RFC variant bits exactly as `gf_core::canonical::uuid_v8` does. Lengths are
+the RFC variant bits exactly as `graphforge_core::canonical::uuid_v8` does. Lengths are
 unsigned 32-bit big-endian values. Presence bytes are exactly `0x00` absent and
 `0x01` present; absent optional fields omit their length and payload. These
 bytes are frozen test vectors, not implementation choice.
@@ -263,10 +263,10 @@ The new generation:
 
 The restoration record belongs to the mandatory `workspace@1` capability and
 record family `restoration_transition@1`. It is a normal manifest participant;
-ADR 0013's manifest shape is unchanged. `gf-storage` verifies exact bytes and
+ADR 0013's manifest shape is unchanged. `graphforge-storage` verifies exact bytes and
 manifest integrity, while domain owners validate their own rows:
-`gf-ontology` validates ontology/config, `gf-provenance` validates provenance
-and lineage, `gf-knowledge` validates knowledge-layer, `gf-api` validates epistemic and composite
+`graphforge-ontology` validates ontology/config, `graphforge-provenance` validates provenance
+and lineage, `graphforge-knowledge` validates knowledge-layer, `graphforge-api` validates epistemic and composite
 cross-domain UUID references, and graph/storage validators own topology,
 properties, catalog, capabilities, and workspace restoration records. A revert
 cannot publish until every registered validator accepts the staged complete
@@ -317,7 +317,7 @@ restored_generation_uuid = uuid_v8(SHA-256(
 `u32be` is unsigned big-endian, `i64be` is signed two's-complement big-endian,
 UUIDs are their 16 RFC-order bytes, SHA-256 values are their 32 raw bytes, and
 actor presence is exactly `0x00` absent or `0x01` present. An absent actor omits
-its UUID bytes. `uuid_v8` is exactly `gf_core::canonical::uuid_v8`.
+its UUID bytes. `uuid_v8` is exactly `graphforge_core::canonical::uuid_v8`.
 
 On the first attempt, after acquiring `writer.lock` then `checkpoints.lock` and
 resolving both generations, the engine selects `restored_at` once from its UTC

@@ -188,7 +188,9 @@ def validate_matrix() -> dict[str, Any]:
     if not {"rust", "python", "node"} <= surfaces:
         raise GateError("matrix omits a public binding surface")
 
-    isolation = (ROOT / "crates/gf-api/tests/knowledge_isolation.rs").read_text(encoding="utf-8")
+    isolation = (ROOT / "crates/graphforge-api/tests/knowledge_isolation.rs").read_text(
+        encoding="utf-8"
+    )
     missing_catalog = sorted(
         fragment for fragment in CATALOG_FRAGMENTS if fragment not in isolation
     )

@@ -25,7 +25,7 @@ chosen to span "1…9999+ at nanosecond precision"; it left no headroom for the 
 
 ## Decision
 
-1. **A custom proleptic-Gregorian calendar on `i64` days** (`crates/gf-rel/src/calendar.rs`) replaces
+1. **A custom proleptic-Gregorian calendar on `i64` days** (`crates/graphforge-rel/src/calendar.rs`) replaces
    chrono for all DATE math — Howard Hinnant's `days_from_civil`/`civil_from_days`, plus ISO-week,
    ordinal, weekday, day-clamped `add_months`, and signed-year ISO formatting. Exact for any `i64`
    year; cross-checked against chrono for the in-range era in unit tests.

@@ -4,7 +4,7 @@
     "request_domain": "graphforge-checkpoint-create-request/1",
     "delete_request_domain": "graphforge-checkpoint-delete-request/1",
     "uuid_domain": "graphforge-checkpoint-uuid/1",
-    "uuid_projection": "gf_core::canonical::uuid_v8",
+    "uuid_projection": "graphforge_core::canonical::uuid_v8",
     "length_encoding": "u32-big-endian",
     "optional_presence": {"absent": 0, "present": 1}
   },
@@ -46,7 +46,7 @@
       "i64be(restored_at_micros)",
       "revert_request_sha256"
     ],
-    "uuid_projection": "gf_core::canonical::uuid_v8",
+    "uuid_projection": "graphforge_core::canonical::uuid_v8",
     "length_encoding": "u32-big-endian",
     "timestamp_encoding": "i64-two-complement-big-endian",
     "optional_presence": {"absent": 0, "present": 1},
