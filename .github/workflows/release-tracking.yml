@@ -1,124 +1,26 @@
-name: Release Tracking
+name: Release Labels
 
 on:
   pull_request:
     types: [closed]
-  schedule:
-    # Run every Monday at 9am UTC to check if release is needed
-    - cron: '0 9 * * 1'
-  workflow_dispatch:
 
 jobs:
   label-merged-pr:
     name: Label Merged PRs
-    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    if: github.event.pull_request.merged == true
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       pull-requests: write
     steps:
       - name: Add release:pending label
-        if: |
+        if: >-
           contains(github.event.pull_request.labels.*.name, 'release:patch') ||
           contains(github.event.pull_request.labels.*.name, 'release:minor') ||
           contains(github.event.pull_request.labels.*.name, 'release:major')
-        run: |
-          gh pr edit ${{ github.event.pull_request.number }} \
-            --add-label "release:pending" \
-            --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  check-release-needed:
-    name: Check if Release Needed
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      issues: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Check release status
-        id: check
-        run: |
-          python scripts/check_release_needed.py > release_check.txt
-          EXIT_CODE=$?
-          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
-          cat release_check.txt
-        continue-on-error: true
-
-      - name: Create reminder issue if needed
-        if: steps.check.outputs.exit_code != '0'
-        run: |
-          # Check if reminder issue already exists
-          EXISTING=$(gh issue list --label "release:reminder" --state open --json number --jq '.[0].number')
-
-          if [ -z "$EXISTING" ]; then
-            # Create new reminder issue
-            REPORT=$(cat release_check.txt)
-            gh issue create \
-              --title "Release Reminder: Consider Creating New Release" \
-              --label "release:reminder" \
-              --body "$(cat <<EOF
-          ## Release Status Check
-
-          The automated release check indicates it may be time to create a new release.
-
-          ### Report
-
-          \`\`\`
-          $REPORT
-          \`\`\`
-
-          ### Next Steps
-
-          1. Review unreleased changes: \`cat CHANGELOG.md\`
-          2. Check PR list: \`gh pr list --state merged --label "release:pending"\`
-          3. If ready to release, follow [RELEASING.md](../blob/main/RELEASING.md)
-
-          ### Release Process
-
-          \`\`\`bash
-          # Determine version bump (patch, minor, major)
-          python scripts/bump_version.py minor
-
-          # Review and update CHANGELOG.md
-          # Then follow release checklist
-          \`\`\`
-
-          See [docs/RELEASE_PROCESS.md](../blob/main/docs/RELEASE_PROCESS.md) for details.
-
-          ---
-          *This issue was automatically created by the release tracking workflow.*
-          *Close this issue when a release is created or if no release is needed.*
-          EOF
-          )"
-            echo "Created release reminder issue"
-          else
-            echo "Release reminder issue already exists (#$EXISTING)"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  close-reminder-on-release:
-    name: Close Reminder on Release
-    if: github.event_name == 'release' && github.event.action == 'published'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      issues: write
-    steps:
-      - name: Close release reminder issues
-        run: |
-          # Find and close all open release reminder issues
-          gh issue list --label "release:reminder" --state open --json number --jq '.[].number' | while read issue; do
-            gh issue close $issue --comment "Closing automatically - release ${{ github.event.release.tag_name }} was published."
-          done
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          gh pr edit "$PR_NUMBER"
+          --add-label "release:pending"
+          --repo "$GITHUB_REPOSITORY"

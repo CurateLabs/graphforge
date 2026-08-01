@@ -416,7 +416,7 @@ security:
 
 **Release process:**
 - Semantic versioning (MAJOR.MINOR.PATCH)
-- Update pyproject.toml + CHANGELOG.md
+- Update coordinated package versions
 - Git tag + GitHub release
 - Automated PyPI publish
 

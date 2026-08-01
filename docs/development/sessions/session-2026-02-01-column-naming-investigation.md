@@ -94,23 +94,17 @@ else:
 1. **`pyproject.toml`**
    - Version bumped: `0.1.2` → `0.1.3`
 
-2. **`CHANGELOG.md`**
-   - Added v0.1.3 section documenting the change
-   - Explained rationale: openCypher TCK compliance, WITH clause correctness
-   - Noted this is a breaking change with clear migration guidance
-
-3. **`docs/column-naming-behavior.md`** (NEW)
+2. **`docs/column-naming-behavior.md`** (NEW)
    - Comprehensive documentation of column naming behavior
    - Examples of all three cases (variable names, aliases, col_N)
    - Historical context and rationale
    - Best practices for users
    - Migration guide from v0.1.2
 
-4. **`docs/feature-return-aliasing.md`**
+3. **`docs/feature-return-aliasing.md`**
    - Added historical note explaining it describes outdated behavior
-   - References current behavior in CHANGELOG
 
-5. **`docs/session-2026-01-31-regression-fix.md`**
+4. **`docs/session-2026-01-31-regression-fix.md`**
    - Added historical note explaining the "fix" was later changed
    - Clarifies that variable names are now intentional
 
@@ -242,7 +236,6 @@ The current implementation is **correct as-is**. The investigation confirmed tha
 
 ### Documentation Changes
 - `pyproject.toml` - version: 0.1.2 → 0.1.3
-- `CHANGELOG.md` - added v0.1.3 section
 - `docs/column-naming-behavior.md` - NEW comprehensive guide
 - `docs/feature-return-aliasing.md` - added historical note
 - `docs/session-2026-01-31-regression-fix.md` - added historical note

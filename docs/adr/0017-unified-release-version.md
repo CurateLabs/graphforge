@@ -87,7 +87,7 @@ Python metadata, Node binding, CLI, skills package, and skills compatibility
 metadata as one set. Candidate validation verifies every recorded Python, npm,
 and crates.io artifact carries the candidate's root version and exact expected
 package inventory. Publication preflight verifies the tag, repository version
-surfaces, candidate record, and changelog before credentials can write.
+surfaces and candidate record before credentials can write.
 
 Release-orchestration work in #288 extends this invariant into the canonical
 manifest and recovery planner. Workflow job state never authorizes a version

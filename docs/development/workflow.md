@@ -674,24 +674,14 @@ MAJOR.MINOR.PATCH
    version = "0.2.0"
    ```
 
-2. **Update CHANGELOG.md**
-   ```markdown
-   ## [0.2.0] - 2026-02-15
-
-   ### Added
-   - WITH clause for query chaining
-   - Variable-length path support
-
-   ### Fixed
-   - Integration test column aliasing
-
-   ### Changed
-   - Improved error messages
-   ```
+2. **Prepare GitHub Release notes**
+   - Prefer notes generated from the immutable GitHub comparison.
+   - Supply explicit notes only when the generated comparison needs operator
+     context.
 
 3. **Commit and Tag**
    ```bash
-   git add pyproject.toml CHANGELOG.md
+   git add pyproject.toml
    git commit -m "chore: bump version to 0.2.0"
    git tag -a v0.2.0 -m "Release version 0.2.0"
    git push origin develop --tags
@@ -709,7 +699,7 @@ MAJOR.MINOR.PATCH
    - Go to Releases → Draft a new release
    - Tag: `v0.2.0`
    - Title: `GraphForge v0.2.0`
-   - Description: Copy from CHANGELOG.md
+   - Description: Generate notes from the GitHub comparison
    - Click "Publish release"
 
 6. **Automated Publish**

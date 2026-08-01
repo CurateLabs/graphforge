@@ -109,4 +109,4 @@ This documentation is maintained alongside the codebase:
 - `docs/tutorial.md` - Getting started with GraphForge
 - `docs/guide/datasets/` - Dataset integration documentation
 - `docs/book/use-cases/` - Use case examples
-- `CHANGELOG.md` - Version history and release notes
+- [GitHub Releases](https://github.com/CurateLabs/graphforge/releases) - Version history and release notes

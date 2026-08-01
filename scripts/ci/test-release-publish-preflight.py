@@ -24,27 +24,12 @@ def load_module():
 mod = load_module()
 sha = "a" * 40
 versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.1")
-changelog = """# Changelog
-
-## [Unreleased]
-
-_Nothing yet._
-
-## [0.5.1] - 2026-08-01
-
-- Release GraphForge.
-
-[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.1...HEAD
-[0.5.1]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.1
-"""
 assert (
     mod.validate(
         tag="v0.5.1",
         expected_sha=sha,
         actual_sha=sha,
         versions=versions,
-        changelog=changelog,
-        docs_changelog=changelog,
     )
     == []
 )
@@ -53,8 +38,6 @@ assert mod.validate(
     expected_sha=sha,
     actual_sha=sha,
     versions={**versions, "skills": "0.5.2"},
-    changelog=changelog,
-    docs_changelog=changelog,
 )
 
 workflow = WORKFLOW.read_text(encoding="utf-8")

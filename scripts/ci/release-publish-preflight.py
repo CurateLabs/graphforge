@@ -2,8 +2,8 @@
 """Fail closed before a GitHub Release can publish registry artifacts.
 
 The release workflow invokes this against the immutable release-event SHA. It
-verifies that the tag, every publishable version surface, and the dated
-CHANGELOG section describe the same non-development version.
+verifies that the tag and every publishable version surface describe the same
+non-development version.
 """
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 VERSION_SCRIPT = ROOT / "scripts" / "set_release_version.py"
-CHANGELOG = ROOT / "CHANGELOG.md"
-DOCS_CHANGELOG = ROOT / "docs" / "reference" / "changelog.md"
 DOCS_URL = "https://docs.graphforge.sh/"
 REPOSITORY_URL = "https://github.com/CurateLabs/graphforge"
 REPOSITORY_GIT_URL = "git+https://github.com/CurateLabs/graphforge.git"
@@ -49,14 +47,6 @@ def git_head() -> str:
 def release_version(tag: str) -> str | None:
     match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
     return match.group(1) if match else None
-
-
-def unreleased_body(changelog: str) -> str | None:
-    match = re.search(
-        r"(?ms)^## \[Unreleased\]\s*\n(?P<body>.*?)(?=^## \[)",
-        changelog,
-    )
-    return match.group("body") if match else None
 
 
 def validate_metadata() -> list[str]:
@@ -103,9 +93,6 @@ def validate(
     expected_sha: str,
     actual_sha: str,
     versions: dict[str, str],
-    changelog: str,
-    docs_changelog: str,
-    allow_unreleased_entries: bool = False,
 ) -> list[str]:
     errors: list[str] = []
     version = release_version(tag)
@@ -124,23 +111,6 @@ def validate(
         if actual != expected:
             errors.append(f"{surface} version is {actual!r}; expected release version {expected!r}")
 
-    dated_heading = re.compile(rf"(?m)^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}\s*$")
-    if not dated_heading.search(changelog):
-        errors.append(f"CHANGELOG lacks a dated [{version}] release heading")
-
-    body = unreleased_body(changelog)
-    if body is None:
-        errors.append("CHANGELOG lacks an [Unreleased] section before the release section")
-    elif re.search(r"(?m)^\s*[-*]\s+", body) and not allow_unreleased_entries:
-        errors.append("CHANGELOG [Unreleased] still contains release-note entries")
-
-    current_repo = "https://github.com/CurateLabs/graphforge"
-    if f"[Unreleased]: {current_repo}/compare/v{version}...HEAD" not in changelog:
-        errors.append("CHANGELOG [Unreleased] comparison link does not target the current repo")
-    if f"[{version}]: {current_repo}/releases/tag/v{version}" not in changelog:
-        errors.append(f"CHANGELOG [{version}] link does not target the current repo release")
-    if docs_changelog != changelog:
-        errors.append("docs/reference/changelog.md does not exactly mirror CHANGELOG.md")
     return errors
 
 
@@ -148,11 +118,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True, help="Release tag, e.g. v0.5.0")
     parser.add_argument("--expected-sha", required=True, help="Release-event commit SHA")
-    parser.add_argument(
-        "--allow-unreleased-entries",
-        action="store_true",
-        help="Waive only the [Unreleased] entry check for an immutable-tag recovery",
-    )
     args = parser.parse_args(argv)
 
     version_module = load_version_module()
@@ -161,9 +126,6 @@ def main(argv: list[str] | None = None) -> int:
         expected_sha=args.expected_sha,
         actual_sha=git_head(),
         versions=version_module.read_current(),
-        changelog=CHANGELOG.read_text(encoding="utf-8"),
-        docs_changelog=DOCS_CHANGELOG.read_text(encoding="utf-8"),
-        allow_unreleased_entries=args.allow_unreleased_entries,
     )
     errors.extend(version_module.check_aligned())
     errors.extend(validate_metadata())

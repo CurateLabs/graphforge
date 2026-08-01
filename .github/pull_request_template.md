@@ -83,7 +83,6 @@ pytest -m "not slow"
 ### Documentation
 
 - [ ] I have updated the documentation (if needed)
-- [ ] I have updated the CHANGELOG.md (if user-facing change)
 - [ ] I have added docstrings to new functions/classes
 - [ ] I have updated the Cypher guide (if adding Cypher features)
 
