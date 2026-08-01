@@ -10,7 +10,7 @@ Surfaces:
 
 Never publishes to production registries.
 
-Crate order prefers ``scripts/ci/crate-publish-plan.py list`` (from #2820) when
+Crate order prefers ``scripts/ci/crate-publish-plan.py list`` (from #269) when
 present; otherwise uses a conservative fallback that excludes bindings.
 
 Usage:
@@ -33,7 +33,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CRATE_PLAN = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 
-# Fallback when crate-publish-plan.py is not on the branch yet (pre-#2820).
+# Fallback when crate-publish-plan.py is not on the branch yet (pre-#269).
 # Keep in sync with CRATES_IO_EXCLUDED there: no binding implementation crates.
 FALLBACK_CARGO_ORDER = (
     "graphforge-core",
