@@ -43,6 +43,7 @@ jobs:
         id: source
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           EVENT_SHA: ${{ github.sha }}
           WAIVE_UNRELEASED_ENTRIES: ${{ inputs.waive_unreleased_entries || false }}

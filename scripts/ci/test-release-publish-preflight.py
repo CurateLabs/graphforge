@@ -106,6 +106,7 @@ assert "refs/remotes/origin/main" in preflight
 assert "workflow_dispatch:" in workflow
 assert "waive_unreleased_entries:" in workflow
 assert "RECOVERY_REASON" in preflight
+assert "GH_TOKEN: ${{ github.token }}" in preflight
 assert "--allow-unreleased-entries" in preflight
 assert "git show" in preflight
 assert "refs/remotes/origin/main:scripts/ci/release-publish-preflight.py" in preflight
