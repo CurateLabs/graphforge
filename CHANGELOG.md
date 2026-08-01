@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Align public installation guidance and registry-status wording with the
+  **v0.5.1** release being shipped; pin install examples to `0.5.1` without
+  claiming live PyPI/npm presence until CurateLabs publishes (#197).
+
 ## [0.5.1] - 2026-08-01
 
 - Freeze Cargo, Python, Node/native npm, CLI, and agent-skills surfaces at

@@ -2,7 +2,7 @@
 
 **Composable graph tooling for analysis, construction, and refinement**
 
-[![Version](https://img.shields.io/badge/version-v0.5--dev-F59E0B.svg)](guide/installation.md)
+[![Version](https://img.shields.io/badge/version-v0.5.1-F59E0B.svg)](guide/installation.md)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](guide/installation.md)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white)](guide/installation.md)
 [![Rust](https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white)](development/contributing.md)
@@ -15,10 +15,11 @@ results, and Parquet persistence. It brings openCypher and analyst-intent verbs 
 scripts, repositories, and editor workflows without requiring a database server. The v0.5
 development line passes all **3,897 openCypher TCK scenarios**.
 
-> **Registry status:** GraphForge v0.5 packages are not published yet. PyPI currently serves
-> the legacy `graphforge` v0.4.0 line, while `@curatelabs/graphforge` and `@curatelabs/graphforge-cli` are not yet
-> available from npm. Follow the [installation guide](guide/installation.md) to build the
-> current Rust-owned engine from source.
+> **Registry status:** CurateLabs will publish GraphForge **v0.5.1** to PyPI (`graphforge`)
+> and npm (`@curatelabs/graphforge`, `@curatelabs/graphforge-cli`) as part of this release.
+> Until **0.5.1** appears, prefer a [source install](guide/installation.md). PyPI still lists
+> an unrelated pure-Python `graphforge` **0.4.0**; pin the CurateLabs release version and do
+> not assume an unpinned install resolves to the native engine.
 
 ```python
 from graphforge import GraphForge

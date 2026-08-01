@@ -1,9 +1,9 @@
 # Installation
 
-GraphForge **v0.5.0** ships as thin native bindings over a Rust core
-(Python via maturin; Node via N-API). Install from the published registries
-for normal use, or build from source on `main` when developing the engine or
-bindings.
+GraphForge **v0.5.1** ships as thin native bindings over a Rust core
+(Python via maturin; Node via N-API). When registries carry this release,
+install from the published packages for normal use; otherwise build from
+source on `main` when developing the engine or bindings.
 
 Prefer an editor workflow? The optional [GraphForge VS Code extension](vscode-extension/install.md)
 detects Node- and Python-first workspaces, helps configure the appropriate native binding, and
@@ -11,36 +11,39 @@ uses the same Rust-owned engine described below.
 
 > **Name collision:** PyPI currently lists an unrelated pure-Python package
 > named `graphforge` at **0.4.0** (~279 KB). CurateLabs GraphForge
-> **0.5.0** is the native engine (Rust `.so` / `.node`). Until CurateLabs
-> publishes 0.5.0, prefer source/dev installs from this repository rather than
-> assuming PyPI/npm already ship the native wheels.
+> **0.5.1** is the native engine (Rust `.so` / `.node`). CurateLabs will
+> publish **0.5.1** to PyPI and npm as part of this release; until those
+> packages appear, prefer source/dev installs from this repository (or pin
+> an already-published **0.5.0** only if you intentionally stay on that
+> line). Do not assume `pip install graphforge` without a pin resolves to
+> the CurateLabs native wheel.
 
 ---
 
-## Python package (current — v0.5.0)
+## Python package (current — v0.5.1)
 
 **Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
 
 ```bash
-# pip
-pip install graphforge
+# After CurateLabs publishes 0.5.1 (pin the release version):
+pip install "graphforge==0.5.1"
 
 # uv (recommended)
-uv add graphforge
+uv add "graphforge==0.5.1"
 ```
 
 ### Verify
 
 ```python
 import graphforge
-print(graphforge.__version__)   # 0.5.0…
+print(graphforge.__version__)   # 0.5.1…
 ```
 
 ### Optional dependencies
 
 ```bash
 # Polars convenience wrapper around Arrow results
-pip install "graphforge[polars]"
+pip install "graphforge[polars]==0.5.1"
 ```
 
 Results are Apache Arrow tables. Convert with `table.to_pandas()`,
@@ -60,17 +63,19 @@ dependency (not bundled inside the `graphforge` wheel). See
 targets).
 
 ```bash
-npm install @curatelabs/graphforge
+# After CurateLabs publishes 0.5.1:
+npm install @curatelabs/graphforge@0.5.1
 # or
-pnpm add @curatelabs/graphforge
+pnpm add @curatelabs/graphforge@0.5.1
 ```
 
 ```js
 import { GraphForge } from "@curatelabs/graphforge";
 ```
 
-Until the CurateLabs package is published to npm, install from a local
-release build or path dependency in this repository.
+Until **0.5.1** is published to npm, install from a local release build or
+path dependency in this repository (published **0.5.0** packages may already
+exist under `@curatelabs/graphforge` if you intentionally stay on that line).
 
 ---
 
@@ -88,8 +93,8 @@ query/bench results.
 
 **Caveats**
 
-- Measured on **local macOS arm64 (darwin-arm64)** release builds of unpublished
-  **0.5.0-dev**. Other OS/arch combinations will differ.
+- Measured on **local macOS arm64 (darwin-arm64)** release builds of
+  **0.5.1**. Other OS/arch combinations will differ.
 - Almost all of the GraphForge footprint is the **Rust native binary**; the
   thin Python/JS wrappers are negligible by comparison.
 - **PyArrow is separate** — it is not inside the `graphforge` wheel. Budget it
