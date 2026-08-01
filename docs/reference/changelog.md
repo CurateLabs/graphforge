@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Verify newly published and resumed npm packages immediately against npm's
+  `dist.integrity` metadata, preserving exact-byte checks without failing while
+  the registry's public tarball CDN is still replicating (#284).
 - Add an explicit, maintainer-reasoned publication recovery dispatch that can
   resume the immutable `v0.5.0` tag and retained candidate after waiving only
   the tagged changelog's stale `[Unreleased]` entries; all artifact, checksum,

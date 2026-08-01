@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -25,22 +27,32 @@ with tempfile.TemporaryDirectory() as temp:
     }
     published: list[Path] = []
     publisher.publish_archive = published.append
-    publisher.published_checksum = lambda _name, _version: "abc123"
-    assert publisher.publish_one(item, root, 1) == "already published; checksum matches"
+    integrity = "sha512-" + base64.b64encode(hashlib.sha512(b"candidate").digest()).decode()
+    publisher.published_integrity = lambda _name, _version: integrity
+    assert publisher.publish_one(item, root, 1) == "already published; integrity matches"
     assert published == []
 
-    responses = iter((None, "abc123"))
-    publisher.published_checksum = lambda _name, _version: next(responses)
+    responses = iter((None, integrity))
+    publisher.published_integrity = lambda _name, _version: next(responses)
     assert publisher.publish_one(item, root, 1) == "published"
     assert published == [archive]
 
-    publisher.published_checksum = lambda _name, _version: "different"
+    different = "sha512-" + base64.b64encode(hashlib.sha512(b"different").digest()).decode()
+    publisher.published_integrity = lambda _name, _version: different
     try:
         publisher.publish_one(item, root, 1)
     except RuntimeError as error:
         assert "refusing to resume" in str(error)
     else:
         raise AssertionError("checksum drift should fail")
+
+    assert publisher.archive_matches_integrity(archive, f"md5-AAAA {integrity}")
+    try:
+        publisher.archive_matches_integrity(archive, "md5-AAAA")
+    except RuntimeError as error:
+        assert "no supported" in str(error)
+    else:
+        raise AssertionError("unsupported integrity should fail")
 
 assert publisher.GROUPS["native"] == slice(0, 6)
 assert publisher.GROUPS["cli"] == slice(6, 7)

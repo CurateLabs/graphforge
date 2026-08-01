@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib.util
 import json
@@ -37,10 +38,6 @@ def load_candidate_module():
     return module
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _json(url: str) -> dict[str, Any] | None:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
@@ -55,22 +52,35 @@ def _json(url: str) -> dict[str, Any] | None:
     return payload
 
 
-def published_checksum(name: str, version: str) -> str | None:
+def published_integrity(name: str, version: str) -> str | None:
     encoded = urllib.parse.quote(name, safe="")
     record = _json(f"{REGISTRY}/{encoded}/{version}")
     if record is None:
         return None
-    tarball = record.get("dist", {}).get("tarball")
-    if not isinstance(tarball, str) or not tarball.startswith("https://registry.npmjs.org/"):
-        raise RuntimeError(f"npm {name}@{version} lacks a trusted registry tarball URL")
-    request = urllib.request.Request(tarball, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            return _sha256_bytes(response.read())
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            return None
-        raise
+    integrity = record.get("dist", {}).get("integrity")
+    if not isinstance(integrity, str) or not integrity.strip():
+        raise RuntimeError(f"npm {name}@{version} lacks dist.integrity")
+    return integrity
+
+
+def archive_matches_integrity(path: Path, integrity: str) -> bool:
+    """Compare an archive to one or more npm Subresource Integrity digests."""
+    data = path.read_bytes()
+    supported = False
+    for token in integrity.split():
+        algorithm, separator, encoded = token.partition("-")
+        if not separator or algorithm not in {"sha256", "sha384", "sha512"}:
+            continue
+        supported = True
+        try:
+            expected = base64.b64decode(encoded, validate=True)
+        except ValueError as error:
+            raise RuntimeError(f"npm returned malformed {algorithm} integrity") from error
+        if hashlib.new(algorithm, data).digest() == expected:
+            return True
+    if not supported:
+        raise RuntimeError("npm returned no supported integrity digest")
+    return False
 
 
 def publish_archive(path: Path) -> None:
@@ -87,28 +97,27 @@ def publish_one(item: dict[str, Any], artifacts_dir: Path, timeout_seconds: int)
     version = item["version"]
     expected = item["sha256"]
     path = artifacts_dir / item["path"]
-    existing = published_checksum(name, version)
+    existing = published_integrity(name, version)
     if existing is not None:
-        if existing != expected:
+        if not archive_matches_integrity(path, existing):
             raise RuntimeError(
-                f"refusing to resume {name}@{version}: registry checksum {existing} "
-                f"differs from candidate {expected}"
+                f"refusing to resume {name}@{version}: registry integrity differs "
+                f"from candidate sha256 {expected}"
             )
-        outcome = "already published; checksum matches"
+        outcome = "already published; integrity matches"
     else:
         publish_archive(path)
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            existing = published_checksum(name, version)
+            existing = published_integrity(name, version)
             if existing is not None:
                 break
             time.sleep(3)
         if existing is None:
             raise RuntimeError(f"timed out waiting for npm to index {name}@{version}")
-        if existing != expected:
+        if not archive_matches_integrity(path, existing):
             raise RuntimeError(
-                f"npm indexed different bytes for {name}@{version}: "
-                f"registry={existing} candidate={expected}"
+                f"npm indexed different bytes for {name}@{version}; candidate sha256 is {expected}"
             )
         outcome = "published"
     print(f"{name}@{version}: {outcome}")
