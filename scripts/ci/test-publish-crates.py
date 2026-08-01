@@ -23,6 +23,7 @@ def load_module():
 
 mod = load_module()
 assert mod.VERSION == "0.5.1"
+v = mod.VERSION
 
 assert mod.normalize_registry_token("  abc\n") == "abc"
 assert mod.normalize_registry_token("abc\r\n") == "abc"
@@ -83,19 +84,19 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     artifacts = root / "artifacts"
     artifacts.mkdir()
-    archive = artifacts / "graphforge-core-0.5.1.crate"
+    archive = artifacts / f"graphforge-core-{v}.crate"
     archive.write_bytes(b"certified crate")
     sha = hashlib.sha256(archive.read_bytes()).hexdigest()
     record = {
         "schema": "graphforge-release-record-v1",
-        "version": "0.5.1",
-        "tag": "v0.5.1",
+        "version": v,
+        "tag": f"v{v}",
         "commit_sha": "release-sha",
         "artifacts": [
             {
                 "surface": "crates",
                 "name": "graphforge-core",
-                "version": "0.5.1",
+                "version": v,
                 "path": archive.name,
                 "sha256": sha,
             }
@@ -121,7 +122,8 @@ with tempfile.TemporaryDirectory() as temp:
             assert "escapes artifact root" in str(exc)
 
     record["artifacts"][0]["path"] = archive.name
-    record["artifacts"][0]["version"] = "0.5.0"
+    # Intentional mismatch: distinct wrong literal, not another copy of current.
+    record["artifacts"][0]["version"] = "0.0.0"
     record_path.write_text(json.dumps(record), encoding="utf-8")
     try:
         mod.release_record_checksums(record_path, artifacts)
