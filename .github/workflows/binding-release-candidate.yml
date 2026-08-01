@@ -474,17 +474,17 @@ jobs:
           pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json
-          pnpm exec napi pre-publish -t npm --skip-optional-publish
+          pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
           for package_dir in npm/*; do
-            npm pack "$package_dir" --ignore-scripts \
+            npm pack "./$package_dir" --ignore-scripts \
               --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
           done
           npm pack . --ignore-scripts \
             --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
           popd
-          npm pack packages/cli --ignore-scripts \
+          npm pack ./packages/cli --ignore-scripts \
             --pack-destination candidate/release-artifacts/npm
-          npm pack packages/agent-skills --ignore-scripts \
+          npm pack ./packages/agent-skills --ignore-scripts \
             --pack-destination candidate/release-artifacts/npm
 
       - name: Package the complete Rust surface
@@ -492,11 +492,17 @@ jobs:
         run: |
           mkdir -p candidate/release-artifacts/crates
           python3 scripts/ci/crate-publish-plan.py check
+          crates=()
+          package_args=()
           while IFS= read -r crate; do
-            cargo package -p "$crate" --allow-dirty --no-verify
+            crates+=("$crate")
+            package_args+=("-p" "$crate")
+          done < <(python3 scripts/ci/crate-publish-plan.py list)
+          cargo package "${package_args[@]}" --allow-dirty --no-verify
+          for crate in "${crates[@]}"; do
             cp "target/release-candidate/package/${crate}-0.5.0.crate" \
               candidate/release-artifacts/crates/
-          done < <(python3 scripts/ci/crate-publish-plan.py list)
+          done
 
       - name: Record license and package evidence
         run: |
