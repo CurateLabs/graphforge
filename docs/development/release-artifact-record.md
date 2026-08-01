@@ -128,9 +128,22 @@ command has a registry-write path.
 
 ## Build and validate offline
 
-After the binding workflow has assembled the four directories, it creates the
-manifest and immediately validates the complete candidate before any registry
-write:
+After the binding workflow has assembled the four directories, it creates a
+temporary manifest and runs a clean-consumer rehearsal before any registry
+write. The rehearsal installs the compatible exact wheel without an index,
+imports the native Python module, installs all eight npm tarballs offline,
+loads the Node native binding through the main package, executes the CLI and
+agent-skills entrypoints, and validates all 15 crate archives and their exact
+dependency graph. Only a passing report is added to the evidence partition;
+the temporary manifest is then removed and the final manifest is recorded over
+the now-complete inventory.
+
+The rehearsal is a local byte/runtime proof, not a publication or release
+certification workflow. It performs zero registry writes and cannot create a
+tag. A missing runtime entrypoint or any version divergence fails before the
+final candidate exists.
+
+The final validation remains fully offline:
 
 ```bash
 python3 scripts/record_release_artifacts.py \
@@ -153,3 +166,20 @@ registry access, tag creation, release creation, or publication.
 `clean-env-verify.py` continues to accept historical
 `graphforge-release-record-v1` documents while also reading the v2 artifact list.
 Historical v0.5.0 records remain immutable.
+
+## Sequential recovery proof
+
+`scripts/ci/release_rehearsal.py` also produces a stable reconciliation report
+for all 24 public nodes. Its sequential simulator accepts only actions emitted
+by the pure recovery planner, applies one supplied live observation at a time,
+and re-plans from the updated registry truth. This proves dependency order and
+partial recovery before workflow parallelism is introduced.
+
+The report records job outcomes such as `cancelled`, `timed_out`, and `skipped`
+for operator context, but those labels never determine package state. For
+example, a timed-out job whose package is publicly verified is skipped, while
+a cancelled job whose package remains authoritatively absent is eligible for a
+future write. Accepted-but-not-visible packages receive only a bounded
+visibility check; conflict, indeterminate state, and expired artifacts remain
+blocked. Every scenario lists every node, its registry state, disposition, and
+sanitized job outcome without credentials or raw registry bodies.

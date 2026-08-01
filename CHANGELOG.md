@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a deterministic pre-write release rehearsal that installs and executes
+  the exact candidate through clean Python, Node/native, CLI, and agent-skills
+  consumers, validates all crate packages and dependencies, and proves the
+  24-node recovery graph sequentially across partial success, cancelled,
+  timed-out, skipped, propagation-delayed, conflicting, indeterminate, and
+  expired-artifact outcomes (#295).
 - Derive publication recovery from the immutable candidate plus fresh PyPI,
   npm, and crates.io truth: normalize absence, accepted propagation, verified
   bytes, conflict, failure, and indeterminate evidence; bound visibility checks

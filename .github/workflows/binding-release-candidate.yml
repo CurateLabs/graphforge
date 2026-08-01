@@ -526,14 +526,35 @@ jobs:
           python3 scripts/verify_package_licenses.py \
             --report candidate/release-artifacts/evidence/package-license-report.json
 
-      - name: Create and validate the immutable checksum record
+      - name: Create the pre-rehearsal candidate manifest
         run: |
           recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'CANDIDATE_RECORDED_AT=%s\n' "$recorded_at" >> "$GITHUB_ENV"
+          python3 scripts/record_release_artifacts.py \
+            --version "$RELEASE_VERSION" \
+            --dist-dir candidate/release-artifacts \
+            --out candidate/rehearsal-manifest.json \
+            --recorded-at "$recorded_at" \
+            --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
+
+      - name: Rehearse exact partitioned release artifacts offline
+        run: |
+          python3 scripts/ci/release_rehearsal.py artifacts \
+            --manifest candidate/rehearsal-manifest.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$EVIDENCE_SHA" \
+            --version "$RELEASE_VERSION" \
+            --rehearsed-at "$CANDIDATE_RECORDED_AT" \
+            --out candidate/release-artifacts/evidence/offline-rehearsal.json
+
+      - name: Create and validate the immutable candidate manifest
+        run: |
+          rm candidate/rehearsal-manifest.json
           python3 scripts/record_release_artifacts.py \
             --version "$RELEASE_VERSION" \
             --dist-dir candidate/release-artifacts \
             --out "candidate/v${RELEASE_VERSION}-artifacts.json" \
-            --recorded-at "$recorded_at" \
+            --recorded-at "$CANDIDATE_RECORDED_AT" \
             --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
           python3 scripts/ci/clean-env-verify.py validate-release-record \
             "candidate/v${RELEASE_VERSION}-artifacts.json"
