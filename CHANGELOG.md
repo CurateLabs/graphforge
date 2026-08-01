@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Freeze Cargo, Python, Node/native npm, CLI, and agent-skills surfaces at
   `0.5.1` and cut the dated changelog for the coordinated M1 corrective
   release (#192).
+- Keep first-party crate path+version dependency pins on the same root
+  version so Binding RC offline rehearsal and crates.io packaging accept
+  the complete 15-crate graph (#192).
 - Replace the Python package README with a concise PyPI landing page: short
   purpose, install path, one minimal first-use example, and canonical
   `docs.graphforge.sh` links instead of a raw CLI command inventory (#304).

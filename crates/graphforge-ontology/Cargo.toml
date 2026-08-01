@@ -8,7 +8,7 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.0", path = "../graphforge-core" }
+graphforge-core = { version = "0.5.1", path = "../graphforge-core" }
 arrow = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
