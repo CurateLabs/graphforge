@@ -596,6 +596,13 @@ def main() -> None:
     assert "--skip-optional-publish --no-gh-release" in release_candidate_job
     assert 'npm pack "./$package_dir"' in release_candidate_job
     assert "scripts/ci/prepare-napi-packages.py" in release_candidate_job
+    assert (
+        "pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu"
+        in release_candidate_job
+    ), "assemble must generate gitignored index.js/index.d.ts before packing the main package"
+    assert "test -f index.js" in release_candidate_job
+    assert "test -f index.d.ts" in release_candidate_job
+    assert 'package/index.js' in release_candidate_job
     assert "pnpm --dir packages/cli pack" in release_candidate_job
     assert "pnpm --dir packages/agent-skills pack" in release_candidate_job
     assert 'cargo package "${package_args[@]}" --allow-dirty --no-verify' in (release_candidate_job)

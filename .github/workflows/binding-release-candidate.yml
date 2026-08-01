@@ -483,6 +483,12 @@ jobs:
           cp candidate/release-artifacts/node-addons/*.node \
             crates/graphforge-bindings-node/artifacts/
           pushd crates/graphforge-bindings-node
+          # index.js / index.d.ts are gitignored NAPI-RS outputs. Generate them
+          # here before packing the main package; matrix jobs already retained
+          # the tested native addons that napi artifacts will distribute.
+          pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu
+          test -f index.js
+          test -f index.d.ts
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
           python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
@@ -496,6 +502,21 @@ jobs:
           done
           npm pack . --ignore-scripts \
             --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          python3 - <<PY
+          import tarfile
+          from pathlib import Path
+          npm_dir = Path("$GITHUB_WORKSPACE") / "candidate" / "release-artifacts" / "npm"
+          packs = [
+              path
+              for path in sorted(npm_dir.glob("curatelabs-graphforge-*.tgz"))
+              if path.name.count("-") == 2  # curatelabs-graphforge-<version>.tgz
+          ]
+          assert len(packs) == 1, packs
+          with tarfile.open(packs[0], "r:gz") as archive:
+              names = set(archive.getnames())
+          missing = {"package/index.js", "package/index.d.ts"} - names
+          assert not missing, f"{packs[0].name} missing {sorted(missing)}"
+          PY
           popd
           pnpm --dir packages/cli pack \
             --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
