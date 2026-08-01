@@ -64,10 +64,25 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) ->
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RehearsalError(f"offline consumer could not execute {command[0]}: {error}") from error
     if result.returncode != 0:
-        stderr = result.stderr.strip().splitlines()
-        detail = stderr[-1] if stderr else f"exit {result.returncode}"
+        detail = _command_failure_detail(result.stderr, result.returncode)
         raise RehearsalError(f"offline consumer {command[0]} failed: {detail}")
     return result.stdout.strip()
+
+
+def _command_failure_detail(stderr: str, returncode: int) -> str:
+    """Surface actionable stderr; npm ends with a log-path line that hides the cause."""
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return f"exit {returncode}"
+    useful = [
+        line
+        for line in lines
+        if "complete log of this run" not in line.lower()
+        and not line.lower().startswith("npm notice")
+    ]
+    selected = useful or lines
+    # Prefer the last few diagnostic lines (code + notsup + wanted/current).
+    return " | ".join(selected[-4:])
 
 
 def _compatible_wheel(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -97,6 +112,33 @@ def _compatible_wheel(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             f"found {len(matches)}"
         )
     return matches[0]
+
+
+def _compatible_native_npm_name() -> str:
+    """Return the one optional native npm package that can install on this host."""
+    system = sys.platform
+    machine = platform.machine().lower()
+    if system == "darwin":
+        name = (
+            "@curatelabs/graphforge-darwin-arm64"
+            if machine == "arm64"
+            else "@curatelabs/graphforge-darwin-x64"
+        )
+    elif system.startswith("linux"):
+        name = (
+            "@curatelabs/graphforge-linux-arm64-gnu"
+            if machine in {"aarch64", "arm64"}
+            else "@curatelabs/graphforge-linux-x64-gnu"
+        )
+    elif system == "win32":
+        if machine not in {"amd64", "x86_64"}:
+            raise RehearsalError(f"unsupported rehearsal platform: {system}/{machine}")
+        name = "@curatelabs/graphforge-win32-x64-msvc"
+    else:
+        raise RehearsalError(f"unsupported rehearsal platform: {system}/{machine}")
+    if name not in candidate_contract.NATIVE_NPM_PACKAGES:
+        raise RehearsalError(f"native npm package mapping is outside the candidate: {name}")
+    return name
 
 
 def _python_consumer(
@@ -142,6 +184,21 @@ def _node_consumer(
     )
     if len(npm_items) != len(candidate_contract.NPM_PACKAGES):
         raise RehearsalError("candidate npm inventory is incomplete")
+    by_name = {item["name"]: item for item in npm_items}
+    # Platform packages declare os/cpu (and linux libc). Installing every
+    # native tarball as a top-level dependency fails with EBADPLATFORM on the
+    # host; keep the full inventory checked above, but install only packages a
+    # clean consumer on this runner can accept offline.
+    host_native = _compatible_native_npm_name()
+    install_names = (
+        "@curatelabs/graphforge",
+        "@curatelabs/graphforge-cli",
+        "@curatelabs/graphforge-agent-skills",
+        host_native,
+    )
+    missing = [name for name in install_names if name not in by_name]
+    if missing:
+        raise RehearsalError(f"candidate npm inventory is missing {missing}")
     node_root = consumer_root / "node"
     node_root.mkdir()
     (node_root / "package.json").write_text(
@@ -158,7 +215,9 @@ def _node_consumer(
             "npm_config_update_notifier": "false",
         }
     )
-    tarballs = [str((artifacts_dir / item["path"]).resolve()) for item in npm_items]
+    tarballs = [
+        str((artifacts_dir / by_name[name]["path"]).resolve()) for name in install_names
+    ]
     _run(
         ["npm", "install", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", *tarballs],
         cwd=node_root,
@@ -208,6 +267,8 @@ def _node_consumer(
         raise RehearsalError("agent-skills compatibility release diverges from the root version")
     return {
         "artifacts": [item["path"] for item in npm_items],
+        "installed_packages": list(install_names),
+        "host_native_package": host_native,
         "agent_skills_release": compatibility["graphforge_release"],
         "cli_status": "passed",
         "loaded_version": node_version,

@@ -77,6 +77,20 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
             "NOTICE",
             "THIRD_PARTY_NOTICES.md",
         ]
+        # Mirror napi platform package.json so offline install tests catch
+        # EBADPLATFORM when every native tarball is installed top-level.
+        platform_constraints = {
+            "@curatelabs/graphforge-darwin-arm64": (["darwin"], ["arm64"]),
+            "@curatelabs/graphforge-darwin-x64": (["darwin"], ["x64"]),
+            "@curatelabs/graphforge-linux-arm64-gnu": (["linux"], ["arm64"]),
+            "@curatelabs/graphforge-linux-x64-gnu": (["linux"], ["x64"]),
+            "@curatelabs/graphforge-win32-x64-msvc": (["win32"], ["x64"]),
+        }
+        os_values, cpu_values = platform_constraints[name]
+        metadata["os"] = os_values
+        metadata["cpu"] = cpu_values
+        if os_values == ["linux"]:
+            metadata["libc"] = ["glibc"]
     elif name == "@curatelabs/graphforge":
         metadata.update(
             {
