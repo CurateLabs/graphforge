@@ -1,0 +1,26 @@
+{
+  "id": "zachary-karate-club",
+  "title": "Zachary's Karate Club",
+  "description": "Undirected friendship network among 34 members of a university karate club.",
+  "source_name": "Mark Newman network data (Karate club)",
+  "source_url": "https://public.websites.umich.edu/~mejn/netdata/karate.zip",
+  "retrieval_note": "Archive retrieved for GraphForge issue #298 visualization examples.",
+  "license": "Public research redistribution with required citation of Zachary (1977); see archive karate.txt.",
+  "citation": "W. W. Zachary, An information flow model for conflict and fission in small groups, Journal of Anthropological Research 33, 452-473 (1977).",
+  "archive": {
+    "filename": "karate.zip",
+    "sha256": "e182d7fabbd44f3c75d307c1cf5259f0c4506954d63c37b9f30e629c78c578f6",
+    "members": {
+      "karate.gml": "f05e321c94b00a5cceab44671a65c34632aac7b152479ba619354be149ba8beb",
+      "karate.txt": "42b1769e51ae6dd09644f71357afadfc18128a29bad3d9c110664d3a75d08566"
+    }
+  },
+  "graph": {
+    "directed": false,
+    "node_count": 34,
+    "edge_count": 78,
+    "node_id_range": [1, 34],
+    "node_label": "Member",
+    "relationship_type": "FRIEND"
+  }
+}

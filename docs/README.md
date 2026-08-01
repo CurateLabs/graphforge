@@ -64,6 +64,7 @@ extension documents are eligible for publication.
 | [`guide/cypher-guide.md`](guide/cypher-guide.md) | openCypher language guide |
 | [`guide/graph-construction.md`](guide/graph-construction.md) | Build graphs with API and Cypher |
 | [`guide/analytics-integration.md`](guide/analytics-integration.md) | Arrow, pandas, Polars, analyst verbs |
+| [`guide/visualization.md`](guide/visualization.md) | Real-data Plotly / Jaal / PyVis / Cytoscape.js / Sigma.js examples |
 | [`guide/datasets/`](guide/datasets/overview.md) | Load real-world networks |
 
 ### Book (research, architecture, deeper usage)

@@ -1,0 +1,22 @@
+{
+  "name": "graphforge-visualization-examples",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Node visualization examples over a shared GraphForge projection (#298)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "projection": "node shared/projection.mjs",
+    "cytoscape": "node node/cytoscape_example.mjs",
+    "sigma": "node node/sigma_example.mjs",
+    "test": "node --test tests/test_node_examples.mjs"
+  },
+  "dependencies": {
+    "apache-arrow": "^18.1.0"
+  },
+  "optionalDependencies": {
+    "@curatelabs/graphforge": "0.5.1"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "projection_id": "karate-member-friend-v1",
+  "description": "Shared undirected projection for GraphForge visualization examples (#298).",
+  "node": {
+    "identity_field": "club_id",
+    "label_field": "label",
+    "display_label_template": "M{club_id}",
+    "color": "#2E86AB",
+    "size": 18
+  },
+  "edge": {
+    "directed": false,
+    "relationship_type": "FRIEND",
+    "color": "#A0AEC0",
+    "width": 1.5
+  },
+  "layout": {
+    "seed": 42,
+    "note": "Libraries that support a layout seed should use 42; others document the limitation."
+  },
+  "query": {
+    "nodes": "MATCH (n:Member) RETURN n.club_id AS club_id, n.label AS label ORDER BY club_id",
+    "edges": "MATCH (a:Member)-[:FRIEND]-(b:Member) WHERE a.club_id < b.club_id RETURN a.club_id AS source, b.club_id AS target ORDER BY source, target"
+  }
+}

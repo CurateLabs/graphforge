@@ -31,6 +31,10 @@ Build graphs programmatically using the Python API.
 ### [Analytics Integration](analytics-integration.md)
 Export graphs to NetworkX, igraph, and pandas for further analysis.
 
+### [Visualization examples](visualization.md)
+Comparable Plotly, Jaal, PyVis, Cytoscape.js, and Sigma.js paths over one shared
+real-data GraphForge projection.
+
 ### Ranking Nodes — `forge.rank()`
 Score every node with a graph centrality algorithm (PageRank, betweenness, closeness, degree,
 clustering coefficient, or triangle count). Returns an Arrow Table with node properties plus a
