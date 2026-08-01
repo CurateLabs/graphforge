@@ -117,7 +117,7 @@ export async function run(outputDir = join(ROOT, "output")) {
   return [htmlPath, jsonPath];
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const outputDir = process.argv.includes("--output-dir")
     ? process.argv[process.argv.indexOf("--output-dir") + 1]
     : join(ROOT, "output");

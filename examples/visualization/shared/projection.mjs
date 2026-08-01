@@ -203,7 +203,7 @@ export function writeProjectionJson(path, projection) {
   return path;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const out = join(ROOT, "output", "projection.json");
   const payload = await project();
   writeProjectionJson(out, payload);
