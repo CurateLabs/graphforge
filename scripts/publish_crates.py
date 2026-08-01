@@ -23,6 +23,7 @@ can finish in one job without hiding non-429 failures.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
@@ -34,7 +35,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from typing import Any
 import urllib.error
 import urllib.request
 
