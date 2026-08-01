@@ -34,9 +34,17 @@ CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 PYPROJECT = ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml"
 NODE_PACKAGE = ROOT / "crates" / "graphforge-bindings-node" / "package.json"
+NODE_NPM_DIR = ROOT / "crates" / "graphforge-bindings-node" / "npm"
 CLI_PACKAGE = ROOT / "packages" / "cli" / "package.json"
 SKILLS_PACKAGE = ROOT / "packages" / "agent-skills" / "package.json"
 SKILLS_COMPATIBILITY = ROOT / "packages" / "agent-skills" / "compatibility.json"
+
+
+def native_npm_packages() -> list[Path]:
+    """Return checked-in native platform package.json paths."""
+    if not NODE_NPM_DIR.is_dir():
+        return []
+    return sorted(NODE_NPM_DIR.glob("*/package.json"))
 
 
 def cargo_lock_versions() -> dict[str, str]:
@@ -127,6 +135,25 @@ def check_aligned() -> list[str]:
             "skills compatibility package_version: got "
             f"{compatibility.get('package_version')!r}, expected {expected['skills']!r}"
         )
+    if compatibility.get("graphforge_release") != expected["skills"]:
+        errors.append(
+            "skills compatibility graphforge_release: got "
+            f"{compatibility.get('graphforge_release')!r}, expected {expected['skills']!r}"
+        )
+    skills_meta = json.loads(SKILLS_PACKAGE.read_text(encoding="utf-8"))
+    skills_release = (skills_meta.get("graphforgeCompatibility") or {}).get("release")
+    if skills_release != expected["skills"]:
+        errors.append(
+            "skills package graphforgeCompatibility.release: got "
+            f"{skills_release!r}, expected {expected['skills']!r}"
+        )
+    for path in native_npm_packages():
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        got = meta.get("version")
+        if got != expected["node"]:
+            errors.append(
+                f"native npm {path.parent.name}: got {got!r}, expected {expected['node']!r}"
+            )
     return errors
 
 
@@ -178,10 +205,19 @@ def apply_version(base: str, *, dev: bool, dry_run: bool) -> dict[str, str]:
     ):
         meta = json.loads(path.read_text(encoding="utf-8"))
         meta["version"] = expected[key]
+        if path == SKILLS_PACKAGE:
+            compatibility_meta = meta.setdefault("graphforgeCompatibility", {})
+            compatibility_meta["release"] = expected[key]
+        path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    for path in native_npm_packages():
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        meta["version"] = expected["node"]
         path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     compatibility = json.loads(SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
     compatibility["package_version"] = expected["skills"]
+    compatibility["graphforge_release"] = expected["skills"]
     SKILLS_COMPATIBILITY.write_text(json.dumps(compatibility, indent=2) + "\n", encoding="utf-8")
 
     return expected

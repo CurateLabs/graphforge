@@ -86,8 +86,14 @@ const output = execFileSync(
   { cwd: consumer, encoding: "utf8" },
 );
 const compatibility = JSON.parse(output);
-assert.equal(compatibility.graphforge_release, "0.5.0");
-assert.equal(compatibility.graphforge_version_range, ">=0.5.0 <0.6.0");
+const packageMetadata = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
+assert.equal(compatibility.graphforge_release, packageMetadata.version);
+assert.equal(
+  compatibility.graphforge_version_range,
+  packageMetadata.graphforgeCompatibility.range,
+);
 assert.deepEqual(compatibility.security_contract, {
   max_value_depth: 16,
   max_value_entries: 4096,

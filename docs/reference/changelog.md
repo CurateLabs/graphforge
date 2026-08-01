@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-01
+
+- Freeze Cargo, Python, Node/native npm, CLI, and agent-skills surfaces at
+  `0.5.1` and cut the dated changelog for the coordinated M1 corrective
+  release (#192).
 - Replace the Python package README with a concise PyPI landing page: short
   purpose, install path, one minimal first-use example, and canonical
   `docs.graphforge.sh` links instead of a raw CLI command inventory (#304).
@@ -3517,7 +3522,8 @@ None. All changes maintain backward compatibility with v0.2.0 and v0.2.1.
 - 81% code coverage
 - Multi-OS, multi-Python CI/CD (3 OS × 4 Python versions)
 
-[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/CurateLabs/graphforge/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.1
 [0.5.0]: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.3.10...v0.4.0
 [0.3.0]: https://github.com/CurateLabs/graphforge-legecy/compare/v0.2.1...v0.3.0

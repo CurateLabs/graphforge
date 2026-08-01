@@ -150,7 +150,10 @@ const compatibility = JSON.parse(
     { cwd: consumer, encoding: "utf8" },
   ),
 );
-assert.equal(compatibility.graphforge_release, "0.5.0");
+const packageMetadata = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
+assert.equal(compatibility.graphforge_release, packageMetadata.version);
 
 const analystPath = realpathSync(mkdtempSync(join(temporary, "analyst-")));
 const developerPath = realpathSync(mkdtempSync(join(temporary, "developer-")));

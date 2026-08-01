@@ -34,7 +34,7 @@ test("reports the machine-readable GraphForge compatibility contract", () => {
   );
   assert.equal(compatibility.package, packageMetadata.name);
   assert.equal(compatibility.package_version, packageMetadata.version);
-  assert.equal(compatibility.graphforge_release, "0.5.0");
+  assert.equal(compatibility.graphforge_release, packageMetadata.version);
   assert.equal(
     compatibility.graphforge_release,
     packageMetadata.graphforgeCompatibility.release,

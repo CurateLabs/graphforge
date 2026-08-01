@@ -1,6 +1,7 @@
 """Tests for multi-surface release version alignment."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,13 @@ def test_expected_mapping() -> None:
 def test_current_tree_is_aligned() -> None:
     assert len(set_release_version.cargo_lock_versions()) == 17
     assert set_release_version.check_aligned() == []
+    compatibility = json.loads(set_release_version.SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
+    current = set_release_version.read_current()
+    assert compatibility["package_version"] == current["skills"]
+    assert compatibility["graphforge_release"] == current["skills"]
+    for path in set_release_version.native_npm_packages():
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        assert meta["version"] == current["node"]
 
 
 def test_dry_run_does_not_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
