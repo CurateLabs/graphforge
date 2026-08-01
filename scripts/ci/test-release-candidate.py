@@ -365,6 +365,10 @@ def main() -> None:
         [sys.executable, str(Path(__file__).with_name("test-release-rehearsal.py"))],
         check=True,
     )
+    subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("test-release-action.py"))],
+        check=True,
+    )
 
 
 if __name__ == "__main__":

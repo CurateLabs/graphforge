@@ -17,7 +17,12 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
         "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "M1-Release-Load-${{ github.run_id }}": 1,
-        "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "M1-Release-Reconciliation-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -28,6 +33,11 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "M1-Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "M1-Release-Load-${{ github.run_id }}": 1,
+        "M1-Release-Candidate-manifest-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-python-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-npm-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-crates-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -147,7 +157,12 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "non-cypher-evidence/",
             "binding-rc-aggregate/report.json",
             "m1-release-load-evidence",
-            "candidate/",
+            "candidate/v${{ env.RELEASE_VERSION }}-artifacts.json",
+            "candidate/release-artifacts/python/",
+            "candidate/release-artifacts/npm/",
+            "candidate/release-artifacts/crates/",
+            "candidate/release-artifacts/{evidence,node-addons}/",
+            "reconciliation/summary.json",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
@@ -165,6 +180,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "non-cypher-evidence",
             "binding-rc-aggregate",
             "m1-release-load-evidence",
+            "candidate",
+            "candidate/release-artifacts/npm",
+            "candidate/release-artifacts/crates",
+            "candidate/release-artifacts",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
@@ -188,6 +207,11 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 expected_run_id = {
                     "non-cypher-evidence": "${{ inputs.rust_run_id }}",
                     "binding-rc-aggregate": "${{ inputs.binding_rc_run_id }}",
+                    "candidate": "${{ steps.candidate.outputs.run_id }}",
+                    "candidate/release-artifacts/python": ("${{ steps.candidate.outputs.run_id }}"),
+                    "candidate/release-artifacts/npm": "${{ steps.candidate.outputs.run_id }}",
+                    "candidate/release-artifacts/crates": ("${{ steps.candidate.outputs.run_id }}"),
+                    "candidate/release-artifacts": "${{ steps.candidate.outputs.run_id }}",
                 }[path]
                 assert field(step, "run-id") == expected_run_id, (
                     f"cross-run artifact run ID drift: {name}"

@@ -22,7 +22,6 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import time
 from typing import Any
 import urllib.error
 import urllib.request
@@ -107,26 +106,9 @@ def package_checksum(name: str, expected_checksum: str | None = None) -> str:
     return checksum
 
 
-def wait_for_version(name: str, checksum: str, timeout_seconds: int) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        record = version_record(name)
-        if record is not None:
-            registry_checksum = record.get("checksum")
-            if registry_checksum != checksum:
-                raise RuntimeError(
-                    f"{name} {VERSION} checksum mismatch: "
-                    f"local={checksum} registry={registry_checksum}"
-                )
-            return
-        time.sleep(3)
-    raise RuntimeError(f"timed out waiting for crates.io to index {name} {VERSION}")
-
-
 def publish_one(
     name: str,
     *,
-    timeout_seconds: int,
     expected_checksum: str | None = None,
 ) -> str:
     checksum = package_checksum(name, expected_checksum)
@@ -138,18 +120,26 @@ def publish_one(
                 f"refusing to resume {name} {VERSION}: existing checksum "
                 f"{registry_checksum} differs from local {checksum}"
             )
-        outcome = "already published; checksum matches"
+        owners = owner_logins(name)
+        if "DecisionNerd" not in owners:
+            raise RuntimeError(
+                f"{name} {VERSION} is indexed but DecisionNerd is not an owner: {sorted(owners)}"
+            )
+        outcome = "already published; checksum and owner match"
     else:
         run(["cargo", "publish", "-p", name, "--locked"])
-        wait_for_version(name, checksum, timeout_seconds)
-        outcome = "published"
+        outcome = "accepted; public checksum and owner verification required"
 
-    owners = owner_logins(name)
-    if "DecisionNerd" not in owners:
-        raise RuntimeError(
-            f"{name} {VERSION} is indexed but DecisionNerd is not an owner: {sorted(owners)}"
-        )
-    print(f"{name} {VERSION}: {outcome}; owner=DecisionNerd")
+    print(f"{name} {VERSION}: {outcome}")
+    return outcome
+
+
+def publish_authorized(name: str, expected_checksum: str) -> str:
+    """Execute one planner-authorized absent-node write without reclassification."""
+    package_checksum(name, expected_checksum)
+    run(["cargo", "publish", "-p", name, "--locked"])
+    outcome = "accepted; public checksum and owner verification required"
+    print(f"{name} {VERSION}: {outcome}")
     return outcome
 
 
@@ -206,12 +196,7 @@ def release_record_checksums(record_path: Path, artifacts_dir: Path) -> dict[str
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--index-timeout",
-        type=int,
-        default=300,
-        help="Seconds to wait for each successful upload to appear in crates.io",
-    )
+    parser.add_argument("--crate", required=True, help="One planner-authorized crate name")
     parser.add_argument(
         "--release-record",
         type=Path,
@@ -257,18 +242,14 @@ def main(argv: list[str] | None = None) -> int:
     if check.returncode != 0:
         return check.returncode
 
-    print(f"Publishing {len(order)} crates in dependency order:")
-    for index, name in enumerate(order, start=1):
-        print(f"  {index:02d}. {name}")
-
-    for name in order:
-        publish_one(
-            name,
-            timeout_seconds=args.index_timeout,
-            expected_checksum=expected_checksums.get(name),
-        )
-
-    print(f"crates.io publication complete: {len(order)} crates at {VERSION}")
+    if args.crate not in order:
+        print(f"requested crate is outside the publication plan: {args.crate}", file=sys.stderr)
+        return 2
+    expected = expected_checksums.get(args.crate)
+    if expected is None:
+        print(f"candidate checksum is missing for {args.crate}", file=sys.stderr)
+        return 2
+    publish_authorized(args.crate, expected)
     return 0
 
 

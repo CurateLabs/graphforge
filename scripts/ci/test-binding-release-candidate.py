@@ -617,16 +617,17 @@ def main() -> None:
     assert release_candidate_job.index("Rehearse exact partitioned release artifacts offline") < (
         release_candidate_job.index("Create and validate the immutable candidate manifest")
     )
-    assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
-        rc_workflow_text
-    )
+    for group in ("manifest", "python", "npm", "crates", "evidence"):
+        assert (
+            f"M1-Release-Candidate-{group}-${{{{ needs.validate_source.outputs.evidence_sha }}}}"
+        ) in rc_workflow_text
 
     publish_workflow_text = PUBLISH_WORKFLOW.read_text()
-    assert "M1-Release-Candidate-$RELEASE_SHA" in publish_workflow_text
+    assert "M1-Release-Candidate-manifest-$RELEASE_SHA" in publish_workflow_text
     assert "PyO3/maturin-action" not in publish_workflow_text
     assert "napi build" not in publish_workflow_text
     assert "candidate/release-artifacts/python/*" in publish_workflow_text
-    assert "--check-url https://pypi.org/simple/" in publish_workflow_text
+    assert "uv publish candidate/release-artifacts/python/*" in publish_workflow_text
 
     with tempfile.TemporaryDirectory() as directory:
         temp = Path(directory)
@@ -780,7 +781,7 @@ def main() -> None:
     publish_text = PUBLISH_WORKFLOW.read_text()
     assert "exec napi build --platform --release" not in publish_text
     assert ARTIFACT_COMMAND not in publish_text
-    assert "M1-Release-Candidate-$RELEASE_SHA" in publish_text
+    assert "M1-Release-Candidate-manifest-$RELEASE_SHA" in publish_text
 
     pnpm = shutil.which("pnpm")
     assert pnpm is not None, "pnpm is required for napi CLI contract validation"

@@ -183,3 +183,22 @@ future write. Accepted-but-not-visible packages receive only a bounded
 visibility check; conflict, indeterminate state, and expired artifacts remain
 blocked. Every scenario lists every node, its registry state, disposition, and
 sanitized job outcome without credentials or raw registry bodies.
+
+## Partitioned orchestration
+
+The Binding Release Candidate retains the manifest and its `python`, `npm`,
+`crates`, and `evidence` groups as five separately downloadable 30-day
+artifacts. Publication jobs download the manifest plus only their own registry
+group and run `release_action.py validate-partition` before observing or
+writing. The five native npm packages are the only parallel publication
+matrix; fresh verification fans into main, CLI, and skills. PyPI and crates.io
+remain independent, credential-isolated lanes.
+
+Before a write the lane persists a sanitized immutable attempt record; after a
+successful registry response it persists an accepted receipt and performs one
+public observation. Later recovery runs load both, so cancellation, timeout,
+or propagation delay cannot become permission for a second write. There is no polling loop. The `always()`
+reconciliation job then observes all 24 nodes and combines those states with
+job conclusions for operator context. See
+[`publication-order.md`](publication-order.md) for the recovery and human stop
+decisions.

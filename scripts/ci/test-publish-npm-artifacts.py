@@ -29,18 +29,17 @@ with tempfile.TemporaryDirectory() as temp:
     publisher.publish_archive = published.append
     integrity = "sha512-" + base64.b64encode(hashlib.sha512(b"candidate").digest()).decode()
     publisher.published_integrity = lambda _name, _version: integrity
-    assert publisher.publish_one(item, root, 1) == "already published; integrity matches"
+    assert publisher.publish_one(item, root) == "already published; integrity matches"
     assert published == []
 
-    responses = iter((None, integrity))
-    publisher.published_integrity = lambda _name, _version: next(responses)
-    assert publisher.publish_one(item, root, 1) == "published"
+    publisher.published_integrity = lambda _name, _version: None
+    assert publisher.publish_one(item, root) == "accepted; public verification required"
     assert published == [archive]
 
     different = "sha512-" + base64.b64encode(hashlib.sha512(b"different").digest()).decode()
     publisher.published_integrity = lambda _name, _version: different
     try:
-        publisher.publish_one(item, root, 1)
+        publisher.publish_one(item, root)
     except RuntimeError as error:
         assert "refusing to resume" in str(error)
     else:
@@ -57,4 +56,7 @@ with tempfile.TemporaryDirectory() as temp:
 assert publisher.GROUPS["native"] == slice(0, 6)
 assert publisher.GROUPS["cli"] == slice(6, 7)
 assert publisher.GROUPS["skills"] == slice(7, 8)
+source = SCRIPT.read_text(encoding="utf-8")
+assert "time.sleep" not in source
+assert "while " not in source
 print("publish npm artifact tests passed")

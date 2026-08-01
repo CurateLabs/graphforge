@@ -751,6 +751,16 @@ def main(argv: list[str] | None = None) -> int:
     observe_parser.add_argument("--observed-at", required=True)
     observe_parser.add_argument("--out", type=Path)
 
+    observe_all_parser = commands.add_parser("observe-all")
+    observe_all_parser.add_argument("--manifest", type=Path, required=True)
+    observe_all_parser.add_argument(
+        "--registry", action="append", choices=("pypi", "npm", "crates")
+    )
+    observe_all_parser.add_argument("--observed-at", required=True)
+    observe_all_parser.add_argument("--receipts-dir", type=Path)
+    observe_all_parser.add_argument("--attempts-dir", type=Path)
+    observe_all_parser.add_argument("--out", type=Path)
+
     plan_parser = commands.add_parser("plan")
     plan_parser.add_argument("--manifest", type=Path, required=True)
     plan_parser.add_argument("--observations", type=Path, required=True)
@@ -779,6 +789,66 @@ def main(argv: list[str] | None = None) -> int:
                 observed_at=args.observed_at,
                 accepted_receipt=receipt,
             )
+        elif args.command == "observe-all":
+            selected = set(args.registry or ("pypi", "npm", "crates"))
+            nodes, _, _ = _manifest_indexes(manifest)
+            receipts: dict[str, dict[str, Any]] = {}
+            if args.receipts_dir:
+                for path in sorted(args.receipts_dir.glob("*.json")):
+                    value = _load_json(path, context="accepted-write receipt")
+                    node_id = value.get("node_id")
+                    if node_id in receipts:
+                        raise RegistryError(f"duplicate accepted-write receipt: {node_id}")
+                    if isinstance(node_id, str):
+                        receipts[node_id] = value
+            attempts: dict[str, dict[str, Any]] = {}
+            if args.attempts_dir:
+                for path in sorted(args.attempts_dir.glob("*.json")):
+                    value = _load_json(path, context="write attempt")
+                    node_id = value.get("node_id")
+                    if (
+                        value.get("schema") != "graphforge-release-write-attempt-v1"
+                        or node_id not in nodes
+                        or value.get("candidate_sha") != manifest["commit_sha"]
+                        or value.get("version") != manifest["version"]
+                    ):
+                        raise RegistryError(f"write attempt identity diverges: {path.name}")
+                    _parse_time(value.get("started_at"), field=f"{path.name}.started_at")
+                    if node_id in attempts:
+                        raise RegistryError(f"duplicate write attempt: {node_id}")
+                    attempts[node_id] = value
+
+            def observe_node(node_id: str) -> dict[str, Any]:
+                result = observe(
+                    manifest,
+                    node_id,
+                    live_response(manifest, node_id),
+                    observed_at=args.observed_at,
+                    accepted_receipt=receipts.get(node_id),
+                )
+                if result["state"] == "absent" and node_id in attempts and node_id not in receipts:
+                    result = {
+                        **result,
+                        "state": "indeterminate",
+                        "reason": "write_attempt_outcome_unknown",
+                        "evidence": {
+                            **result["evidence"],
+                            "attempt_started_at": attempts[node_id]["started_at"],
+                        },
+                    }
+                return result
+
+            result = {
+                "schema": OBSERVATION_SET_SCHEMA,
+                "candidate_sha": manifest["commit_sha"],
+                "version": manifest["version"],
+                "observations": [
+                    observe_node(node_id)
+                    for node_id, node in sorted(nodes.items())
+                    if node["registry"] in selected
+                ],
+            }
+            _assert_safe_output(result)
         else:
             observations = _load_json(args.observations, context="registry observations")
             availability = _load_json(args.availability, context="artifact availability")

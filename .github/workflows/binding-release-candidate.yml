@@ -564,10 +564,42 @@ jobs:
             --expected-sha "$EVIDENCE_SHA" \
             --version "$RELEASE_VERSION"
 
-      - name: Retain the release candidate for publication
+      - name: Retain the candidate manifest for publication
         uses: actions/upload-artifact@v7
         with:
-          name: M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
-          path: candidate/
+          name: M1-Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/v${{ env.RELEASE_VERSION }}-artifacts.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the Python candidate partition
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/release-artifacts/python/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the npm candidate partition
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/release-artifacts/npm/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the crates candidate partition
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/release-artifacts/crates/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Retain the evidence candidate partition
+        uses: actions/upload-artifact@v7
+        with:
+          name: M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}
+          path: candidate/release-artifacts/{evidence,node-addons}/
           if-no-files-found: error
           retention-days: 30

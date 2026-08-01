@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
-"""Static contract for ordered, clean-consumer @curatelabs/graphforge-cli publication."""
+"""Static contract for npm native fan-in, CLI, and skills publication."""
 
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish.yaml"
-VERIFY = ROOT / "scripts" / "ci" / "verify-node-cli-release-package.mjs"
 
 
 def main() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    _, found, tail = text.partition("  publish-npm:\n")
-    assert found
-    npm_job, found, _ = tail.partition("\n  publish-crates:\n")
-    assert found
-    assert "needs: [candidate-preflight, publish-pypi]" in npm_job
-    assert "pnpm --filter @curatelabs/graphforge-cli test:offline" in npm_job
-    assert "node scripts/ci/verify-node-cli-release-package.mjs" in npm_job
-    assert npm_job.count("python3 scripts/publish_npm_artifacts.py") == 3
-    assert "Load reviewed npm recovery publisher" in npm_job
-    assert npm_job.index("--group native") < npm_job.index("verify-node-cli-release-package.mjs")
-    assert npm_job.index("verify-node-cli-release-package.mjs") < npm_job.index("--group cli")
-    assert npm_job.index("--group cli") < npm_job.index("--group skills")
-    assert "continue-on-error" not in npm_job
-    assert "|| true" not in npm_job
-    assert VERIFY.is_file()
+    native = text.split("  npm-native:\n", 1)[1].split("\n  npm-main:", 1)[0]
+    main_job = text.split("  npm-main:\n", 1)[1].split("\n  npm-cli:", 1)[0]
+    cli = text.split("  npm-cli:\n", 1)[1].split("\n  npm-skills:", 1)[0]
+    skills = text.split("  npm-skills:\n", 1)[1].split("\n  publish-crates:", 1)[0]
+    assert native.count("- graphforge-") == 5
+    assert "fail-fast: false" in native
+    assert "needs: [candidate-preflight, npm-native]" in main_job
+    assert "needs: [candidate-preflight, npm-main]" in cli
+    assert "needs: [candidate-preflight, npm-cli]" in skills
+    assert "npm:@curatelabs/graphforge" in main_job
+    assert "npm:@curatelabs/graphforge-cli" in cli
+    assert "npm:@curatelabs/graphforge-agent-skills" in skills
+    for job in (native, main_job, cli, skills):
+        assert "--registry npm" in job
+        assert "release_action.py authorize" in job
+        assert "scripts/publish_npm_artifacts.py" in job
+        assert "secrets.NPM_TOKEN" in job
+        assert "time.sleep" not in job
     print("publish CLI contract tests passed")
 
 
