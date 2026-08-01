@@ -93,12 +93,15 @@ jobs:
             "${MAX_ARGS[@]}" \
             --output examples/visualization/stress/results
 
+      - name: Stage evidence for upload
+        run: |
+          cp examples/visualization/stress/METHODOLOGY.md examples/visualization/stress/results/
+          cp examples/visualization/stress/size_ladder.json examples/visualization/stress/results/
+
       - name: Upload evidence artifact
         uses: actions/upload-artifact@v7
         with:
           name: visualization-limits-stress-${{ github.sha }}
-          path: |
-            examples/visualization/stress/results/
-            examples/visualization/stress/METHODOLOGY.md
-            examples/visualization/stress/size_ladder.json
+          path: examples/visualization/stress/results/
           if-no-files-found: error
+          retention-days: 1
