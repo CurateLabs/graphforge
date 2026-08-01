@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import email.parser
+from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
-from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "crates" / "graphforge-bindings-py" / "README.md"
