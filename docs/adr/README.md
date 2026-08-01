@@ -1,7 +1,7 @@
-# Architecture Decision Records (v0.5.0)
+# Architecture Decision Records
 
 Contiguous ADR sequence for decisions that remain part of the shipped / current
-v0.5.0 product architecture. Superseded tooling pins and post-0.5.0 roadmap ADRs
+GraphForge product architecture. Superseded tooling pins and roadmap-only ADRs
 are not retained in this tree.
 
 | ADR | Title | File |
@@ -22,6 +22,7 @@ are not retained in this tree.
 | 0014 | [Complete-workspace checkpoints and generation-preserving revert](0014-workspace-checkpoints.md) | `0014-workspace-checkpoints.md` |
 | 0015 | [Three embedded project-write modes](0015-embedded-write-modes.md) | `0015-embedded-write-modes.md` |
 | 0016 | [Repository integration and deployment configuration boundary](0016-repository-integration-and-deployment-configuration.md) | `0016-repository-integration-and-deployment-configuration.md` |
+| 0017 | [One version across core and adapters](0017-unified-release-version.md) | `0017-unified-release-version.md` |
 
 ## Numbering
 

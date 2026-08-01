@@ -267,4 +267,5 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [ADR 0014: Workspace Checkpoints](../../adr/0014-workspace-checkpoints.md) — complete-workspace checkpoints and revert
 - [ADR 0015: Embedded Write Modes](../../adr/0015-embedded-write-modes.md) — single, queued, and optimistic project writes
 - [ADR 0016: Repository integration and deployment configuration](../../adr/0016-repository-integration-and-deployment-configuration.md) — tracked definitions, local data, CLI, skills, and IaC ownership boundaries
+- [ADR 0017: One version across core and adapters](../../adr/0017-unified-release-version.md) — one public version for the Rust core, bindings, CLI, and skills release set
 - [Roadmap](../../releases/roadmap.md) — Milestones and timeline

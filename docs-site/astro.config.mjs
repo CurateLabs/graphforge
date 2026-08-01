@@ -233,6 +233,10 @@ export default defineConfig({
                   label: '0016 — Repository Integration',
                   slug: 'adr/0016-repository-integration-and-deployment-configuration',
                 },
+                {
+                  label: '0017 — Unified Release Version',
+                  slug: 'adr/0017-unified-release-version',
+                },
               ],
             },
           ],

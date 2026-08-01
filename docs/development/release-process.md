@@ -27,6 +27,21 @@ Example: 1.2.3
          └─────── MAJOR: Breaking changes
 ```
 
+### One product version across registries
+
+[ADR 0017](../adr/0017-unified-release-version.md) defines one shared release
+set. All public `graphforge-*` crates, the `graphforge` Python package,
+`@curatelabs/graphforge` and its five native npm packages, the CLI, and agent
+skills use the same exact public `MAJOR.MINOR.PATCH` version.
+
+Bindings are thin adapters over the Rust-owned product, not independently
+versioned products. A partial registry failure does not authorize a
+registry-specific patch version, even temporarily. Recovery either resumes
+absent artifacts from the same immutable candidate or advances the complete
+shared release set to one coordinated new version. Run
+`python3 scripts/set_release_version.py --check` and validate the complete
+candidate record before any publication credential can write.
+
 ### Version Increments
 
 **MAJOR version** (1.0.0 → 2.0.0) when:
