@@ -114,7 +114,9 @@ jobs:
           scripts/ci/test-domain-dependencies.py
 
       - name: Test crates.io publish plan helper
-        run: python3 scripts/ci/test-crate-publish-plan.py
+        run: |
+          python3 scripts/ci/test-crate-publish-plan.py
+          python3 scripts/ci/test-publish-crates.py
 
       - name: Test release publication preflight
         run: |

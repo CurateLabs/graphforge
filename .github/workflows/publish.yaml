@@ -528,6 +528,8 @@ jobs:
     name: Dependency-ordered crates lane
     needs: candidate-preflight
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    # New-crate rate limits are ~10 minutes each; remaining surface may need ~90+ minutes.
+    timeout-minutes: 180
     permissions:
       actions: read
       contents: write
@@ -535,6 +537,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
+      - name: Use main-branch crates publisher for recovery
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          # Recovery checkouts the immutable tag SHA for certified crate bytes.
+          # Overlay the durable publisher (429 Retry-After waits) from main without
+          # moving the tag. Never print secrets.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git show refs/remotes/origin/main:scripts/publish_crates.py \
+            > "$RUNNER_TEMP/publish_crates.py"
+          install -m 0755 "$RUNNER_TEMP/publish_crates.py" scripts/publish_crates.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"

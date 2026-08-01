@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -45,31 +46,117 @@ except ValueError as exc:
     assert "non-printable" in str(exc)
     assert "\x85" not in str(exc)
 
-commands: list[list[str]] = []
+RATE_BODY = (
+    "error: failed to publish graphforge-plan v0.5.1 to registry at https://crates.io\n"
+    "Caused by:\n"
+    "  the remote server responded with an error (status 429 Too Many Requests): "
+    "You have published too many new crates in a short period of time. "
+    "Please try again after Sat, 01 Aug 2026 19:40:15 GMT and see "
+    "https://crates.io/docs/rate-limits for more details.\n"
+)
+fixed_now = datetime(2026, 8, 1, 19, 35, 47, tzinfo=timezone.utc)
+wait = mod.parse_rate_limit_retry_wait(RATE_BODY, now=fixed_now)
+# 19:40:15 - 19:35:47 = 268s, plus the small post-window buffer.
+assert wait == 268 + mod.RATE_LIMIT_BUFFER_SECONDS
+assert mod.parse_rate_limit_retry_wait("error: something else\n") is None
+assert (
+    mod.parse_rate_limit_retry_wait(
+        "status 429 Too Many Requests\nRetry-After: 42\n",
+        now=fixed_now,
+    )
+    == 42 + mod.RATE_LIMIT_BUFFER_SECONDS
+)
+# 429 without a parseable wait hint must not invent a backoff.
+assert (
+    mod.parse_rate_limit_retry_wait(
+        "the remote server responded with an error (status 429 Too Many Requests)\n",
+        now=fixed_now,
+    )
+    is None
+)
+# Past retry timestamps still apply the buffer rather than sleeping forever or negative.
+past = mod.parse_rate_limit_retry_wait(
+    "status 429 Too Many Requests: Please try again after Sat, 01 Aug 2026 19:30:00 GMT\n",
+    now=fixed_now,
+)
+assert past == float(mod.RATE_LIMIT_BUFFER_SECONDS)
+
+publish_calls: list[list[str]] = []
+sleeps: list[float] = []
+
+
+def fake_publish(command: list[str]) -> subprocess.CompletedProcess[str]:
+    publish_calls.append(command)
+    if len(publish_calls) == 1:
+        return subprocess.CompletedProcess(command, 101, stdout="", stderr=RATE_BODY)
+    return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+
+mod.cargo_publish(
+    "graphforge-plan",
+    sleep=sleeps.append,
+    run_publish=fake_publish,
+    now=lambda: fixed_now,
+)
+assert publish_calls == [
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
+]
+assert sleeps == [268 + mod.RATE_LIMIT_BUFFER_SECONDS]
+
+# Non-429 failures must surface immediately without sleeping.
+publish_calls.clear()
+sleeps.clear()
+
+
+def permanent_failure(command: list[str]) -> subprocess.CompletedProcess[str]:
+    publish_calls.append(command)
+    return subprocess.CompletedProcess(
+        command,
+        101,
+        stdout="",
+        stderr="error: failed to publish: checksum mismatch\n",
+    )
+
+
+try:
+    mod.cargo_publish(
+        "graphforge-plan",
+        sleep=sleeps.append,
+        run_publish=permanent_failure,
+        now=lambda: fixed_now,
+    )
+    raise AssertionError("expected non-429 publish failure")
+except subprocess.CalledProcessError as exc:
+    assert exc.returncode == 101
+assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked"]]
+assert sleeps == []
+
+published: list[str] = []
 mod.package_checksum = lambda _name, expected=None: expected or "abc123"
 mod.owner_logins = lambda _name: {"DecisionNerd"}
-mod.run = commands.append
+mod.cargo_publish = lambda name, **_kwargs: published.append(name)
 
 mod.version_record = lambda _name: {"checksum": "abc123"}
 assert (
     mod.publish_one("graphforge-core", expected_checksum="abc123")
     == "already published; checksum and owner match"
 )
-assert commands == []
+assert published == []
 
 mod.version_record = lambda _name: None
 assert (
     mod.publish_one("graphforge-core")
     == "accepted; public checksum and owner verification required"
 )
-assert commands == [["cargo", "publish", "-p", "graphforge-core", "--locked"]]
+assert published == ["graphforge-core"]
 
-commands.clear()
+published.clear()
 assert (
     mod.publish_authorized("graphforge-core", "abc123")
     == "accepted; public checksum and owner verification required"
 )
-assert commands == [["cargo", "publish", "-p", "graphforge-core", "--locked"]]
+assert published == ["graphforge-core"]
 
 mod.version_record = lambda _name: {"checksum": "different"}
 try:

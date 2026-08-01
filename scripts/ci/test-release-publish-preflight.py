@@ -97,6 +97,9 @@ assert "needs: [candidate-preflight, npm-cli]" in skills
 assert "--node npm:@curatelabs/graphforge-agent-skills" in skills
 
 assert "needs: candidate-preflight" in crates
+assert "timeout-minutes: 180" in crates
+assert "Use main-branch crates publisher for recovery" in crates
+assert "refs/remotes/origin/main:scripts/publish_crates.py" in crates
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
