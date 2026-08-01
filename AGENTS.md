@@ -13,7 +13,6 @@ Every change follows:
 - The issue body is the specification. Test its acceptance criteria.
 - Sequence work from live GitHub parent/sub-issue and blocked-by relationships, not issue numbers or remembered plans.
 - Preserve unrelated branches, worktrees, files, and agent work.
-- Update `[Unreleased]` for behavior changes.
 
 Narrow sub-issues may split a canonical issue only to satisfy existing acceptance criteria, isolate a verified blocker, or separate an XL independently reviewable concern. They must be native sub-issues, block the canonical issue, avoid overlap, and never expand scope. The canonical issue remains the close gate.
 
