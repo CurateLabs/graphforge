@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Replace the Python package README with a concise PyPI landing page: short
+  purpose, install path, one minimal first-use example, and canonical
+  `docs.graphforge.sh` links instead of a raw CLI command inventory (#304).
 - Partition the immutable candidate into independently retained Python, npm,
   crates, evidence, and manifest artifacts; authorize every write from fresh
   registry truth; parallelize only the five native npm packages with verified
