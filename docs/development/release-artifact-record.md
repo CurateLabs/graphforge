@@ -131,10 +131,12 @@ command has a registry-write path.
 After the binding workflow has assembled the four directories, it creates a
 temporary manifest and runs a clean-consumer rehearsal before any registry
 write. The rehearsal installs the compatible exact wheel without an index,
-imports the native Python module, installs all eight npm tarballs offline,
-loads the Node native binding through the main package, executes the CLI and
-agent-skills entrypoints, and validates all 15 crate archives and their exact
-dependency graph. Only a passing report is added to the evidence partition;
+imports the native Python module, validates the full eight-package npm
+inventory, then installs only the host-compatible native tarball with
+main/CLI/skills offline, loads the Node native binding through the main
+package, executes the CLI and agent-skills entrypoints, and validates all
+15 crate archives and their exact dependency graph. Only a passing report is
+added to the evidence partition;
 the temporary manifest is then removed and the final manifest is recorded over
 the now-complete inventory.
 
