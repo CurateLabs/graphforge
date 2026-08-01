@@ -101,6 +101,8 @@ assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
 assert "secrets.CARGO_REGISTRY_TOKEN" in crates
+assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
+assert "Never print the value" in crates
 assert "secrets.NPM_TOKEN" not in crates
 
 for lane in (pypi, native, main, cli, skills, crates):
@@ -139,6 +141,7 @@ credential_workflow = CREDENTIAL_WORKFLOW.read_text(encoding="utf-8")
 assert "npm whoami" in credential_workflow
 assert "secrets.NPM_TOKEN" in credential_workflow
 assert "secrets.CARGO_REGISTRY_TOKEN" in credential_workflow
+assert "never print the value" in credential_workflow.lower()
 for forbidden in ("npm publish", "uv publish", "cargo publish", "release:\n"):
     assert forbidden not in credential_workflow
 
