@@ -621,6 +621,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}
-          path: candidate/release-artifacts/{evidence,node-addons}/
+          # upload-artifact does not expand bash brace globs; list both dirs.
+          path: |
+            candidate/release-artifacts/evidence/
+            candidate/release-artifacts/node-addons/
           if-no-files-found: error
           retention-days: 30

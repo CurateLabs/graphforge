@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offline Binding RC CLI rehearsal initializes a git project before
   `config validate` so the clean consumer matches the real CLI project
   contract (#192).
+- Retain Binding RC evidence and node-addon partitions with a multiline
+  upload-artifact path so brace globs are not treated as a missing file
+  set (#192).
 - Replace the Python package README with a concise PyPI landing page: short
   purpose, install path, one minimal first-use example, and canonical
   `docs.graphforge.sh` links instead of a raw CLI command inventory (#304).
