@@ -21,6 +21,13 @@ const forbiddenPrivateMarkers = [
 
 assert.match(manifest.revision, /^[0-9a-f]{40}$/, 'revision must be a full commit SHA');
 assert.equal(manifest.sourceDirectory, 'docs/published');
+assert.deepEqual(manifest.localPatches, [
+  {
+    issue: '#279',
+    reason: 'Use the Curate Labs-owned npm scope for the v0.5.0 release.',
+    sources: ['commands.md', 'install.md', 'overview.md'],
+  },
+]);
 assert.match(manifest.repository, /^[\w.-]+\/[\w.-]+$/, 'repository must be a GitHub owner/name pair');
 assert.equal(manifest.pages.length, expectedSources.length, 'duplicate page entries are forbidden');
 assert.deepEqual(
