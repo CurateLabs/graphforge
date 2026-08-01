@@ -128,6 +128,11 @@ assert "needs: [candidate-preflight, publish-pypi]" in npm_job
 assert "scripts/publish_npm_artifacts.py" in npm_job
 assert "Load reviewed npm recovery publisher" in npm_job
 assert "refs/remotes/origin/main:scripts/publish_npm_artifacts.py" in npm_job
+assert "scripts/amend_npm_main_artifact.py" in npm_job
+assert "Apply authorized unpublished main npm amendment" in npm_job
+assert "v0.5.0-npm-amendment.json" in npm_job
+assert "curatelabs-graphforge-0.5.0-amended.tgz" in npm_job
+assert "contents: write" in npm_job
 assert "--group native" in npm_job
 assert "--group cli" in npm_job
 assert "--group skills" in npm_job

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Split native binaries out of the main `@curatelabs/graphforge` npm tarball,
+  and add the explicitly authorized v0.5.0 supplemental artifact/checksum
+  record so the previously unpublished main package stays below npm's payload
+  limit while reusing the already-published platform packages (#287).
 - Verify newly published and resumed npm packages immediately against npm's
   `dist.integrity` metadata, preserving exact-byte checks without failing while
   the registry's public tarball CDN is still replicating (#284).

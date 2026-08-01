@@ -192,7 +192,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       actions: read
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -209,6 +209,11 @@ jobs:
           install -m 0755 \
             "$RUNNER_TEMP/publish_npm_artifacts.py" \
             scripts/publish_npm_artifacts.py
+          git show refs/remotes/origin/main:scripts/amend_npm_main_artifact.py \
+            > "$RUNNER_TEMP/amend_npm_main_artifact.py"
+          install -m 0755 \
+            "$RUNNER_TEMP/amend_npm_main_artifact.py" \
+            scripts/amend_npm_main_artifact.py
 
       - uses: actions/setup-node@v6
         with:
@@ -229,6 +234,46 @@ jobs:
           gh run download "$CANDIDATE_RUN_ID"
           --name "M1-Release-Candidate-$RELEASE_SHA"
           --dir candidate
+
+      - name: Apply authorized unpublished main npm amendment
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag == 'v0.5.0'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          supplement="v0.5.0-npm-amendment.json"
+          archive="curatelabs-graphforge-0.5.0-amended.tgz"
+          supplement_count="$(gh release view "$RELEASE_TAG" --json assets \
+            --jq "[.assets[] | select(.name == \"$supplement\")] | length")"
+          archive_count="$(gh release view "$RELEASE_TAG" --json assets \
+            --jq "[.assets[] | select(.name == \"$archive\")] | length")"
+          if test "$supplement_count" = 0 && test "$archive_count" = 0; then
+            python3 scripts/amend_npm_main_artifact.py create \
+              --record candidate/v0.5.0-artifacts.json \
+              --artifacts-dir candidate/release-artifacts \
+              --amended-archive "candidate/$archive" \
+              --supplement "candidate/$supplement"
+            gh release upload "$RELEASE_TAG" \
+              "candidate/$archive" "candidate/$supplement"
+          else
+            test "$supplement_count" = 1
+            test "$archive_count" = 1
+            mkdir -p candidate/amendment
+            gh release download "$RELEASE_TAG" \
+              --pattern "$supplement" --pattern "$archive" \
+              --dir candidate/amendment
+            python3 scripts/amend_npm_main_artifact.py apply \
+              --record candidate/v0.5.0-artifacts.json \
+              --artifacts-dir candidate/release-artifacts \
+              --amended-archive "candidate/amendment/$archive" \
+              --supplement "candidate/amendment/$supplement"
+          fi
+          python3 scripts/ci/release-candidate.py validate \
+            --record candidate/v0.5.0-artifacts.json \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "${{ needs.candidate-preflight.outputs.release_sha }}" \
+            --version 0.5.0
 
       - name: Publish recorded npm tarballs in dependency order
         shell: bash

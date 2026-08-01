@@ -30,8 +30,7 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "THIRD_PARTY_NOTICES.md",
-    "*.node"
+    "THIRD_PARTY_NOTICES.md"
   ],
   "napi": {
     "binaryName": "graphforge",
