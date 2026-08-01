@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "cucumber",
@@ -2048,7 +2048,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ast"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "graphforge-core",
  "serde",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-bindings-node"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-api",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-bindings-py"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "futures",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "clap",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_yaml_ng",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-cypher"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "graphforge-ast",
  "graphforge-core",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-exec"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-io"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "graphforge-core",
  "graphforge-storage",
@@ -2155,7 +2155,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ir"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-ast",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-knowledge"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-ontology"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2198,7 +2198,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-plan"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "datafusion",
  "graphforge-core",
@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-provenance"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-rel"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow-data",
  "chrono",
@@ -2239,7 +2239,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-search"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "graphforge-core",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "graphforge-storage"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow",
  "async-trait",
