@@ -12,8 +12,8 @@ repository.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-graphforge-api = { version = "0.5.0", path = "../graphforge-api" }
-graphforge-cli = { version = "0.5.0", path = "../graphforge-cli" }
+graphforge-api = { version = "0.5.1", path = "../graphforge-api" }
+graphforge-cli = { version = "0.5.1", path = "../graphforge-cli" }
 # `ipc` (default in arrow 58) serializes execute() results to an Arrow IPC
 # stream Buffer for the JS side to decode with apache-arrow.
 arrow = { workspace = true }

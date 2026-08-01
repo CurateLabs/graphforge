@@ -12,8 +12,8 @@ repository.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
-graphforge-api = { version = "0.5.0", path = "../graphforge-api" }
-graphforge-cli = { version = "0.5.0", path = "../graphforge-cli" }
+graphforge-api = { version = "0.5.1", path = "../graphforge-api" }
+graphforge-cli = { version = "0.5.1", path = "../graphforge-cli" }
 # `StreamExt::next` drives the facade's async streaming query one batch per pull
 # in the synchronous RecordBatchReader adapter (execute_stream, #587).
 futures = { workspace = true }
