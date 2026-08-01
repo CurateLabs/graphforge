@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -165,6 +166,13 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             f"artifact retention drift: {name}"
         )
         path = field(step, "path")
+        assert path is not None, f"artifact upload has no path: {name}"
+        # upload-artifact does not expand bash brace globs; a literal
+        # `{evidence,node-addons}` path retains zero files after green assembly.
+        # Allow GitHub `${{ }}` expressions; reject comma brace expansions only.
+        assert not re.search(r"(?<!\$)\{[^{}\n]+,[^{}\n]+\}", path), (
+            f"artifact upload path uses brace globs: {name}: {path}"
+        )
         assert path in {
             "binding-rc-reports/${{ matrix.target }}.json",
             "binding-rc-reports/${{ matrix.report_target }}.json",

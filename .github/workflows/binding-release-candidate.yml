@@ -460,6 +460,25 @@ jobs:
           path: candidate/release-artifacts/node-addons
           merge-multiple: true
 
+      # Fail closed before pack/rehearsal if matrix addon transfer nested or
+      # emptied the staging directory. Retain later uploads evidence/ + node-addons/.
+      - name: Require staged Node addons for candidate assembly
+        shell: bash
+        run: |
+          shopt -s nullglob
+          addons=(candidate/release-artifacts/node-addons/*.node)
+          if test "${#addons[@]}" -ne 5; then
+            printf 'expected 5 staged Node addons under candidate/release-artifacts/node-addons/, found %s\n' \
+              "${#addons[@]}" >&2
+            if test -d candidate/release-artifacts/node-addons; then
+              find candidate/release-artifacts/node-addons -type f -print >&2
+            else
+              printf 'node-addons staging directory is missing\n' >&2
+            fi
+            exit 1
+          fi
+          printf 'staged_node_addons=%s\n' "${#addons[@]}"
+
       - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 

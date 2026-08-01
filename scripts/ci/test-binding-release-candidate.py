@@ -624,6 +624,19 @@ def main() -> None:
     assert release_candidate_job.index("Rehearse exact partitioned release artifacts offline") < (
         release_candidate_job.index("Create and validate the immutable candidate manifest")
     )
+    # Matrix addons must land as flat *.node files before pack/rehearsal/retain.
+    assert "Require staged Node addons for candidate assembly" in release_candidate_job
+    assert "addons=(candidate/release-artifacts/node-addons/*.node)" in release_candidate_job
+    assert release_candidate_job.index("Download exact-run tested Node addons") < (
+        release_candidate_job.index("Require staged Node addons for candidate assembly")
+    )
+    assert release_candidate_job.index("Require staged Node addons for candidate assembly") < (
+        release_candidate_job.index("Assemble and pack every npm package")
+    )
+    # upload-artifact does not expand brace globs; retain must list both dirs.
+    assert "{evidence,node-addons}" not in release_candidate_job
+    assert "candidate/release-artifacts/evidence/" in release_candidate_job
+    assert "candidate/release-artifacts/node-addons/" in release_candidate_job
     for group in ("manifest", "python", "npm", "crates", "evidence"):
         assert (
             f"M1-Release-Candidate-{group}-${{{{ needs.validate_source.outputs.evidence_sha }}}}"

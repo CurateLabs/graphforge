@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fail closed after Binding RC Node addon download when
+  `candidate/release-artifacts/node-addons/` does not contain exactly five
+  `*.node` files, and reject brace-glob retain paths in CI storage policy
+  (#192).
 - Fix homepage accessibility: label the NetworkX/GraphForge/Neo4j comparison
   table headers (including row scopes) and emit static `tabindex` on Expressive
   Code `<pre>` blocks so keyboard users can reach horizontally scrollable
