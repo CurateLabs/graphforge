@@ -12,11 +12,20 @@ credential is projected from Pulumi ESC into the GitHub Actions secret used by
 
 The token is normalized before ``cargo publish``: leading/trailing whitespace
 and CR/LF are stripped. The value is never logged.
+
+crates.io new-crate rate limits (HTTP 429) are handled durably: the publisher
+parses ``Retry-After`` / ``try again after …`` from cargo's error output, sleeps
+until that time (plus a small buffer), and retries the same crate publish.
+Total wait is capped so a full remaining surface (~10 new crates at ~10 minutes)
+can finish in one job without hiding non-429 failures.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import importlib.util
 import json
@@ -25,6 +34,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 import urllib.error
 import urllib.request
@@ -33,6 +43,15 @@ ROOT = Path(__file__).resolve().parents[1]
 PLAN_SCRIPT = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 CRATES_API = "https://crates.io/api/v1/crates"
 USER_AGENT = "GraphForge crates.io publisher (github.com/CurateLabs/graphforge)"
+# New-crate limit is 1 / 10 minutes after the burst; leave headroom for ~10 crates.
+RATE_LIMIT_BUFFER_SECONDS = 15
+MAX_SINGLE_RATE_LIMIT_WAIT_SECONDS = 20 * 60
+MAX_TOTAL_RATE_LIMIT_WAIT_SECONDS = 2 * 60 * 60
+_TRY_AGAIN_AFTER = re.compile(
+    r"try again after ([A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT)",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_HEADER = re.compile(r"(?im)^retry-after:\s*(\d+)\s*$")
 _VERSION_MATCH = re.search(
     r'(?ms)^\[workspace\.package\].*?^version\s*=\s*"([^"]+)"',
     (ROOT / "Cargo.toml").read_text(encoding="utf-8"),
@@ -69,6 +88,113 @@ def load_plan_module():
 def run(command: list[str]) -> None:
     print("+ " + " ".join(command), flush=True)
     subprocess.run(command, cwd=ROOT, check=True)
+
+
+def _is_rate_limit_output(output: str) -> bool:
+    lowered = output.lower()
+    return "status 429" in lowered or "too many requests" in lowered
+
+
+def parse_rate_limit_retry_wait(
+    output: str,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Return seconds to sleep for a crates.io 429, or None if not rate-limited.
+
+    Prefers the ``try again after <HTTP-date>`` timestamp in the crates.io body,
+    then a ``Retry-After: <seconds>`` header line if cargo surfaces one. Never
+    inspects or returns credential material.
+    """
+    if not _is_rate_limit_output(output):
+        return None
+
+    match = _TRY_AGAIN_AFTER.search(output)
+    if match is not None:
+        when = parsedate_to_datetime(match.group(1))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        current = now if now is not None else datetime.now(timezone.utc)
+        delay = (when - current).total_seconds() + RATE_LIMIT_BUFFER_SECONDS
+        return max(delay, float(RATE_LIMIT_BUFFER_SECONDS))
+
+    header = _RETRY_AFTER_HEADER.search(output)
+    if header is not None:
+        return float(int(header.group(1))) + RATE_LIMIT_BUFFER_SECONDS
+
+    # Recognized 429 without a parseable wait hint: fail closed (no blind backoff).
+    return None
+
+
+def _default_cargo_publish_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    print("+ " + " ".join(command), flush=True)
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+    )
+
+
+def _emit_process_output(result: subprocess.CompletedProcess[str]) -> None:
+    for stream in (result.stdout, result.stderr):
+        if not stream:
+            continue
+        print(stream, end="" if stream.endswith("\n") else "\n", flush=True)
+
+
+def cargo_publish(
+    name: str,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    run_publish: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> None:
+    """Run ``cargo publish`` for one crate, sleeping through bounded 429 waits."""
+    command = ["cargo", "publish", "-p", name, "--locked"]
+    runner = run_publish or _default_cargo_publish_run
+    clock = now or (lambda: datetime.now(timezone.utc))
+    waited = 0.0
+    while True:
+        result = runner(command)
+        if result.returncode == 0:
+            _emit_process_output(result)
+            return
+
+        combined = f"{result.stdout or ''}{result.stderr or ''}"
+        wait = parse_rate_limit_retry_wait(combined, now=clock())
+        if wait is None:
+            _emit_process_output(result)
+            raise subprocess.CalledProcessError(
+                result.returncode,
+                command,
+                output=result.stdout,
+                stderr=result.stderr,
+            )
+
+        if wait > MAX_SINGLE_RATE_LIMIT_WAIT_SECONDS:
+            raise RuntimeError(
+                f"crates.io rate-limit wait for {name} is {wait:.0f}s; "
+                f"refusing waits above {MAX_SINGLE_RATE_LIMIT_WAIT_SECONDS}s"
+            )
+        if waited + wait > MAX_TOTAL_RATE_LIMIT_WAIT_SECONDS:
+            raise RuntimeError(
+                f"crates.io rate-limit wait budget exhausted for {name}: "
+                f"already waited {waited:.0f}s, next wait {wait:.0f}s, "
+                f"cap {MAX_TOTAL_RATE_LIMIT_WAIT_SECONDS}s "
+                f"(~10 new crates at ~10 minutes each)"
+            )
+
+        print(
+            f"{name}: crates.io 429 rate limit; sleeping {wait:.0f}s before retry "
+            f"(waited {waited:.0f}s / {MAX_TOTAL_RATE_LIMIT_WAIT_SECONDS}s budget)",
+            flush=True,
+        )
+        sleep(wait)
+        waited += wait
 
 
 def registry_json(path: str) -> dict[str, Any] | None:
@@ -145,7 +271,7 @@ def publish_one(
             )
         outcome = "already published; checksum and owner match"
     else:
-        run(["cargo", "publish", "-p", name, "--locked"])
+        cargo_publish(name)
         outcome = "accepted; public checksum and owner verification required"
 
     print(f"{name} {VERSION}: {outcome}")
@@ -155,7 +281,7 @@ def publish_one(
 def publish_authorized(name: str, expected_checksum: str) -> str:
     """Execute one planner-authorized absent-node write without reclassification."""
     package_checksum(name, expected_checksum)
-    run(["cargo", "publish", "-p", name, "--locked"])
+    cargo_publish(name)
     outcome = "accepted; public checksum and owner verification required"
     print(f"{name} {VERSION}: {outcome}")
     return outcome
