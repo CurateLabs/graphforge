@@ -21,10 +21,15 @@ uses the same Rust-owned engine described below.
 
 **Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
 
+**pip**
+
 ```bash
 pip install "graphforge==0.5.1"
+```
 
-# uv (recommended)
+**uv** (recommended)
+
+```bash
 uv add "graphforge==0.5.1"
 ```
 
@@ -58,9 +63,15 @@ dependency (not bundled inside the `graphforge` wheel). See
 **Requirements:** a current Node.js LTS (CI covers the binding’s supported
 targets).
 
+**npm**
+
 ```bash
 npm install @curatelabs/graphforge@0.5.1
-# or
+```
+
+**pnpm**
+
+```bash
 pnpm add @curatelabs/graphforge@0.5.1
 ```
 

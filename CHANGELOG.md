@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#301).
 - Use final shipped voice for v0.5.1 install and release wording (no
   pre-publish hedges in public docs) (#301).
+- Split pip/uv and npm/pnpm install examples into separate copyable
+  code fences on the installation guide, quickstart, tutorial, and Python
+  binding README (#301).
 
 ## [0.5.1] - 2026-08-01
 

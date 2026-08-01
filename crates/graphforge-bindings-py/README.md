@@ -5,10 +5,16 @@ with Rust-owned behavior, Arrow results, and a thin repository lifecycle CLI.
 
 ## Install
 
+**pip**
+
 ```bash
-pip install graphforge
-# or
-uv add graphforge
+pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
 ```
 
 ## First use

@@ -11,10 +11,16 @@ To run the same engine from your editor, see the [VS Code extension guide](vscod
 
 ## Install
 
+**pip**
+
 ```bash
-pip install graphforge
-# or
-uv add graphforge
+pip install "graphforge==0.5.1"
+```
+
+**uv** (recommended)
+
+```bash
+uv add "graphforge==0.5.1"
 ```
 
 ---
