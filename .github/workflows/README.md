@@ -112,6 +112,13 @@ bounded-resource stress lane, uploads case/reproduction/resource evidence, and
 never substitutes for the required short concurrency matrix. Stress retries are
 diagnostic only.
 
+### `visualization-limits-stress.yml`
+
+Maintainer `workflow_dispatch` only. Runs the #299 visualization limits harness
+(Plotly, Plotly.js, Jaal, PyVis, Cytoscape.js, Sigma.js) on a standard hosted runner,
+uploads machine-readable evidence, and is never a PR, push, scheduled, required,
+or release gate. See [`examples/visualization/stress/`](../../examples/visualization/stress/).
+
 ### `checkpoint-recovery-gate.yml` and `non-cypher-surface-gate.yml`
 
 Maintainers manually dispatch these SHA-bound release-certification workflows

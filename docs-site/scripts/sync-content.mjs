@@ -56,6 +56,7 @@ const PAGES = [
   'guide/analytics-integration.md',
   'guide/visualization.md',
   'guide/exploratory-analyst.md',
+  'guide/visualization-limits.md',
   'guides/repository-integration.md',
   'guide/datasets/overview.md',
   'guide/datasets/ldbc.md',

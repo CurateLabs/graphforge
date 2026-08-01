@@ -1,9 +1,9 @@
 # Visualization examples
 
 GraphForge returns Arrow tables from its public Python and Node APIs. This guide
-shows how to take **one shared real-data projection** and render it with five
-common ecosystem libraries—without adding visualization behavior to GraphForge
-Core.
+shows how to take **one shared real-data projection** and render it with common
+ecosystem libraries in both Python and Node.js—without adding visualization
+behavior to GraphForge Core.
 
 Runnable sources live under
 [`examples/visualization/`](https://github.com/CurateLabs/graphforge/tree/main/examples/visualization).
@@ -15,6 +15,7 @@ Runnable sources live under
 | Python | [Plotly](https://plotly.com/python/) | `plotly_karate.html` + JSON | Deterministic circular layout using seed `42` | Fully offline-friendly HTML via CDN Plotly.js |
 | Python | [Jaal](https://github.com/imohitmayank/jaal) | `jaal_karate_payload.json` (+ Dash app) | **Not supported** by Jaal `create()`/`plot()` | Interactive view needs a Dash server (`--serve`) |
 | Python | [PyVis](https://pyvis.readthedocs.io/) | `pyvis_karate.html` | `layout.randomSeed = 42` | Writes standalone HTML |
+| Node.js | [Plotly.js](https://plotly.com/javascript/) | `plotly_js_karate.html` + JSON | Same circular layout / seed `42` as Python Plotly | CDN Plotly.js; figure JSON built without a Node Plotly package |
 | Node.js | [Cytoscape.js](https://js.cytoscape.org/) | elements JSON + HTML | cose has no portable seed matching the contract | Closest honest path: cose, `animate: false` |
 | Node.js | [Sigma.js](https://www.sigmajs.org/) | graphology JSON + HTML | Seeded circular coordinates (`42`) | Browser page loads graphology + sigma via import map |
 
@@ -39,7 +40,7 @@ python examples/visualization/dataset/fetch.py
 
 ## Shared projection contract
 
-All five examples:
+All examples:
 
 1. Download and checksum-verify Newman's `karate.zip`.
 2. Parse `karate.gml` edges.
@@ -80,9 +81,9 @@ npm install
 # export GRAPHFORGE_NODE_PATH=/absolute/path/to/crates/graphforge-bindings-node/index.js
 ```
 
-Node examples depend on `apache-arrow` for IPC decoding and load Cytoscape.js /
-Sigma.js in the generated HTML from public CDNs (no visualization dependency is
-added to GraphForge packages).
+Node examples depend on `apache-arrow` for IPC decoding and load Plotly.js,
+Cytoscape.js, and Sigma.js in the generated HTML from public CDNs (no
+visualization dependency is added to GraphForge packages).
 
 ## Commands and expected output
 
@@ -100,6 +101,9 @@ python examples/visualization/python/pyvis_example.py
 python examples/visualization/python/jaal_example.py
 # -> output/jaal_karate_payload.json
 # Local interactive Dash UI: add --serve
+
+node examples/visualization/node/plotly_example.mjs
+# -> output/plotly_js_karate.html, output/plotly_js_karate.json
 
 node examples/visualization/node/cytoscape_example.mjs
 # -> output/cytoscape_karate_elements.json, output/cytoscape_karate.html
@@ -126,8 +130,8 @@ scheduled CI, or release gates.
 - **Cytoscape.js `cose`** does not provide a stable, documented seed equivalent
   to the shared contract; the HTML records the requested seed and uses
   non-animated cose.
-- **Plotly** has no built-in force-directed seed for graphs; the example uses a
-  deterministic circular layout derived from seed `42`.
+- **Plotly / Plotly.js** have no built-in force-directed seed for graphs; both
+  examples use the same deterministic circular layout derived from seed `42`.
 - These examples demonstrate integration paths. They are not library
   recommendations or scalability proofs.
 

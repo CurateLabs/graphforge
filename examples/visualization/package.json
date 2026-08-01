@@ -9,6 +9,7 @@
   },
   "scripts": {
     "projection": "node shared/projection.mjs",
+    "plotly": "node node/plotly_example.mjs",
     "cytoscape": "node node/cytoscape_example.mjs",
     "sigma": "node node/sigma_example.mjs",
     "test": "node --test tests/test_node_examples.mjs"

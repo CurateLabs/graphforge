@@ -1,0 +1,8 @@
+# Optional dependencies for the visualization stress harness (#299).
+# Not part of GraphForge Core or the published Python package.
+plotly>=5.18
+jaal>=0.1.9
+pyvis>=0.3.2
+pandas>=2.0
+networkx>=3.0
+pytest>=8.0

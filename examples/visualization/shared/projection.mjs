@@ -2,7 +2,8 @@
  * Shared GraphForge projection for Node visualization examples.
  *
  * Loads Mark Newman's karate-club GML through GraphForge's public Node API and
- * returns the same deterministic projection consumed by Cytoscape.js / Sigma.js.
+ * returns the same deterministic projection consumed by Plotly.js, Cytoscape.js,
+ * and Sigma.js.
  */
 
 import { createHash } from "node:crypto";
@@ -202,7 +203,7 @@ export function writeProjectionJson(path, projection) {
   return path;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const out = join(ROOT, "output", "projection.json");
   const payload = await project();
   writeProjectionJson(out, payload);

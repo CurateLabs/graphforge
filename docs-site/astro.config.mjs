@@ -53,6 +53,7 @@ export default defineConfig({
             { label: 'Analytics Integration', slug: 'guide/analytics-integration' },
             { label: 'Visualization examples', slug: 'guide/visualization' },
             { label: 'Exploratory Analyst', slug: 'guide/exploratory-analyst' },
+            { label: 'Visualization limits', slug: 'guide/visualization-limits' },
           ],
         },
         {

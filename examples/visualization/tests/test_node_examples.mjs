@@ -1,7 +1,8 @@
 /**
  * Focused checks for Node visualization examples (#298).
  *
- * Constructs Cytoscape.js and Sigma.js payloads without opening a browser.
+ * Constructs Plotly.js, Cytoscape.js, and Sigma.js payloads without opening a
+ * browser.
  */
 
 import assert from "node:assert/strict";
@@ -13,6 +14,10 @@ import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import test from "node:test";
 import { project } from "../shared/projection.mjs";
+import {
+  toPlotlyFigure,
+  buildHtml as buildPlotlyHtml,
+} from "../node/plotly_example.mjs";
 import { toCytoscapeElements, buildHtml as buildCyHtml } from "../node/cytoscape_example.mjs";
 import {
   toGraphologyExport,
@@ -26,6 +31,18 @@ test("shared projection has karate counts via GraphForge", async () => {
   assert.equal(projection.projection_id, "karate-member-friend-v1");
   assert.equal(projection.nodes.length, 34);
   assert.equal(projection.edges.length, 78);
+});
+
+test("plotly.js builds figure and html artifact", async () => {
+  const projection = await project();
+  const figure = toPlotlyFigure(projection);
+  assert.equal(figure.data.length, 2);
+  assert.equal(figure.data[1].text.length, 34);
+  assert.equal(figure.data[0].x.filter((v) => v === null).length, 78);
+  const html = buildPlotlyHtml(figure);
+  assert.match(html, /Plotly\.newPlot/);
+  assert.match(html, /plotly-2\.35\.2/);
+  assert.match(html, /M1/);
 });
 
 test("cytoscape builds elements and html artifact", async () => {
@@ -52,7 +69,11 @@ test("sigma builds graphology export and html artifact", async () => {
 test("example scripts write artifacts", async () => {
   const out = mkdtempSync(join(tmpdir(), "gf-viz-node-"));
   try {
-    for (const script of ["cytoscape_example.mjs", "sigma_example.mjs"]) {
+    for (const script of [
+      "plotly_example.mjs",
+      "cytoscape_example.mjs",
+      "sigma_example.mjs",
+    ]) {
       const result = spawnSync(
         process.execPath,
         [join(ROOT, "node", script), "--output-dir", out],
@@ -60,6 +81,10 @@ test("example scripts write artifacts", async () => {
       );
       assert.equal(result.status, 0, result.stderr || result.stdout);
     }
+    assert.match(
+      readFileSync(join(out, "plotly_js_karate.html"), "utf8"),
+      /Plotly\.newPlot/,
+    );
     assert.match(
       readFileSync(join(out, "cytoscape_karate.html"), "utf8"),
       /cytoscape/,
