@@ -198,6 +198,18 @@ jobs:
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
 
+      - name: Load reviewed npm recovery publisher
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          git show refs/remotes/origin/main:scripts/publish_npm_artifacts.py \
+            > "$RUNNER_TEMP/publish_npm_artifacts.py"
+          install -m 0755 \
+            "$RUNNER_TEMP/publish_npm_artifacts.py" \
+            scripts/publish_npm_artifacts.py
+
       - uses: actions/setup-node@v6
         with:
           node-version: "20"

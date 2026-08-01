@@ -126,6 +126,8 @@ assert "candidate/release-artifacts/python/*" in pypi_job
 npm_job = workflow.split("  publish-npm:\n", 1)[1].split("\n  publish-crates:", 1)[0]
 assert "needs: [candidate-preflight, publish-pypi]" in npm_job
 assert "scripts/publish_npm_artifacts.py" in npm_job
+assert "Load reviewed npm recovery publisher" in npm_job
+assert "refs/remotes/origin/main:scripts/publish_npm_artifacts.py" in npm_job
 assert "--group native" in npm_job
 assert "--group cli" in npm_job
 assert "--group skills" in npm_job
