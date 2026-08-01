@@ -20,8 +20,8 @@ field. The public node set is fixed:
 - `@curatelabs/graphforge-cli` and
   `@curatelabs/graphforge-agent-skills`.
 
-Every archive records its byte length, SHA-256, SRI integrity, package identity,
-required files, member count, and an inventory digest. Validation reopens the
+Every archive records its byte length, SHA-256, SHA-256/SHA-512 SRI integrities,
+package identity, required files, member count, and an inventory digest. Validation reopens the
 exact archive and compares those facts. It rejects missing Python import/native
 surfaces, Node entrypoints or types, native addons, CLI/skills entrypoints, crate
 sources, legal files, or exact-version first-party dependency metadata—even when

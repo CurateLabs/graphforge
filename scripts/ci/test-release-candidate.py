@@ -234,6 +234,10 @@ def main() -> None:
         validated = release_candidate.validate(manifest_path, artifacts, SHA, VERSION)
         assert len(validated["nodes"]) == 24
         assert len(release_candidate.npm_paths(validated)) == 8
+        assert all(
+            [value.split("-", 1)[0] for value in item["integrities"]] == ["sha256", "sha512"]
+            for item in validated["artifacts"]
+        )
         assert set(validated["publication_states"]) == set(manifest_module.PUBLICATION_STATES)
         rebuilt = manifest_module.build_manifest(
             version=VERSION,

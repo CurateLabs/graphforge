@@ -73,12 +73,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _integrity(path: Path) -> str:
-    digest = hashlib.sha256()
+def _integrities(path: Path) -> list[str]:
+    digests = (hashlib.sha256(), hashlib.sha512())
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256-" + base64.b64encode(digest.digest()).decode("ascii")
+            for digest in digests:
+                digest.update(chunk)
+    return [
+        f"{digest.name}-" + base64.b64encode(digest.digest()).decode("ascii") for digest in digests
+    ]
 
 
 def _safe_relative(value: str, *, context: str) -> str:
@@ -503,6 +506,7 @@ def scan_dist(dist_dir: Path, version: str) -> list[dict[str, Any]]:
                 name = archive["package"]["name"]
             except CandidateError as error:
                 inspection_error = str(error)
+        integrities = _integrities(path)
         artifacts.append(
             {
                 "path": relative,
@@ -514,7 +518,8 @@ def scan_dist(dist_dir: Path, version: str) -> list[dict[str, Any]]:
                 "filename": path.name,
                 "bytes": path.stat().st_size,
                 "sha256": sha256_file(path),
-                "integrity": _integrity(path),
+                "integrity": integrities[0],
+                "integrities": integrities,
                 "archive": archive,
                 **({"inspection_error": inspection_error} if inspection_error else {}),
             }
@@ -749,7 +754,8 @@ def validate(
             raise CandidateError(f"artifacts[{index}] has an invalid SHA-256")
         if sha256_file(path) != digest:
             raise CandidateError(f"artifact checksum mismatch: {relative}")
-        if item.get("integrity") != _integrity(path):
+        integrities = _integrities(path)
+        if item.get("integrity") != integrities[0] or item.get("integrities") != integrities:
             raise CandidateError(f"artifact integrity mismatch: {relative}")
         if item.get("bytes") != path.stat().st_size:
             raise CandidateError(f"artifact byte count mismatch: {relative}")
