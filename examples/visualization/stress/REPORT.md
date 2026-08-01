@@ -9,32 +9,34 @@
 ## Status
 
 - Methodology frozen in [`METHODOLOGY.md`](METHODOLOGY.md) before recorded runs.
-- Depends on the #298 shared projection contract (provisional bridge in
-  `harness/contract.py` until #298 merges `examples/visualization/shared`).
+- Uses the #298 / #312 shared modules under `examples/visualization/shared/`
+  (and `dataset/`); offline fixture fallback remains for unit tests only.
 - Checked-in `results/results-latest.json` currently reflects a **local**
-  dry-run (`--no-graphforge --max-nodes 34`) that exercises all five options on
+  dry-run (`--no-graphforge --max-nodes 34`) that exercises all six options on
   the karate ladder. Replace/augment with the `workflow_dispatch` artifact from
   `Visualization Limits Stress` for CI-class evidence on the full ladder.
 
 ## Options in scope
 
-All five options remain in the comparison, including awkward or failing cases:
+All six options remain in the comparison, including awkward or failing cases:
 
 1. Plotly (Python)
-2. Jaal (Python / Dash)
-3. PyVis (Python)
-4. Cytoscape.js (Node, headless)
-5. Sigma.js (Node / graphology headless)
+2. Plotly.js (Node, figure JSON)
+3. Jaal (Python / Dash)
+4. PyVis (Python)
+5. Cytoscape.js (Node, headless)
+6. Sigma.js (Node / graphology headless)
 
 ## Local dry-run (karate ladder, no GraphForge binding)
 
 Environment: local developer machine; GraphForge projection bypassed
 (`graphforge_projection_seconds = 0`). Largest step: `karate_full` (34 nodes /
-78 edges). All five options succeeded at every karate step.
+78 edges). All six options succeeded at every karate step.
 
 | option | largest success | first failure/timeout | notes |
 | --- | --- | --- | --- |
 | plotly | `karate_full` (34 / 78) | none on karate ladder | Circular layout compromise |
+| plotly_js | `karate_full` (34 / 78) | none on karate ladder | Same circular figure JSON; no DOM |
 | jaal | `karate_full` (34 / 78) | none on karate ladder | `Jaal.create()` only; no HTTP server |
 | pyvis | `karate_full` (34 / 78) | none on karate ladder | HTML artifact ~largest payload on this ladder |
 | cytoscape | `karate_full` (34 / 78) | none on karate ladder | Headless; no DOM layout |

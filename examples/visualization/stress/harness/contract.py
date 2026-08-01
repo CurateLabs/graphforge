@@ -1,22 +1,24 @@
-"""Shared projection contract bridge for #299.
+"""Stress-harness projection helpers for #299.
 
-Prefers #298 modules under ``examples/visualization/shared`` and
-``examples/visualization/dataset`` when present. Until that PR merges, a
-provisional loader builds the same ``karate-member-friend-v1`` projection
-shape from fixtures / on-demand downloads.
+Uses the canonical modules under ``examples/visualization/shared`` and
+``examples/visualization/dataset`` (landed with #298 / #312). Offline unit
+tests may fall back to committed karate fixtures when dataset fetch is
+unavailable; ladder steps above 34 nodes still download SNAP facebook_combined.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 import hashlib
 import importlib.util
 import json
+from pathlib import Path
 import re
 import sys
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+from urllib.error import URLError
 from urllib.request import urlretrieve
 
 STRESS_ROOT = Path(__file__).resolve().parents[1]
@@ -28,16 +30,34 @@ CACHE_DIR = STRESS_ROOT / ".cache"
 
 FACEBOOK_URL = "https://snap.stanford.edu/data/facebook_combined.txt.gz"
 
-# Matches examples/visualization/shared/contract.json from #298.
-PROJECTION_CONTRACT = {
-    "projection_id": "karate-member-friend-v1",
-    "node_label": "Member",
-    "edge_type": "FRIEND",
-    "directed": False,
-    "layout_seed": 42,
-    "node_fields": ["id", "label", "club_id"],
-    "edge_fields": ["source", "target"],
-}
+
+def _projection_contract() -> dict[str, Any]:
+    """Flatten shared/contract.json into the harness's lookup shape."""
+    path = SHARED_DIR / "contract.json"
+    if path.is_file():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return {
+            "projection_id": raw["projection_id"],
+            "node_label": "Member",
+            "edge_type": raw["edge"]["relationship_type"],
+            "directed": bool(raw["edge"]["directed"]),
+            "layout_seed": int(raw["layout"]["seed"]),
+            "node_fields": ["id", "label", "club_id"],
+            "edge_fields": ["source", "target"],
+        }
+    # Offline fallback when shared/ is absent (should not happen on main).
+    return {
+        "projection_id": "karate-member-friend-v1",
+        "node_label": "Member",
+        "edge_type": "FRIEND",
+        "directed": False,
+        "layout_seed": 42,
+        "node_fields": ["id", "label", "club_id"],
+        "edge_fields": ["source", "target"],
+    }
+
+
+PROJECTION_CONTRACT = _projection_contract()
 
 
 @dataclass(frozen=True)
@@ -117,11 +137,11 @@ def _try_load_298_projection() -> Any | None:
 
 def _parse_edge_list(path: Path) -> list[tuple[str, str]]:
     edges: list[tuple[str, str]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
             continue
-        parts = line.replace(",", "\t").split()
+        parts = stripped.replace(",", "\t").split()
         if len(parts) < 2:
             continue
         u, v = parts[0], parts[1]
@@ -170,7 +190,7 @@ def ensure_facebook_edge_list() -> Path:
     if txt_path.is_file() and txt_path.stat().st_size > 0:
         return txt_path
     if not gz_path.is_file():
-        urlretrieve(FACEBOOK_URL, gz_path)  # noqa: S310 — fixed SNAP URL
+        urlretrieve(FACEBOOK_URL, gz_path)
     with gzip.open(gz_path, "rb") as src, txt_path.open("wb") as dst:
         dst.write(src.read())
     return txt_path
@@ -178,25 +198,29 @@ def ensure_facebook_edge_list() -> Path:
 
 def load_edge_list_dataset(name: str) -> tuple[list[tuple[str, str]], dict[str, Any]]:
     if name == "karate":
-        # Prefer #298 fetch + GML when available.
+        # Prefer the shared dataset fetch (#298) when available.
         fetch_mod = _load_module("graphforge_viz_dataset_fetch", DATASET_DIR / "fetch.py")
         if fetch_mod is not None:
-            extract_dir = fetch_mod.fetch_dataset()
-            gml_path = extract_dir / "karate.gml"
-            edges = parse_gml_undirected_edges(gml_path.read_text(encoding="utf-8"))
-            manifest = fetch_mod.load_manifest()
-            provenance = {
-                "dataset": manifest["id"],
-                "license": manifest["license"],
-                "source_url": manifest["source_url"],
-                "citation": manifest["citation"],
-                "checksum_sha256": manifest["archive"]["sha256"],
-                "node_count": manifest["graph"]["node_count"],
-                "edge_count": len(edges),
-                "projection_id": PROJECTION_CONTRACT["projection_id"],
-                "via": "examples/visualization/dataset/fetch.py",
-            }
-            return edges, provenance
+            try:
+                extract_dir = fetch_mod.fetch_dataset()
+                gml_path = extract_dir / "karate.gml"
+                edges = parse_gml_undirected_edges(gml_path.read_text(encoding="utf-8"))
+                manifest = fetch_mod.load_manifest()
+                provenance = {
+                    "dataset": manifest["id"],
+                    "license": manifest["license"],
+                    "source_url": manifest["source_url"],
+                    "citation": manifest["citation"],
+                    "checksum_sha256": manifest["archive"]["sha256"],
+                    "node_count": manifest["graph"]["node_count"],
+                    "edge_count": len(edges),
+                    "projection_id": PROJECTION_CONTRACT["projection_id"],
+                    "via": "examples/visualization/dataset/fetch.py",
+                }
+                return edges, provenance
+            except (OSError, URLError, SystemExit, RuntimeError, KeyError, ValueError):
+                # Fall through to committed fixtures for offline unit tests.
+                pass
 
         path = FIXTURES / "karate_edges.txt"
         nodes_meta = json.loads((FIXTURES / "karate_nodes.json").read_text(encoding="utf-8"))
@@ -212,10 +236,8 @@ def load_edge_list_dataset(name: str) -> tuple[list[tuple[str, str]], dict[str, 
             "checksum_sha256": _sha256_file(path),
             "node_count": len(nodes_meta["nodes"]),
             "edge_count": len(edges),
-            "projection_id": nodes_meta.get(
-                "projection_id", PROJECTION_CONTRACT["projection_id"]
-            ),
-            "via": "stress/fixtures provisional (#298 shared not present)",
+            "projection_id": nodes_meta.get("projection_id", PROJECTION_CONTRACT["projection_id"]),
+            "via": "stress/fixtures offline fallback",
         }
         return edges, provenance
 
@@ -341,9 +363,7 @@ def projection_from_298_dict(payload: dict[str, Any], *, elapsed: float) -> Grap
         )
         for row in payload["edges"]
     ]
-    checksum = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode()
-    ).hexdigest()
+    checksum = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
     return GraphProjection(
         nodes=nodes,
         edges=edges,
@@ -351,9 +371,7 @@ def projection_from_298_dict(payload: dict[str, Any], *, elapsed: float) -> Grap
         dataset_checksum=checksum,
         directed=bool(payload.get("directed", False)),
         layout_seed=int(payload.get("layout_seed", PROJECTION_CONTRACT["layout_seed"])),
-        projection_id=str(
-            payload.get("projection_id", PROJECTION_CONTRACT["projection_id"])
-        ),
+        projection_id=str(payload.get("projection_id", PROJECTION_CONTRACT["projection_id"])),
         provenance={
             "via": "examples/visualization/shared/projection.py",
             "graphforge_projection_seconds_hint": elapsed,
@@ -444,8 +462,10 @@ def _arrow_rows(table: Any) -> list[dict[str, Any]]:
         data = table.to_pydict()
         n = len(next(iter(data.values()))) if data else 0
         return [{k: data[k][i] for k in data} for i in range(n)]
-    names = list(table.schema.names) if hasattr(table, "schema") else list(
-        getattr(table, "column_names", [])
+    names = (
+        list(table.schema.names)
+        if hasattr(table, "schema")
+        else list(getattr(table, "column_names", []))
     )
     data = {name: table.column(name).to_pylist() for name in names}
     return [{k: data[k][i] for k in data} for i in range(table.num_rows)]
@@ -465,14 +485,9 @@ def build_step_projection(
 ) -> tuple[GraphProjection, float]:
     """Return projection for a ladder step and GraphForge projection seconds."""
     shared = _try_load_298_projection()
-    # Full #298 projection only covers karate (34). Use it when the step fits
+    # Shared projection covers full karate (34). Use it when the step fits
     # and GraphForge is requested; still apply deterministic subgraph sampling.
-    if (
-        shared is not None
-        and use_graphforge
-        and target_nodes <= 34
-        and hasattr(shared, "project")
-    ):
+    if shared is not None and use_graphforge and target_nodes <= 34 and hasattr(shared, "project"):
         started = time.perf_counter()
         try:
             full = shared.project()
@@ -495,10 +510,7 @@ def build_step_projection(
                 if str(n["id"]) in selected
             ]
             nodes.sort(key=lambda n: n.club_id)
-            proj_edges = [
-                ProjectionEdge(source=u, target=v)
-                for u, v in sub_edges
-            ]
+            proj_edges = [ProjectionEdge(source=u, target=v) for u, v in sub_edges]
             checksum = hashlib.sha256(
                 json.dumps(
                     {"nodes": [n.club_id for n in nodes], "edges": sub_edges},
@@ -512,13 +524,9 @@ def build_step_projection(
                     dataset_id="zachary-karate-club",
                     dataset_checksum=checksum,
                     directed=bool(full.get("directed", False)),
-                    layout_seed=int(
-                        full.get("layout_seed", PROJECTION_CONTRACT["layout_seed"])
-                    ),
+                    layout_seed=int(full.get("layout_seed", PROJECTION_CONTRACT["layout_seed"])),
                     projection_id=str(
-                        full.get(
-                            "projection_id", PROJECTION_CONTRACT["projection_id"]
-                        )
+                        full.get("projection_id", PROJECTION_CONTRACT["projection_id"])
                     ),
                     provenance={
                         "via": "examples/visualization/shared/projection.project",

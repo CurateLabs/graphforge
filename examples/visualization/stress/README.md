@@ -5,7 +5,7 @@ Apples-to-apples stress harness over the shared #298 projection contract for:
 | Runtime | Option |
 | --- | --- |
 | Python | Plotly, Jaal, PyVis |
-| Node.js | Cytoscape.js, Sigma.js |
+| Node.js | Plotly.js, Cytoscape.js, Sigma.js |
 
 ## Not a CI/release gate
 

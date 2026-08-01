@@ -8,6 +8,7 @@ visualizations for:
 | Python | Plotly | `python/plotly_example.py` |
 | Python | Jaal | `python/jaal_example.py` |
 | Python | PyVis | `python/pyvis_example.py` |
+| Node.js | Plotly.js | `node/plotly_example.mjs` |
 | Node.js | Cytoscape.js | `node/cytoscape_example.mjs` |
 | Node.js | Sigma.js | `node/sigma_example.mjs` |
 
@@ -43,6 +44,7 @@ node examples/visualization/shared/projection.mjs
 python examples/visualization/python/plotly_example.py
 python examples/visualization/python/pyvis_example.py
 python examples/visualization/python/jaal_example.py
+node examples/visualization/node/plotly_example.mjs
 node examples/visualization/node/cytoscape_example.mjs
 node examples/visualization/node/sigma_example.mjs
 ```

@@ -11,7 +11,7 @@ same projection contract.
 ## What is measured
 
 Maintainers can run an **opt-in** harness that walks a deterministic size ladder
-for Plotly, Jaal, PyVis, Cytoscape.js, and Sigma.js, recording:
+for Plotly (Python), Plotly.js, Jaal, PyVis, Cytoscape.js, and Sigma.js, recording:
 
 - GraphForge projection time (public API only)
 - Visualization input preparation time

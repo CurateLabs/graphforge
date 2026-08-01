@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import time
-from pathlib import Path
 from typing import Any
 
 from ..contract import GraphProjection
@@ -16,10 +16,7 @@ NODE_DIR = Path(__file__).resolve().parents[2] / "node"
 def render(projection: GraphProjection) -> dict[str, Any]:
     prep_started = time.perf_counter()
     request = {
-        "nodes": [
-            {"id": n.id, "label": n.label, "club_id": n.club_id}
-            for n in projection.nodes
-        ],
+        "nodes": [{"id": n.id, "label": n.label, "club_id": n.club_id} for n in projection.nodes],
         "edges": [
             {
                 "id": f"e-{e.source}-{e.target}",
@@ -46,9 +43,7 @@ def render(projection: GraphProjection) -> dict[str, Any]:
     )
     init_seconds = time.perf_counter() - init_started
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"sigma_render.mjs failed ({proc.returncode}): {proc.stderr.strip()}"
-        )
+        raise RuntimeError(f"sigma_render.mjs failed ({proc.returncode}): {proc.stderr.strip()}")
     response = json.loads(proc.stdout)
     return {
         "viz_prep_seconds": prep_seconds,

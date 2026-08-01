@@ -115,7 +115,7 @@ diagnostic only.
 ### `visualization-limits-stress.yml`
 
 Maintainer `workflow_dispatch` only. Runs the #299 visualization limits harness
-(Plotly, Jaal, PyVis, Cytoscape.js, Sigma.js) on a standard hosted runner,
+(Plotly, Plotly.js, Jaal, PyVis, Cytoscape.js, Sigma.js) on a standard hosted runner,
 uploads machine-readable evidence, and is never a PR, push, scheduled, required,
 or release gate. See [`examples/visualization/stress/`](../../examples/visualization/stress/).
 

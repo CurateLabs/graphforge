@@ -1,4 +1,4 @@
-"""Cytoscape.js adapter — delegates payload construction to Node."""
+"""Plotly.js adapter — delegates figure JSON construction to Node."""
 
 from __future__ import annotations
 
@@ -15,37 +15,29 @@ NODE_DIR = Path(__file__).resolve().parents[2] / "node"
 
 def render(projection: GraphProjection) -> dict[str, Any]:
     prep_started = time.perf_counter()
-    elements = {
-        "nodes": [
-            {
-                "data": {
-                    "id": n.id,
-                    "label": n.label,
-                    "club_id": n.club_id,
-                }
-            }
-            for n in projection.nodes
-        ],
+    request = {
+        "nodes": [{"id": n.id, "label": n.label, "club_id": n.club_id} for n in projection.nodes],
         "edges": [
             {
-                "data": {
-                    "id": f"e-{e.source}-{e.target}",
-                    "source": e.source,
-                    "target": e.target,
-                    "type": e.type,
-                }
+                "id": f"e-{e.source}-{e.target}",
+                "source": e.source,
+                "target": e.target,
+                "type": e.type,
             }
             for e in projection.edges
         ],
-    }
-    request = {
-        "elements": elements,
         "layout_seed": projection.layout_seed,
+        "style": {
+            "node_size": 8,
+            "node_color": "#2E86AB",
+            "edge_width": 0.5,
+            "edge_color": "#888",
+        },
     }
     prep_seconds = time.perf_counter() - prep_started
 
     init_started = time.perf_counter()
-    script = NODE_DIR / "cytoscape_render.mjs"
+    script = NODE_DIR / "plotly_render.mjs"
     proc = subprocess.run(
         ["node", str(script)],
         input=json.dumps(request),
@@ -56,18 +48,16 @@ def render(projection: GraphProjection) -> dict[str, Any]:
     )
     init_seconds = time.perf_counter() - init_started
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"cytoscape_render.mjs failed ({proc.returncode}): {proc.stderr.strip()}"
-        )
+        raise RuntimeError(f"plotly_render.mjs failed ({proc.returncode}): {proc.stderr.strip()}")
     response = json.loads(proc.stdout)
     return {
         "viz_prep_seconds": prep_seconds,
         "renderer_init_seconds": init_seconds + float(response.get("construct_seconds", 0)),
         "payload_bytes": int(response["payload_bytes"]),
-        "artifact_kind": "cytoscape_elements_json",
+        "artifact_kind": "plotly_js_json",
         "divergence_notes": response.get(
             "divergence_notes",
-            "Headless Cytoscape.js constructs the element graph; no browser layout run.",
+            "Plotly.js figure JSON construction; no DOM/Plotly.newPlot.",
         ),
         "payload_preview": response.get("payload_preview", ""),
     }

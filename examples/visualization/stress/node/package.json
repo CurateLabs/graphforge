@@ -2,8 +2,9 @@
   "name": "graphforge-visualization-stress",
   "private": true,
   "version": "0.0.0",
+  "license": "Apache-2.0",
   "type": "module",
-  "description": "Headless Cytoscape.js / Sigma.js construction probes for issue #299",
+  "description": "Headless Plotly.js / Cytoscape.js / Sigma.js construction probes for issue #299",
   "dependencies": {
     "cytoscape": "^3.32.0",
     "graphology": "^0.25.4",

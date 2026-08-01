@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 STRESS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(STRESS_ROOT))
 
-from harness.contract import build_step_projection
-from harness.adapters import ADAPTERS
+from harness.adapters import ADAPTERS  # noqa: E402
+from harness.contract import build_step_projection  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -29,6 +29,14 @@ def test_plotly_construct(small_projection) -> None:
     outcome = ADAPTERS["plotly"][1](small_projection)
     assert outcome["payload_bytes"] > 0
     assert outcome["artifact_kind"] == "plotly_json"
+
+
+def test_plotly_js_construct(small_projection) -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    outcome = ADAPTERS["plotly_js"][1](small_projection)
+    assert outcome["payload_bytes"] > 0
+    assert outcome["artifact_kind"] == "plotly_js_json"
 
 
 def test_pyvis_construct(small_projection) -> None:

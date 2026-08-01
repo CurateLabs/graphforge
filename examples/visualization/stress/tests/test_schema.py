@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-
-import pytest
+import sys
 
 STRESS_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(STRESS_ROOT))
 
-from harness.contract import sample_subgraph, load_edge_list_dataset, projection_from_edges
-from harness.schema import (
+from harness.contract import (  # noqa: E402
+    load_edge_list_dataset,
+    projection_from_edges,
+    sample_subgraph,
+)
+from harness.schema import (  # noqa: E402
     OPTIONS,
     RESULT_SCHEMA_VERSION,
     empty_result,
@@ -52,8 +54,15 @@ def test_result_schema_rejects_unknown_option() -> None:
     assert any("unknown option" in err for err in validate_result_record(record))
 
 
-def test_all_five_options_listed() -> None:
-    assert set(OPTIONS) == {"plotly", "jaal", "pyvis", "cytoscape", "sigma"}
+def test_all_options_listed() -> None:
+    assert set(OPTIONS) == {
+        "plotly",
+        "plotly_js",
+        "jaal",
+        "pyvis",
+        "cytoscape",
+        "sigma",
+    }
     assert RESULT_SCHEMA_VERSION == "1.0.0"
 
 
@@ -80,7 +89,7 @@ def test_deterministic_subgraph_selection() -> None:
 
 def test_projection_contract_fields() -> None:
     edges, provenance = load_edge_list_dataset("karate")
-    nodes, sub = sample_subgraph(edges, 10, 29901)
+    _nodes, sub = sample_subgraph(edges, 10, 29901)
     projection = projection_from_edges(
         sub,
         dataset_id=provenance["dataset"],

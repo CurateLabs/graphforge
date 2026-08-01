@@ -5,19 +5,18 @@ resource-observation method **before** a recorded CI-class run.
 
 ## Dependency on #298
 
-The harness consumes the shared visualization projection contract established
-by [#298](https://github.com/CurateLabs/graphforge/issues/298):
+The harness consumes the shared visualization projection modules landed with
+[#298](https://github.com/CurateLabs/graphforge/issues/298) / [#312](https://github.com/CurateLabs/graphforge/pull/312):
 
-- projection id `karate-member-friend-v1`
-- node fields: `id` / `club_id`, `label` (`M{club_id}`)
-- edge fields: `source`, `target` (undirected `FRIEND`)
-- layout seed `42` (circular positions where a library has no seeded layout)
+- `examples/visualization/shared/contract.json` — projection id
+  `karate-member-friend-v1`, layout seed `42`, undirected `FRIEND`
+- `examples/visualization/shared/projection.py` — GraphForge public-API projection
+- `examples/visualization/dataset/fetch.py` — verified karate GML fetch
 
-Until #298 merges its `examples/visualization/shared` modules, the harness uses
-a provisional loader in `harness/contract.py` that builds the same shape via
-GraphForge's public Python API (`add_node` / `add_edge` / `execute`) or a pure
-Python fallback for unit tests. When #298 lands, `contract.py` prefers the
-shared `build_step_projection` entrypoint automatically.
+`harness/contract.py` loads those modules directly for karate-sized steps.
+Offline unit tests may use committed `fixtures/` when dataset fetch is
+unavailable; ladder steps above 34 nodes download SNAP `facebook_combined`
+on demand.
 
 ## Datasets
 
@@ -69,7 +68,8 @@ For each visualization option independently:
 
 | Option | Compromise |
 | --- | --- |
-| Plotly | No native graph layout; deterministic circular coordinates from the shared seed |
+| Plotly (Python) | No native graph layout; deterministic circular coordinates from the shared seed |
+| Plotly.js | Same circular-layout figure JSON as Python; no DOM/`Plotly.newPlot` in the probe |
 | Jaal | Measures `Jaal.create()` dashboard construction; does not serve HTTP or open a browser |
 | PyVis | Barnes-Hut physics are engine-internal; shared seed is recorded but not injected into vis.js |
 | Cytoscape.js | Headless element + position construction; no DOM layout tick |

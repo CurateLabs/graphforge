@@ -30,6 +30,7 @@ VALID_STATUSES = frozenset({"success", "failure", "timeout", "resource_limit", "
 
 OPTIONS = (
     "plotly",
+    "plotly_js",
     "jaal",
     "pyvis",
     "cytoscape",

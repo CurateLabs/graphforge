@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 STRESS_ROOT = ROOT / "examples" / "visualization" / "stress"
@@ -37,17 +37,24 @@ def test_size_ladder_frozen_before_run() -> None:
 
 
 def test_dispatch_only_workflow_has_no_pr_push_schedule() -> None:
-    workflow = (
-        ROOT / ".github" / "workflows" / "visualization-limits-stress.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "visualization-limits-stress.yml").read_text(
+        encoding="utf-8"
+    )
     assert "workflow_dispatch" in workflow
     # Guard against accidentally wiring this into routine CI.
     for forbidden in ("pull_request:", "push:", "schedule:"):
         assert forbidden not in workflow
 
 
-def test_result_schema_and_five_options() -> None:
-    assert set(OPTIONS) == {"plotly", "jaal", "pyvis", "cytoscape", "sigma"}
+def test_result_schema_and_options() -> None:
+    assert set(OPTIONS) == {
+        "plotly",
+        "plotly_js",
+        "jaal",
+        "pyvis",
+        "cytoscape",
+        "sigma",
+    }
     record = empty_result(
         option="sigma",
         runtime="node",

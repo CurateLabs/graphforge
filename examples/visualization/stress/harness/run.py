@@ -8,14 +8,14 @@ or via the workflow_dispatch-only GitHub Actions workflow.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import platform
 import resource
 import sys
 import traceback
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 STRESS_ROOT = Path(__file__).resolve().parents[1]
@@ -53,24 +53,24 @@ def _env_manifest() -> dict[str, Any]:
         import graphforge
 
         versions["graphforge"] = getattr(graphforge, "__version__", "unknown")
-    except Exception as exc:  # noqa: BLE001 — manifest must not fail the run
+    except Exception as exc:
         versions["graphforge"] = f"unavailable: {exc}"
     for pkg in ("plotly", "jaal", "pyvis", "pandas", "networkx"):
         try:
             mod = __import__(pkg)
             versions[pkg] = getattr(mod, "__version__", "unknown")
-        except Exception:
+        except Exception:  # noqa: PERF203 — optional deps probed independently
             versions[pkg] = "not-installed"
     try:
         import subprocess
 
-        node = subprocess.run(
-            ["node", "-v"], capture_output=True, text=True, check=False
-        )
+        node = subprocess.run(["node", "-v"], capture_output=True, text=True, check=False)
         versions["node"] = node.stdout.strip() or node.stderr.strip()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         versions["node"] = f"unavailable: {exc}"
-    mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") if hasattr(os, "sysconf") else None
+    mem_bytes = (
+        os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") if hasattr(os, "sysconf") else None
+    )
     try:
         if mem_bytes is None:
             raise AttributeError
@@ -177,7 +177,7 @@ def run_matrix(
                 record["peak_rss_mb"] = _peak_rss_mb()
                 if stop_on_failure:
                     stopped[option] = str(exc)
-            except Exception as exc:  # noqa: BLE001 — failures are recorded outcomes
+            except Exception as exc:
                 record["status"] = "failure"
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 record["traceback"] = traceback.format_exc(limit=5)
@@ -254,9 +254,7 @@ def _write_markdown_summary(report: dict[str, Any], path: Path) -> None:
     lines.extend(["", "## Per-option largest success", ""])
     for option in OPTIONS:
         successes = [
-            r
-            for r in report["results"]
-            if r["option"] == option and r["status"] == "success"
+            r for r in report["results"] if r["option"] == option and r["status"] == "success"
         ]
         if not successes:
             lines.append(f"- **{option}**: no successful step")
@@ -275,9 +273,7 @@ def _write_markdown_summary(report: dict[str, Any], path: Path) -> None:
             if r["option"] == option and r["status"] in {"failure", "timeout", "resource_limit"}
         ]
         for err in err_rows:
-            lines.append(
-                f"  - {err['status']} at `{err['step_id']}`: {err.get('error')}"
-            )
+            lines.append(f"  - {err['status']} at `{err['step_id']}`: {err.get('error')}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
