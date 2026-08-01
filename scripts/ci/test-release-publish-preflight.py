@@ -109,7 +109,10 @@ assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
 assert "Never print the value" in crates
 assert "secrets.NPM_TOKEN" not in crates
 assert "Refresh this node before authorize" in crates
-assert 'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live' in crates
+assert (
+    'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
+    in crates
+)
 observe_before_authorize = crates.index(
     'release_registry.py observe --manifest "candidate/$MANIFEST_NAME" --node "$node" --live'
 )
