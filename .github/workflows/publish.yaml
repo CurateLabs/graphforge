@@ -555,6 +555,9 @@ jobs:
             > "$RUNNER_TEMP/crate-authorize-refresh-nodes.py"
           install -m 0755 "$RUNNER_TEMP/crate-authorize-refresh-nodes.py" \
             scripts/ci/crate-authorize-refresh-nodes.py
+          git show refs/remotes/origin/main:scripts/ci/release_registry.py \
+            > "$RUNNER_TEMP/release_registry.py"
+          install -m 0755 "$RUNNER_TEMP/release_registry.py" scripts/ci/release_registry.py
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"

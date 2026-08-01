@@ -99,8 +99,8 @@ mod.cargo_publish(
     now=lambda: fixed_now,
 )
 assert publish_calls == [
-    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
-    ["cargo", "publish", "-p", "graphforge-plan", "--locked"],
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"],
+    ["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"],
 ]
 assert sleeps == [268 + mod.RATE_LIMIT_BUFFER_SECONDS]
 
@@ -129,7 +129,7 @@ try:
     raise AssertionError("expected non-429 publish failure")
 except subprocess.CalledProcessError as exc:
     assert exc.returncode == 101
-assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked"]]
+assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"]]
 assert sleeps == []
 
 published: list[str] = []

@@ -153,8 +153,14 @@ def cargo_publish(
     run_publish: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> None:
-    """Run ``cargo publish`` for one crate, sleeping through bounded 429 waits."""
-    command = ["cargo", "publish", "-p", name, "--locked"]
+    """Run ``cargo publish`` for one crate, sleeping through bounded 429 waits.
+
+    Uses ``--no-verify`` to match certified Binding RC packaging. Some crates
+    (notably ``graphforge-cli``) embed workspace paths such as ``project-skills``
+    that are outside the packaged tarball; verify would fail while the certified
+    checksum gate still requires those exact bytes.
+    """
+    command = ["cargo", "publish", "-p", name, "--locked", "--no-verify"]
     runner = run_publish or _default_cargo_publish_run
     clock = now or (lambda: datetime.now(timezone.utc))
     waited = 0.0
