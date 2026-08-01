@@ -606,6 +606,17 @@ def main() -> None:
     assert "--version 0.5.0" not in release_candidate_job
     assert "${crate}-0.5.0.crate" not in release_candidate_job
     assert "scripts/ci/release-candidate.py validate" in rc_workflow_text
+    assert "Create the pre-rehearsal candidate manifest" in release_candidate_job
+    assert "Rehearse exact partitioned release artifacts offline" in release_candidate_job
+    assert "scripts/ci/release_rehearsal.py artifacts" in release_candidate_job
+    assert "--manifest candidate/rehearsal-manifest.json" in release_candidate_job
+    assert "--out candidate/release-artifacts/evidence/offline-rehearsal.json" in (
+        release_candidate_job
+    )
+    assert "rm candidate/rehearsal-manifest.json" in release_candidate_job
+    assert release_candidate_job.index("Rehearse exact partitioned release artifacts offline") < (
+        release_candidate_job.index("Create and validate the immutable candidate manifest")
+    )
     assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
         rc_workflow_text
     )

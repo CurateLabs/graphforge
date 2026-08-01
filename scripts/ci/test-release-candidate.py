@@ -87,7 +87,7 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
         )
         members.update(
             {
-                "package/index.js": b"module.exports = {}\n",
+                "package/index.js": (f"exports.version = () => '{package_version}';\n").encode(),
                 "package/index.d.ts": b"export declare function version(): string\n",
                 "package/lib/index.mjs": b"export const loaded = true\n",
                 "package/THIRD_PARTY_NOTICES.md": b"Third party",
@@ -102,7 +102,10 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
         )
         members.update(
             {
-                "package/bin/graphforge.js": b"#!/usr/bin/env node\n",
+                "package/bin/graphforge.js": (
+                    b"#!/usr/bin/env node\n"
+                    b"process.stdout.write(JSON.stringify({contract:'fixture'}));\n"
+                ),
                 "package/lib/run.mjs": b"export function run() {}\n",
                 "package/THIRD_PARTY_NOTICES.md": b"Third party",
             }
@@ -112,7 +115,10 @@ def npm_members(name: str, *, package_version: str = VERSION) -> dict[str, bytes
         metadata["graphforgeCompatibility"] = {"release": package_version}
         members.update(
             {
-                "package/bin/graphforge-agent-skills.js": b"#!/usr/bin/env node\n",
+                "package/bin/graphforge-agent-skills.js": (
+                    "#!/usr/bin/env node\n"
+                    f"process.stdout.write(JSON.stringify({{graphforge_release:'{package_version}'}}));\n"
+                ).encode(),
                 "package/adapter/index.js": b"export {}\n",
                 "package/schemas/validator.js": b"export {}\n",
                 "package/workflows/index.js": b"export {}\n",
@@ -353,6 +359,10 @@ def main() -> None:
     print("release-candidate tests: ok")
     subprocess.run(
         [sys.executable, str(Path(__file__).with_name("test-release-registry.py"))],
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("test-release-rehearsal.py"))],
         check=True,
     )
 
