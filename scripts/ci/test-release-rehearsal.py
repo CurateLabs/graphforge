@@ -207,8 +207,10 @@ def test_sequential_reconciliation() -> None:
     assert skipped["next_actions"][0]["kind"] == "publish"
 
     receipt = {
+        "schema": "graphforge-release-accepted-receipt-v1",
         "node_id": "npm:@curatelabs/graphforge",
         "version": manifest["version"],
+        "candidate_sha": manifest["commit_sha"],
         "accepted_at": "2030-01-01T12:00:00+00:00",
         "visibility_deadline": "2030-01-01T12:10:00+00:00",
         "observation_count": 0,

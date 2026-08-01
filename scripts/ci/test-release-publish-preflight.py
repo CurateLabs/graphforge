@@ -134,7 +134,7 @@ assert "release_rehearsal.py reconcile" in summary
 assert "M1-Release-Reconciliation-${{ github.run_id }}" in summary
 assert ".complete == true and (.nodes | length) == 24" in summary
 
-assert "time.sleep" not in workflow
+assert "sleep" not in workflow
 assert "continue-on-error" not in workflow
 assert "|| true" not in workflow
 assert WRITE_EVIDENCE.is_file()

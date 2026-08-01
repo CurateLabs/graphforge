@@ -144,10 +144,16 @@ def _receipt(
     *,
     node_id: str,
     version: str,
+    candidate_sha: str,
 ) -> dict[str, Any] | None:
     if value is None:
         return None
-    if value.get("node_id") != node_id or value.get("version") != version:
+    if (
+        value.get("schema") != "graphforge-release-accepted-receipt-v1"
+        or value.get("node_id") != node_id
+        or value.get("version") != version
+        or value.get("candidate_sha") != candidate_sha
+    ):
         raise RegistryError("accepted-write receipt identity diverges from the candidate")
     accepted_at = _parse_time(value.get("accepted_at"), field="receipt.accepted_at")
     deadline = _parse_time(value.get("visibility_deadline"), field="receipt.visibility_deadline")
@@ -385,7 +391,12 @@ def observe(
     expected = _node_expected(manifest, node_id)
     node = expected["node"]
     now = _parse_time(observed_at, field="observed_at")
-    receipt = _receipt(accepted_receipt, node_id=node_id, version=expected["version"])
+    receipt = _receipt(
+        accepted_receipt,
+        node_id=node_id,
+        version=expected["version"],
+        candidate_sha=expected["commit_sha"],
+    )
     if receipt is not None and now < _parse_time(
         receipt["accepted_at"], field="receipt.accepted_at"
     ):
@@ -797,10 +808,18 @@ def main(argv: list[str] | None = None) -> int:
                 for path in sorted(args.receipts_dir.glob("*.json")):
                     value = _load_json(path, context="accepted-write receipt")
                     node_id = value.get("node_id")
+                    if (
+                        value.get("schema") != "graphforge-release-accepted-receipt-v1"
+                        or node_id not in nodes
+                        or value.get("candidate_sha") != manifest["commit_sha"]
+                        or value.get("version") != manifest["version"]
+                    ):
+                        raise RegistryError(
+                            f"accepted-write receipt identity diverges: {path.name}"
+                        )
                     if node_id in receipts:
                         raise RegistryError(f"duplicate accepted-write receipt: {node_id}")
-                    if isinstance(node_id, str):
-                        receipts[node_id] = value
+                    receipts[node_id] = value
             attempts: dict[str, dict[str, Any]] = {}
             if args.attempts_dir:
                 for path in sorted(args.attempts_dir.glob("*.json")):

@@ -129,7 +129,9 @@ def authorize(
         planned_at=planned_at,
         registries={node["registry"]},
     )
-    decision = next(item for item in plan["decisions"] if item["node_id"] == node_id)
+    decision = next((item for item in plan["decisions"] if item["node_id"] == node_id), None)
+    if decision is None:
+        raise ActionError(f"planner returned no decision for node {node_id}")
     action = next((item for item in plan["actions"] if item["node_id"] == node_id), None)
     if decision["disposition"] not in {"publish", "skip_verified"}:
         raise ActionError(
@@ -160,8 +162,10 @@ def accepted_receipt(manifest: dict[str, Any], node_id: str, *, accepted_at: str
         raise ActionError("accepted_at must include a timezone")
     moment = moment.astimezone(timezone.utc)
     return {
+        "schema": "graphforge-release-accepted-receipt-v1",
         "node_id": node_id,
         "version": manifest["version"],
+        "candidate_sha": manifest["commit_sha"],
         "accepted_at": moment.isoformat(),
         "visibility_deadline": (moment + timedelta(minutes=15)).isoformat(),
         "observation_count": 0,

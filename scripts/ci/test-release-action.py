@@ -50,6 +50,21 @@ def test_partition() -> None:
         assert report["status"] == "passed"
         assert len(report["artifact_paths"]) == 8
         target = partition / npm_paths[0]
+        original = target.read_bytes()
+        target.write_bytes(b"\x00" * len(original))
+        try:
+            action.validate_partition(
+                manifest,
+                partition,
+                "npm",
+                expected_sha=candidate_fixture.SHA,
+                version=candidate_fixture.VERSION,
+                checked_at=manifest["recorded_at"],
+            )
+        except action.ActionError as error:
+            assert "checksum diverges" in str(error)
+        else:
+            raise AssertionError("same-size mutation passed validation")
         target.write_bytes(b"different")
         try:
             action.validate_partition(
@@ -121,8 +136,10 @@ def test_authorization() -> None:
         manifest, "pypi:graphforge", accepted_at="2030-01-01T12:00:00Z"
     )
     assert receipt == {
+        "schema": "graphforge-release-accepted-receipt-v1",
         "node_id": "pypi:graphforge",
         "version": manifest["version"],
+        "candidate_sha": manifest["commit_sha"],
         "accepted_at": "2030-01-01T12:00:00+00:00",
         "visibility_deadline": "2030-01-01T12:15:00+00:00",
         "observation_count": 0,
@@ -238,6 +255,34 @@ def test_observe_all() -> None:
             unknown = json.loads(output.read_text(encoding="utf-8"))["observations"]
             assert unknown[0]["state"] == "indeterminate"
             assert unknown[0]["reason"] == "write_attempt_outcome_unknown"
+            assert unknown[0]["evidence"]["attempt_started_at"] == ("2030-01-01T11:59:00+00:00")
+
+            receipts.mkdir(exist_ok=True)
+            bad_receipt = action.accepted_receipt(
+                manifest,
+                "pypi:graphforge",
+                accepted_at="2030-01-01T12:00:00Z",
+            )
+            bad_receipt["candidate_sha"] = "f" * 40
+            receipts.joinpath("pypi.json").write_text(json.dumps(bad_receipt), encoding="utf-8")
+            assert (
+                registry.main(
+                    [
+                        "observe-all",
+                        "--manifest",
+                        str(manifest_path),
+                        "--registry",
+                        "pypi",
+                        "--receipts-dir",
+                        str(receipts),
+                        "--observed-at",
+                        registry_fixture.NOW,
+                        "--out",
+                        str(output),
+                    ]
+                )
+                == 1
+            )
     finally:
         registry.live_response = original
 
