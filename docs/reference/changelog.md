@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep first-party crate path+version dependency pins on the same root
   version so Binding RC offline rehearsal and crates.io packaging accept
   the complete 15-crate graph (#192).
+- Generate the gitignored NAPI-RS `index.js` / `index.d.ts` entrypoints
+  during Binding RC candidate assembly so the main npm tarball is complete
+  before offline rehearsal (#192).
 - Replace the Python package README with a concise PyPI landing page: short
   purpose, install path, one minimal first-use example, and canonical
   `docs.graphforge.sh` links instead of a raw CLI command inventory (#304).
