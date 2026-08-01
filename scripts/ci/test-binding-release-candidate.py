@@ -602,7 +602,7 @@ def main() -> None:
     ), "assemble must generate gitignored index.js/index.d.ts before packing the main package"
     assert "test -f index.js" in release_candidate_job
     assert "test -f index.d.ts" in release_candidate_job
-    assert 'package/index.js' in release_candidate_job
+    assert "package/index.js" in release_candidate_job
     assert "pnpm --dir packages/cli pack" in release_candidate_job
     assert "pnpm --dir packages/agent-skills pack" in release_candidate_job
     assert 'cargo package "${package_args[@]}" --allow-dirty --no-verify' in (release_candidate_job)
