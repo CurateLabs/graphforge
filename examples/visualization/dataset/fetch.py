@@ -10,10 +10,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from pathlib import Path
 import sys
 import urllib.request
 import zipfile
-from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -47,7 +47,7 @@ def fetch_dataset(cache_dir: Path | None = None, *, force: bool = False) -> Path
     if force or not archive_path.is_file() or _sha256(archive_path) != expected_archive:
         url = manifest["source_url"]
         print(f"Downloading {url} -> {archive_path}", file=sys.stderr)
-        urllib.request.urlretrieve(url, archive_path)  # noqa: S310 — fixed URL from manifest
+        urllib.request.urlretrieve(url, archive_path)
 
     actual = _sha256(archive_path)
     if actual != expected_archive:

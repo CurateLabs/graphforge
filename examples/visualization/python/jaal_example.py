@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -84,8 +84,8 @@ def main() -> None:
             "Jaal.create()/plot() does not accept a layout seed; interactive viewing "
             "requires a Dash server (use --serve locally)."
         ),
-        "node_count": int(len(node_df)),
-        "edge_count": int(len(edge_df)),
+        "node_count": len(node_df),
+        "edge_count": len(edge_df),
         "nodes": node_df.to_dict(orient="records"),
         "edges": edge_df.to_dict(orient="records"),
         "app_constructed": app is not None,

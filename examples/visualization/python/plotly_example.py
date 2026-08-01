@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -50,7 +50,10 @@ def build_figure(projection: dict):
                 x=edge_x,
                 y=edge_y,
                 mode="lines",
-                line={"width": projection["style"]["edge_width"], "color": projection["style"]["edge_color"]},
+                line={
+                    "width": projection["style"]["edge_width"],
+                    "color": projection["style"]["edge_color"],
+                },
                 hoverinfo="none",
                 name="edges",
             ),

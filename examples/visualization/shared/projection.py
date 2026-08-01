@@ -7,9 +7,9 @@ returns a deterministic node/edge projection consumed by each library adapter.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -8,9 +8,10 @@ opening an interactive browser.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -85,7 +86,7 @@ def test_example_scripts_cli(tmp_path):
     """Smoke each example script end-to-end with GraphForge + artifact output."""
     out = tmp_path / "cli"
     out.mkdir()
-    env = {**dict(**{k: v for k, v in __import__("os").environ.items()}), "PYTHONPATH": str(ROOT)}
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
     scripts = [
         ROOT / "python" / "plotly_example.py",
         ROOT / "python" / "pyvis_example.py",
