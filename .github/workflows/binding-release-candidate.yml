@@ -472,7 +472,7 @@ jobs:
           pushd crates/graphforge-bindings-node
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts --output-dir artifacts --npm-dir npm
-          python3 ../../../scripts/ci/validate-napi-artifacts.py \
+          python3 "$GITHUB_WORKSPACE/scripts/ci/validate-napi-artifacts.py" \
             --npm-dir npm --manifest package.json
           pnpm exec napi pre-publish -t npm --skip-optional-publish
           for package_dir in npm/*; do
