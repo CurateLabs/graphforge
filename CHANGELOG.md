@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split pip/uv and npm/pnpm install examples into separate copyable
   code fences on the installation guide, quickstart, tutorial, and Python
   binding README (#301).
+- Restructure Quick Start for Python and Node paths with separate
+  copyable fences, and add a direct Studio (GraphForge for VS Code)
+  pointer to the Marketplace, Open VSX, and extension guide (#301).
 
 ## [0.5.1] - 2026-08-01
 
