@@ -593,6 +593,12 @@ def main() -> None:
     assert 'node-version: "22"' in release_candidate_job
     assert validator_from_workspace in release_candidate_job
     assert "../../../scripts/ci/validate-napi-artifacts.py" not in release_candidate_job
+    assert "--skip-optional-publish --no-gh-release" in release_candidate_job
+    assert 'npm pack "./$package_dir"' in release_candidate_job
+    assert "npm pack ./packages/cli" in release_candidate_job
+    assert "npm pack ./packages/agent-skills" in release_candidate_job
+    assert 'cargo package "${package_args[@]}" --allow-dirty --no-verify' in (release_candidate_job)
+    assert 'cargo package -p "$crate"' not in release_candidate_job
     assert "scripts/ci/release-candidate.py validate" in rc_workflow_text
     assert "M1-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}" in (
         rc_workflow_text
