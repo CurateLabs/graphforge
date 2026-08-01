@@ -61,6 +61,9 @@ mutations = [
     {"tag": "0.5.0"},
     {"actual_sha": "b" * 40},
     {"versions": {**versions, "python": "0.5.0.dev0"}},
+    # ADR 0017: a registry-specific adapter patch is forbidden even when the
+    # Rust and Python surfaces still agree.
+    {"versions": {**versions, "node": "0.5.1"}},
     {"changelog": changelog.replace("## [0.5.0] - 2026-07-31", "## [0.5.0]")},
     {"changelog": changelog.replace("_Nothing yet._", "- Stale release entry")},
     {

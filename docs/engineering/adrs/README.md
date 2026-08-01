@@ -7,7 +7,7 @@ Decisions are immutable once accepted: to change one, add a new ADR that superse
 ## Path coordination
 
 DocSlime’s canonical directory is `docs/engineering/adrs/`. GraphForge’s accepted ADR bodies
-live in [`../../adr/`](../../adr/) as a contiguous v0.5.0 sequence (`0001`–`0014`) after the
+live in [`../../adr/`](../../adr/) as one contiguous sequence after the
 [#2730](https://github.com/CurateLabs/graphforge-legecy/pull/2730) cull/renumber
 ([#2725](https://github.com/CurateLabs/graphforge-legecy/issues/2725)). This folder is an
 **index only** — do not duplicate ADR bodies or fork a second numbering sequence here.
@@ -53,3 +53,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0014 | Complete-workspace checkpoints | Accepted | [`../../adr/0014-workspace-checkpoints.md`](../../adr/0014-workspace-checkpoints.md) |
 | 0015 | Three embedded project-write modes | Accepted | [`../../adr/0015-embedded-write-modes.md`](../../adr/0015-embedded-write-modes.md) |
 | 0016 | Repository integration and deployment configuration boundary | Accepted | [`../../adr/0016-repository-integration-and-deployment-configuration.md`](../../adr/0016-repository-integration-and-deployment-configuration.md) |
+| 0017 | One version across core and adapters | Accepted | [`../../adr/0017-unified-release-version.md`](../../adr/0017-unified-release-version.md) |

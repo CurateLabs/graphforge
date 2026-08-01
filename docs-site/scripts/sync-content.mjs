@@ -110,7 +110,7 @@ const PAGES = [
   'development/clean-environment-verification.md',
   'development/release-strategy.md',
   'development/release-workflows.md',
-  // ADRs after #2725 cull/renumber (0001–0014)
+  // Accepted ADRs after #2725 cull/renumber.
   'adr/README.md',
   'adr/0001-rust-core.md',
   'adr/0002-lr1-grammar.md',
@@ -128,6 +128,7 @@ const PAGES = [
   'adr/0014-workspace-checkpoints.md',
   'adr/0015-embedded-write-modes.md',
   'adr/0016-repository-integration-and-deployment-configuration.md',
+  'adr/0017-unified-release-version.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

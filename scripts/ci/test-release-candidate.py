@@ -82,6 +82,20 @@ def main() -> None:
         else:
             raise AssertionError("checksum mutation should fail")
 
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp) / "artifacts"
+        record_path, artifacts_dir = _fixture(root)
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        npm_item = next(item for item in record["artifacts"] if item["surface"] == "npm")
+        npm_item["version"] = "0.5.1"
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+        try:
+            release_candidate.validate(record_path, artifacts_dir, "a" * 40, "0.5.0")
+        except release_candidate.CandidateError as error:
+            assert "artifact version mismatch" in str(error)
+        else:
+            raise AssertionError("ADR 0017 forbids npm/core version divergence")
+
     print("release-candidate tests: ok")
 
 

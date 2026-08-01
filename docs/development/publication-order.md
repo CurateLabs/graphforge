@@ -14,6 +14,20 @@ Related operational docs:
 [`release-process.md`](release-process.md),
 `.github/workflows/publish.yaml`.
 
+## Shared-version invariant
+
+[ADR 0017](../adr/0017-unified-release-version.md) applies to every normal and
+recovery path. The 15 public crates, PyPI package, npm main/native packages,
+CLI, and agent skills form one release set with one exact version. Package jobs
+may resume independently, but package versions may not.
+
+A partial publication has only two valid dispositions: resume an absent
+artifact from the same immutable candidate, or prepare one coordinated new
+version for the complete release set. A plan that advances only an adapter,
+registry, native package, CLI, skills package, or crate fails before every
+write. Existing tags, release records, and registry artifacts remain immutable
+historical evidence.
+
 ## Preconditions (must be true before step 1)
 
 1. §5 version freeze is complete: Cargo workspace, Python binding, Node binding,

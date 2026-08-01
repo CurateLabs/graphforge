@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Adopt ADR 0017's single-version release invariant: all public Rust crates,
+  Python and Node/native adapters, CLI, and agent skills must publish one exact
+  GraphForge version, and partial-publication recovery may not introduce
+  temporary or registry-specific version divergence (#292).
 - Split native binaries out of the main `@curatelabs/graphforge` npm tarball,
   and add the explicitly authorized v0.5.0 supplemental artifact/checksum
   record so the previously unpublished main package stays below npm's payload
