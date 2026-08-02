@@ -223,7 +223,14 @@ def cargo_publish(
             result = runner(command)
         finally:
             if trusted_token is not None:
-                revoke_trusted_publishing_token(trusted_token)
+                try:
+                    revoke_trusted_publishing_token(trusted_token)
+                except (OSError, urllib.error.URLError) as error:
+                    print(
+                        f"{name}: warning: Trusted Publishing token revocation failed "
+                        f"({type(error).__name__}); it will expire normally",
+                        file=sys.stderr,
+                    )
         if result.returncode == 0:
             _emit_process_output(result)
             return
