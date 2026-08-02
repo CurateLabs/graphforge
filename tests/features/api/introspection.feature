@@ -1,7 +1,7 @@
-@api @introspection @skip-node
+@api @introspection
 Feature: Introspection API
 
-  Scenario: schema returns Arrow Table describing node labels and properties
+  Scenario: schema returns Arrow Table describing present node labels
     Given a graph with a Person node named "Alice" and a Paper node titled "GNN"
     When I call schema
     Then the result is an Arrow Table

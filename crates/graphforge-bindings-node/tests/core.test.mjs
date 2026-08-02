@@ -106,27 +106,75 @@ function checkPreV1ProjectError() {
   }
 }
 
-function checkNotImplementedSurface() {
+function checkInspectionSurface() {
   const forge = new GraphForge();
-  const calls = {
-    schema: () => forge.schema(),
-    begin: () => forge.begin(),
-    labels: () => forge.labels(),
-    nodeCount: () => forge.nodeCount(),
-  };
-  for (const [name, call] of Object.entries(calls)) {
-    try {
-      call();
-    } catch (e) {
-      assert.equal(
-        e.code,
-        "NotImplementedError",
-        `${name}: got code=${e.code}`,
-      );
-      continue;
-    }
-    throw new Error(`expected NotImplementedError from ${name}()`);
+  forge.execute(
+    "CREATE (a:Person:Author), (b:Person), (p:Paper), " +
+      "(a)-[:AUTHORED]->(p), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(a)",
+  );
+
+  assert.deepEqual(forge.labels(), ["Author", "Paper", "Person"]);
+  assert.deepEqual(forge.relationshipTypes(), ["AUTHORED", "KNOWS"]);
+  assert.equal(forge.nodeCount(), 3);
+  assert.equal(forge.nodeCount("Person"), 2);
+  assert.equal(forge.nodeCount("Missing"), 0);
+  assert.equal(forge.nodeCount("Person') MATCH (n) RETURN n //"), 0);
+
+  const schema = tableFromIPC(forge.schema());
+  assert.deepEqual(
+    schema.schema.fields.map((field) => [
+      field.name,
+      field.type.toString(),
+      field.nullable,
+    ]),
+    [
+      ["label", "Utf8", true],
+      ["node_count", "Uint64", true],
+      ["rel_type", "Utf8", true],
+      ["rel_count", "Uint64", true],
+    ],
+  );
+  assert.deepEqual(
+    [...schema.getChild("label").toArray()],
+    ["Author", "Paper", "Person", null, null],
+  );
+  const nodeCounts = schema.getChild("node_count");
+  assert.deepEqual(
+    Array.from({ length: schema.numRows }, (_, row) => nodeCounts.get(row)),
+    [1n, 1n, 2n, null, null],
+  );
+  assert.deepEqual(
+    [...schema.getChild("rel_type").toArray()],
+    [null, null, null, "AUTHORED", "KNOWS"],
+  );
+  const relationshipCounts = schema.getChild("rel_count");
+  assert.deepEqual(
+    Array.from({ length: schema.numRows }, (_, row) =>
+      relationshipCounts.get(row),
+    ),
+    [null, null, null, 1n, 2n],
+  );
+
+  forge.close();
+  for (const call of [
+    () => forge.labels(),
+    () => forge.relationshipTypes(),
+    () => forge.nodeCount(),
+    () => forge.schema(),
+  ]) {
+    assert.throws(call, (error) => error.code === "LifecycleError");
   }
+}
+
+function checkTransactionSurfaceIsAbsent() {
+  for (const name of ["begin", "commit", "rollback"]) {
+    assert.equal(name in GraphForge.prototype, false, `${name} must not ship`);
+  }
+  const declarations = readFileSync(
+    new URL("../index.d.ts", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(declarations, /^\s+(?:begin|commit|rollback)\(\):/m);
 }
 
 function checkFind() {
@@ -195,5 +243,6 @@ test("load ontology", checkLoadOntology);
 test("parse error", checkParseError);
 test("pre-v1 project error", checkPreV1ProjectError);
 test("find", checkFind);
-test("not implemented surface", checkNotImplementedSurface);
+test("graph inspection surface", checkInspectionSurface);
+test("generic transaction surface is absent", checkTransactionSurfaceIsAbsent);
 test("plan handle", checkPlanHandle);

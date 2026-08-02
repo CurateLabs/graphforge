@@ -63,6 +63,7 @@ mod embedding_refresh;
 mod embedding_spaces;
 mod epistemic_snapshot;
 mod find_execution;
+mod graph_inspection;
 mod graph_snapshot;
 mod hypotheses;
 mod invocation_descriptor;
@@ -2430,36 +2431,43 @@ impl GraphForge {
         Err(GfError::NotImplemented("index"))
     }
 
-    /// Return schema information as a tabular result.
+    /// Return deterministic label and relationship counts as an Arrow batch.
+    ///
+    /// Label rows precede relationship rows. The unrelated column pair is null,
+    /// and both sections are ordered lexically.
     ///
     /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the read path is wired.
-    pub fn schema(&self) -> Result<RecordBatch, GfError> {
-        Err(GfError::NotImplemented("schema"))
+    /// Returns a structured project, execution, or schema error if the committed
+    /// graph generation cannot be inspected.
+    pub fn schema(&self) -> Result<arrow::record_batch::RecordBatch, GfError> {
+        self.inspect_graph()?.into_record_batch()
     }
 
     /// Return all node label strings.
     ///
     /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the read path is wired.
+    /// Returns a structured project, execution, or schema error if the committed
+    /// graph generation cannot be inspected.
     pub fn labels(&self) -> Result<Vec<String>, GfError> {
-        Err(GfError::NotImplemented("labels"))
+        Ok(self.inspect_graph()?.labels())
     }
 
     /// Return all relationship type strings.
     ///
     /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the read path is wired.
+    /// Returns a structured project, execution, or schema error if the committed
+    /// graph generation cannot be inspected.
     pub fn relationship_types(&self) -> Result<Vec<String>, GfError> {
-        Err(GfError::NotImplemented("relationship_types"))
+        Ok(self.inspect_graph()?.relationship_types())
     }
 
-    /// Return the number of nodes for a label.
+    /// Return the total node count for an empty label, or the exact count for a label.
     ///
     /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the read path is wired.
-    pub fn node_count(&self, _label: &str) -> Result<u64, GfError> {
-        Err(GfError::NotImplemented("node_count"))
+    /// Returns a structured project, execution, or schema error if the committed
+    /// graph generation cannot be inspected.
+    pub fn node_count(&self, label: &str) -> Result<u64, GfError> {
+        Ok(self.inspect_graph()?.node_count(label))
     }
 
     /// Return a human-readable explanation of every compiler stage for `cypher`:
@@ -2652,30 +2660,6 @@ impl GraphForge {
         tmp.persist(dest)
             .map_err(|e| GfError::Storage(format!("persist {path}: {e}")))?;
         Ok(())
-    }
-
-    /// Begin a transaction.
-    ///
-    /// # Errors
-    /// Returns [`GfError::NotImplemented`] until transactions are wired.
-    pub fn begin(&self) -> Result<(), GfError> {
-        Err(GfError::NotImplemented("begin"))
-    }
-
-    /// Commit the current transaction.
-    ///
-    /// # Errors
-    /// Returns [`GfError::NotImplemented`] until transactions are wired.
-    pub fn commit(&self) -> Result<(), GfError> {
-        Err(GfError::NotImplemented("commit"))
-    }
-
-    /// Roll back the current transaction.
-    ///
-    /// # Errors
-    /// Returns [`GfError::NotImplemented`] until transactions are wired.
-    pub fn rollback(&self) -> Result<(), GfError> {
-        Err(GfError::NotImplemented("rollback"))
     }
 
     /// Return the storage path, if any (`None` for an in-memory instance).

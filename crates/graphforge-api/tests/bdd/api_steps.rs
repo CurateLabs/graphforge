@@ -17,6 +17,7 @@ async fn given_empty_graph(world: &mut GraphForgeWorld) {
     world.nodes.clear();
     world.last_error = None;
     world.last_result = None;
+    world.last_algorithm_result = None;
 }
 
 #[given(regex = r#"^a graph with a Person node named "([^"]+)"$"#)]
@@ -88,21 +89,49 @@ async fn given_n_papers_title(world: &mut GraphForgeWorld, _n: u32) {
 #[given(
     regex = r#"^a graph with a Person node named "([^"]+)" and a Paper node titled "([^"]+)"$"#
 )]
-async fn given_person_and_paper(world: &mut GraphForgeWorld, _name: String, _title: String) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+async fn given_person_and_paper(world: &mut GraphForgeWorld, name: String, title: String) {
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let person_props = std::collections::HashMap::from([(
+        "name".to_owned(),
+        graphforge_api::PropValue::Str(name),
+    )]);
+    forge
+        .add_node("Person", &person_props)
+        .expect("person introspection fixture");
+    let paper_props = std::collections::HashMap::from([(
+        "title".to_owned(),
+        graphforge_api::PropValue::Str(title),
+    )]);
+    forge
+        .add_node("Paper", &paper_props)
+        .expect("paper introspection fixture");
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with a KNOWS relationship and an AUTHORED relationship$"#)]
 async fn given_two_rel_types(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    forge
+        .execute(
+            "CREATE (a:Person)-[:KNOWS]->(:Person), \
+             (a)-[:AUTHORED]->(:Paper)",
+        )
+        .expect("relationship introspection fixture");
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with (\d+) Person nodes and (\d+) Paper node$"#)]
-async fn given_persons_and_papers(world: &mut GraphForgeWorld, _np: u32, _npa: u32) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+async fn given_persons_and_papers(world: &mut GraphForgeWorld, np: u32, npa: u32) {
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let mut patterns = Vec::new();
+    patterns.extend((0..np).map(|index| format!("(:Person {{name:'Person{index}'}})")));
+    patterns.extend((0..npa).map(|index| format!("(:Paper {{title:'Paper{index}'}})")));
+    if !patterns.is_empty() {
+        forge
+            .execute(&format!("CREATE {}", patterns.join(", ")))
+            .expect("count introspection fixture");
+    }
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with Person nodes but no Paper nodes$"#)]
@@ -183,11 +212,6 @@ async fn given_persistent_at_tmp(world: &mut GraphForgeWorld) {
 #[given(regex = r#"^the forge instance is closed$"#)]
 async fn given_forge_closed(world: &mut GraphForgeWorld) {
     world.forge = None;
-}
-
-#[given(regex = r#"^a transaction has been started$"#)]
-async fn given_tx_started(_world: &mut GraphForgeWorld) {
-    // pending
 }
 
 #[given(regex = r#"^a Person node named "([^"]+)"$"#)]
@@ -701,7 +725,7 @@ async fn when_add_deep_graph_paper(world: &mut GraphForgeWorld) {
 async fn when_schema(world: &mut GraphForgeWorld) {
     if let Some(forge) = &world.forge {
         match forge.schema() {
-            Ok(r) => world.last_result = Some(r),
+            Ok(result) => world.last_algorithm_result = Some(result),
             Err(e) => world.last_error = Some(e.to_string()),
         }
     }
@@ -709,17 +733,47 @@ async fn when_schema(world: &mut GraphForgeWorld) {
 
 #[when(regex = r#"^I call labels$"#)]
 async fn when_labels(world: &mut GraphForgeWorld) {
-    world.last_error = Some("not implemented".to_string());
+    if let Some(forge) = &world.forge {
+        match forge.labels() {
+            Ok(labels) => {
+                world.last_result = Some(graphforge_api::RecordBatch {
+                    schema: vec!["label".into()],
+                    columns: vec![labels],
+                });
+            }
+            Err(error) => world.last_error = Some(error.to_string()),
+        }
+    }
 }
 
 #[when(regex = r#"^I call relationship_types$"#)]
 async fn when_rel_types(world: &mut GraphForgeWorld) {
-    world.last_error = Some("not implemented".to_string());
+    if let Some(forge) = &world.forge {
+        match forge.relationship_types() {
+            Ok(relationship_types) => {
+                world.last_result = Some(graphforge_api::RecordBatch {
+                    schema: vec!["relationship_type".into()],
+                    columns: vec![relationship_types],
+                });
+            }
+            Err(error) => world.last_error = Some(error.to_string()),
+        }
+    }
 }
 
 #[when(regex = r#"^I call node_count for label "([^"]+)"$"#)]
-async fn when_node_count(world: &mut GraphForgeWorld, _label: String) {
-    world.last_error = Some("not implemented".to_string());
+async fn when_node_count(world: &mut GraphForgeWorld, label: String) {
+    if let Some(forge) = &world.forge {
+        match forge.node_count(&label) {
+            Ok(count) => {
+                world.last_result = Some(graphforge_api::RecordBatch {
+                    schema: vec!["node_count".into()],
+                    columns: vec![vec![count.to_string()]],
+                });
+            }
+            Err(error) => world.last_error = Some(error.to_string()),
+        }
+    }
 }
 
 #[when(regex = r#"^I call explain on "([^"]+)"$"#)]
@@ -733,21 +787,6 @@ async fn when_explain(world: &mut GraphForgeWorld, query: String) {
         }
         Err(e) => world.last_error = Some(e.to_string()),
     }
-}
-
-#[when(regex = r#"^I call begin$"#)]
-async fn when_begin(world: &mut GraphForgeWorld) {
-    world.last_error = Some("not implemented".to_string());
-}
-
-#[when(regex = r#"^I call commit$"#)]
-async fn when_commit(world: &mut GraphForgeWorld) {
-    world.last_error = Some("not implemented".to_string());
-}
-
-#[when(regex = r#"^I call rollback$"#)]
-async fn when_rollback(world: &mut GraphForgeWorld) {
-    world.last_error = Some("not implemented".to_string());
 }
 
 #[when(regex = r#"^I call clear$"#)]
@@ -1109,8 +1148,14 @@ async fn then_path_reaches_dispatch(world: &mut GraphForgeWorld) {
 }
 
 #[then(regex = r#"^the result is (\d+)$"#)]
-async fn then_result_is_n(_world: &mut GraphForgeWorld, _n: i64) {
-    // pending
+async fn then_result_is_n(world: &mut GraphForgeWorld, n: i64) {
+    let value = world
+        .last_result
+        .as_ref()
+        .and_then(|result| result.columns.first())
+        .and_then(|column| column.first())
+        .expect("integer result");
+    assert_eq!(value.parse::<i64>().unwrap(), n);
 }
 
 #[then(regex = r#"^the result is a non-empty string$"#)]
@@ -1154,15 +1199,15 @@ async fn then_result_contains_text(world: &mut GraphForgeWorld, text: String) {
         return; // pending skeleton step — skip gracefully
     }
     if let Some(rb) = &world.last_result {
-        let val = rb
-            .columns
-            .first()
-            .and_then(|c| c.first())
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let values = rb.columns.iter().flatten().collect::<Vec<_>>();
         assert!(
-            val.contains(&*text),
-            "expected result to contain {text:?}\ngot:\n{val}"
+            values.iter().any(|value| value.contains(&text)),
+            "expected result to contain {text:?}\ngot:\n{}",
+            values
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     } else {
         panic!(
@@ -1173,18 +1218,43 @@ async fn then_result_contains_text(world: &mut GraphForgeWorld, text: String) {
 }
 
 #[then(regex = r#"^the result is an empty list$"#)]
-async fn then_empty_list(_world: &mut GraphForgeWorld) {
-    // pending
+async fn then_empty_list(world: &mut GraphForgeWorld) {
+    assert!(
+        world
+            .last_result
+            .as_ref()
+            .and_then(|result| result.columns.first())
+            .is_some_and(Vec::is_empty),
+        "expected empty list, got {:?}",
+        world.last_result
+    );
 }
 
 #[then(regex = r#"^calling relationship_types also returns an empty list$"#)]
-async fn then_rel_types_empty(_world: &mut GraphForgeWorld) {
-    // pending
+async fn then_rel_types_empty(world: &mut GraphForgeWorld) {
+    assert!(
+        world
+            .forge
+            .as_ref()
+            .expect("open forge")
+            .relationship_types()
+            .expect("relationship types")
+            .is_empty()
+    );
 }
 
 #[then(regex = r#"^the table contains an entry for label "([^"]+)"$"#)]
-async fn then_schema_has_label(_world: &mut GraphForgeWorld, _label: String) {
-    // pending
+async fn then_schema_has_label(world: &mut GraphForgeWorld, label: String) {
+    let labels = world
+        .last_algorithm_result
+        .as_ref()
+        .expect("schema result")
+        .column_by_name("label")
+        .expect("label column")
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("Utf8 labels");
+    assert!(labels.iter().flatten().any(|value| value == label));
 }
 
 #[then(regex = r#"^the two score results are not identical$"#)]

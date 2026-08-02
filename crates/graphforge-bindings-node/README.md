@@ -48,6 +48,24 @@ console.log(table.toArray());
 GraphForge returns Arrow IPC buffers from query and analyst-verb result
 surfaces. Decode them with `apache-arrow` as shown above.
 
+## Graph inspection
+
+```js
+const labels = forge.labels();
+const relationshipTypes = forge.relationshipTypes();
+const totalNodes = forge.nodeCount();
+const people = forge.nodeCount("Person");
+const schema = tableFromIPC(forge.schema());
+```
+
+Names are sorted and include only values present in the committed graph.
+`schema()` returns `label`, `node_count`, `rel_type`, and `rel_count`; label rows
+come first, followed by relationship rows, with the unrelated columns null.
+
+There is no generic `begin()` / `commit()` / `rollback()` surface. Each
+`execute()` write is atomic. Use `publishCompositeTransaction()` when graph and
+knowledge mutations must publish in one committed generation.
+
 For persistent projects, create the project directory before passing its path
 to `new GraphForge(path)`.
 

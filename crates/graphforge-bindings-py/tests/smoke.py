@@ -277,14 +277,6 @@ def check_clear() -> None:
         assert persistent.execute("MATCH (n:Person) RETURN n.name").num_rows == 1
 
 
-def _expect_not_implemented(name: str, call) -> None:
-    try:
-        call()
-    except NotImplementedError:
-        return
-    raise SystemExit(f"expected NotImplementedError from {name}()")
-
-
 def _expect_validation_error(call) -> None:
     try:
         call()
@@ -302,25 +294,32 @@ def _expect_validation_message(message: str, call) -> None:
     raise SystemExit(f"expected ValidationError: {message}")
 
 
-def check_unimplemented_surface() -> None:
-    # The remaining v0.5 surface is present with correct signatures and raises
-    # NotImplementedError. Implemented construction methods are exercised by
-    # their dedicated native acceptance checks.
+def check_inspection_surface() -> None:
+    # #333 — inspection is functional and generic transaction stubs are absent.
     forge = g.GraphForge()
-    forge.execute("CREATE (:Person {name: 'A'})")
-    calls = {
-        # transactions
-        "begin": forge.begin,
-        "commit": forge.commit,
-        "rollback": forge.rollback,
-        # introspection
-        "schema": forge.schema,
-        "labels": forge.labels,
-        "relationship_types": forge.relationship_types,
-        "node_count": forge.node_count,
+    forge.execute("CREATE (a:Person:Author {name: 'A'})-[:KNOWS]->(:Paper {title: 'Work'})")
+    assert forge.labels() == ["Author", "Paper", "Person"]
+    assert forge.relationship_types() == ["KNOWS"]
+    assert forge.node_count() == 2
+    assert forge.node_count("Person") == 1
+    assert forge.node_count("Missing') MATCH (n) RETURN n //") == 0
+    schema = forge.schema()
+    assert schema.schema == pa.schema(
+        [
+            pa.field("label", pa.string(), nullable=True),
+            pa.field("node_count", pa.uint64(), nullable=True),
+            pa.field("rel_type", pa.string(), nullable=True),
+            pa.field("rel_count", pa.uint64(), nullable=True),
+        ]
+    )
+    assert schema.to_pydict() == {
+        "label": ["Author", "Paper", "Person", None],
+        "node_count": [1, 1, 1, None],
+        "rel_type": [None, None, None, "KNOWS"],
+        "rel_count": [None, None, None, 1],
     }
-    for name, call in calls.items():
-        _expect_not_implemented(name, call)
+    for name in ("begin", "commit", "rollback"):
+        assert not hasattr(forge, name), name
 
 
 def check_find() -> None:
@@ -7000,7 +6999,7 @@ def main() -> None:
     check_filtered_knn()
     check_cosine()
     check_find()
-    check_unimplemented_surface()
+    check_inspection_surface()
     check_lifecycle()
     print(f"native smoke OK: graphforge {g.__version__}")
 

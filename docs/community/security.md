@@ -85,19 +85,12 @@ Protect your database files:
 chmod 600 mydata.db
 ```
 
-### Transaction Security
+### Atomic Writes
 
-Always use transactions for write operations:
-
-```python
-db.begin()
-try:
-    # Your operations
-    db.commit()
-except Exception:
-    db.rollback()
-    raise
-```
+Every `execute()` write publishes atomically. When graph and knowledge mutations
+must share one committed generation, validate and submit one
+`publish_composite_transaction()` request. GraphForge does not expose generic
+`begin()`, `commit()`, or `rollback()` methods.
 
 ### Dependency Security
 

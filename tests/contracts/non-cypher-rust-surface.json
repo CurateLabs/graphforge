@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "60a96ded9d55acdfed8c1bc5ae8876564f0e1262a7fea5f2bbc014be5af0a1e8",
+  "public_method_digest": "7b9704118564c177abc8d7a69919c8f2d863770f95af9f706f4cd8ac3b3a9b18",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -27,11 +27,8 @@
       "SearchIndexOptions": "introspection"
     },
     "overrides": {
-      "GraphForge.begin": "release-tested",
-      "GraphForge.commit": "release-tested",
       "GraphForge.index": "release-tested",
       "GraphForge.load_ontology": "release-tested",
-      "GraphForge.rollback": "release-tested",
       "GraphForge.validate_bulk_edges": "introspection",
       "GraphForge.validate_bulk_nodes": "introspection",
       "crate.authorize_composite_transaction": "introspection",
@@ -298,15 +295,15 @@
         {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "explain_is_side_effect_free_on_the_shared_catalog"},
         {"path": "crates/graphforge-api/src/lib.rs", "symbol": "parameter_binding_filters_by_value"},
         {"path": "crates/graphforge-api/tests/e2e_baseline.rs", "symbol": "execute_stream_owned_guard_outlives_dropped_forge"},
-        {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "execute_to_parquet_roundtrips"}
+        {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "execute_to_parquet_roundtrips"},
+        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"}
       ]
     },
     "compatibility": {
-      "ids": ["GraphForge.begin", "GraphForge.commit", "GraphForge.index", "GraphForge.load_ontology", "GraphForge.rollback"],
+      "ids": ["GraphForge.index", "GraphForge.load_ontology"],
       "test_refs": [
         {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "load_ontology_applies_and_promotes_mode"},
-        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"},
-        {"path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs", "symbol": "transaction_stubs_return_exact_stable_errors"}
+        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"}
       ]
     }
   },
