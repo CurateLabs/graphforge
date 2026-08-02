@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -45,6 +46,56 @@ try:
 except ValueError as exc:
     assert "non-printable" in str(exc)
     assert "\x85" not in str(exc)
+
+# Trusted Publishing performs a fresh OIDC exchange for every cargo attempt.
+original_environ = os.environ.copy()
+original_urlopen = mod.urllib.request.urlopen
+requests = []
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, *_args):
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def fake_urlopen(request, timeout):
+    requests.append((request, timeout))
+    if request.full_url.startswith(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]):
+        return FakeResponse({"value": "signed-oidc-jwt"})
+    if request.get_method() == "POST":
+        return FakeResponse({"token": "trusted-token"})
+    return FakeResponse({})
+
+
+os.environ.update(
+    {
+        mod.TRUSTED_PUBLISHING_ENV: "true",
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/token",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+    }
+)
+mod.urllib.request.urlopen = fake_urlopen
+try:
+    assert mod.request_trusted_publishing_token() == "trusted-token"
+    assert requests[0][0].full_url == "https://oidc.example/token?audience=crates.io"
+    assert requests[0][0].get_header("Authorization") == "Bearer request-token"
+    assert json.loads(requests[1][0].data) == {"jwt": "signed-oidc-jwt"}
+    mod.revoke_trusted_publishing_token("trusted-token")
+    assert requests[2][0].get_method() == "DELETE"
+    assert requests[2][0].get_header("Authorization") == "Bearer trusted-token"
+finally:
+    mod.urllib.request.urlopen = original_urlopen
+    os.environ.clear()
+    os.environ.update(original_environ)
 
 RATE_BODY = (
     "error: failed to publish graphforge-plan v0.5.1 to registry at https://crates.io\n"
@@ -131,6 +182,33 @@ except subprocess.CalledProcessError as exc:
     assert exc.returncode == 101
 assert publish_calls == [["cargo", "publish", "-p", "graphforge-plan", "--locked", "--no-verify"]]
 assert sleeps == []
+
+# A revoke outage is visible to the operator but cannot turn an accepted publish
+# into a failed, potentially duplicate recovery attempt.
+original_request_token = mod.request_trusted_publishing_token
+original_revoke_token = mod.revoke_trusted_publishing_token
+original_environ = os.environ.copy()
+os.environ[mod.TRUSTED_PUBLISHING_ENV] = "true"
+mod.request_trusted_publishing_token = lambda: "trusted-token"
+
+
+def revoke_failure(_token):
+    raise mod.urllib.error.URLError("unavailable")
+
+
+mod.revoke_trusted_publishing_token = revoke_failure
+try:
+    mod.cargo_publish(
+        "graphforge-plan",
+        run_publish=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="ok\n", stderr=""
+        ),
+    )
+finally:
+    mod.request_trusted_publishing_token = original_request_token
+    mod.revoke_trusted_publishing_token = original_revoke_token
+    os.environ.clear()
+    os.environ.update(original_environ)
 
 published: list[str] = []
 mod.package_checksum = lambda _name, expected=None: expected or "abc123"

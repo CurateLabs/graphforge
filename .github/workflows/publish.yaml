@@ -533,6 +533,7 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -572,24 +573,13 @@ jobs:
       - name: Publish dependency-ready crates with one observation per accepted write
         shell: bash
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CRATES_IO_TRUSTED_PUBLISHING: "true"
           RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
           MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.candidate-preflight.outputs.release_tag }}
         run: |
-          # Defensive: ESC/GitHub secret projection can append CR/LF/whitespace.
-          # Recovery checkouts the immutable tag SHA, so normalize here in the
-          # main-branch workflow before cargo publish. Never print the value.
-          CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN//$'\r'/}"
-          CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN#"${CARGO_REGISTRY_TOKEN%%[![:space:]]*}"}"
-          CARGO_REGISTRY_TOKEN="${CARGO_REGISTRY_TOKEN%"${CARGO_REGISTRY_TOKEN##*[![:space:]]}"}"
-          export CARGO_REGISTRY_TOKEN
-          if test -z "$CARGO_REGISTRY_TOKEN"; then
-            echo "CARGO_REGISTRY_TOKEN is empty after trim" >&2
-            exit 1
-          fi
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           bash scripts/ci/download-release-write-evidence.sh "$RELEASE_TAG" "$RELEASE_VERSION" write-evidence
           python3 scripts/ci/release_action.py validate-partition --manifest "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --group crates --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --checked-at "$now"
