@@ -7,8 +7,8 @@ the archive checksum. If that exact version already exists, publication only
 continues when crates.io reports the same checksum.
 
 Requires ``CARGO_REGISTRY_TOKEN`` in the environment. The maintained release
-credential is projected from Pulumi ESC into the GitHub Actions secret used by
-``publish.yaml``.
+workflow obtains a fresh short-lived value through crates.io Trusted Publishing
+for every ``cargo publish`` attempt.
 
 The token is normalized before ``cargo publish``: leading/trailing whitespace
 and CR/LF are stripped. The value is never logged.
@@ -37,11 +37,14 @@ import sys
 import time
 from typing import Any
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAN_SCRIPT = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 CRATES_API = "https://crates.io/api/v1/crates"
+TRUSTED_PUBLISHING_TOKENS_API = "https://crates.io/api/v1/trusted_publishing/tokens"
+TRUSTED_PUBLISHING_ENV = "CRATES_IO_TRUSTED_PUBLISHING"
 USER_AGENT = "GraphForge crates.io publisher (github.com/CurateLabs/graphforge)"
 # New-crate limit is 1 / 10 minutes after the burst; leave headroom for ~10 crates.
 RATE_LIMIT_BUFFER_SECONDS = 15
@@ -74,6 +77,54 @@ def normalize_registry_token(raw: str) -> str:
     if any(not (0x20 <= ord(ch) <= 0x7E or 0xA0 <= ord(ch) <= 0xFF) for ch in token):
         raise ValueError("CARGO_REGISTRY_TOKEN contains non-printable or non-ISO-8859-1 characters")
     return token
+
+
+def trusted_publishing_enabled() -> bool:
+    """Return whether this process should obtain per-attempt OIDC tokens."""
+    return os.environ.get(TRUSTED_PUBLISHING_ENV) == "true"
+
+
+def request_trusted_publishing_token() -> str:
+    """Exchange this GitHub Actions job's OIDC identity for a crates.io token."""
+    request_url = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+    request_token = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    if not request_url or not request_token:
+        raise RuntimeError("Trusted Publishing requires GitHub Actions id-token: write permission")
+
+    separator = "&" if "?" in request_url else "?"
+    oidc_request = urllib.request.Request(
+        f"{request_url}{separator}{urllib.parse.urlencode({'audience': 'crates.io'})}",
+        headers={"Authorization": f"Bearer {request_token}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(oidc_request, timeout=30) as response:
+        oidc_payload = json.load(response)
+    jwt = oidc_payload.get("value")
+    if not isinstance(jwt, str) or not jwt:
+        raise RuntimeError("GitHub Actions did not return an OIDC token")
+
+    exchange_request = urllib.request.Request(
+        TRUSTED_PUBLISHING_TOKENS_API,
+        data=json.dumps({"jwt": jwt}).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    with urllib.request.urlopen(exchange_request, timeout=30) as response:
+        exchange_payload = json.load(response)
+    token = exchange_payload.get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError("crates.io did not return a Trusted Publishing token")
+    return normalize_registry_token(token)
+
+
+def revoke_trusted_publishing_token(token: str) -> None:
+    """Revoke a per-attempt token after Cargo no longer needs it."""
+    request = urllib.request.Request(
+        TRUSTED_PUBLISHING_TOKENS_API,
+        headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
+        method="DELETE",
+    )
+    with urllib.request.urlopen(request, timeout=30):
+        pass
 
 
 def load_plan_module():
@@ -165,7 +216,14 @@ def cargo_publish(
     clock = now or (lambda: datetime.now(timezone.utc))
     waited = 0.0
     while True:
-        result = runner(command)
+        trusted_token = request_trusted_publishing_token() if trusted_publishing_enabled() else None
+        if trusted_token is not None:
+            os.environ["CARGO_REGISTRY_TOKEN"] = trusted_token
+        try:
+            result = runner(command)
+        finally:
+            if trusted_token is not None:
+                revoke_trusted_publishing_token(trusted_token)
         if result.returncode == 0:
             _emit_process_output(result)
             return
@@ -363,13 +421,14 @@ def main(argv: list[str] | None = None) -> int:
         print("--release-record and --artifacts-dir must be provided together", file=sys.stderr)
         return 2
 
-    try:
-        os.environ["CARGO_REGISTRY_TOKEN"] = normalize_registry_token(
-            os.environ.get("CARGO_REGISTRY_TOKEN", "")
-        )
-    except ValueError as error:
-        print(str(error), file=sys.stderr)
-        return 2
+    if not trusted_publishing_enabled():
+        try:
+            os.environ["CARGO_REGISTRY_TOKEN"] = normalize_registry_token(
+                os.environ.get("CARGO_REGISTRY_TOKEN", "")
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
 
     plan = load_plan_module()
     crates = plan.load_workspace()

@@ -106,9 +106,10 @@ assert "refs/remotes/origin/main:scripts/ci/release_registry.py" in crates
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates
-assert "secrets.CARGO_REGISTRY_TOKEN" in crates
-assert "CARGO_REGISTRY_TOKEN is empty after trim" in crates
-assert "Never print the value" in crates
+assert "id-token: write" in crates
+assert 'CRATES_IO_TRUSTED_PUBLISHING: "true"' in crates
+assert "rust-lang/crates-io-auth-action" not in crates
+assert "secrets.CARGO_REGISTRY_TOKEN" not in crates
 assert "secrets.NPM_TOKEN" not in crates
 assert "Refresh this node and its crates dependencies before authorize" in crates
 assert "scripts/ci/crate-authorize-refresh-nodes.py" in crates
@@ -162,8 +163,8 @@ assert "sleep" not in write_evidence
 credential_workflow = CREDENTIAL_WORKFLOW.read_text(encoding="utf-8")
 assert "npm whoami" in credential_workflow
 assert "secrets.NPM_TOKEN" in credential_workflow
-assert "secrets.CARGO_REGISTRY_TOKEN" in credential_workflow
-assert "never print the value" in credential_workflow.lower()
+assert "secrets.CARGO_REGISTRY_TOKEN" not in credential_workflow
+assert "crates-io-auth-action" not in credential_workflow
 for forbidden in ("npm publish", "uv publish", "cargo publish", "release:\n"):
     assert forbidden not in credential_workflow
 

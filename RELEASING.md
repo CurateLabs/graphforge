@@ -10,7 +10,7 @@ are in
 - The release version is aligned across every public package surface.
 - Normal PR CI is green on the intended `main` commit.
 - The retained partitioned candidate and offline rehearsal are complete.
-- Registry credentials and PyPI trusted publishing are configured.
+- The npm token and PyPI/crates.io trusted publishing are configured.
 - A maintainer has explicitly authorized the immutable tag, GitHub Release, and
   registry writes.
 

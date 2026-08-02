@@ -24,9 +24,9 @@ Before a maintainer authorizes publication:
 4. `evidence/offline-rehearsal.json` proves the exact partitions passed clean
    Python, Node/native, CLI, and skills consumers and crate/dependency checks
    with zero registry writes.
-5. PyPI trusted publishing is configured for `CurateLabs/graphforge` and
-   `publish.yaml`; the npm token has scoped public-package write access and
-   Bypass 2FA; the crates.io token belongs to `DecisionNerd`.
+5. PyPI and crates.io trusted publishing are configured for
+   `CurateLabs/graphforge` and `publish.yaml`; the npm token has scoped
+   public-package write access and Bypass 2FA.
 6. The maintainer explicitly decides to create the immutable v0.5.1 tag and
    GitHub Release. Implementation CI and ordinary issue close do not run a
    release-certification cascade.
@@ -44,8 +44,8 @@ dependencies stop the lane.
 The independent work is:
 
 - PyPI may run independently with OIDC and the Python partition.
-- crates.io may run independently with only its token and the crates partition;
-  crates remain in the checked topological order below.
+- crates.io may run independently with its short-lived trusted-publishing token
+  and the crates partition; crates remain in the checked topological order below.
 - the five native npm packages run as a fail-slow parallel matrix with only the
   npm token and npm partition.
 
