@@ -23,8 +23,43 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "7b9704118564c177abc8d7a69919c8f2d863770f95af9f706f4cd8ac3b3a9b18"
-EXPECTED_RELEASE_DIGEST = "b08b40684ddd01a0b17f87f94b008b129ee49d62614d9b8a7c4a2f6b701be27b"
+EXPECTED_RUST_DIGEST = "d867e276ca262c52acd087475d4cc3b3ebf2295b0419d50926b5c9048f35ce27"
+EXPECTED_RELEASE_DIGEST = "c36590ea5e3427d3a3db1a80f5375f51c9071a1d9d951f9da4b9c56446e9a16d"
+
+PYTHON_ONLY_METHODS = frozenset(
+    {
+        "CancellationToken.__init__",
+        "EdgeHandle.__repr__",
+        "EdgeHandle.__str__",
+        "EdgeHandle.rel_type",
+        "EdgeHandle.uuid",
+        "GraphForge.__init__",
+        "GraphForge.__repr__",
+        "GraphForge.add_edges",
+        "GraphForge.add_nodes",
+        "GraphForge.close",
+        "GraphForge.configure_openrouter",
+        "GraphForge.execute_polars",
+        "GraphForge.load_ontology",
+        "GraphForge.ontology_mode",
+        "GraphForge.path",
+        "InvocationDescriptor.algorithm",
+        "InvocationDescriptor.fingerprint",
+        "InvocationDescriptor.projection_fingerprint",
+        "InvocationDescriptor.verb",
+        "NodeHandle.__repr__",
+        "NodeHandle.__str__",
+        "NodeHandle.label",
+        "NodeHandle.uuid",
+        "ResolvedBeliefProjection.graph_content_fingerprint",
+        "ResolvedBeliefProjection.policy_fingerprint",
+        "ResolvedBeliefProjection.snapshot_fingerprint",
+        "ResolvedBeliefProjection.source_generation_uuid",
+        "ResolvedBeliefProjection.transaction_cutoff",
+        "ResolvedBeliefProjection.valid_time",
+        "ResolvedBeliefProjection.valid_time_fingerprint",
+    }
+)
 
 EVIDENCE = {
     "infra-validation": {
@@ -188,7 +223,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 183
+    assert len(release_methods) == 181
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -261,36 +296,7 @@ def _classification_report() -> dict[str, object]:
     # A newly exposed Python product method must be deliberately projected or
     # explicitly listed as Python-only. This catches silent binding expansion.
     projected = {item["python_id"] for item in classifications.values() if item["python_id"]}
-    python_only = {
-        "CancellationToken.__init__",
-        "EdgeHandle.__repr__",
-        "EdgeHandle.__str__",
-        "EdgeHandle.rel_type",
-        "EdgeHandle.uuid",
-        "GraphForge.__init__",
-        "GraphForge.__repr__",
-        "GraphForge.close",
-        "GraphForge.configure_openrouter",
-        "GraphForge.execute_polars",
-        "GraphForge.load_ontology",
-        "GraphForge.ontology_mode",
-        "GraphForge.path",
-        "InvocationDescriptor.algorithm",
-        "InvocationDescriptor.fingerprint",
-        "InvocationDescriptor.projection_fingerprint",
-        "InvocationDescriptor.verb",
-        "NodeHandle.__repr__",
-        "NodeHandle.__str__",
-        "NodeHandle.label",
-        "NodeHandle.uuid",
-        "ResolvedBeliefProjection.graph_content_fingerprint",
-        "ResolvedBeliefProjection.policy_fingerprint",
-        "ResolvedBeliefProjection.snapshot_fingerprint",
-        "ResolvedBeliefProjection.source_generation_uuid",
-        "ResolvedBeliefProjection.transaction_cutoff",
-        "ResolvedBeliefProjection.valid_time",
-        "ResolvedBeliefProjection.valid_time_fingerprint",
-    }
+    python_only = set(PYTHON_ONLY_METHODS)
     unclassified_python = sorted(python_methods - projected - python_only)
     assert not unclassified_python, f"unclassified compiled Python methods: {unclassified_python}"
     return {

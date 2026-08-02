@@ -14,7 +14,7 @@ import {
   IWorldOptions,
   World,
 } from "@cucumber/cucumber";
-import { tableFromIPC, Table } from "apache-arrow";
+import { Field, FixedSizeBinary, RecordBatchStreamWriter, Schema, tableFromIPC, Table, Utf8, vectorFromArray } from "apache-arrow";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -125,6 +125,63 @@ function firstRowValue(world: GraphForgeWorld, col: string): unknown {
 /** Format a JS value as a Cypher literal for a CREATE property map. */
 function cypherLit(v: unknown): string {
   return typeof v === "number" ? String(v) : JSON.stringify(v);
+}
+
+const BDD_NODE_OPERATION = "018f0f4e-7b8c-7000-8000-000000003481";
+const BDD_NODE_TABLE_OPERATION = "018f0f4e-7b8c-7000-8000-000000003482";
+const BDD_EDGE_OPERATION = "018f0f4e-7b8c-7000-8000-000000003483";
+
+function tableToIpc(table: Table): Buffer {
+  return Buffer.from(RecordBatchStreamWriter.writeAll(table).toUint8Array(true));
+}
+
+function bulkNodeTable(names: string[]): Table {
+  const schema = new Schema(
+    [
+      new Field("node_uuid", new FixedSizeBinary(16), true),
+      new Field("label", new Utf8(), false),
+      new Field("name", new Utf8(), false),
+    ],
+    new Map([
+      ["graphforge.bulk_contract_version", "1"],
+      ["graphforge.bulk_kind", "node"],
+      ["graphforge.row_order", "logical_input_order"],
+    ]),
+  );
+  return new Table(schema, {
+    node_uuid: vectorFromArray(
+      names.map(() => null),
+      new FixedSizeBinary(16),
+    ),
+    label: vectorFromArray(
+      names.map(() => "Person"),
+      new Utf8(),
+    ),
+    name: vectorFromArray(names, new Utf8()),
+  });
+}
+
+function bulkEdgeTable(sourceUuid: string, targetUuid: string): Table {
+  const schema = new Schema(
+    [
+      new Field("edge_uuid", new FixedSizeBinary(16), true),
+      new Field("rel_type", new Utf8(), false),
+      new Field("source_uuid", new FixedSizeBinary(16), false),
+      new Field("target_uuid", new FixedSizeBinary(16), false),
+    ],
+    new Map([
+      ["graphforge.bulk_contract_version", "1"],
+      ["graphforge.bulk_kind", "edge"],
+      ["graphforge.row_order", "logical_input_order"],
+    ]),
+  );
+  const uuidBytes = (value: string) => Buffer.from(value.replace(/-/g, ""), "hex");
+  return new Table(schema, {
+    edge_uuid: vectorFromArray([null], new FixedSizeBinary(16)),
+    rel_type: vectorFromArray(["KNOWS"], new Utf8()),
+    source_uuid: vectorFromArray([uuidBytes(sourceUuid)], new FixedSizeBinary(16)),
+    target_uuid: vectorFromArray([uuidBytes(targetUuid)], new FixedSizeBinary(16)),
+  });
 }
 
 /**
@@ -789,16 +846,23 @@ When(
 When(
   'I bulk add nodes with label "Person" and 2 records',
   function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.addNodes("Person", [{ name: "Alice" }, { name: "Bob" }]));
+    _catch(this, () =>
+      this.forge!.publishBulkNodes(
+        BDD_NODE_OPERATION,
+        tableToIpc(bulkNodeTable(["Alice", "Bob"]))
+      )
+    );
   }
 );
 
 When(
   'I bulk add nodes with label "Person" from an Arrow Table of 5 rows',
   function (this: GraphForgeWorld) {
-    const rows = [0, 1, 2, 3, 4].map((i) => ({ name: String.fromCharCode(65 + i) }));
-    _catch(this, () => this.forge!.addNodes("Person", rows));
-  }
+    const names = [0, 1, 2, 3, 4].map((i) => String.fromCharCode(65 + i));
+    _catch(this, () =>
+      this.forge!.publishBulkNodes(BDD_NODE_TABLE_OPERATION, tableToIpc(bulkNodeTable(names))),
+    );
+  },
 );
 
 When(
@@ -809,11 +873,14 @@ When(
       this.error = codedError("ValidationError", "Need 2 nodes");
       return;
     }
-    const records = [{ src_id: nodes[0].uuid, dst_id: nodes[1].uuid }];
-    _catch(this, () => this.forge!.addEdges("KNOWS", records, "src_id", "dst_id"));
-  }
+    _catch(this, () =>
+      this.forge!.publishBulkEdges(
+        BDD_EDGE_OPERATION,
+        tableToIpc(bulkEdgeTable(nodes[0].uuid, nodes[1].uuid)),
+      ),
+    );
+  },
 );
-
 
 When(
   /^I rank "([^"]*)" by "([^"]*)"$/,
@@ -1303,9 +1370,19 @@ Then(
 
 Then(
   /^execute "([^"]*)" returns (\d+) row with value (\d+)$/,
-  function (this: GraphForgeWorld, _query: string, _nStr: string, _val: string) {
-    return "pending";
-  }
+  function (this: GraphForgeWorld, query: string, nStr: string, val: string) {
+    const table = tableFromIPC(this.forge!.execute(query) as Buffer);
+    const expectedRows = parseInt(nStr, 10);
+    if (table.numRows !== expectedRows) {
+      throw new Error(`execute "${query}": expected ${expectedRows} row, got ${table.numRows}`);
+    }
+    const column = table.getChildAt(0);
+    if (!column || Number(column.get(0)) !== parseInt(val, 10)) {
+      throw new Error(
+        `execute "${query}": expected first value ${val}, got ${String(column?.get(0))}`,
+      );
+    }
+  },
 );
 
 Then(

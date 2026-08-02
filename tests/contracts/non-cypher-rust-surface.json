@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "7b9704118564c177abc8d7a69919c8f2d863770f95af9f706f4cd8ac3b3a9b18",
+  "public_method_digest": "d867e276ca262c52acd087475d4cc3b3ebf2295b0419d50926b5c9048f35ce27",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -124,7 +124,7 @@
     },
     "lifecycle-construction": {
       "ids": [
-        "GraphForge.add_edge", "GraphForge.add_edges", "GraphForge.add_node", "GraphForge.add_nodes",
+        "GraphForge.add_edge", "GraphForge.add_node",
         "GraphForge.adopt_ontology", "GraphForge.clear_ontology", "GraphForge.labels", "GraphForge.node_count",
         "GraphForge.ontology_mode", "GraphForge.publish_bulk_edges", "GraphForge.publish_bulk_nodes",
         "GraphForge.relationship_types", "GraphForge.workspace_configuration", "GraphForge.workspace_ontology"

@@ -22,17 +22,17 @@ Feature: Graph Construction API
     When I add a node with label "Person" named "Alice"
     Then execute readback returns the NodeHandle UUID and name "Alice"
 
-  @construction @skip-node
+  @construction
   Scenario: bulk add_nodes with a list of records
     When I bulk add nodes with label "Person" and 2 records
     Then execute "MATCH (p:Person) RETURN p.name" returns 2 rows
 
-  @construction @skip-node
+  @construction
   Scenario: bulk add_nodes with Arrow Table
     When I bulk add nodes with label "Person" from an Arrow Table of 5 rows
     Then execute "MATCH (p:Person) RETURN p.name" returns 5 rows
 
-  @construction @skip-node
+  @construction
   Scenario: bulk add_edges with src and dst column names
     Given a graph with 2 Person nodes with ids in columns "src_id" and "dst_id"
     When I bulk add edges with type "KNOWS" using source column "src_id" and destination column "dst_id"

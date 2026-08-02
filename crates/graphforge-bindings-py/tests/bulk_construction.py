@@ -177,6 +177,7 @@ def check_bulk_construction(project: Path) -> None:
     assert edge_receipt.num_rows == 1, edge_receipt
     assert edge_receipt.column("rel_type").to_pylist() == ["KNOWS"]
 
+    forge.close()
     forge = g.GraphForge(str(project))
     reopened = forge.execute(
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) "
@@ -197,6 +198,7 @@ def check_bulk_construction(project: Path) -> None:
     else:
         raise SystemExit("expected TypeError for malformed bulk container")
     assert project_digest(project) == before
+    forge.close()
 
 
 if __name__ == "__main__":

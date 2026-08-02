@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 183,
-  "releaseSurfaceDigest": "b08b40684ddd01a0b17f87f94b008b129ee49d62614d9b8a7c4a2f6b701be27b",
+  "releaseSurfaceCount": 181,
+  "releaseSurfaceDigest": "c36590ea5e3427d3a3db1a80f5375f51c9071a1d9d951f9da4b9c56446e9a16d",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -31,9 +31,7 @@
       "CheckpointView.inspect_adjacency",
       "CheckpointView.project_capabilities",
       "GraphForge.add_edge",
-      "GraphForge.add_edges",
       "GraphForge.add_node",
-      "GraphForge.add_nodes",
       "GraphForge.adopt_ontology",
       "GraphForge.algorithm_run",
       "GraphForge.algorithm_run_events",

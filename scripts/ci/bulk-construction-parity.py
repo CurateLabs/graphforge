@@ -26,6 +26,7 @@ import graphforge as g
 
 ROOT = Path(__file__).resolve().parents[2]
 NODE_PKG = ROOT / "crates" / "graphforge-bindings-node"
+NODE_PROBE_TIMEOUT_SECONDS = 300
 
 NODE_A = uuid.UUID("018f0f4e-7b8c-7000-8000-00000000d001")
 NODE_B = uuid.UUID("018f0f4e-7b8c-7000-8000-00000000d002")
@@ -109,6 +110,10 @@ def empty_node_table() -> pa.Table:
 
 def run_python(project: Path) -> dict:
     forge = g.GraphForge(str(project))
+    assert callable(forge.publish_bulk_nodes)
+    assert callable(forge.publish_bulk_edges)
+    assert callable(forge.add_nodes), "Python container normalization must remain available"
+    assert callable(forge.add_edges), "Python container normalization must remain available"
     empty = forge.publish_bulk_nodes(OP_NODES, empty_node_table())
     assert empty.num_rows == 0
 
@@ -173,6 +178,7 @@ def run_python(project: Path) -> dict:
     assert edges.num_rows == 1
     assert edges.column("rel_type").to_pylist() == ["KNOWS"]
 
+    forge.close()
     forge = g.GraphForge(str(project))
     reopened = forge.execute(
         "MATCH (a:Person)-[r:KNOWS]->(b:Person) "
@@ -186,6 +192,7 @@ def run_python(project: Path) -> dict:
         "node_ids": [str(value) for value in ids],
         "digest": project_digest(project),
     }
+    forge.close()
     return payload
 
 
@@ -293,6 +300,10 @@ function projectDigest(root) {{
 rmSync(project, {{ recursive: true, force: true }});
 mkdirSync(project, {{ recursive: true }});
 let forge = new GraphForge(project);
+assert.equal("addNodes" in forge, false);
+assert.equal("addEdges" in forge, false);
+assert.equal(typeof forge.publishBulkNodes, "function");
+assert.equal(typeof forge.publishBulkEdges, "function");
 
 const empty = tableFromIPC(forge.publishBulkNodes(OP_NODES, tableToIpc(new Table(bulkNodeSchema))));
 assert.equal(empty.numRows, 0);
@@ -359,6 +370,7 @@ const edge = new Table(bulkEdgeSchema, {{
 const edgeReceipt = tableFromIPC(forge.publishBulkEdges(OP_EDGES, tableToIpc(edge)));
 assert.equal(edgeReceipt.numRows, 1);
 
+forge.close();
 forge = new GraphForge(project);
 const reopened = tableFromIPC(
   forge.execute(
@@ -373,6 +385,7 @@ const payload = {{
   since: [...reopened.getChild("since")].map((value) => Number(value)),
   node_ids: receivedIds,
 }};
+forge.close();
 writeFileSync(outPath, JSON.stringify(payload));
 """,
         encoding="utf-8",
@@ -380,17 +393,47 @@ writeFileSync(outPath, JSON.stringify(payload));
 
 
 def run_node(project: Path) -> dict:
-    script = project.parent / "node-bulk-parity.mjs"
-    write_node_probe(project, script)
-    completed = subprocess.run(
-        ["node", str(script)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise SystemExit(f"node parity probe failed: {completed.stdout}\n{completed.stderr}")
+    with tempfile.NamedTemporaryFile(
+        dir=NODE_PKG,
+        prefix=".node-bulk-parity-",
+        suffix=".mjs",
+        delete=False,
+    ) as handle:
+        script = Path(handle.name)
+    try:
+        write_node_probe(project, script)
+        node = shutil.which("node")
+        if node is None:
+            raise SystemExit("node parity probe requires a Node.js executable on PATH")
+        try:
+            # Fixed argument vector with shell disabled; the executable is resolved above.
+            completed = subprocess.run(
+                [node, str(script)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=NODE_PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            source = script.read_text(encoding="utf-8").splitlines()
+            numbered = "\n".join(
+                f"{line_number}: {line}" for line_number, line in enumerate(source, start=1)
+            )
+            raise SystemExit(
+                f"node parity probe timed out after {NODE_PROBE_TIMEOUT_SECONDS}s: "
+                f"{error.stdout or ''}\n{error.stderr or ''}\n{numbered}"
+            ) from error
+        if completed.returncode != 0:
+            source = script.read_text(encoding="utf-8").splitlines()
+            numbered = "\n".join(
+                f"{line_number}: {line}" for line_number, line in enumerate(source, start=1)
+            )
+            raise SystemExit(
+                f"node parity probe failed: {completed.stdout}\n{completed.stderr}\n{numbered}"
+            )
+    finally:
+        script.unlink(missing_ok=True)
     return json.loads((project / "node-parity.json").read_text(encoding="utf-8"))
 
 

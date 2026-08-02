@@ -185,6 +185,7 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
     assert.equal(edgeReceipt.numRows, 1);
     assert.deepEqual([...edgeReceipt.getChild("rel_type")], ["KNOWS"]);
 
+    forge.close();
     forge = new GraphForge(project);
     const reopened = tableFromIPC(
       forge.execute(
@@ -201,7 +202,6 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
       [...reopened.getChild("since")].map((value) => Number(value)),
       [2020],
     );
-
     let malformed = false;
     try {
       forge.publishBulkNodes(EDGE_OPERATION, Buffer.from("not-ipc"));
@@ -209,6 +209,7 @@ test("publishBulkNodes/Edges accept canonical IPC and reopen identically", () =>
       malformed = true;
     }
     assert.equal(malformed, true);
+    forge.close();
   } finally {
     rmSync(project, { recursive: true, force: true });
   }

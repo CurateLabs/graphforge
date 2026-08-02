@@ -166,15 +166,18 @@ function checkInspectionSurface() {
   }
 }
 
-function checkTransactionSurfaceIsAbsent() {
-  for (const name of ["begin", "commit", "rollback"]) {
+function checkRemovedSurfaceIsAbsent() {
+  for (const name of ["begin", "commit", "rollback", "addNodes", "addEdges"]) {
     assert.equal(name in GraphForge.prototype, false, `${name} must not ship`);
   }
   const declarations = readFileSync(
     new URL("../index.d.ts", import.meta.url),
     "utf8",
   );
-  assert.doesNotMatch(declarations, /^\s+(?:begin|commit|rollback)\(\):/m);
+  assert.doesNotMatch(
+    declarations,
+    /^\s+(?:begin|commit|rollback|addNodes|addEdges)\([^)]*\):/m,
+  );
 }
 
 function checkFind() {
@@ -244,5 +247,8 @@ test("parse error", checkParseError);
 test("pre-v1 project error", checkPreV1ProjectError);
 test("find", checkFind);
 test("graph inspection surface", checkInspectionSurface);
-test("generic transaction surface is absent", checkTransactionSurfaceIsAbsent);
+test(
+  "generic transaction and bulk convenience stub surfaces are absent",
+  checkRemovedSurfaceIsAbsent,
+);
 test("plan handle", checkPlanHandle);

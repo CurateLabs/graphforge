@@ -26,6 +26,7 @@ fn error_code(err: &GfError) -> &'static str {
         GfError::Lifecycle(_) => "LifecycleError",
         GfError::Validation(message)
             if is_uuid_parameter_validation(message)
+                || is_bulk_validation(message)
                 || is_ontology_lifecycle_validation(message) =>
         {
             "GF_VALIDATION"
@@ -34,6 +35,10 @@ fn error_code(err: &GfError) -> &'static str {
         GfError::Ontology(_) => "OntologyError",
         GfError::NotImplemented(_) => "NotImplementedError",
     }
+}
+
+fn is_bulk_validation(message: &str) -> bool {
+    message.starts_with("GF_BULK_VALIDATION(")
 }
 
 fn is_ontology_lifecycle_validation(message: &str) -> bool {
@@ -174,6 +179,15 @@ mod tests {
             assert_eq!(mapped.status, "GF_VALIDATION");
             assert_eq!(mapped.reason, message);
         }
+    }
+
+    #[test]
+    fn bulk_validation_uses_the_stable_public_code() {
+        let message =
+            "GF_BULK_VALIDATION(invalid_uuid): bulk node row 0 field \"node_uuid\": invalid UUID";
+        let mapped = to_napi_err(&GfError::Validation(message.into()));
+        assert_eq!(mapped.status, "GF_VALIDATION");
+        assert_eq!(mapped.reason, message);
     }
 
     #[test]
