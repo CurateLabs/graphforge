@@ -3567,17 +3567,32 @@ registered again after reopen before its space can refresh.
 
 Columns: `label`, `node_count`, `rel_type`, `rel_count`.
 
+The table reports only labels and relationship types present in the committed
+graph generation. Label rows come first with null relationship columns,
+followed by relationship rows with null label columns; each section is sorted
+lexically. Counts are `UInt64`. An empty graph returns a zero-row table with the
+same four nullable fields.
+
 ### `labels()` → `list[str]`
 
-All node labels present in the graph.
+All node labels present in the graph, sorted lexically. Ontology declarations
+and runtime-catalog observations without a matching node are excluded.
 
 ### `relationship_types()` → `list[str]`
 
-All relationship types present in the graph.
+All relationship types present in the graph, sorted lexically. Declarations and
+observations without a matching relationship are excluded.
 
 ### `node_count(label=None)` → `int`
 
-Total node count, or count for a specific label.
+Total node count, or the exact count for a specific label. Multi-label nodes
+count once in the total and once for every matching label; an unknown label
+returns `0`.
+
+GraphForge does not expose generic `begin()`, `commit()`, or `rollback()`
+methods. Each `execute()` write publishes atomically; use
+`publish_composite_transaction()` when graph and knowledge mutations must share
+one committed generation.
 
 ### `explain(query, stage=None)` → `str`
 

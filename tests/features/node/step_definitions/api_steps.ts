@@ -508,13 +508,6 @@ Given(
 );
 
 Given(
-  "a transaction has been started",
-  function (this: GraphForgeWorld) {
-    this.forge!.begin();
-  }
-);
-
-Given(
   /^a graph with a Person node named "([^"]*)" connected by a KNOWS edge to a Person node named "([^"]*)"$/,
   function (this: GraphForgeWorld, name: string, name2: string) {
     this.forge = new GraphForge();
@@ -1030,27 +1023,6 @@ When(
 );
 
 When(
-  "I call begin",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.begin());
-  }
-);
-
-When(
-  "I call commit",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.commit());
-  }
-);
-
-When(
-  "I call rollback",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.rollback());
-  }
-);
-
-When(
   "I call clear",
   function (this: GraphForgeWorld) {
     _catch(this, () => this.forge!.clear());
@@ -1381,8 +1353,11 @@ Then("a structured selector error is raised", function (this: GraphForgeWorld) {
 Then(
   /^the result is (\d+)$/,
   function (this: GraphForgeWorld, nStr: string) {
-    if (this.error) return "pending";
-    if (this.result !== parseInt(nStr, 10)) return "pending";
+    if (this.error) throw this.error;
+    const expected = parseInt(nStr, 10);
+    if (this.result !== expected) {
+      throw new Error(`expected ${expected}, got ${String(this.result)}`);
+    }
   }
 );
 
@@ -1413,8 +1388,10 @@ Then(
 Then(
   "the result is an empty list",
   function (this: GraphForgeWorld) {
-    if (this.error) return "pending";
-    if (!Array.isArray(this.result) || (this.result as unknown[]).length !== 0) return "pending";
+    if (this.error) throw this.error;
+    if (!Array.isArray(this.result) || (this.result as unknown[]).length !== 0) {
+      throw new Error(`expected an empty list, got ${JSON.stringify(this.result)}`);
+    }
   }
 );
 
@@ -1422,15 +1399,20 @@ Then(
   "calling relationship_types also returns an empty list",
   function (this: GraphForgeWorld) {
     const result = this.forge!.relationshipTypes();
-    if (!Array.isArray(result) || result.length !== 0) return "pending";
+    if (!Array.isArray(result) || result.length !== 0) {
+      throw new Error(`expected no relationship types, got ${JSON.stringify(result)}`);
+    }
   }
 );
 
 Then(
   /^the table contains an entry for label "([^"]*)"$/,
-  function (this: GraphForgeWorld, _label: string) {
-    if (this.error) return "pending";
-    return "pending";
+  function (this: GraphForgeWorld, label: string) {
+    const table = resultTable(this);
+    const labels = table.getChild("label");
+    if (!labels || ![...labels.toArray()].includes(label)) {
+      throw new Error(`schema does not contain label ${label}`);
+    }
   }
 );
 

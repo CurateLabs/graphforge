@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 186,
-  "releaseSurfaceDigest": "9edf1fa64367f2f37132c9fe8c9f4aa388edcfe390c9ef4a21de346c6aa9ed1d",
+  "releaseSurfaceCount": 183,
+  "releaseSurfaceDigest": "b08b40684ddd01a0b17f87f94b008b129ee49d62614d9b8a7c4a2f6b701be27b",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -45,13 +45,11 @@
       "GraphForge.assess_confidence",
       "GraphForge.attach_evidence",
       "GraphForge.attach_resolved_run",
-      "GraphForge.begin",
       "GraphForge.bind_embedding_space_alias",
       "GraphForge.checkpoint",
       "GraphForge.clear",
       "GraphForge.clear_ontology",
       "GraphForge.cluster",
-      "GraphForge.commit",
       "GraphForge.confidence_assessment",
       "GraphForge.confidence_inputs",
       "GraphForge.create_assertion",
@@ -131,7 +129,6 @@
       "GraphForge.resolve_belief_projection",
       "GraphForge.resolve_belief_subject",
       "GraphForge.revert_to_checkpoint",
-      "GraphForge.rollback",
       "GraphForge.schema",
       "GraphForge.set_default_embedding_space",
       "GraphForge.set_embedding_refresh_project_policy",
@@ -198,7 +195,7 @@
       ]
     },
     "lifecycleConstruction": {
-      "core.test.mjs": ["add node"],
+      "core.test.mjs": ["add node", "graph inspection surface"],
       "smoke.test.mjs": ["lifecycle"]
     },
     "checkpointView": {
@@ -274,7 +271,7 @@
       ]
     },
     "persistenceErrorsCancellation": {
-      "core.test.mjs": ["pre-v1 project error", "parse error"],
+      "core.test.mjs": ["pre-v1 project error", "parse error", "graph inspection surface"],
       "checkpoints.test.mjs": [
         "checkpoint pagination and diff cancellation use the shared adapter"
       ],

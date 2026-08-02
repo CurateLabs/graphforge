@@ -113,14 +113,21 @@ fn public_lifecycle_inventory_covers_remaining_facade_methods() {
 
     assert_eq!(graph.add_nodes().unwrap_err().code(), "GF_NOT_IMPLEMENTED");
     assert_eq!(graph.add_edges().unwrap_err().code(), "GF_NOT_IMPLEMENTED");
-    assert_eq!(graph.labels().unwrap_err().code(), "GF_NOT_IMPLEMENTED");
+    assert_eq!(graph.labels().unwrap(), ["Person".to_owned()]);
+    assert!(graph.relationship_types().unwrap().is_empty());
+    assert_eq!(graph.node_count("").unwrap(), 1);
+    assert_eq!(graph.node_count("Person").unwrap(), 1);
+    assert_eq!(graph.node_count("Missing").unwrap(), 0);
+    let inspection = graph.schema().unwrap();
+    assert_eq!(inspection.num_rows(), 1);
     assert_eq!(
-        graph.relationship_types().unwrap_err().code(),
-        "GF_NOT_IMPLEMENTED"
-    );
-    assert_eq!(
-        graph.node_count("Person").unwrap_err().code(),
-        "GF_NOT_IMPLEMENTED"
+        inspection
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["label", "node_count", "rel_type", "rel_count"]
     );
 
     let configuration = graph.workspace_configuration().unwrap();
@@ -773,22 +780,5 @@ fn typed_uuid_parameters_preserve_identity_across_surfaces_and_reopen() {
             .unwrap()
             .value(0),
         alice.uuid.as_bytes()
-    );
-}
-
-#[test]
-fn transaction_stubs_return_exact_stable_errors() {
-    let graph = GraphForge::new(None).unwrap();
-    for error in [graph.begin(), graph.commit(), graph.rollback()].map(Result::unwrap_err) {
-        assert_eq!(error.code(), "GF_NOT_IMPLEMENTED");
-    }
-    assert!(graph.begin().unwrap_err().to_string().contains("begin"));
-    assert!(graph.commit().unwrap_err().to_string().contains("commit"));
-    assert!(
-        graph
-            .rollback()
-            .unwrap_err()
-            .to_string()
-            .contains("rollback")
     );
 }

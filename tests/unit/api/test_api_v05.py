@@ -2,10 +2,9 @@
 
 The 0.4.x pure-Python stub (``src/graphforge``) was retired in the cutover; these
 tests exercise the native ``graphforge`` engine. Implemented query, search,
-analyst, lifecycle, and single-node construction paths return their real native
-results; remaining writes, transactions, and introspection raise
-``NotImplementedError`` until their native implementation lands. Tests assert
-the full intended UX, with genuine gaps kept as explicit expectations.
+analyst, lifecycle, construction, and graph-inspection paths return their real
+native results. Tests assert the full intended UX, with genuine gaps kept as
+explicit expectations.
 """
 
 from __future__ import annotations
@@ -520,22 +519,69 @@ class TestFind:
         assert table.column("matched_on").to_pylist() == ["text"]
 
 
-# Remaining unimplemented v0.5 methods stay present with their real
-# signatures and raise NotImplementedError. Bulk construction methods are
-# covered by crates/graphforge-bindings-py/tests/bulk_construction.py.
-_UNIMPLEMENTED = [
-    ("begin", lambda f: f.begin()),
-    ("commit", lambda f: f.commit()),
-    ("rollback", lambda f: f.rollback()),
-    ("schema", lambda f: f.schema()),
-    ("labels", lambda f: f.labels()),
-    ("relationship_types", lambda f: f.relationship_types()),
-    ("node_count", lambda f: f.node_count()),
-]
+class TestInspectionSurface:
+    def test_empty_graph_is_exact(self) -> None:
+        forge = GraphForge()
+        assert forge.labels() == []
+        assert forge.relationship_types() == []
+        assert forge.node_count() == 0
+        assert forge.node_count("Missing") == 0
+        table = forge.schema()
+        assert table.column_names == ["label", "node_count", "rel_type", "rel_count"]
+        assert table.schema == pa.schema(
+            [
+                pa.field("label", pa.string(), nullable=True),
+                pa.field("node_count", pa.uint64(), nullable=True),
+                pa.field("rel_type", pa.string(), nullable=True),
+                pa.field("rel_count", pa.uint64(), nullable=True),
+            ]
+        )
+        assert table.num_rows == 0
 
+    def test_multi_label_counts_and_schema_are_deterministic(self) -> None:
+        forge = GraphForge()
+        forge.execute(
+            "CREATE (a:Person:Author), (b:Person), (p:Paper), "
+            "(a)-[:AUTHORED]->(p), (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(a)"
+        )
 
-class TestUnimplementedSurface:
-    @pytest.mark.parametrize("name,call", _UNIMPLEMENTED, ids=[n for n, _ in _UNIMPLEMENTED])
-    def test_raises_not_implemented(self, name: str, call) -> None:
-        with pytest.raises(NotImplementedError):
-            call(GraphForge())
+        assert forge.labels() == ["Author", "Paper", "Person"]
+        assert forge.relationship_types() == ["AUTHORED", "KNOWS"]
+        assert forge.node_count() == 3
+        assert forge.node_count("Person") == 2
+        assert forge.node_count("Person') MATCH (n) RETURN n //") == 0
+        table = forge.schema()
+        assert table.schema == pa.schema(
+            [
+                pa.field("label", pa.string(), nullable=True),
+                pa.field("node_count", pa.uint64(), nullable=True),
+                pa.field("rel_type", pa.string(), nullable=True),
+                pa.field("rel_count", pa.uint64(), nullable=True),
+            ]
+        )
+        assert table.to_pydict() == {
+            "label": ["Author", "Paper", "Person", None, None],
+            "node_count": [1, 1, 2, None, None],
+            "rel_type": [None, None, None, "AUTHORED", "KNOWS"],
+            "rel_count": [None, None, None, 1, 2],
+        }
+
+    def test_generic_transaction_methods_are_absent(self) -> None:
+        forge = GraphForge()
+        for name in ("begin", "commit", "rollback"):
+            assert not hasattr(forge, name)
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda forge: forge.schema(),
+            lambda forge: forge.labels(),
+            lambda forge: forge.relationship_types(),
+            lambda forge: forge.node_count(),
+        ],
+    )
+    def test_closed_instance_raises_lifecycle(self, call) -> None:
+        forge = GraphForge()
+        forge.close()
+        with pytest.raises(g.LifecycleError):
+            call(forge)

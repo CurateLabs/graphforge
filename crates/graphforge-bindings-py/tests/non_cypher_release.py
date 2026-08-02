@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "60a96ded9d55acdfed8c1bc5ae8876564f0e1262a7fea5f2bbc014be5af0a1e8"
-EXPECTED_RELEASE_DIGEST = "9edf1fa64367f2f37132c9fe8c9f4aa388edcfe390c9ef4a21de346c6aa9ed1d"
+EXPECTED_RUST_DIGEST = "7b9704118564c177abc8d7a69919c8f2d863770f95af9f706f4cd8ac3b3a9b18"
+EXPECTED_RELEASE_DIGEST = "b08b40684ddd01a0b17f87f94b008b129ee49d62614d9b8a7c4a2f6b701be27b"
 
 EVIDENCE = {
     "infra-validation": {
@@ -188,7 +188,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 186
+    assert len(release_methods) == 183
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -357,7 +357,8 @@ def check_stable_error_code_matrix() -> None:
             capability_version=2,
         ),
     )
-    _expect_code(NotImplementedError, "GF_NOT_IMPLEMENTED", forge.begin)
+    for method in ("begin", "commit", "rollback"):
+        assert not hasattr(forge, method), method
 
     context = multiprocessing.get_context("spawn")
     ready: multiprocessing.Queue = context.Queue()
@@ -449,6 +450,18 @@ def check_lifecycle_checkpoint_errors_and_reopen() -> None:
         alice = forge.add_node("Person", name="Alice")
         bob = forge.add_node("Person", name="Bob")
         forge.add_edge(alice, "KNOWS", bob, since=2026)
+        assert forge.labels() == ["Person"]
+        assert forge.relationship_types() == ["KNOWS"]
+        assert forge.node_count() == 2
+        assert forge.node_count("Person") == 2
+        assert forge.node_count("Person') MATCH (n) RETURN n //") == 0
+        inspection_schema = forge.schema()
+        assert inspection_schema.to_pydict() == {
+            "label": ["Person", None],
+            "node_count": [2, None],
+            "rel_type": [None, "KNOWS"],
+            "rel_count": [None, 1],
+        }
         checkpoint = forge.checkpoint(
             name="baseline",
             idempotency_key="018f0f4e-7b8c-7000-8000-000000002430",
@@ -499,6 +512,10 @@ def check_lifecycle_checkpoint_errors_and_reopen() -> None:
             "RETURN a.name AS src, b.name AS dst, r.since AS since"
         )
         assert rows.to_pydict() == {"src": ["Alice"], "dst": ["Bob"], "since": [2026]}
+        assert reopened.labels() == ["Person"]
+        assert reopened.relationship_types() == ["KNOWS"]
+        assert reopened.node_count() == 2
+        assert reopened.schema().equals(inspection_schema)
         assert reopened.rank("Person", by="degree").column("score").to_pylist() == [1.0, 0.0]
         reopened.index("Person", properties=["name"], rebuild=True)
         assert reopened.find("alice", label="Person").column("name").to_pylist() == ["Alice"]

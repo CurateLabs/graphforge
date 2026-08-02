@@ -223,6 +223,14 @@ test("the native Node facade preserves deterministic IPC through persistence and
     );
     assert.deepEqual([...find.getChild("name").toArray()], ["Alice"]);
     assert.deepEqual([...find.getChild("matched_on").toArray()], ["text"]);
+    assert.deepEqual(forge.labels(), ["Person"]);
+    assert.deepEqual(forge.relationshipTypes(), ["KNOWS"]);
+    assert.equal(forge.nodeCount(), 2);
+    const inspection = tableFromIPC(forge.schema());
+    assert.deepEqual(
+      inspection.schema.fields.map(({ name }) => name),
+      ["label", "node_count", "rel_type", "rel_count"],
+    );
     forge.close();
 
     const reopened = new GraphForge(project);
@@ -233,6 +241,13 @@ test("the native Node facade preserves deterministic IPC through persistence and
     assert.deepEqual(
       tableFromIPC(reopened.find("alice", "Person")).toArray(),
       find.toArray(),
+    );
+    assert.deepEqual(reopened.labels(), ["Person"]);
+    assert.deepEqual(reopened.relationshipTypes(), ["KNOWS"]);
+    assert.equal(reopened.nodeCount(), 2);
+    assert.deepEqual(
+      tableFromIPC(reopened.schema()).toArray(),
+      inspection.toArray(),
     );
     reopened.close();
   } finally {

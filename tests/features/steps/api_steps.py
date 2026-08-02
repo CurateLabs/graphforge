@@ -490,11 +490,6 @@ def given_forge_closed(ctx):
     ctx.forge.close()
 
 
-@given("a transaction has been started")
-def given_tx_started(ctx):
-    ctx.forge.begin()
-
-
 @given(
     parsers.parse(
         'a graph with a Person node named "{name}" connected by a KNOWS edge to a Person node named "{name2}"'
@@ -989,21 +984,6 @@ def when_node_count(ctx, label):
 @when(parsers.parse('I call explain on "{query}"'))
 def when_explain(ctx, query):
     ctx.result, ctx.error = _catch(ctx.forge.explain, query)
-
-
-@when("I call begin")
-def when_begin(ctx):
-    ctx.result, ctx.error = _catch(ctx.forge.begin)
-
-
-@when("I call commit")
-def when_commit(ctx):
-    ctx.result, ctx.error = _catch(ctx.forge.commit)
-
-
-@when("I call rollback")
-def when_rollback(ctx):
-    ctx.result, ctx.error = _catch(ctx.forge.rollback)
 
 
 @when("I call clear")

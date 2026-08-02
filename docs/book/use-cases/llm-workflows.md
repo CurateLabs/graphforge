@@ -342,10 +342,10 @@ rows = db.execute("""
 
 The example below simulates an end-to-end extraction pipeline without calling a real LLM API. Swap `mock_extract` for your actual LLM client.
 
-> **Transaction tip:** Wrap the entire batch ingestion in a single `begin()/commit()`
-> rather than one transaction per document. Per-document transactions add ~240%
-> overhead because `begin()` deep-copies the graph state on each call. A single batch
-> transaction costs the same as no transaction while giving full rollback on failure.
+> **Atomic publication:** Every `execute()` write publishes atomically. If the whole
+> ingestion must become visible as one committed generation, construct one
+> `publish_composite_transaction()` request. GraphForge does not expose generic
+> `begin()`, `commit()`, or `rollback()` methods.
 
 ```python
 from __future__ import annotations
@@ -507,14 +507,9 @@ if __name__ == "__main__":
         },
     ]
 
-    # Wrap the whole batch in one transaction — cheap (one deepcopy on empty graph)
-    db.begin()
-    try:
-        ingest_documents(db, corpus)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    # ingest_documents uses atomic execute() writes. Use one composite publication
+    # instead if the complete batch must become visible as a single generation.
+    ingest_documents(db, corpus)
 
     print(summarise_graph(db))
 ```

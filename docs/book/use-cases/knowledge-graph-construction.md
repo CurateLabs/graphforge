@@ -223,7 +223,6 @@ a human review step), redirect all edges to the canonical node and delete the al
 
 ```python
 # Suppose 'GraphForge DB' and 'GraphForge' are the same thing
-db.begin()
 db.execute(
     """
     MATCH (alias:Technology {name: 'GraphForge DB'})
@@ -231,10 +230,10 @@ db.execute(
     WITH alias, canon
     MATCH (alias)-[r]->(target)
     MERGE (canon)-[:{rel_type} {{confidence: r.confidence}}]->(target)
+    WITH alias
+    DETACH DELETE alias
     """.replace("{rel_type}", "IMPLEMENTED_IN")  # repeat per rel type as needed
 )
-db.execute("MATCH (alias:Technology {name: 'GraphForge DB'}) DETACH DELETE alias")
-db.commit()
 ```
 
 ---
@@ -437,8 +436,9 @@ db = GraphForge()   # in-memory for this example; use GraphForge("kg/") to persi
 SOURCE  = "doc:example:python-ecosystem"
 MODEL   = "gpt-4o-mock"
 
-db.begin()
-
+# Each execute() below is an atomic publication. Build one
+# publish_composite_transaction() request instead when the entire import must
+# publish as one committed generation.
 # Load entities
 for ent in llm_output["entities"]:
     db.execute(
@@ -478,8 +478,6 @@ for rel in llm_output["relationships"]:
             "model":      MODEL,
         },
     )
-
-db.commit()
 
 # -----------------------------------------------------------------
 # 3. Query the graph

@@ -1531,19 +1531,6 @@ fn result_to_pyarrow(py: Python<'_>, result: &ExecutionResult) -> PyResult<Py<Py
     Ok(table.unbind())
 }
 
-/// Preserve structured errors for analyst verbs whose binding conversion is pending.
-/// A successful facade result remains unavailable until that verb's ordered
-/// binding slice installs its native Arrow converter.
-fn verb_result<T>(py: Python<'_>, r: Result<T, GfError>) -> PyResult<Py<PyAny>> {
-    match r {
-        Err(e) => Err(to_pyerr(py, &e)),
-        Ok(_) => Err(to_pyerr(
-            py,
-            &GfError::NotImplemented("analyst-verb result conversion is not yet implemented"),
-        )),
-    }
-}
-
 /// Transfer a native analyst-algorithm batch to a `pyarrow.Table` without reshaping it.
 fn algorithm_result(py: Python<'_>, r: Result<RecordBatch, GfError>) -> PyResult<Py<PyAny>> {
     let batch = r.map_err(|error| to_pyerr(py, &error))?;
@@ -5424,29 +5411,6 @@ impl GraphForge {
         record_batch_to_pyarrow_table(py, &receipt)
     }
 
-    // ----- Transactions — not yet implemented (raises NotImplementedError).
-
-    /// Begin a transaction.
-    fn begin(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.begin())
-            .map_err(|e| to_pyerr(py, &e))
-    }
-
-    /// Commit the current transaction.
-    fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.commit())
-            .map_err(|e| to_pyerr(py, &e))
-    }
-
-    /// Roll back the current transaction.
-    fn rollback(&self, py: Python<'_>) -> PyResult<()> {
-        self.ensure_open()?;
-        py.detach(|| self.inner.rollback())
-            .map_err(|e| to_pyerr(py, &e))
-    }
-
     /// Remove all nodes and edges (in-memory instances only).
     fn clear(&self, py: Python<'_>) -> PyResult<()> {
         self.ensure_open()?;
@@ -5454,12 +5418,12 @@ impl GraphForge {
             .map_err(|e| to_pyerr(py, &e))
     }
 
-    // ----- Introspection — not yet implemented (raises NotImplementedError).
+    // ----- Introspection.
 
-    /// Schema summary as a `pyarrow.Table` (label/property/type).
+    /// Sorted label and relationship counts as a `pyarrow.Table`.
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
-        verb_result(py, py.detach(|| self.inner.schema()))
+        algorithm_result(py, py.detach(|| self.inner.schema()))
     }
 
     /// The node labels present in the graph.

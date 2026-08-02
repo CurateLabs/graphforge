@@ -5702,29 +5702,6 @@ impl GraphForge {
         g.add_edges().map_err(|e| to_napi_err(&e))
     }
 
-    // ----- Transactions — not yet implemented (raise NotImplementedError).
-
-    /// Begin a transaction.
-    #[napi]
-    pub fn begin(&self) -> Result<()> {
-        let g = self.open_guard()?;
-        g.begin().map_err(|e| to_napi_err(&e))
-    }
-
-    /// Commit the current transaction.
-    #[napi]
-    pub fn commit(&self) -> Result<()> {
-        let g = self.open_guard()?;
-        g.commit().map_err(|e| to_napi_err(&e))
-    }
-
-    /// Roll back the current transaction.
-    #[napi]
-    pub fn rollback(&self) -> Result<()> {
-        let g = self.open_guard()?;
-        g.rollback().map_err(|e| to_napi_err(&e))
-    }
-
     /// Remove all nodes and edges (in-memory instances only).
     #[napi]
     pub fn clear(&self) -> Result<()> {
@@ -5734,11 +5711,14 @@ impl GraphForge {
 
     // ----- Introspection.
 
-    /// Schema summary as an Arrow IPC `Buffer` (label/property/type).
+    /// Sorted label and relationship counts as an Arrow IPC `Buffer`.
     #[napi]
     pub fn schema(&self) -> Result<Buffer> {
-        self.ensure_open()?;
-        Err(to_napi_err(&GfError::NotImplemented("schema")))
+        let graph = self.open_guard()?;
+        let batch = graph.schema().map_err(|error| to_napi_err(&error))?;
+        record_batch_to_ipc(&batch)
+            .map(Buffer::from)
+            .map_err(|error| to_napi_err(&error))
     }
 
     /// The node labels present in the graph.
