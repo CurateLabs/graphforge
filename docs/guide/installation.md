@@ -1,6 +1,6 @@
 # Installation
 
-GraphForge **v0.5.1** ships as thin native bindings over a Rust core
+GraphForge ships as thin native bindings over a Rust core
 (Python via maturin; Node via N-API). Install the published packages for
 normal use; build from source on `main` when developing the engine or
 bindings.
@@ -10,41 +10,40 @@ detects Node- and Python-first workspaces, helps configure the appropriate nativ
 uses the same Rust-owned engine described below.
 
 > **Name collision:** PyPI also lists an unrelated pure-Python package
-> named `graphforge` at **0.4.0** (~279 KB). CurateLabs GraphForge
-> **0.5.1** is the native engine (Rust `.so` / `.node`) on PyPI and npm.
-> Pin the release version (`graphforge==0.5.1`) — do not assume an unpinned
-> `pip install graphforge` resolves to the CurateLabs native wheel.
+> named `graphforge` at **0.4.0** (~279 KB). Current CurateLabs GraphForge
+> releases are native wheels (Rust `.so` / `.node`) on PyPI and npm. Install
+> by package name to receive the current release.
 
 ---
 
-## Python package (v0.5.1)
+## Python package
 
 **Requirements:** Python 3.10 or newer (3.10–3.14 tested in CI).
 
 **pip**
 
 ```bash
-pip install "graphforge==0.5.1"
+pip install graphforge
 ```
 
 **uv** (recommended)
 
 ```bash
-uv add "graphforge==0.5.1"
+uv add graphforge
 ```
 
 ### Verify
 
 ```python
 import graphforge
-print(graphforge.__version__)   # 0.5.1…
+print(graphforge.__version__)
 ```
 
 ### Optional dependencies
 
 ```bash
 # Polars convenience wrapper around Arrow results
-pip install "graphforge[polars]==0.5.1"
+pip install "graphforge[polars]"
 ```
 
 Results are Apache Arrow tables. Convert with `table.to_pandas()`,
@@ -58,7 +57,7 @@ dependency (not bundled inside the `graphforge` wheel). See
 
 ---
 
-## Node package (@curatelabs/graphforge, v0.5.1)
+## Node package (`@curatelabs/graphforge`)
 
 **Requirements:** a current Node.js LTS (CI covers the binding’s supported
 targets).
@@ -66,13 +65,13 @@ targets).
 **npm**
 
 ```bash
-npm install @curatelabs/graphforge@0.5.1
+npm install @curatelabs/graphforge
 ```
 
 **pnpm**
 
 ```bash
-pnpm add @curatelabs/graphforge@0.5.1
+pnpm add @curatelabs/graphforge
 ```
 
 ```js

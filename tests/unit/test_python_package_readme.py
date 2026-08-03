@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email.parser
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -13,22 +14,39 @@ README = ROOT / "crates" / "graphforge-bindings-py" / "README.md"
 PYPROJECT = ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml"
 CANONICAL_DOCS = "https://docs.graphforge.sh/"
 STALE_DOCS = "https://curatelabs.github.io/graphforge/"
-# Public install docs must pin the published release (name collision / pin).
-PINNED_PIP_INSTALLS = (
-    'pip install "graphforge==0.5.1"',
-    "pip install graphforge==0.5.1",
+# Public install docs must install the current published release by package name.
+UNPINNED_PIP_INSTALLS = (
+    'pip install "graphforge"',
+    "pip install graphforge",
 )
 
 
+def _has_unpinned_pip_install(text: str) -> bool:
+    return any(snippet in text for snippet in UNPINNED_PIP_INSTALLS)
+
+
 def _has_pinned_pip_install(text: str) -> bool:
-    return any(snippet in text for snippet in PINNED_PIP_INSTALLS)
+    return bool(
+        re.search(
+            r"""\bpip\s+install\b[^\n]*?[\"']?graphforge(?:\[[^\]\n]+\])?[\"']?\s*(?:===|==|~=|!=|<=|>=|<|>|@)""",
+            text,
+        )
+    )
+
+
+def test_pinned_pip_install_detector_covers_quotes_and_options() -> None:
+    assert _has_pinned_pip_install('pip install "graphforge==0.5.1"')
+    assert _has_pinned_pip_install("pip install 'graphforge==0.5.1'")
+    assert _has_pinned_pip_install("pip install --upgrade graphforge==0.5.1")
+    assert _has_pinned_pip_install("pip install --upgrade 'graphforge==0.5.1'")
 
 
 def test_python_readme_is_concise_pypi_landing_page() -> None:
     text = README.read_text(encoding="utf-8")
     lines = [line.rstrip() for line in text.splitlines()]
     assert lines[0] == "# GraphForge for Python"
-    assert _has_pinned_pip_install(text)
+    assert _has_unpinned_pip_install(text)
+    assert not _has_pinned_pip_install(text)
     assert "from graphforge import GraphForge" in text
     assert "forge.execute(" in text
     assert CANONICAL_DOCS in text
@@ -84,7 +102,8 @@ def test_python_sdist_embeds_readme_in_pkg_info() -> None:
     description = metadata.get_payload()
     assert isinstance(description, str)
     assert "# GraphForge for Python" in description
-    assert _has_pinned_pip_install(description)
+    assert _has_unpinned_pip_install(description)
+    assert not _has_pinned_pip_install(description)
     assert "from graphforge import GraphForge" in description
     assert CANONICAL_DOCS in description
     assert STALE_DOCS not in description

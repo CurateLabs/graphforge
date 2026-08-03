@@ -28,7 +28,7 @@ edges). Provenance, license/citation, and SHA-256 identities live in
 python -m pip install -r examples/visualization/requirements.txt
 python examples/visualization/dataset/fetch.py
 
-# Node (uses in-repo binding when present; else @curatelabs/graphforge@0.5.1)
+# Node (uses in-repo binding when present; else @curatelabs/graphforge)
 cd examples/visualization
 npm install
 ```

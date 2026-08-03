@@ -1,7 +1,8 @@
 <h1 align="center">GraphForge</h1>
 
 <p align="center">
-  <a href="#installation"><img src="https://img.shields.io/badge/version-v0.5.1-F59E0B.svg" alt="GraphForge v0.5.1" /></a>
+  <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi" alt="PyPI version" /></a>
+  <a href="https://www.npmjs.com/package/@curatelabs/graphforge"><img src="https://img.shields.io/npm/v/%40curatelabs/graphforge.svg?label=npm&logo=npm" alt="npm version" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
   <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
@@ -50,7 +51,7 @@ first-class Arrow results across language bindings.
 
 | | NetworkX | **GraphForge** | Neo4j / Memgraph |
 |:---|:---|:---|:---|
-| **Setup** | `pip install` | Embedded package (`graphforge==0.5.1`) | Run a server |
+| **Setup** | `pip install` | Embedded package (`graphforge`) | Run a server |
 | **Query language** | Python API | **Full openCypher** | Full Cypher |
 | **Persistence** | Manual | **Parquet project directory** | Native |
 | **Results** | Python objects | **Apache Arrow Tables** | Driver rows |
@@ -71,36 +72,36 @@ aggregations remain edge-count bound. See scale limits for measured ceilings.*
 
 ## Installation
 
-Install GraphForge **v0.5.1** from PyPI or npm. Pin the release version — PyPI
-also lists an unrelated pure-Python `graphforge` **0.4.0**; do not confuse it
-with the CurateLabs native engine.
+Install GraphForge from PyPI or npm. The current `graphforge` package is the
+CurateLabs native engine; earlier pure-Python releases under the same PyPI name
+predate it.
 
 **pip**
 
 ```bash
-pip install "graphforge==0.5.1"
+pip install graphforge
 ```
 
 **uv** (recommended)
 
 ```bash
-uv add "graphforge==0.5.1"
+uv add graphforge
 ```
 
 **npm**
 
 ```bash
-npm install @curatelabs/graphforge@0.5.1
+npm install @curatelabs/graphforge
 ```
 
 **pnpm**
 
 ```bash
-pnpm add @curatelabs/graphforge@0.5.1
+pnpm add @curatelabs/graphforge
 ```
 
 ```bash
-python -c "import graphforge; print(graphforge.__version__)"  # 0.5.1…
+python -c "import graphforge; print(graphforge.__version__)"
 ```
 
 **Requirements:** Python 3.10–3.14
