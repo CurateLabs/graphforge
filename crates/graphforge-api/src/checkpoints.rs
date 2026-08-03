@@ -2097,6 +2097,56 @@ mod tests {
         OperationId(Uuid::from_u128(value))
     }
 
+    #[test]
+    fn checkpoint_digest_and_scope_helpers_are_closed_and_exact() {
+        assert_eq!(decode_hex(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        for invalid in ["", "ab", &"gg".repeat(32)] {
+            let error = decode_hex(invalid).unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(
+                error.to_string(),
+                "validation error: invalid checkpoint digest"
+            );
+        }
+        for (capability, family, expected) in [
+            ("graph", "snapshot", "graph"),
+            ("ontology", "snapshot", "ontology"),
+            ("provenance", "events", "provenance"),
+            ("knowledge", "assertions", "knowledge"),
+            ("epistemic", "status", "epistemic"),
+            ("valid_time", "validity", "epistemic"),
+            ("workspace", "ontology", "ontology"),
+            ("workspace", "configuration", "configuration"),
+            ("search", "index", "capabilities"),
+        ] {
+            assert_eq!(participant_scope(capability, family), expected);
+        }
+        for scope in [
+            CheckpointDiffScope::Summary,
+            CheckpointDiffScope::All,
+            CheckpointDiffScope::Graph,
+            CheckpointDiffScope::Ontology,
+            CheckpointDiffScope::Configuration,
+            CheckpointDiffScope::Capabilities,
+            CheckpointDiffScope::Provenance,
+            CheckpointDiffScope::Knowledge,
+            CheckpointDiffScope::Epistemic,
+        ] {
+            let actual = match scope {
+                CheckpointDiffScope::Summary | CheckpointDiffScope::All => "anything",
+                CheckpointDiffScope::Graph => "graph",
+                CheckpointDiffScope::Ontology => "ontology",
+                CheckpointDiffScope::Configuration => "configuration",
+                CheckpointDiffScope::Capabilities => "capabilities",
+                CheckpointDiffScope::Provenance => "provenance",
+                CheckpointDiffScope::Knowledge => "knowledge",
+                CheckpointDiffScope::Epistemic => "epistemic",
+            };
+            assert!(scope_matches(scope, actual));
+        }
+        assert!(!scope_matches(CheckpointDiffScope::Graph, "knowledge"));
+    }
+
     fn enable(graph: &GraphForge, capability_id: crate::CapabilityId, seed: u128) {
         graph
             .enable_capability(crate::EnableCapabilityRequest {

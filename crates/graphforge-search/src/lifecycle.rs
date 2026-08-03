@@ -1508,4 +1508,95 @@ mod tests {
         ));
         assert!(consume_retry(None).is_ok());
     }
+
+    #[test]
+    fn inspection_reports_no_properties_missing_current_and_stale_without_building() {
+        let empty = TempDir::new().unwrap();
+        let no_properties = inspect_text_index_freshness(
+            empty.path(),
+            lazy_request(),
+            None,
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(no_properties.state, TextIndexFreshnessState::Missing);
+        assert_eq!(
+            no_properties.reason,
+            Some(TextIndexFreshnessReason::NoTextProperties)
+        );
+        assert!(no_properties.properties.is_empty());
+        assert!(!empty.path().join("indexes").exists());
+
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let missing = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(missing.state, TextIndexFreshnessState::Missing);
+        assert_eq!(missing.reason, Some(TextIndexFreshnessReason::NotBuilt));
+        assert_eq!(missing.artifact_generation, None);
+
+        let published = prepare(project.path());
+        let current = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(current.state, TextIndexFreshnessState::Current);
+        assert_eq!(current.reason, None);
+        assert_eq!(
+            current.artifact_generation.as_deref(),
+            published
+                .artifact()
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+        );
+        assert_eq!(
+            current.artifact_source_fingerprint.as_deref(),
+            Some(current.source_fingerprint.as_str())
+        );
+
+        bump_search_generation(project.path()).unwrap();
+        let stale = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(stale.state, TextIndexFreshnessState::Stale);
+        assert_eq!(
+            stale.reason,
+            Some(TextIndexFreshnessReason::SourceGenerationChanged)
+        );
+        assert_eq!(stale.artifact_generation, current.artifact_generation);
+    }
+
+    #[test]
+    fn snapshot_rejects_nonregular_source_entries_without_reading_or_replacing_them() {
+        for relative in ["topology/nodes.parquet", "properties/Person.parquet"] {
+            let project = TempDir::new().unwrap();
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let result =
+                capture_text_snapshot(project.path(), TextSearchLimits::default(), || Ok(()));
+            assert!(matches!(
+                result,
+                Err(SearchArtifactError::SourceSnapshot { .. })
+            ));
+            assert!(path.is_dir());
+        }
+    }
 }

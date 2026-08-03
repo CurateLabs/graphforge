@@ -1226,4 +1226,53 @@ mod tests {
         ));
         assert_eq!(std::fs::read(root.join(CURRENT_FILE)).unwrap(), b"corrupt");
     }
+
+    #[test]
+    fn current_pointer_malformed_state_matrix_is_exact_and_non_mutating() {
+        let key = key();
+        let cases: Vec<Vec<u8>> = vec![
+            b"not-json".to_vec(),
+            br#"{}"#.to_vec(),
+            br#"{"version":"../escape"}"#.to_vec(),
+            br#"{"version":"version-bad/slash"}"#.to_vec(),
+            vec![b'x'; MAX_CURRENT_BYTES + 1],
+        ];
+        for bytes in cases {
+            let dir = TempDir::new().unwrap();
+            let root = key.artifact_root(dir.path());
+            std::fs::create_dir_all(&root).unwrap();
+            let pointer = root.join(CURRENT_FILE);
+            std::fs::write(&pointer, &bytes).unwrap();
+            let result = current_search_artifact(dir.path(), &key);
+            assert!(matches!(
+                result,
+                Err(SearchArtifactError::CorruptManifest { .. })
+                    | Err(SearchArtifactError::ResourceExhausted {
+                        resource: "current_pointer_bytes",
+                        ..
+                    })
+            ));
+            assert_eq!(std::fs::read(&pointer).unwrap(), bytes);
+            assert!(!root.join(VERSIONS_DIR).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn syncing_build_with_symlink_fails_without_following_or_mutating_target() {
+        use std::os::unix::fs::symlink;
+
+        let build = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let target = external.path().join("secret");
+        std::fs::write(&target, b"caller bytes").unwrap();
+        let link = build.path().join("linked");
+        symlink(&target, &link).unwrap();
+        assert!(matches!(
+            sync_tree(build.path()),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"caller bytes");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
 }

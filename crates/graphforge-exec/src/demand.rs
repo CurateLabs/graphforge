@@ -842,4 +842,73 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(&plan, &optimized));
     }
+
+    #[tokio::test]
+    async fn demand_wrappers_replace_children_and_enforce_zero_demand() {
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
+        let replacement: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
+
+        let probe = Arc::new(ProbeExec::new(Arc::clone(&child), 4, true, false));
+        let probe_error = Arc::clone(&probe)
+            .with_new_children(vec![])
+            .expect_err("probe requires one child");
+        assert!(matches!(
+            probe_error,
+            DataFusionError::Internal(message) if message == "DemandProbeExec needs one child"
+        ));
+        let replaced_probe = probe
+            .with_new_children(vec![Arc::clone(&replacement)])
+            .expect("replace probe child");
+        assert!(Arc::ptr_eq(replaced_probe.children()[0], &replacement));
+
+        let demand = Arc::new(QueryDemand::new());
+        let guard = Arc::new(DemandGuardExec::new(
+            Arc::clone(&child),
+            Arc::clone(&demand),
+            0,
+        ));
+        let guard_error = Arc::clone(&guard)
+            .with_new_children(vec![])
+            .expect_err("guard requires one child");
+        assert!(matches!(
+            guard_error,
+            DataFusionError::Internal(message) if message == "DemandGuardExec needs one child"
+        ));
+        let replaced_guard = guard
+            .with_new_children(vec![replacement])
+            .expect("replace guard child");
+        assert_eq!(replaced_guard.name(), "DemandGuardExec");
+
+        let context = SessionContext::new();
+        let batches = collect(replaced_guard, context.task_ctx())
+            .await
+            .expect("zero-demand guard returns an empty stream");
+        assert!(batches.is_empty());
+        assert!(
+            !demand.is_cancelled(),
+            "zero demand does not start the child"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_child_cancels_demand_and_finishes_quiescently() {
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
+        let demand = Arc::new(QueryDemand::new());
+        let guard: Arc<dyn ExecutionPlan> =
+            Arc::new(DemandGuardExec::new(child, Arc::clone(&demand), 10));
+        let batches = collect(guard, SessionContext::new().task_ctx())
+            .await
+            .expect("empty child finishes normally");
+        assert!(batches.is_empty());
+        assert!(demand.is_cancelled());
+        assert_eq!(demand.in_flight_reads.load(Ordering::Acquire), 0);
+    }
 }

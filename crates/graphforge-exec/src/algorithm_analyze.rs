@@ -150,7 +150,6 @@ impl RustAlgorithm for CountAutomorphisms {
             dependency: BUILTIN_REVIEW,
         }
     }
-
     fn execute(
         &self,
         graph: &AdjacencyGraph,
@@ -6585,5 +6584,56 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn graphsage_source_resource_contract_validates_feature_matrix() {
+        let empty = AdjacencyGraph::with_test_counts(0, 0);
+        assert!(graphsage_source_resources(&empty).is_err());
+
+        let mut graph = AdjacencyGraph::with_test_directed_edges(2, &[(0, 1)]);
+        assert_eq!(
+            graphsage_source_resources(&graph).unwrap_err().to_string(),
+            "validation error: graphsage selected node has no resolved feature vector"
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![]), (1, vec![])]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0, 2.0]), (1, vec![3.0])]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent shape")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([
+                (0, vec![1.0, 2.0]),
+                (1, vec![f64::NAN, 4.0]),
+            ]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("must be finite")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0, 2.0]), (1, vec![3.0, 4.0])]))
+            .unwrap();
+        let (width, retained) = graphsage_source_resources(&graph).unwrap();
+        assert_eq!(width, 2);
+        assert!(retained >= 96);
+        let projection = graphsage_projection(&graph).expect("valid GraphSAGE projection");
+        assert_eq!(projection.nodes().len(), 2);
+        assert_eq!(projection.feature_width(), 2);
     }
 }

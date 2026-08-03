@@ -3530,8 +3530,8 @@ mod tests {
     use arrow::array::{Array, FixedSizeBinaryBuilder, Int64Array, StringArray, UInt32Array};
     use datafusion::common::TableReference;
     use graphforge_ir::{
-        CreateEdgeSpec, CreateNodeSpec, CreatePattern, IrLiteral, PropId, RemovePropItem,
-        SetPropItem, VarId,
+        BinaryOpKind, CaseArm, CreateEdgeSpec, CreateNodeSpec, CreatePattern, IrLiteral, PropId,
+        RemovePropItem, SetPropItem, UnaryOpKind, VarId,
     };
 
     use super::*;
@@ -3547,6 +3547,61 @@ mod tests {
 
         assert_eq!(ctx.counters.labels_removed, 0);
         assert_eq!(ctx.counters.labels_added, 0);
+    }
+
+    #[test]
+    fn expression_variable_collection_walks_every_composite_shape_once() {
+        let mut arena = ExprArena::default();
+        let var0 = arena.push(IrExpr::VarRef(VarId(0)));
+        let var1 = arena.push(IrExpr::VarRef(VarId(1)));
+        let var2 = arena.push(IrExpr::VarRef(VarId(2)));
+        let property = arena.push(IrExpr::PropertyAccess {
+            base: var0,
+            prop: PropId(7),
+        });
+        let unary = arena.push(IrExpr::UnaryOp {
+            op: UnaryOpKind::Neg,
+            expr: var1,
+        });
+        let binary = arena.push(IrExpr::BinaryOp {
+            op: BinaryOpKind::Add,
+            left: property,
+            right: unary,
+        });
+        let function = arena.push(IrExpr::FunctionCall {
+            name: "coalesce".into(),
+            args: vec![binary, var2, var2],
+        });
+        let list = arena.push(IrExpr::ListLiteral(vec![function, var0]));
+        let map = arena.push(IrExpr::MapLiteral(vec![
+            ("items".into(), list),
+            ("fallback".into(), var1),
+        ]));
+        let case = arena.push(IrExpr::Case {
+            operand: Some(var0),
+            arms: vec![CaseArm {
+                when: var1,
+                then: map,
+            }],
+            else_expr: Some(var2),
+        });
+        let comprehension = arena.push(IrExpr::ListComprehension {
+            loop_var: VarId(9),
+            list,
+            filter: Some(binary),
+            projection: Some(case),
+        });
+
+        let mut vars = HashSet::new();
+        collect_expr_vars(&arena, comprehension, &mut vars, &mut HashSet::new());
+        assert_eq!(vars, HashSet::from([VarId(0), VarId(1), VarId(2)]));
+
+        collect_expr_vars(&arena, comprehension, &mut vars, &mut HashSet::new());
+        assert_eq!(
+            vars.len(),
+            3,
+            "revisiting expressions does not duplicate vars"
+        );
     }
 
     fn create_op() -> GraphOp {

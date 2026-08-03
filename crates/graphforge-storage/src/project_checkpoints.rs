@@ -3232,4 +3232,46 @@ mod tests {
         );
         assert!(list_checkpoints(root.path()).unwrap().is_empty());
     }
+
+    #[test]
+    fn registry_header_sort_and_revision_validation_matrix_uses_durable_records() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(701), "Alpha"),
+        )
+        .unwrap();
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(702), "Beta"),
+        )
+        .unwrap();
+        let root = directory.path().join(CHECKPOINTS_DIR);
+        let stable = read_registry(&root).unwrap();
+        assert!(validate_registry(&stable).is_ok());
+
+        let mutations: Vec<Box<dyn Fn(&mut Registry)>> = vec![
+            Box::new(|registry| registry.format = "future".into()),
+            Box::new(|registry| registry.format_version = 2),
+            Box::new(|registry| registry.active.reverse()),
+            Box::new(|registry| registry.active[0].created_revision = 0),
+            Box::new(|registry| registry.active[1].name = registry.active[0].name.clone()),
+            Box::new(|registry| {
+                registry.active[1].checkpoint_uuid = registry.active[0].checkpoint_uuid
+            }),
+            Box::new(|registry| {
+                registry.active[1].create_operation_uuid = registry.active[0].create_operation_uuid
+            }),
+        ];
+        for mutate in mutations {
+            let mut candidate = stable.clone();
+            mutate(&mut candidate);
+            assert_eq!(
+                validate_registry(&candidate).unwrap_err().code(),
+                "GF_CHECKPOINT_REGISTRY_CORRUPT"
+            );
+        }
+        assert_eq!(read_registry(&root).unwrap(), stable);
+    }
 }

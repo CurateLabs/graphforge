@@ -976,29 +976,61 @@ mod tests {
         let first_reasoning = reasoning(&graph, first, first_provenance, 14, 15);
         let second_reasoning = reasoning(&graph, second, second_provenance, 16, 17);
         let group_uuid = uuid7(18);
-        graph
-            .create_hypothesis_group(CreateHypothesisGroupRequest {
-                context: context(19),
-                group_uuid,
-                question_key: "risk.primary-cause.v1".into(),
-                provenance_uuid: first_provenance,
-            })
+        let group_request = CreateHypothesisGroupRequest {
+            context: context(19),
+            group_uuid,
+            question_key: "risk.primary-cause.v1".into(),
+            provenance_uuid: first_provenance,
+        };
+        let group_receipt = graph
+            .create_hypothesis_group(group_request.clone())
             .unwrap();
+        assert_eq!(
+            graph
+                .create_hypothesis_group(group_request.clone())
+                .unwrap()
+                .batches,
+            group_receipt.batches
+        );
+        let mut conflicting_group = group_request;
+        conflicting_group.question_key = "risk.changed.v1".into();
+        assert_eq!(
+            graph
+                .create_hypothesis_group(conflicting_group)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
         for (event_seed, operation_seed, assertion_uuid, reasoning_uuid, provenance_uuid) in [
             (20, 90, first, first_reasoning, first_provenance),
             (22, 80, second, second_reasoning, second_provenance),
         ] {
-            graph
-                .record_hypothesis_membership(&RecordHypothesisMembershipRequest {
-                    context: context(operation_seed),
-                    membership_event_uuid: uuid7(event_seed),
-                    group_uuid,
-                    assertion_uuid,
-                    action: HypothesisMembershipAction::Added,
-                    reasoning_uuid,
-                    provenance_uuid,
-                })
-                .unwrap();
+            let request = RecordHypothesisMembershipRequest {
+                context: context(operation_seed),
+                membership_event_uuid: uuid7(event_seed),
+                group_uuid,
+                assertion_uuid,
+                action: HypothesisMembershipAction::Added,
+                reasoning_uuid,
+                provenance_uuid,
+            };
+            let receipt = graph.record_hypothesis_membership(&request).unwrap();
+            assert_eq!(
+                graph
+                    .record_hypothesis_membership(&request)
+                    .unwrap()
+                    .batches,
+                receipt.batches
+            );
+            let mut conflict = request;
+            conflict.action = HypothesisMembershipAction::Removed;
+            assert_eq!(
+                graph
+                    .record_hypothesis_membership(&conflict)
+                    .unwrap_err()
+                    .code(),
+                "GF_IDEMPOTENCY_CONFLICT"
+            );
         }
         graph
             .assess_confidence(AssessConfidenceRequest {
@@ -1013,16 +1045,33 @@ mod tests {
             0,
             "even the highest confidence must not select implicitly"
         );
-        graph
-            .record_hypothesis_selection(&RecordHypothesisSelectionRequest {
-                context: context(70),
-                selection_event_uuid: uuid7(25),
-                group_uuid,
-                selected_assertion_uuid: Some(first),
-                reasoning_uuid: first_reasoning,
-                provenance_uuid: first_provenance,
-            })
+        let selection_request = RecordHypothesisSelectionRequest {
+            context: context(70),
+            selection_event_uuid: uuid7(25),
+            group_uuid,
+            selected_assertion_uuid: Some(first),
+            reasoning_uuid: first_reasoning,
+            provenance_uuid: first_provenance,
+        };
+        let selection_receipt = graph
+            .record_hypothesis_selection(&selection_request)
             .unwrap();
+        assert_eq!(
+            graph
+                .record_hypothesis_selection(&selection_request)
+                .unwrap()
+                .batches,
+            selection_receipt.batches
+        );
+        let mut selection_conflict = selection_request;
+        selection_conflict.selected_assertion_uuid = Some(second);
+        assert_eq!(
+            graph
+                .record_hypothesis_selection(&selection_conflict)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
 
         let generation_before = resolve(&graph).unwrap().generation_uuid();
         let error = graph
@@ -1043,18 +1092,33 @@ mod tests {
             "rejected selected-member removal must not publish"
         );
 
-        graph
-            .remove_hypothesis_member(&RemoveHypothesisMemberRequest {
-                context: context(60),
-                membership_event_uuid: uuid7(29),
-                selection_event_uuid: uuid7(30),
-                group_uuid,
-                assertion_uuid: first,
-                selected_assertion_uuid: Some(second),
-                reasoning_uuid: first_reasoning,
-                provenance_uuid: first_provenance,
-            })
-            .unwrap();
+        let remove_request = RemoveHypothesisMemberRequest {
+            context: context(60),
+            membership_event_uuid: uuid7(29),
+            selection_event_uuid: uuid7(30),
+            group_uuid,
+            assertion_uuid: first,
+            selected_assertion_uuid: Some(second),
+            reasoning_uuid: first_reasoning,
+            provenance_uuid: first_provenance,
+        };
+        let removal_receipt = graph.remove_hypothesis_member(&remove_request).unwrap();
+        assert_eq!(
+            graph
+                .remove_hypothesis_member(&remove_request)
+                .unwrap()
+                .batches,
+            removal_receipt.batches
+        );
+        let mut removal_conflict = remove_request;
+        removal_conflict.selected_assertion_uuid = None;
+        assert_eq!(
+            graph
+                .remove_hypothesis_member(&removal_conflict)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
         assert_eq!(
             graph.hypothesis_members(group_uuid).unwrap().batches[0].num_rows(),
             1

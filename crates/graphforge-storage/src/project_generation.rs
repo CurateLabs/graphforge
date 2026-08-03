@@ -1910,4 +1910,76 @@ mod tests {
 
         assert_code(error, "GF_PROJECT_CORRUPT");
     }
+
+    #[test]
+    fn canonical_identity_and_manifest_validation_matrix_is_total() {
+        let expected = Uuid::now_v7();
+        assert_eq!(
+            parse_canonical_uuid(&expected.hyphenated().to_string()).unwrap(),
+            expected
+        );
+        for value in [
+            "not-a-uuid".to_owned(),
+            expected.simple().to_string(),
+            expected.hyphenated().to_string().to_uppercase(),
+        ] {
+            assert_code(
+                parse_canonical_uuid(&value).unwrap_err(),
+                "GF_PROJECT_CORRUPT",
+            );
+        }
+        assert_eq!(parse_sha256(&"00".repeat(32)).unwrap(), [0; 32]);
+        for value in ["00".to_owned(), "AA".repeat(32), "gg".repeat(32)] {
+            assert_code(parse_sha256(&value).unwrap_err(), "GF_PROJECT_CORRUPT");
+        }
+        for value in ["", "Upper", "has/slash", "has space", ".", ".."] {
+            assert_code(
+                validate_machine_id(value).unwrap_err(),
+                "GF_PROJECT_CORRUPT",
+            );
+        }
+        assert!(validate_machine_id("graph_data-1").is_ok());
+
+        let base = GenerationManifest {
+            format: "graphforge-generation".into(),
+            format_version: 1,
+            generation_uuid: expected.hyphenated().to_string(),
+            parent_generation_uuid: None,
+            transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
+            capabilities: vec![CapabilityDescriptor {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            }],
+            participants: vec![],
+        };
+        assert!(validate_manifest(&base, expected).is_ok());
+        let mutations: Vec<Box<dyn Fn(&mut GenerationManifest)>> = vec![
+            Box::new(|manifest| manifest.format = "future".into()),
+            Box::new(|manifest| manifest.format_version = 2),
+            Box::new(|manifest| manifest.generation_uuid = Uuid::now_v7().to_string()),
+            Box::new(|manifest| manifest.transaction_uuid = "bad".into()),
+            Box::new(|manifest| manifest.capabilities[0].capability_id = "Upper".into()),
+            Box::new(|manifest| manifest.capabilities[0].capability_version = 0),
+        ];
+        for mutate in mutations {
+            let mut manifest = base.clone();
+            mutate(&mut manifest);
+            assert!(validate_manifest(&manifest, expected).is_err());
+        }
+    }
+
+    #[test]
+    fn bounded_regular_file_rejects_missing_directory_and_oversize_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert!(read_bounded_regular_file(&missing, 4).is_err());
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(read_bounded_regular_file(&directory, 4).is_err());
+        let oversized = root.path().join("oversized");
+        std::fs::write(&oversized, b"12345").unwrap();
+        assert!(read_bounded_regular_file(&oversized, 4).is_err());
+        assert_eq!(std::fs::read(&oversized).unwrap(), b"12345");
+        assert_eq!(read_bounded_regular_file(&oversized, 5).unwrap(), b"12345");
+    }
 }

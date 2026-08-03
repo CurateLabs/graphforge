@@ -1961,6 +1961,24 @@ mod tests {
             property_value_at(&unsupported, 0).unwrap_err(),
             "unsupported property type UInt64"
         );
+
+        let list =
+            ListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>([Some(vec![
+                Some(1),
+                None,
+                Some(3),
+            ])]);
+        assert_eq!(
+            property_value_at(&list, 0).unwrap(),
+            PropValue::List(vec![PropValue::Int(1), PropValue::Null, PropValue::Int(3)])
+        );
+        let large = LargeListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>([
+            Some(vec![Some(4), Some(5)]),
+        ]);
+        assert_eq!(
+            property_value_at(&large, 0).unwrap(),
+            PropValue::List(vec![PropValue::Int(4), PropValue::Int(5)])
+        );
     }
 
     fn node_batch(ids: &[Uuid], labels: &[&str], names: &[Option<&str>]) -> RecordBatch {
@@ -2193,6 +2211,102 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, BulkValidationReason::UnsupportedPropertyType);
         assert_eq!(error.field.as_deref(), Some("events"));
+    }
+
+    #[test]
+    fn property_and_ontology_type_registries_cover_every_supported_family() {
+        let scalar_types = [
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+        ];
+        for data_type in scalar_types {
+            assert!(validate_property_type(BulkInputKind::Node, "value", &data_type).is_ok());
+        }
+        for data_type in [
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+        ] {
+            assert!(validate_property_type(BulkInputKind::Edge, "values", &data_type).is_ok());
+        }
+        let error =
+            validate_property_type(BulkInputKind::Node, "when", &DataType::Date32).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::UnsupportedPropertyType);
+        assert_eq!(error.field.as_deref(), Some("when"));
+
+        for identifier in ["Person", "_private", "Ångström2"] {
+            assert!(validate_identifier(BulkInputKind::Node, 0, "label", identifier).is_ok());
+            assert!(validate_property_name(BulkInputKind::Node, identifier).is_ok());
+        }
+        for identifier in ["", "9name", "has space", "has-dash"] {
+            let row =
+                validate_identifier(BulkInputKind::Edge, 7, "rel_type", identifier).unwrap_err();
+            assert_eq!(row.reason, BulkValidationReason::InvalidIdentifier);
+            assert_eq!(row.row_ordinal, Some(7));
+            let field = validate_property_name(BulkInputKind::Edge, identifier).unwrap_err();
+            assert_eq!(field.reason, BulkValidationReason::InvalidIdentifier);
+            assert_eq!(field.field.as_deref(), Some(identifier));
+        }
+
+        let compatible = [
+            (PropertyValueType::Utf8, DataType::LargeUtf8),
+            (PropertyValueType::Int64, DataType::UInt32),
+            (PropertyValueType::Float64, DataType::Float32),
+            (PropertyValueType::Bool, DataType::Boolean),
+            (
+                PropertyValueType::List,
+                DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+            ),
+        ];
+        for (expected, actual) in compatible {
+            assert!(
+                validate_ontology_field(
+                    BulkInputKind::Node,
+                    3,
+                    "value",
+                    &Field::new("value", actual, false),
+                    &expected,
+                    false,
+                )
+                .is_ok()
+            );
+        }
+        for expected in [
+            PropertyValueType::Duration,
+            PropertyValueType::DateTime,
+            PropertyValueType::Map,
+        ] {
+            let error = validate_ontology_field(
+                BulkInputKind::Node,
+                3,
+                "value",
+                &Field::new("value", DataType::Utf8, false),
+                &expected,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+        }
+        let error = validate_ontology_field(
+            BulkInputKind::Edge,
+            4,
+            "weight",
+            &Field::new("weight", DataType::Float64, true),
+            &PropertyValueType::Float64,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::NullabilityMismatch);
+        assert_eq!(error.row_ordinal, Some(4));
     }
 
     #[test]
@@ -2913,6 +3027,85 @@ mod tests {
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
         );
+    }
+
+    #[test]
+    fn bulk_publication_conflicts_preserve_the_committed_generation_and_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let left = uuid(9_100);
+        let right = uuid(9_101);
+        let node_operation = operation(9_102);
+        let original = node_batch(
+            &[left, right],
+            &["Person", "Person"],
+            &[Some("A"), Some("B")],
+        );
+        graph
+            .publish_bulk_nodes(node_operation, &[original.clone()])
+            .unwrap();
+        let committed = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+
+        let changed = node_batch(
+            &[left, right],
+            &["Person", "Person"],
+            &[Some("A"), Some("changed")],
+        );
+        let error = graph
+            .publish_bulk_nodes(node_operation, &[changed])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GF_IDEMPOTENCY_CONFLICT: bulk-node operation UUID was already used with different input"
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(directory.path())
+                .unwrap()
+                .generation_uuid(),
+            committed
+        );
+        let collision = graph
+            .validate_bulk_nodes(operation(9_103), &[original])
+            .unwrap_err();
+        assert_eq!(collision.reason, BulkValidationReason::IdentityConflict);
+        assert_eq!(collision.row_ordinal, Some(0));
+
+        let edge = uuid(9_104);
+        let edge_operation = operation(9_105);
+        let original_edge = edge_batch(&[edge], &["KNOWS"], &[left], &[right]);
+        graph
+            .publish_bulk_edges(edge_operation, &[original_edge.clone()])
+            .unwrap();
+        let edge_committed = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+        let changed_edge = edge_batch(&[edge], &["LIKES"], &[left], &[right]);
+        let error = graph
+            .publish_bulk_edges(edge_operation, &[changed_edge])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GF_IDEMPOTENCY_CONFLICT: bulk-edge operation UUID was already used with different input"
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(directory.path())
+                .unwrap()
+                .generation_uuid(),
+            edge_committed
+        );
+        let empty_nodes = graph.validate_bulk_nodes(operation(9_106), &[]).unwrap();
+        let collision = graph
+            .validate_bulk_edges(operation(9_107), &[original_edge], &empty_nodes)
+            .unwrap_err();
+        assert_eq!(collision.reason, BulkValidationReason::IdentityConflict);
+        assert_eq!(collision.row_ordinal, Some(0));
+
+        drop(graph);
+        let reopened = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        assert_eq!(reopened.node_count("Person").unwrap(), 2);
+        assert_eq!(reopened.relationship_types().unwrap(), ["KNOWS"]);
     }
 
     #[test]

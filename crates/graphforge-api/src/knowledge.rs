@@ -3220,6 +3220,85 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
+    #[test]
+    fn domain_error_mapping_preserves_public_fault_domains() {
+        use graphforge_knowledge::KnowledgeError;
+        for (error, code) in [
+            (
+                KnowledgeError::Conflict("identity"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                KnowledgeError::TransactionConflict("transaction"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                KnowledgeError::Limit {
+                    participant: "assertions",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (KnowledgeError::Dangling("assertion"), "GF_NOT_FOUND"),
+            (
+                KnowledgeError::Invalid {
+                    field: "claim",
+                    message: "empty",
+                },
+                "GF_VALIDATION",
+            ),
+            (KnowledgeError::Duplicate("assertion_uuid"), "GF_VALIDATION"),
+        ] {
+            assert_eq!(knowledge_error(error).code(), code);
+        }
+
+        use graphforge_provenance::ProvenanceError;
+        for (error, code) in [
+            (
+                ProvenanceError::Conflict("identity"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                ProvenanceError::Limit {
+                    participant: "events",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (
+                ProvenanceError::Invalid {
+                    field: "event",
+                    message: "invalid",
+                },
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Duplicate("event_uuid"),
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Dangling("event_uuid"),
+                "GF_SCHEMA_MISMATCH",
+            ),
+        ] {
+            assert_eq!(provenance_error(error).code(), code);
+        }
+        assert_eq!(
+            transaction_conflict("changed").code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            not_found_kind("evidence").to_string(),
+            "GF_NOT_FOUND: evidence was not found"
+        );
+        assert_eq!(
+            not_found().to_string(),
+            "GF_NOT_FOUND: assertion was not found"
+        );
+    }
+
     fn enable(graph: &GraphForge, capability_id: CapabilityId, seed: u8) {
         graph
             .enable_capability(EnableCapabilityRequest {

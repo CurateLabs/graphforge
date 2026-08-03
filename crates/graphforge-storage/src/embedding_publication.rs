@@ -1289,6 +1289,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deletion_removes_generation_and_alias_and_is_idempotent_across_reopen() {
+        let empty = tempfile::tempdir().unwrap();
+        let absent = EmbeddingCompatibilityId::from_hex(&"11".repeat(32)).unwrap();
+        assert!(
+            !delete_embedding_space_lineage(
+                empty.path(),
+                absent,
+                EmbeddingSpaceCatalogLimits::default(),
+                SearchCoordinationLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+        );
+        assert!(!empty.path().join("embeddings").exists());
+
+        let project = tempfile::tempdir().unwrap();
+        let descriptor = descriptor("delete-me", 2);
+        let vectors = batch(&[1.0, 2.0]);
+        let published = publish(project.path(), &descriptor, source(1), &vectors, 20);
+        let compatibility = descriptor.compatibility_id().unwrap();
+        crate::bind_existing_embedding_space_catalog_entry(
+            project.path(),
+            "semantic",
+            compatibility,
+            false,
+            EmbeddingSpaceCatalogLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(
+            delete_embedding_space_lineage(
+                project.path(),
+                compatibility,
+                EmbeddingSpaceCatalogLimits::default(),
+                SearchCoordinationLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+        );
+        assert!(!published.publication().path.exists());
+        assert!(!deletion_marker(project.path(), compatibility).exists());
+        assert!(
+            crate::read_embedding_space_catalog(
+                project.path(),
+                EmbeddingSpaceCatalogLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            current_embedding_generation(
+                project.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            !delete_embedding_space_lineage(
+                project.path(),
+                compatibility,
+                EmbeddingSpaceCatalogLimits::default(),
+                SearchCoordinationLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn interrupted_deletion_retains_marker_and_retry_completes_without_resurrection() {
+        let project = tempfile::tempdir().unwrap();
+        let descriptor = descriptor("interrupted-delete", 2);
+        let vectors = batch(&[1.0, 2.0]);
+        let published = publish(project.path(), &descriptor, source(1), &vectors, 20);
+        let compatibility = descriptor.compatibility_id().unwrap();
+        let marker = deletion_marker(project.path(), compatibility);
+        let root = space_root(project.path(), compatibility);
+        let error = delete_embedding_space_lineage(
+            project.path(),
+            compatibility,
+            EmbeddingSpaceCatalogLimits::default(),
+            SearchCoordinationLimits::default(),
+            || {
+                if marker.exists() && root.exists() {
+                    Err(SearchArtifactError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SearchArtifactError::Cancelled));
+        assert!(marker.is_file());
+        assert!(published.publication().path.is_dir());
+
+        assert!(
+            delete_embedding_space_lineage(
+                project.path(),
+                compatibility,
+                EmbeddingSpaceCatalogLimits::default(),
+                SearchCoordinationLimits::default(),
+                || Ok(()),
+            )
+            .unwrap()
+        );
+        assert!(!marker.exists());
+        assert!(!root.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_embedding_ancestor_fails_closed() {

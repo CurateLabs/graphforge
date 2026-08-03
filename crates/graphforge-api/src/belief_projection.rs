@@ -1411,6 +1411,95 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
+    #[test]
+    fn attachment_and_projection_helper_errors_are_exact_and_closed() {
+        let descriptor = InvocationDescriptor::new(
+            graphforge_core::algorithms::Algorithm::Rank(
+                graphforge_core::algorithms::RankAlgorithm::Degree,
+            ),
+            [0; 32],
+            BTreeMap::from([
+                ("directed".into(), crate::InvocationParameter::Bool(false)),
+                (
+                    "label".into(),
+                    crate::InvocationParameter::Utf8("Person".into()),
+                ),
+                ("via".into(), crate::InvocationParameter::Utf8("*".into())),
+            ]),
+        )
+        .unwrap();
+        let valid = AttachResolvedRunRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(1)),
+                actor_uuid: None,
+            },
+            attachment_uuid: uuid7(2),
+            run_uuid: uuid7(3),
+            descriptor,
+        };
+        assert!(validate_attachment_request(&valid).is_ok());
+        for (mut request, message) in [
+            (
+                AttachResolvedRunRequest {
+                    context: WriteContext {
+                        operation_uuid: OperationId(Uuid::nil()),
+                        actor_uuid: None,
+                    },
+                    ..valid.clone()
+                },
+                "operation_uuid must not be nil",
+            ),
+            (
+                AttachResolvedRunRequest {
+                    attachment_uuid: Uuid::nil(),
+                    ..valid.clone()
+                },
+                "attachment_uuid must not be nil",
+            ),
+            (
+                AttachResolvedRunRequest {
+                    run_uuid: Uuid::nil(),
+                    ..valid.clone()
+                },
+                "run_uuid must not be nil",
+            ),
+            (
+                AttachResolvedRunRequest {
+                    context: WriteContext {
+                        operation_uuid: OperationId(uuid7(4)),
+                        actor_uuid: Some(Uuid::nil()),
+                    },
+                    ..valid.clone()
+                },
+                "actor_uuid must not be nil",
+            ),
+            (
+                AttachResolvedRunRequest {
+                    attachment_uuid: Uuid::from_u128(5),
+                    ..valid
+                },
+                "attachment_uuid must be UUIDv7",
+            ),
+        ] {
+            let error = validate_attachment_request(&request).unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(error.to_string(), format!("validation error: {message}"));
+            request.context.actor_uuid = None;
+        }
+        assert_eq!(schema("bad schema").code(), "GF_SCHEMA_MISMATCH");
+        assert_eq!(ambiguous("two branches").code(), "GF_AMBIGUOUS_PROJECTION");
+        assert_eq!(
+            transaction_conflict("drift").code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            descriptor_fingerprint(b"not a descriptor")
+                .unwrap_err()
+                .code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+    }
+
     fn context(seed: u8) -> WriteContext {
         WriteContext {
             operation_uuid: OperationId(uuid7(seed)),

@@ -1940,4 +1940,80 @@ mod tests {
         .unwrap();
         assert_eq!(graph.neighbors(fixture.ids[1]).len(), 2);
     }
+
+    #[test]
+    fn projection_fingerprint_rejects_corrupt_topology_and_vectors() {
+        let uuid0 = u128::from(10_u8).to_be_bytes();
+        let uuid1 = u128::from(11_u8).to_be_bytes();
+        let edge_uuid = u128::from(12_u8).to_be_bytes();
+        let base = || AdjacencyGraph {
+            directed: true,
+            node_ids: vec![0, 1],
+            node_uuid_by_id: HashMap::from([(0, uuid0), (1, uuid1)]),
+            node_id_by_uuid: HashMap::from([(uuid0, 0), (uuid1, 1)]),
+            neighbors: HashMap::from([(
+                0,
+                vec![AlgorithmEdge {
+                    edge_id: 0,
+                    neighbor_id: 1,
+                    edge_uuid,
+                    weight: 2.5,
+                }],
+            )]),
+            node_vectors: HashMap::new(),
+        };
+
+        let valid = base().projection_fingerprint().expect("valid projection");
+        assert_ne!(valid.as_bytes(), &[0; 32]);
+
+        let mut missing_target = base();
+        missing_target.neighbors.get_mut(&0).unwrap()[0].neighbor_id = 9;
+        assert_eq!(
+            missing_target
+                .projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm projection target has no UUID identity"
+        );
+
+        let mut non_finite = base();
+        non_finite.neighbors.get_mut(&0).unwrap()[0].weight = f64::NAN;
+        assert_eq!(
+            non_finite.projection_fingerprint().unwrap_err().to_string(),
+            "execution error: algorithm projection edge weight is not finite"
+        );
+
+        let mut unmirrored = base();
+        unmirrored.directed = false;
+        assert_eq!(
+            unmirrored.projection_fingerprint().unwrap_err().to_string(),
+            "execution error: undirected algorithm projection edge is missing its mirrored adjacency"
+        );
+
+        let mut vectors = base();
+        vectors.node_vectors.insert(0, vec![1.0, 2.0]);
+        vectors.node_vectors.insert(1, vec![3.0, 4.0]);
+        let fingerprint = vectors
+            .descriptor_projection_fingerprint()
+            .expect("finite descriptor projection");
+        assert_ne!(fingerprint.as_bytes(), valid.as_bytes());
+
+        vectors.node_vectors.get_mut(&1).unwrap()[0] = f64::INFINITY;
+        assert_eq!(
+            vectors
+                .descriptor_projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm vector projection contains a non-finite value"
+        );
+        vectors.node_vectors.remove(&1);
+        vectors.node_vectors.insert(9, vec![1.0]);
+        assert_eq!(
+            vectors
+                .descriptor_projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm vector projection has no UUID identity"
+        );
+    }
 }

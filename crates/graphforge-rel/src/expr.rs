@@ -14929,4 +14929,138 @@ mod tests {
         assert!(cypher_order_key(&first).starts_with("20:node"));
         assert!(cypher_order_key(&second).starts_with("80:num"));
     }
+
+    #[test]
+    fn cypher_reverse_runtime_dispatches_strings_lists_and_type_errors() {
+        use datafusion::arrow::array::{Array, ListArray, StringArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let invoke = |value: ScalarValue| {
+            let data_type = value.data_type();
+            CypherReverse::new().invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Scalar(value)],
+                arg_fields: vec![Arc::new(Field::new("value", data_type.clone(), true))],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", data_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        };
+
+        let text = invoke(ScalarValue::LargeUtf8(Some("Áda".into()))).unwrap();
+        let text = match text {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let text = text.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(text.value(0), "ad́A");
+
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(3)),
+            ],
+            &DataType::Int64,
+            true,
+        ));
+        let reversed = invoke(list).unwrap();
+        let reversed = match reversed {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let reversed = reversed.as_any().downcast_ref::<ListArray>().unwrap();
+        let values = reversed.value(0);
+        assert_eq!(
+            (0..values.len())
+                .map(|row| ScalarValue::try_from_array(&values, row).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                ScalarValue::Int64(Some(3)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(1)),
+            ]
+        );
+
+        let error = invoke(ScalarValue::Int64(Some(7))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Error during planning: reverse() expects a string or list, got Int64"
+        );
+    }
+
+    #[test]
+    fn cypher_list_plus_runtime_covers_each_operand_shape() {
+        use datafusion::arrow::array::{Array, ListArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let list = |values: &[i64]| {
+            ScalarValue::List(ScalarValue::new_list(
+                &values
+                    .iter()
+                    .copied()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>(),
+                &DataType::Int64,
+                true,
+            ))
+        };
+        let invoke = |left: ScalarValue, right: ScalarValue| {
+            let udf = CypherListPlus::new();
+            let types = [left.data_type(), right.data_type()];
+            let return_type = udf.return_type(&types).unwrap();
+            udf.invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Scalar(left), ColumnarValue::Scalar(right)],
+                arg_fields: types
+                    .iter()
+                    .enumerate()
+                    .map(|(index, data_type)| {
+                        Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                    })
+                    .collect(),
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        };
+        let values = |result: ColumnarValue| {
+            let array = match result {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = list.value(0);
+            (0..values.len())
+                .map(|row| {
+                    let value = ScalarValue::try_from_array(&values, row).unwrap();
+                    decode_het(&value).unwrap_or(value)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            values(invoke(list(&[1, 2]), list(&[3, 4])).unwrap()),
+            [1, 2, 3, 4]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        assert_eq!(
+            values(invoke(list(&[1, 2]), ScalarValue::Int64(Some(3))).unwrap()),
+            [1, 2, 3]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        assert_eq!(
+            values(invoke(ScalarValue::Int64(Some(1)), list(&[2, 3])).unwrap()),
+            [1, 2, 3]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        let error = invoke(ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Execution error: list + requires at least one list operand"
+        );
+    }
 }

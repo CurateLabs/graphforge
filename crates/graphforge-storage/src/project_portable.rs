@@ -1270,4 +1270,65 @@ mod tests {
         assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
         assert!(!target.exists());
     }
+
+    #[test]
+    fn portable_identity_digest_and_count_validation_matrix_is_total() {
+        let uuid = Uuid::now_v7();
+        assert_eq!(
+            parse_canonical_uuid(&uuid.hyphenated().to_string()).unwrap(),
+            uuid
+        );
+        for value in [
+            "bad".to_owned(),
+            uuid.simple().to_string(),
+            uuid.hyphenated().to_string().to_uppercase(),
+        ] {
+            assert_eq!(
+                parse_canonical_uuid(&value).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+        }
+        assert_eq!(parse_digest(&"00".repeat(32)).unwrap(), [0; 32]);
+        for value in ["short".to_owned(), "AA".repeat(32), "zz".repeat(32)] {
+            assert_eq!(
+                parse_digest(&value).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+        }
+        assert!(enforce_count(4, 4).is_ok());
+        assert_eq!(enforce_count(5, 4).unwrap_err().code(), "GF_RESOURCE_LIMIT");
+    }
+
+    #[test]
+    fn export_destination_kind_matrix_preserves_existing_state() {
+        let root = tempfile::tempdir().unwrap();
+        let missing_parent = root.path().join("missing/out.gfx");
+        assert_eq!(
+            reject_export_destination(&missing_parent)
+                .unwrap_err()
+                .code(),
+            "GF_IO"
+        );
+        assert!(!root.path().join("missing").exists());
+
+        let directory = root.path().join("directory.gfx");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            reject_export_destination(&directory).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert!(directory.is_dir());
+
+        let regular = root.path().join("regular.gfx");
+        std::fs::write(&regular, b"caller bytes").unwrap();
+        assert_eq!(
+            reject_export_destination(&regular).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert_eq!(std::fs::read(&regular).unwrap(), b"caller bytes");
+
+        let available = root.path().join("available.gfx");
+        assert!(reject_export_destination(&available).is_ok());
+        assert!(!available.exists());
+    }
 }

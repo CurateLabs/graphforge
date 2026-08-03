@@ -2500,4 +2500,127 @@ mod tests {
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
         assert!(error.to_string().contains("does not match its journal"));
     }
+
+    #[test]
+    fn staged_participant_file_kind_matrix_fails_before_current_mutation() {
+        for kind in ["missing", "directory", "symlink"] {
+            let root = project();
+            let parent = resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid();
+            let request = request(vec![participant("graph", "nodes", b"stable")]);
+            let ProjectStageOutcome::Staged(staged) =
+                stage_project_generation(root.path(), &request).unwrap()
+            else {
+                panic!("unexpected replay")
+            };
+            let path = staged
+                .generation_root
+                .join(PARTICIPANTS_DIR)
+                .join(&staged.participants.first().unwrap().relative_path);
+            std::fs::remove_file(&path).unwrap();
+            match kind {
+                "missing" => {}
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                "symlink" => {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(root.path().join(CURRENT_FILE), &path).unwrap();
+                    #[cfg(not(unix))]
+                    std::fs::create_dir(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = match staged.validate(|_| Ok(()), |_, _| Ok(())) {
+                Ok(_) => panic!("hostile staged participant must fail"),
+                Err(error) => error,
+            };
+            let expected_code = if kind == "missing" {
+                "GF_IO"
+            } else {
+                "GF_PUBLICATION_FAILED"
+            };
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(
+                resolve_project_generation(root.path())
+                    .unwrap()
+                    .generation_uuid(),
+                parent
+            );
+        }
+    }
+
+    #[test]
+    fn journal_decode_and_atomic_temp_cleanup_matrix_is_fail_closed() {
+        let root = project();
+        let journal = root.path().join(TRANSACTIONS_DIR).join("malformed.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        for bytes in [
+            b"not-json".as_slice(),
+            br#"{"journal_version":999}"#,
+            br#"{"journal_version":1,"transaction_uuid":"bad"}"#,
+        ] {
+            std::fs::write(&journal, bytes).unwrap();
+            assert_eq!(
+                read_journal(&journal).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+        }
+
+        let unrelated = root.path().join("metadata.json");
+        assert!(!cleanup_atomicwrite_temp(&unrelated).unwrap());
+        let empty = root.path().join(".atomicwriteabc123");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(cleanup_atomicwrite_temp(&empty).unwrap());
+        assert!(!empty.exists());
+
+        let populated = root.path().join(".atomicwritedef456");
+        std::fs::create_dir(&populated).unwrap();
+        std::fs::write(populated.join("tmpfile.tmp"), b"abandoned").unwrap();
+        assert!(cleanup_atomicwrite_temp(&populated).unwrap());
+        assert!(!populated.exists());
+
+        let hostile = root.path().join(".atomicwriteghi789");
+        std::fs::create_dir(&hostile).unwrap();
+        std::fs::write(hostile.join("unexpected"), b"caller bytes").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&hostile).unwrap());
+        assert_eq!(
+            std::fs::read(hostile.join("unexpected")).unwrap(),
+            b"caller bytes"
+        );
+    }
+
+    #[test]
+    fn machine_directory_and_lock_reject_hostile_path_components_without_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            Path::new("../escape"),
+            Path::new("/absolute"),
+            Path::new("safe/../escape"),
+        ] {
+            assert_eq!(
+                ensure_machine_directory(root.path(), relative)
+                    .unwrap_err()
+                    .code(),
+                "GF_PROJECT_CORRUPT"
+            );
+        }
+        let file = root.path().join("owned");
+        std::fs::write(&file, b"caller bytes").unwrap();
+        assert_eq!(
+            ensure_machine_directory(root.path(), Path::new("owned/child"))
+                .unwrap_err()
+                .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"caller bytes");
+
+        let lock = root.path().join("lock");
+        std::fs::create_dir(&lock).unwrap();
+        assert_eq!(
+            open_regular_lock(&lock).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        assert!(lock.is_dir());
+    }
 }

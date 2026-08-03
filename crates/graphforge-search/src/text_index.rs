@@ -733,4 +733,82 @@ mod tests {
             Err(SearchArtifactError::Cancelled)
         ));
     }
+
+    #[test]
+    fn index_directory_measurement_is_recursive_bounded_and_non_mutating() {
+        let root = TempDir::new().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("a"), b"12").unwrap();
+        std::fs::write(nested.join("b"), b"345").unwrap();
+        assert_eq!(
+            bounded_directory_bytes(
+                root.path(),
+                TextSearchLimits::default(),
+                &mut || Ok(()),
+                false,
+            )
+            .unwrap(),
+            5
+        );
+        let mut limits = TextSearchLimits::default();
+        limits.index_bytes = 4;
+        assert!(matches!(
+            bounded_directory_bytes(root.path(), limits, &mut || Ok(()), false),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_index_bytes",
+                limit: 4,
+            })
+        ));
+        assert_eq!(std::fs::read(nested.join("b")).unwrap(), b"345");
+        assert!(matches!(
+            bounded_directory_bytes(
+                root.path(),
+                TextSearchLimits::default(),
+                &mut || Err(SearchArtifactError::Cancelled),
+                false,
+            ),
+            Err(SearchArtifactError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn build_directory_and_symlink_entries_fail_closed_without_cleanup() {
+        let root = TempDir::new().unwrap();
+        let nonempty = root.path().join("nonempty");
+        std::fs::create_dir(&nonempty).unwrap();
+        std::fs::write(nonempty.join("keep"), b"caller").unwrap();
+        assert!(matches!(
+            prepare_empty_directory(&nonempty),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert_eq!(std::fs::read(nonempty.join("keep")).unwrap(), b"caller");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let linked = root.path().join("linked");
+            std::fs::create_dir(&linked).unwrap();
+            symlink(root.path(), linked.join("escape")).unwrap();
+            for corrupt_on_io in [false, true] {
+                assert!(matches!(
+                    bounded_directory_bytes(
+                        &linked,
+                        TextSearchLimits::default(),
+                        &mut || Ok(()),
+                        corrupt_on_io,
+                    ),
+                    Err(SearchArtifactError::CorruptDerivedIndex { .. })
+                ));
+                assert!(
+                    linked
+                        .join("escape")
+                        .symlink_metadata()
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            }
+        }
+    }
 }
