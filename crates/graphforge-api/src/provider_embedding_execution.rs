@@ -548,6 +548,69 @@ mod tests {
         ProviderEmbeddingPlanRequest,
     };
 
+    #[test]
+    fn refresh_failure_classification_is_exhaustive_and_stable() {
+        use EmbeddingRefreshFailureClass as Refresh;
+        use EmbeddingRefreshOutcomeStatus::{Cancelled, Failed};
+        let provider_cases = [
+            (ProviderFailureClass::Cancelled, Cancelled),
+            (
+                ProviderFailureClass::ResourceExhausted,
+                Failed(Refresh::ResourceExhausted),
+            ),
+            (
+                ProviderFailureClass::InvalidRequest,
+                Failed(Refresh::Validation),
+            ),
+            (
+                ProviderFailureClass::MalformedResponse,
+                Failed(Refresh::Validation),
+            ),
+            (
+                ProviderFailureClass::UnsupportedCapability,
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                ProviderFailureClass::Authentication,
+                Failed(Refresh::Unavailable),
+            ),
+            (ProviderFailureClass::Timeout, Failed(Refresh::Provider)),
+            (ProviderFailureClass::Transport, Failed(Refresh::Provider)),
+            (
+                ProviderFailureClass::ProviderRejected,
+                Failed(Refresh::Provider),
+            ),
+        ];
+        for (input, expected) in provider_cases {
+            assert_eq!(provider_outcome(input), expected);
+        }
+
+        let api_cases = [
+            (GfError::Storage("disk".into()), Refresh::Storage),
+            (
+                GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    message: "project".into(),
+                },
+                Refresh::Storage,
+            ),
+            (
+                GfError::Lifecycle("closed".into()),
+                Refresh::ConcurrentMutation,
+            ),
+            (
+                GfError::NotImplemented("future".into()),
+                Refresh::Unavailable,
+            ),
+            (GfError::Execution("execute".into()), Refresh::Provider),
+            (GfError::Validation("invalid".into()), Refresh::Validation),
+            (GfError::Ontology("ontology".into()), Refresh::Validation),
+        ];
+        for (input, expected) in api_cases {
+            assert_eq!(api_outcome(&input), Failed(expected));
+        }
+    }
+
     struct FakeProvider<'a> {
         contract: ProviderModelContract,
         mutate: Option<&'a GraphForge>,

@@ -1701,6 +1701,74 @@ mod tests {
     }
 
     #[test]
+    fn freshness_vocabulary_and_manifest_generation_failures_are_exact() {
+        assert_eq!(AdjacencyFreshnessState::Current.as_str(), "current");
+        assert_eq!(AdjacencyFreshnessState::Missing.as_str(), "missing");
+        assert_eq!(AdjacencyFreshnessState::Stale.as_str(), "stale");
+        assert_eq!(
+            AdjacencyFreshnessState::Incompatible.as_str(),
+            "incompatible"
+        );
+        for (reason, token) in [
+            (AdjacencyFreshnessReason::NotBuilt, "not_built"),
+            (
+                AdjacencyFreshnessReason::MixedArtifactGeneration,
+                "mixed_artifact_generation",
+            ),
+            (
+                AdjacencyFreshnessReason::IncompleteDeltaChain,
+                "incomplete_delta_chain",
+            ),
+            (AdjacencyFreshnessReason::MissingCsr, "missing_csr"),
+            (
+                AdjacencyFreshnessReason::UnreadableArtifact,
+                "unreadable_artifact",
+            ),
+            (
+                AdjacencyFreshnessReason::ContentMismatch,
+                "content_mismatch",
+            ),
+            (
+                AdjacencyFreshnessReason::FutureArtifactGeneration,
+                "future_artifact_generation",
+            ),
+        ] {
+            assert_eq!(reason.as_str(), token);
+        }
+
+        let mixed = TempDir::new().unwrap();
+        write_diamond(mixed.path());
+        build_adjacency_index(mixed.path(), BUILD_TS).unwrap();
+        let mut manifest = read_manifest(mixed.path()).unwrap();
+        manifest[0].topology_generation += 1;
+        write_manifest(mixed.path(), &manifest).unwrap();
+        let inspection = inspect_adjacency_index(mixed.path()).unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(AdjacencyFreshnessReason::MixedArtifactGeneration)
+        );
+        assert_eq!(inspection.artifact_generation, None);
+
+        let future = TempDir::new().unwrap();
+        write_diamond(future.path());
+        build_adjacency_index(future.path(), BUILD_TS).unwrap();
+        let mut manifest = read_manifest(future.path()).unwrap();
+        for row in &mut manifest {
+            row.topology_generation += 1;
+        }
+        write_manifest(future.path(), &manifest).unwrap();
+        let inspection = inspect_adjacency_index(future.path()).unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(AdjacencyFreshnessReason::FutureArtifactGeneration)
+        );
+        assert_eq!(inspection.artifact_generation, Some(2));
+        assert_eq!(inspection.artifact_fingerprint, None);
+    }
+
+    #[test]
     fn validate_detects_corrupted_csr() {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());

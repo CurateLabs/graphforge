@@ -664,6 +664,24 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn provider_rerank_error_preserves_display_source_and_failure_domain() {
+        let api = ProviderRerankError::from(GfError::Validation("bad rerank".into()));
+        assert_eq!(api.to_string(), "validation error: bad rerank");
+        assert!(api.source().is_some());
+
+        let artifact = ProviderRerankError::from(SearchArtifactError::Cancelled);
+        assert_eq!(artifact.to_string(), "search operation cancelled");
+        assert!(artifact.source().is_some());
+
+        let provider = ProviderRerankError::from(graphforge_search::ProviderError::new(
+            &contract("rerank-error-model"),
+            graphforge_search::ProviderFailureClass::ProviderRejected,
+        ));
+        assert!(provider.to_string().contains("rerank-error-model"));
+        assert!(provider.source().is_some());
+    }
+
     fn request(failure_policy: RerankFailurePolicy) -> ProviderRerankRequest {
         ProviderRerankRequest {
             label: "Document".to_owned(),

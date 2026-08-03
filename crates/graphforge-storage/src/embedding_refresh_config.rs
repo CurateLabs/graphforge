@@ -1608,4 +1608,81 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         sync_directory(directory.path()).unwrap();
     }
+
+    #[test]
+    fn policy_and_wire_validation_matrix_is_exact_and_side_effect_free() {
+        for debounce in [
+            Duration::ZERO,
+            MAX_DEBOUNCE + Duration::from_millis(1),
+            Duration::from_nanos(1_500_000),
+        ] {
+            assert!(matches!(
+                validate_debounce(debounce),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding refresh debounce",
+                    ..
+                })
+            ));
+        }
+        assert!(validate_debounce(Duration::from_millis(1)).is_ok());
+        for max_concurrent_jobs in [0, MAX_EMBEDDING_REFRESH_JOBS + 1] {
+            assert!(
+                validate_project_policy(EmbeddingRefreshProjectPolicy {
+                    max_concurrent_jobs,
+                    ..EmbeddingRefreshProjectPolicy::default()
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            validate_space_policy(EmbeddingRefreshSpacePolicy {
+                proactive: None,
+                debounce: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_outcome(EmbeddingRefreshOutcomeRecord {
+                status: EmbeddingRefreshOutcomeStatus::Cancelled,
+                graph_generation: 0,
+                source_fingerprint: fingerprint(1),
+                completed_at_micros: -1,
+            })
+            .is_err()
+        );
+
+        let prior = outcome(3, 3, 30);
+        for next in [outcome(3, 3, 29), outcome(2, 2, 30), outcome(3, 4, 30)] {
+            assert!(validate_outcome_progress(prior, next).is_err());
+        }
+        assert!(validate_outcome_progress(prior, prior).is_ok());
+
+        let classes = [
+            EmbeddingRefreshFailureClass::Provider,
+            EmbeddingRefreshFailureClass::Validation,
+            EmbeddingRefreshFailureClass::ResourceExhausted,
+            EmbeddingRefreshFailureClass::Storage,
+            EmbeddingRefreshFailureClass::ConcurrentMutation,
+            EmbeddingRefreshFailureClass::Incompatible,
+            EmbeddingRefreshFailureClass::Corrupt,
+            EmbeddingRefreshFailureClass::Unavailable,
+        ];
+        for class in classes {
+            let token = failure_token(class);
+            assert_eq!(parse_failure_class(token).unwrap(), class);
+            assert_eq!(
+                outcome_tokens(EmbeddingRefreshOutcomeStatus::Failed(class)),
+                ("failed", Some(token))
+            );
+        }
+        assert!(parse_failure_class("unknown").is_err());
+        assert_eq!(
+            outcome_tokens(EmbeddingRefreshOutcomeStatus::Succeeded),
+            ("succeeded", None)
+        );
+        assert_eq!(
+            outcome_tokens(EmbeddingRefreshOutcomeStatus::Cancelled),
+            ("cancelled", None)
+        );
+    }
 }

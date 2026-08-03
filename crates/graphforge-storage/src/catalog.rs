@@ -1881,6 +1881,38 @@ mod tests {
         assert_eq!(total, 0);
     }
 
+    #[tokio::test]
+    async fn every_table_provider_exposes_base_contract_and_empty_scan() {
+        let dir = TempDir::new().unwrap();
+        let providers: Vec<Arc<dyn TableProvider>> = vec![
+            Arc::new(TopologyNodeTable::new(
+                dir.path().join("topology/nodes.parquet"),
+            )),
+            Arc::new(TypedEdgeTable::open(dir.path(), "KNOWS")),
+            Arc::new(UnionEdgeTable::open(dir.path())),
+            Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
+            Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+        ];
+        let ctx = SessionContext::new();
+        for (index, provider) in providers.into_iter().enumerate() {
+            assert_eq!(provider.table_type(), TableType::Base);
+            assert!(
+                provider.as_any().is::<TopologyNodeTable>()
+                    || provider.as_any().is::<TypedEdgeTable>()
+                    || provider.as_any().is::<UnionEdgeTable>()
+                    || provider.as_any().is::<PropertyTable>()
+                    || provider.as_any().is::<EdgePropertyTable>()
+            );
+            let name = format!("provider_{index}");
+            let expected = provider.schema();
+            ctx.register_table(&name, provider).unwrap();
+            let frame = ctx.sql(&format!("SELECT * FROM {name}")).await.unwrap();
+            assert_eq!(frame.schema().inner(), &expected);
+            let batches = frame.collect().await.unwrap();
+            assert_eq!(row_count(&batches), 0);
+        }
+    }
+
     #[test]
     fn graph_catalog_open_exploratory_registers_tables() {
         let dir = TempDir::new().unwrap();

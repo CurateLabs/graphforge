@@ -690,6 +690,27 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn provider_find_error_preserves_display_source_and_conversion_domains() {
+        let api = ProviderFindError::from(GfError::Validation("bad query".into()));
+        assert_eq!(api.to_string(), "validation error: bad query");
+        assert!(api.source().is_some());
+        assert_eq!(GfError::from(api).code(), "GF_VALIDATION");
+
+        let artifact = ProviderFindError::from(SearchArtifactError::Cancelled);
+        assert_eq!(artifact.to_string(), "search operation cancelled");
+        assert!(artifact.source().is_some());
+        assert_eq!(GfError::from(artifact).code(), "GF_EXECUTION");
+
+        let provider = ProviderFindError::from(ProviderError::new(
+            &contract("error-model"),
+            graphforge_search::ProviderFailureClass::Timeout,
+        ));
+        assert!(provider.to_string().contains("error-model"));
+        assert!(provider.source().is_some());
+        assert_eq!(GfError::from(provider).code(), "GF_EXECUTION");
+    }
+
     fn provider(model: &str, query_vector: Vec<f32>) -> FakeProvider {
         FakeProvider {
             contract: contract(model),

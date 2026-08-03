@@ -1446,4 +1446,66 @@ mod tests {
             Err(SearchArtifactError::ConcurrentMutation)
         ));
     }
+
+    #[test]
+    fn public_freshness_vocabulary_and_request_bounds_are_total() {
+        assert_eq!(TextIndexFreshnessState::Missing.as_str(), "missing");
+        assert_eq!(TextIndexFreshnessState::Current.as_str(), "current");
+        assert_eq!(TextIndexFreshnessState::Stale.as_str(), "stale");
+        assert_eq!(
+            TextIndexFreshnessState::Incompatible.as_str(),
+            "incompatible"
+        );
+        let reasons = [
+            (
+                TextIndexFreshnessReason::NoTextProperties,
+                "no_text_properties",
+            ),
+            (TextIndexFreshnessReason::NotBuilt, "not_built"),
+            (
+                TextIndexFreshnessReason::SourceGenerationChanged,
+                "source_generation_changed",
+            ),
+            (
+                TextIndexFreshnessReason::SourceFingerprintChanged,
+                "source_fingerprint_changed",
+            ),
+            (
+                TextIndexFreshnessReason::ManifestVersion,
+                "manifest_version",
+            ),
+            (TextIndexFreshnessReason::BackendVersion, "backend_version"),
+            (
+                TextIndexFreshnessReason::ContractVersion,
+                "contract_version",
+            ),
+            (
+                TextIndexFreshnessReason::ArtifactSelector,
+                "artifact_selector",
+            ),
+        ];
+        for (reason, token) in reasons {
+            assert_eq!(reason.as_str(), token);
+        }
+
+        let limits = TextSearchLimits::default();
+        assert!(matches!(
+            validate_search_request("valid", 0, limits),
+            Err(SearchArtifactError::InvalidSelector { field: "limit", .. })
+        ));
+        assert!(matches!(
+            validate_search_request("valid", limits.results + 1, limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_results",
+                ..
+            })
+        ));
+        let retry = Cell::new(true);
+        assert!(consume_retry(Some(&retry)).is_ok());
+        assert!(matches!(
+            consume_retry(Some(&retry)),
+            Err(SearchArtifactError::ConcurrentMutation)
+        ));
+        assert!(consume_retry(None).is_ok());
+    }
 }

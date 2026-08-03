@@ -941,6 +941,90 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn bind_existing_requires_owned_live_lineage_and_persists_exact_alias() {
+        let project = tempfile::tempdir().unwrap();
+        let compatibility_id = id(7);
+        assert!(matches!(
+            bind_existing_embedding_space_catalog_entry(
+                project.path(),
+                "semantic",
+                compatibility_id,
+                false,
+                EmbeddingSpaceCatalogLimits::default(),
+                || Ok(()),
+            ),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "embedding compatibility identity",
+                ..
+            })
+        ));
+
+        let lineage = project
+            .path()
+            .join(EMBEDDINGS_DIR)
+            .join("spaces")
+            .join(compatibility_id.to_hex());
+        std::fs::create_dir_all(&lineage).unwrap();
+        std::fs::write(lineage.join("space.json"), b"descriptor-presence").unwrap();
+        let marker =
+            crate::embedding_publication::deletion_marker(project.path(), compatibility_id);
+        std::fs::write(&marker, b"deleting").unwrap();
+        assert!(
+            bind_existing_embedding_space_catalog_entry(
+                project.path(),
+                "semantic",
+                compatibility_id,
+                false,
+                EmbeddingSpaceCatalogLimits::default(),
+                || Ok(()),
+            )
+            .is_err()
+        );
+        assert!(!catalog_path(project.path()).exists());
+
+        std::fs::remove_file(marker).unwrap();
+        let catalog = bind_existing_embedding_space_catalog_entry(
+            project.path(),
+            "semantic",
+            compatibility_id,
+            false,
+            EmbeddingSpaceCatalogLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(
+            catalog.get(&EmbeddingDisplayName::new("semantic").unwrap()),
+            Some(compatibility_id)
+        );
+        assert_eq!(read(project.path()), catalog);
+    }
+
+    #[test]
+    fn catalog_limits_reject_before_creating_state() {
+        for limits in [
+            EmbeddingSpaceCatalogLimits {
+                metadata_bytes: 0,
+                ..EmbeddingSpaceCatalogLimits::default()
+            },
+            EmbeddingSpaceCatalogLimits {
+                entries: 0,
+                ..EmbeddingSpaceCatalogLimits::default()
+            },
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            assert!(matches!(
+                read_embedding_space_catalog(project.path(), limits, || Ok(())),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding space catalog limits",
+                    ..
+                })
+            ));
+            assert!(!project.path().join(EMBEDDINGS_DIR).exists());
+        }
+    }
+
     #[cfg(not(unix))]
     #[test]
     fn directory_sync_is_a_supported_noop() {

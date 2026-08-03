@@ -991,6 +991,147 @@ mod tests {
     }
 
     #[test]
+    fn every_parameter_encoding_and_typed_accessor_has_an_exact_contract() {
+        let values = [
+            InvocationParameter::Bool(true),
+            InvocationParameter::U64(42),
+            InvocationParameter::U64List(vec![1, 2]),
+            InvocationParameter::F64(1.25),
+            InvocationParameter::Utf8("value".into()),
+            InvocationParameter::Uuid([7; 16]),
+            InvocationParameter::UuidList(vec![[1; 16], [2; 16]]),
+            InvocationParameter::Utf8List(vec!["a".into(), "b".into()]),
+            InvocationParameter::F64List(vec![-1.0, 2.5]),
+        ];
+        for value in &values {
+            let mut writer = CanonicalWriter::new();
+            value.encode(&mut writer).unwrap();
+            let bytes = writer.finish();
+            let mut reader = CanonicalReader::new(&bytes).unwrap();
+            assert_eq!(&decode_parameter(&mut reader).unwrap(), value);
+            reader.finish().unwrap();
+        }
+
+        let parameters = BTreeMap::from([
+            ("bool".into(), values[0].clone()),
+            ("u64".into(), values[1].clone()),
+            ("u64_list".into(), values[2].clone()),
+            ("f64".into(), values[3].clone()),
+            ("utf8".into(), values[4].clone()),
+            ("uuid".into(), values[5].clone()),
+            ("uuid_list".into(), values[6].clone()),
+            ("utf8_list".into(), values[7].clone()),
+            ("f64_list".into(), values[8].clone()),
+        ]);
+        assert!(required_bool(&parameters, "bool").unwrap());
+        assert_eq!(required_u64(&parameters, "u64").unwrap(), 42);
+        assert_eq!(optional_u64(&parameters, "u64").unwrap(), Some(42));
+        assert_eq!(required_u64_list(&parameters, "u64_list").unwrap(), [1, 2]);
+        assert_eq!(required_f64(&parameters, "f64").unwrap(), 1.25);
+        assert_eq!(
+            required_f64_list(&parameters, "f64_list").unwrap(),
+            [-1.0, 2.5]
+        );
+        assert_eq!(required_utf8(&parameters, "utf8").unwrap(), "value");
+        assert_eq!(
+            optional_utf8(&parameters, "utf8").unwrap().as_deref(),
+            Some("value")
+        );
+        assert_eq!(
+            required_utf8_list(&parameters, "utf8_list").unwrap(),
+            ["a", "b"]
+        );
+        assert_eq!(optional_uuid(&parameters, "uuid").unwrap(), Some([7; 16]));
+        assert_eq!(
+            optional_uuid_list(&parameters, "uuid_list").unwrap(),
+            Some(vec![[1; 16], [2; 16]])
+        );
+        assert_eq!(optional_u64(&parameters, "missing").unwrap(), None);
+        assert_eq!(optional_utf8(&parameters, "missing").unwrap(), None);
+        assert_eq!(optional_uuid(&parameters, "missing").unwrap(), None);
+        assert_eq!(optional_uuid_list(&parameters, "missing").unwrap(), None);
+
+        for error in [
+            required_bool(&parameters, "utf8").unwrap_err(),
+            required_u64(&parameters, "utf8").unwrap_err(),
+            optional_u64(&parameters, "utf8").unwrap_err(),
+            required_u64_list(&parameters, "utf8").unwrap_err(),
+            required_f64(&parameters, "utf8").unwrap_err(),
+            required_f64_list(&parameters, "utf8").unwrap_err(),
+            required_utf8(&parameters, "bool").unwrap_err(),
+            optional_utf8(&parameters, "bool").unwrap_err(),
+            required_utf8_list(&parameters, "utf8").unwrap_err(),
+            optional_uuid(&parameters, "utf8").unwrap_err(),
+            optional_uuid_list(&parameters, "utf8").unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut writer = CanonicalWriter::new();
+            assert_eq!(
+                InvocationParameter::F64(value)
+                    .encode(&mut writer)
+                    .unwrap_err()
+                    .code(),
+                "GF_DESCRIPTOR_INVALID"
+            );
+        }
+    }
+
+    #[test]
+    fn specialized_path_and_analysis_parameter_allowlists_are_closed() {
+        for (algorithm, name) in [
+            (PathAlgorithm::AStar, "heuristic"),
+            (PathAlgorithm::RandomWalk, "walk_length"),
+            (PathAlgorithm::RandomWalk, "seed"),
+            (PathAlgorithm::MinCostMaxFlow, "capacity_property"),
+            (PathAlgorithm::MinCostMaxFlowEdges, "cost_property"),
+            (PathAlgorithm::MinSteinerTree, "terminal_uuids"),
+            (PathAlgorithm::PrizeCollectingSteinerTree, "prize_property"),
+        ] {
+            assert!(allowed_path_parameter(algorithm, name));
+        }
+        for (algorithm, name) in [
+            (PathAlgorithm::Bfs, "weight"),
+            (PathAlgorithm::GomoryHuTree, "source_uuid"),
+            (PathAlgorithm::Dfs, "target_uuid"),
+            (PathAlgorithm::Bfs, "unknown"),
+        ] {
+            assert!(!allowed_path_parameter(algorithm, name));
+        }
+        for algorithm in [
+            AnalyzeAlgorithm::Node2Vec,
+            AnalyzeAlgorithm::GraphSage,
+            AnalyzeAlgorithm::FastRandomProjection,
+            AnalyzeAlgorithm::HashGnn,
+        ] {
+            let names = embedding_parameter_names(algorithm).unwrap();
+            assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(
+                names
+                    .iter()
+                    .all(|name| allowed_analyze_parameter(algorithm, name))
+            );
+        }
+        assert!(allowed_analyze_parameter(
+            AnalyzeAlgorithm::MinimumKSpanningTree,
+            "k"
+        ));
+        assert!(allowed_analyze_parameter(
+            AnalyzeAlgorithm::MaxWeightMatching,
+            "weight"
+        ));
+        assert!(allowed_analyze_parameter(
+            AnalyzeAlgorithm::Modularity,
+            "partition_property"
+        ));
+        assert!(!allowed_analyze_parameter(
+            AnalyzeAlgorithm::IsDag,
+            "weight"
+        ));
+    }
+
+    #[test]
     fn algorithm_specific_registry_rejects_irrelevant_parameters() {
         let analyze_error = InvocationDescriptor::new(
             Algorithm::Analyze(AnalyzeAlgorithm::IsDag),
@@ -1201,6 +1342,52 @@ mod tests {
         let truncated = &descriptor.canonical_bytes()[..descriptor.canonical_bytes().len() - 1];
         let error = InvocationDescriptor::from_canonical_bytes(truncated).unwrap_err();
         assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+    }
+
+    #[test]
+    fn canonical_decoder_rejects_invalid_magic_kinds_values_and_bounds() {
+        let descriptor = InvocationDescriptor::new(
+            Algorithm::Rank(RankAlgorithm::Degree),
+            [9; 32],
+            BTreeMap::from([
+                ("directed".into(), InvocationParameter::Bool(false)),
+                ("label".into(), InvocationParameter::Utf8("Person".into())),
+                ("via".into(), InvocationParameter::Utf8("*".into())),
+            ]),
+        )
+        .unwrap();
+        let mut corrupt = descriptor.canonical_bytes().to_vec();
+        corrupt[..4].copy_from_slice(b"NOPE");
+        assert_eq!(
+            InvocationDescriptor::from_canonical_bytes(&corrupt)
+                .unwrap_err()
+                .code(),
+            "GF_DESCRIPTOR_INVALID"
+        );
+        let mut trailing = descriptor.canonical_bytes().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            InvocationDescriptor::from_canonical_bytes(&trailing)
+                .unwrap_err()
+                .code(),
+            "GF_DESCRIPTOR_INVALID"
+        );
+        let decode = |kind: &str, payload: Option<u8>| {
+            let mut writer = CanonicalWriter::new();
+            writer.text(kind).unwrap();
+            if let Some(value) = payload {
+                writer.u8(value).unwrap();
+            }
+            let bytes = writer.finish();
+            let mut reader = CanonicalReader::new(&bytes).unwrap();
+            decode_parameter(&mut reader).unwrap_err()
+        };
+        assert_eq!(decode("bool", Some(2)).code(), "GF_DESCRIPTOR_INVALID");
+        assert_eq!(decode("unknown", None).code(), "GF_DESCRIPTOR_INVALID");
+        assert_eq!(
+            bounded_list_count(1_000_001).unwrap_err().code(),
+            "GF_DESCRIPTOR_INVALID"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {
