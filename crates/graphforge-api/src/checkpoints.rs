@@ -2147,6 +2147,70 @@ mod tests {
         assert!(!scope_matches(CheckpointDiffScope::Graph, "knowledge"));
     }
 
+    #[test]
+    fn checkpoint_row_projection_uuid_and_parquet_failures_are_structured() {
+        let uuid = {
+            let mut bytes = [41_u8; 16];
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        };
+        let uuids =
+            FixedSizeBinaryArray::try_from_iter([uuid.as_bytes().as_slice()].into_iter()).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::FixedSizeBinary(16),
+                false,
+            )])),
+            vec![Arc::new(uuids)],
+        )
+        .unwrap();
+        let projected = project_row(&batch, 0, &["record_uuid"]).unwrap();
+        assert_eq!(projected.num_rows(), 1);
+        assert_eq!(record_uuid(&batch, 0, "record_uuid").unwrap(), uuid);
+        assert_eq!(
+            project_row(&batch, 0, &["missing"]).unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+
+        let strings = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["not-a-uuid"]))],
+        )
+        .unwrap();
+        assert_eq!(
+            record_uuid(&strings, 0, "record_uuid").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        let nulls = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::FixedSizeBinary(16),
+                true,
+            )])),
+            vec![Arc::new(FixedSizeBinaryArray::new_null(16, 1))],
+        )
+        .unwrap();
+        assert_eq!(
+            record_uuid(&nulls, 0, "record_uuid").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        assert_eq!(
+            read_parquet(b"not parquet", &PageRequest::default())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let adapters = record_adapters().unwrap();
+        assert!(adapters.contains_key(&("knowledge", "assertions")));
+        assert!(adapters.contains_key(&("provenance", "events")));
+    }
+
     fn enable(graph: &GraphForge, capability_id: crate::CapabilityId, seed: u128) {
         graph
             .enable_capability(crate::EnableCapabilityRequest {

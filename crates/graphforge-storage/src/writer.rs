@@ -2439,6 +2439,11 @@ mod tests {
         let b = new_v7();
         let e = w.create_edge(new_v7(), "KNOWS", &a, &b);
         assert!(matches!(e, Err(GfError::Storage(_))), "got {e:?}");
+
+        let unknown_source = new_v7();
+        let source_error = w.create_edge(new_v7(), "KNOWS", &unknown_source, &a);
+        assert!(matches!(&source_error, Err(GfError::Storage(_))));
+        assert!(source_error.unwrap_err().to_string().contains("source"));
     }
 
     #[test]

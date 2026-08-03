@@ -2127,4 +2127,22 @@ mod tests {
         assert_eq!(row_count(&batches), 1);
         assert_eq!(batches[0].schema(), TOPOLOGY_NODES_SCHEMA.clone());
     }
+
+    #[test]
+    fn catalog_and_schema_debug_identity_are_stable_and_content_free() {
+        let schema = GraphSchema::new();
+        assert_eq!(format!("{schema:?}"), "GraphSchema { table_names: [] }");
+        assert!(schema.as_any().downcast_ref::<GraphSchema>().is_some());
+        assert!(!schema.table_exist("missing"));
+
+        let dir = TempDir::new().unwrap();
+        let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+        assert_eq!(
+            format!("{catalog:?}"),
+            "GraphCatalog { schema_names: [\"graph\"] }"
+        );
+        assert!(catalog.as_any().downcast_ref::<GraphCatalog>().is_some());
+        assert!(catalog.schema("graph").is_some());
+        assert!(catalog.schema("private").is_none());
+    }
 }

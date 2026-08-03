@@ -458,4 +458,122 @@ mod tests {
         let mut invalid = CanonicalReader::new(&[0, 0, 0, 0, 0, 0, 0, 1, 0xff]).unwrap();
         assert!(invalid.text().is_err());
     }
+
+    #[test]
+    fn every_domain_and_error_code_has_a_frozen_external_spelling() {
+        let domains = [
+            (CanonicalDomain::Schema, "graphforge/schema"),
+            (CanonicalDomain::Assertion, "graphforge/assertion"),
+            (CanonicalDomain::EvidenceLink, "graphforge/evidence-link"),
+            (
+                CanonicalDomain::ConfidenceAssessment,
+                "graphforge/confidence-assessment",
+            ),
+            (CanonicalDomain::Reasoning, "graphforge/reasoning"),
+            (
+                CanonicalDomain::AssertionStatus,
+                "graphforge/assertion-status",
+            ),
+            (
+                CanonicalDomain::AssertionValidity,
+                "graphforge/assertion-validity",
+            ),
+            (
+                CanonicalDomain::AssertionSupersession,
+                "graphforge/assertion-supersession",
+            ),
+            (
+                CanonicalDomain::HypothesisGroup,
+                "graphforge/hypothesis-group",
+            ),
+            (
+                CanonicalDomain::HypothesisMembership,
+                "graphforge/hypothesis-membership",
+            ),
+            (
+                CanonicalDomain::HypothesisSelection,
+                "graphforge/hypothesis-selection",
+            ),
+            (
+                CanonicalDomain::CompositeGraphMutationContent,
+                "graphforge/composite-graph-mutation-content",
+            ),
+            (
+                CanonicalDomain::CompositeRequest,
+                "graphforge/composite-request",
+            ),
+            (
+                CanonicalDomain::ProvenanceEvent,
+                "graphforge/provenance-event",
+            ),
+            (CanonicalDomain::Lineage, "graphforge/lineage"),
+            (
+                CanonicalDomain::InvocationDescriptor,
+                "graphforge/invocation-descriptor",
+            ),
+            (
+                CanonicalDomain::GraphProjection,
+                "graphforge/graph-projection",
+            ),
+            (
+                CanonicalDomain::BeliefProjectionPolicy,
+                "graphforge/belief-projection-policy",
+            ),
+            (
+                CanonicalDomain::BeliefProjectionAttachment,
+                "graphforge/belief-projection-attachment",
+            ),
+            (CanonicalDomain::ArrowResult, "graphforge/arrow-result"),
+        ];
+        for (domain, spelling) in domains {
+            assert_eq!(domain.as_str(), spelling);
+        }
+
+        assert_eq!(
+            CanonicalError::Limit {
+                item: "x",
+                observed: 2,
+                limit: 1
+            }
+            .code(),
+            "GF_CANONICAL_LIMIT"
+        );
+        assert_eq!(
+            CanonicalError::UnsupportedVersion { version: 0 }.code(),
+            "GF_UNSUPPORTED_CONTRACT_VERSION"
+        );
+        assert_eq!(
+            CanonicalError::Malformed("x").code(),
+            "GF_CANONICAL_INVALID"
+        );
+    }
+
+    #[test]
+    fn reader_rejects_declared_text_limit_and_offset_overflow() {
+        let bytes = (MAX_CANONICAL_TEXT_BYTES + 1).to_be_bytes();
+        let error = CanonicalReader::new(&bytes).unwrap().text().unwrap_err();
+        assert!(matches!(error, CanonicalError::Limit { item: "text", .. }));
+
+        let mut reader = CanonicalReader::new(&[0]).unwrap();
+        reader.u8().unwrap();
+        assert_eq!(
+            reader.raw(usize::MAX).unwrap_err(),
+            CanonicalError::Malformed("byte range overflow")
+        );
+    }
+
+    #[test]
+    fn writer_covers_signed_binary_and_single_byte_grammar() {
+        let mut writer = CanonicalWriter::new();
+        writer.u8(0xab).unwrap();
+        writer.i64(-2).unwrap();
+        writer.binary(&[1, 2, 3]).unwrap();
+        assert_eq!(
+            writer.finish(),
+            [
+                0xab, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe, 0, 0, 0, 0, 0, 0, 0, 3, 1, 2,
+                3
+            ]
+        );
+    }
 }

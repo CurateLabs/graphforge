@@ -3299,6 +3299,126 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_ledger_codecs_and_participant_contracts_are_exact() {
+        let assertion = AssertionLedger::default();
+        let confidence = ConfidenceLedger::default();
+        let evidence = EvidenceLedger::default();
+        let reasoning = ReasoningLedger::default();
+        let status = AssertionStatusLedger::default();
+        let supersession = AssertionSupersessionLedger::default();
+        for participants in [
+            encode_ledger(&assertion).unwrap(),
+            encode_confidence_ledger(&confidence).unwrap(),
+            encode_evidence_ledger(&evidence).unwrap(),
+            encode_reasoning_ledger(&reasoning).unwrap(),
+            encode_status_ledger(&status).unwrap(),
+            encode_supersession_ledger(&supersession).unwrap(),
+        ] {
+            assert!(!participants.is_empty());
+            assert!(participants.iter().all(|participant| {
+                participant.encoding == ProjectParticipantEncoding::Parquet
+                    && participant.row_count == 0
+                    && !participant.bytes.is_empty()
+            }));
+            for participant in participants {
+                assert!(read_parquet(&participant.bytes).unwrap().is_empty());
+            }
+        }
+
+        let registry = schema_registry();
+        let entry = registry
+            .iter()
+            .find(|entry| entry.record_family == "assertions")
+            .unwrap();
+        let snapshot = graphforge_storage::ProjectParticipantSnapshot {
+            capability_id: entry.capability_id.into(),
+            capability_version: entry.capability_version,
+            record_family_id: entry.record_family.into(),
+            record_version: entry.record_version,
+            encoding: "parquet".into(),
+            schema_fingerprint: entry.schema_fingerprint,
+            row_count: 0,
+            bytes: Vec::new(),
+        };
+        require_participant_contract(&snapshot, "assertions").unwrap();
+        assert_eq!(read_or_empty(&snapshot, true).unwrap()[0].num_rows(), 0);
+        assert_eq!(read_or_empty(&snapshot, false).unwrap()[0].num_rows(), 0);
+        let mut incompatible = snapshot.clone();
+        incompatible.encoding = "json".into();
+        assert_eq!(
+            require_participant_contract(&incompatible, "assertions")
+                .unwrap_err()
+                .code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        assert_eq!(
+            snapshot_to_participant(incompatible).unwrap().encoding,
+            ProjectParticipantEncoding::Json
+        );
+        let mut unsupported = snapshot;
+        unsupported.encoding = "sqlite".into();
+        assert_eq!(
+            snapshot_to_participant(unsupported).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn knowledge_arrow_and_write_context_helpers_cover_empty_and_invalid_boundaries() {
+        let schema = AssertionLedger::default()
+            .assertion_batch()
+            .unwrap()
+            .schema();
+        let empty = concat_or_empty(&[], &schema).unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        let combined = concat_or_empty(&[empty.clone(), empty.clone()], &schema).unwrap();
+        assert_eq!(combined.num_rows(), 0);
+        let token = PageToken::new(uuid7(91), 4);
+        let paged = with_next_token(&empty, Some(&token)).unwrap();
+        assert_eq!(
+            paged.schema().metadata()["graphforge.next_page_token"],
+            token.as_str()
+        );
+        let unpaged = with_next_token(&empty, None).unwrap();
+        assert!(
+            !unpaged
+                .schema()
+                .metadata()
+                .contains_key("graphforge.next_page_token")
+        );
+        let result = assertion_result(empty);
+        assert_eq!(result.stats.rows_produced, 0);
+        assert_eq!(result.batches.len(), 1);
+
+        assert_eq!(
+            require_uuid(Uuid::nil(), "record_uuid").unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(Uuid::nil()),
+            actor_uuid: None,
+        };
+        assert_eq!(
+            validate_write_context(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(uuid7(92)),
+            actor_uuid: Some(Uuid::nil()),
+        };
+        assert_eq!(
+            validate_write_context(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(uuid7(92)),
+            actor_uuid: Some(uuid7(93)),
+        };
+        validate_write_context(&context).unwrap();
+        assert_eq!(not_found().code(), "GF_NOT_FOUND");
+    }
+
     fn enable(graph: &GraphForge, capability_id: CapabilityId, seed: u8) {
         graph
             .enable_capability(EnableCapabilityRequest {

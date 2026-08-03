@@ -2282,6 +2282,38 @@ mod tests {
     }
 
     #[test]
+    fn aborted_optimistic_replay_fails_closed_when_generation_cleanup_is_incomplete() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"attempt")]);
+        let operation: [u8; 32] = Sha256::digest(b"aborted-cleanup-contract").into();
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
+        else {
+            panic!("optimistic operation replayed unexpectedly");
+        };
+        abort_stale_generation(&staged).unwrap();
+        drop(staged);
+
+        let leftover = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(request.generation_uuid.hyphenated().to_string());
+        std::fs::create_dir(&leftover).unwrap();
+        let error = stage_project_generation_optimistic(root.path(), &request, operation)
+            .err()
+            .expect("incomplete aborted cleanup must fail closed");
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("cleanup is incomplete"));
+        assert!(leftover.exists());
+        assert_eq!(
+            read_journal(&journal_path(root.path(), request.transaction_uuid))
+                .unwrap()
+                .phase,
+            JournalPhase::Aborted
+        );
+    }
+
+    #[test]
     fn optimistic_promotion_closes_staged_handles_before_directory_rename() {
         let root = project();
         let request = request(vec![participant("graph", "nodes", b"promoted")]);
@@ -2588,6 +2620,85 @@ mod tests {
             std::fs::read(hostile.join("unexpected")).unwrap(),
             b"caller bytes"
         );
+    }
+
+    #[test]
+    fn atomic_temp_cleanup_rejects_near_misses_links_and_multiple_entries() {
+        let root = project();
+        for name in [
+            ".atomicwrite",
+            ".atomicwrite12345",
+            ".atomicwrite1234567",
+            ".atomicwrite12-456",
+            "atomicwrite123456",
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&path).unwrap());
+            assert!(path.exists());
+        }
+
+        let regular = root.path().join(".atomicwriteabc001");
+        std::fs::write(&regular, b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&regular).unwrap());
+        assert_eq!(std::fs::read(&regular).unwrap(), b"caller");
+
+        let multiple = root.path().join(".atomicwriteabc002");
+        std::fs::create_dir(&multiple).unwrap();
+        std::fs::write(multiple.join("tmpfile.tmp"), b"temporary").unwrap();
+        std::fs::write(multiple.join("second"), b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&multiple).unwrap());
+        assert_eq!(std::fs::read(multiple.join("second")).unwrap(), b"caller");
+
+        let wrong_entry = root.path().join(".atomicwriteabc003");
+        std::fs::create_dir(&wrong_entry).unwrap();
+        std::fs::write(wrong_entry.join("not-temp"), b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&wrong_entry).unwrap());
+        assert_eq!(
+            std::fs::read(wrong_entry.join("not-temp")).unwrap(),
+            b"caller"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let linked_dir = root.path().join(".atomicwriteabc004");
+            symlink(root.path(), &linked_dir).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&linked_dir).unwrap());
+            assert!(
+                linked_dir
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+
+            let linked_entry = root.path().join(".atomicwriteabc005");
+            std::fs::create_dir(&linked_entry).unwrap();
+            symlink(
+                root.path().join(CURRENT_FILE),
+                linked_entry.join("tmpfile.tmp"),
+            )
+            .unwrap();
+            assert!(!cleanup_atomicwrite_temp(&linked_entry).unwrap());
+            assert!(
+                linked_entry
+                    .join("tmpfile.tmp")
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+
+            let hardlinked_entry = root.path().join(".atomicwriteabc006");
+            std::fs::create_dir(&hardlinked_entry).unwrap();
+            let owned = root.path().join("hardlink-owner");
+            std::fs::write(&owned, b"caller").unwrap();
+            std::fs::hard_link(&owned, hardlinked_entry.join("tmpfile.tmp")).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&hardlinked_entry).unwrap());
+            assert_eq!(std::fs::read(&owned).unwrap(), b"caller");
+        }
     }
 
     #[test]

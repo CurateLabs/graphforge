@@ -1323,6 +1323,75 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn empty_composite_domain_merges_do_not_require_optional_capabilities() {
+        let graph = GraphForge::new(None).unwrap();
+        let parent = graphforge_storage::resolve_project_generation(
+            graph.resolved_generation.container_root(),
+        )
+        .unwrap();
+        let knowledge = CompositeKnowledgeParticipants::default();
+        assert!(
+            merge_provenance(&parent, &knowledge)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(
+            merge_assertions(&parent, &knowledge)
+                .unwrap()
+                .assertions
+                .is_empty()
+        );
+        assert!(
+            merge_confidence(&parent, &knowledge)
+                .unwrap()
+                .assessments
+                .is_empty()
+        );
+        assert!(
+            merge_evidence(&parent, &knowledge)
+                .unwrap()
+                .links
+                .is_empty()
+        );
+        assert!(
+            merge_reasoning(&parent, &knowledge)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert!(merge_status(&parent, &knowledge).unwrap().events.is_empty());
+        assert!(
+            merge_supersessions(&parent, &knowledge)
+                .unwrap()
+                .relations()
+                .is_empty()
+        );
+        let hypotheses = merge_hypotheses(&parent, &knowledge).unwrap();
+        assert!(hypotheses.groups().is_empty());
+        assert!(hypotheses.membership_events().is_empty());
+        assert!(hypotheses.selection_events().is_empty());
+        assert!(
+            merge_validity(&parent, &knowledge)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(
+            replacement_families(&CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(99)),
+                    actor_uuid: None,
+                },
+                graph_mutations: Vec::new(),
+                knowledge,
+            })
+            .is_empty()
+        );
+    }
+
     fn publish_request() -> CompositeTransactionRequest {
         let operation = uuid7(10);
         let node = uuid7(20);

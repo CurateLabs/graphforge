@@ -4502,6 +4502,100 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_function_argument_contract_matrix_and_specialized_paths() {
+        use datafusion::arrow::datatypes::{DataType, Field, Fields};
+        use datafusion::logical_expr::lit;
+
+        for (function, expected) in [
+            (
+                AggFunc::CountDistinct,
+                "COUNT DISTINCT requires an argument",
+            ),
+            (AggFunc::Sum, "SUM requires an argument"),
+            (AggFunc::SumDistinct, "SUM DISTINCT requires an argument"),
+            (AggFunc::Avg, "AVG requires an argument"),
+            (AggFunc::AvgDistinct, "AVG DISTINCT requires an argument"),
+            (AggFunc::Min, "MIN requires an argument"),
+            (AggFunc::Max, "MAX requires an argument"),
+            (AggFunc::Collect, "COLLECT requires an argument"),
+            (AggFunc::CollectDistinct, "COLLECT requires an argument"),
+            (
+                AggFunc::PercentileDisc,
+                "percentileDisc requires a value argument",
+            ),
+            (
+                AggFunc::PercentileCont,
+                "percentileCont requires a value argument",
+            ),
+        ] {
+            assert_eq!(
+                lower_agg_func(function, None, None, None)
+                    .unwrap_err()
+                    .to_string(),
+                format!("unsupported expression: {expected}")
+            );
+        }
+
+        for function in [AggFunc::PercentileDisc, AggFunc::PercentileCont] {
+            assert!(
+                lower_agg_func(function, Some(lit(1_i64)), None, Some(&DataType::Int64))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("percentile argument")
+            );
+        }
+
+        for function in [
+            AggFunc::Count,
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+        ] {
+            let arg = (function != AggFunc::Count).then(|| lit(1_i64));
+            assert!(lower_agg_func(function, arg, None, Some(&DataType::Int64)).is_ok());
+        }
+        assert!(
+            lower_agg_func(
+                AggFunc::Avg,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&DataType::Null),
+            )
+            .is_ok()
+        );
+        assert!(
+            lower_agg_func(
+                AggFunc::AvgDistinct,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&DataType::Null),
+            )
+            .is_ok()
+        );
+
+        let heterogeneous = DataType::Struct(Fields::from(vec![
+            Field::new("__het_tag", DataType::Int8, false),
+            Field::new("__het_value_0", DataType::Int64, true),
+        ]));
+        for function in [AggFunc::Min, AggFunc::Max] {
+            let expression = lower_agg_func(
+                function,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&heterogeneous),
+            )
+            .unwrap();
+            assert!(format!("{expression}").contains("cypher_"));
+        }
+    }
+
+    #[test]
     fn sort_lowers_keys() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
         let lowerer = GraphPlanLowerer::new(Some(&catalog), None);

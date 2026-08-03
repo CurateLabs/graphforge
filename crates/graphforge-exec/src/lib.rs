@@ -5994,6 +5994,24 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn public_write_wrappers_preserve_no_target_and_empty_plan_errors() {
+        let session = make_session();
+        let plan = GraphPlan::builder("openCypher").build();
+        let params = HashMap::from([("value".to_owned(), graphforge_ir::IrLiteral::Int(1))]);
+
+        for result in [
+            session.execute_delete(&plan).await,
+            session.execute_delete_with_params(&plan, &params).await,
+            session.execute_set(&plan).await,
+            session.execute_set_with_params(&plan, &params).await,
+            session.execute_remove(&plan).await,
+            session.execute_remove_with_params(&plan, &params).await,
+        ] {
+            assert!(result.is_err());
+        }
+    }
+
     #[test]
     fn context_exposes_graph_catalog() {
         let session = make_session();

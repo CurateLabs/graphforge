@@ -1935,13 +1935,22 @@ mod tests {
 
     #[test]
     fn generated_bulk_identities_are_deterministic_typed_and_domain_separated() {
-        let operation = operation(42);
-        let node_zero = generated_uuid(operation, BulkInputKind::Node, 0);
-        assert_eq!(node_zero, generated_uuid(operation, BulkInputKind::Node, 0));
-        assert_ne!(node_zero, generated_uuid(operation, BulkInputKind::Node, 1));
-        assert_ne!(node_zero, generated_uuid(operation, BulkInputKind::Edge, 0));
+        let operation_id = operation(42);
+        let node_zero = generated_uuid(operation_id, BulkInputKind::Node, 0);
+        assert_eq!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Node, 0)
+        );
+        assert_ne!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Node, 1)
+        );
+        assert_ne!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Edge, 0)
+        );
         assert_eq!(node_zero.get_version_num(), 7);
-        assert!(validate_operation_uuid(BulkInputKind::Node, operation).is_ok());
+        assert!(validate_operation_uuid(BulkInputKind::Node, operation_id).is_ok());
         let invalid =
             validate_operation_uuid(BulkInputKind::Edge, OperationId(Uuid::from_u128(42)))
                 .unwrap_err();
@@ -1959,6 +1968,18 @@ mod tests {
                 BulkValidationReason::InvalidIdentifier
             );
         }
+
+        let graph = GraphForge::new(None).unwrap();
+        let stale_nodes = ValidatedBulkNodes {
+            rows: Vec::new(),
+            operation_uuid: operation(43),
+            source_generation_uuid: uuid(44),
+        };
+        let error = graph
+            .validate_bulk_edges(operation(45), &[], &stale_nodes)
+            .unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::GenerationMismatch);
+        assert_eq!(error.kind, BulkInputKind::Edge);
     }
 
     #[test]

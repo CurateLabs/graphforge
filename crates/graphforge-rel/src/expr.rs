@@ -15217,4 +15217,396 @@ mod tests {
             assert!(error.to_string().contains(fragment));
         }
     }
+
+    #[test]
+    fn scalar_conversion_helpers_exhaust_every_numeric_width_null_and_error_contract() {
+        let integers = [
+            (ScalarValue::Int8(Some(-8)), -8_i64),
+            (ScalarValue::Int16(Some(-16)), -16),
+            (ScalarValue::Int32(Some(-32)), -32),
+            (ScalarValue::Int64(Some(-64)), -64),
+            (ScalarValue::UInt8(Some(8)), 8),
+            (ScalarValue::UInt16(Some(16)), 16),
+            (ScalarValue::UInt32(Some(32)), 32),
+            (ScalarValue::UInt64(Some(64)), 64),
+        ];
+        for (value, expected) in &integers {
+            assert_eq!(scalar_as_i128(value), Some(i128::from(*expected)));
+            assert_eq!(scalar_as_f64(value), Some(*expected as f64));
+            assert_eq!(to_cypher_integer(value).unwrap(), Some(*expected));
+            assert_eq!(to_cypher_float(value).unwrap(), Some(*expected as f64));
+            assert_eq!(to_cypher_string(value).unwrap(), Some(expected.to_string()));
+        }
+
+        for (value, integer, float, text) in [
+            (
+                ScalarValue::Float32(Some(12.75)),
+                Some(12),
+                Some(12.75),
+                Some("12.75".to_owned()),
+            ),
+            (
+                ScalarValue::Float64(Some(-12.75)),
+                Some(-12),
+                Some(-12.75),
+                Some("-12.75".to_owned()),
+            ),
+            (
+                ScalarValue::Utf8(Some("42.9".into())),
+                Some(42),
+                Some(42.9),
+                Some("42.9".to_owned()),
+            ),
+            (
+                ScalarValue::LargeUtf8(Some("-3".into())),
+                Some(-3),
+                Some(-3.0),
+                Some("-3".to_owned()),
+            ),
+        ] {
+            assert_eq!(to_cypher_integer(&value).unwrap(), integer);
+            assert_eq!(to_cypher_float(&value).unwrap(), float);
+            assert_eq!(to_cypher_string(&value).unwrap(), text);
+        }
+
+        for null in [
+            ScalarValue::Null,
+            ScalarValue::Int64(None),
+            ScalarValue::Float64(None),
+            ScalarValue::Utf8(None),
+            ScalarValue::Boolean(None),
+        ] {
+            assert_eq!(to_cypher_integer(&null).unwrap(), None);
+            assert_eq!(to_cypher_float(&null).unwrap(), None);
+            assert_eq!(to_cypher_boolean(&null).unwrap(), None);
+            assert_eq!(to_cypher_string(&null).unwrap(), None);
+        }
+
+        for invalid_float in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            assert_eq!(trunc_float_to_i64(invalid_float), None);
+        }
+        assert_eq!(trunc_float_to_i64(-9.99), Some(-9));
+        for invalid_text in ["", "not-a-number", "NaN", "inf"] {
+            let value = ScalarValue::Utf8(Some(invalid_text.into()));
+            assert_eq!(to_cypher_integer(&value).unwrap(), None);
+            assert_eq!(to_cypher_float(&value).unwrap(), None);
+        }
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Boolean(Some(true))).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Utf8(Some("true".into()))).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::LargeUtf8(Some("false".into()))).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Utf8(Some("TRUE".into()))).unwrap(),
+            None
+        );
+
+        for invalid in [
+            ScalarValue::Boolean(Some(true)),
+            ScalarValue::Binary(Some(vec![1])),
+        ] {
+            assert!(to_cypher_integer(&invalid).is_err());
+            assert!(to_cypher_float(&invalid).is_err());
+        }
+        assert!(to_cypher_boolean(&ScalarValue::Int64(Some(1))).is_err());
+        assert!(to_cypher_string(&ScalarValue::Binary(Some(vec![1]))).is_err());
+        assert!(to_cypher_integer(&ScalarValue::UInt64(Some(u64::MAX))).is_err());
+    }
+
+    #[test]
+    fn canonical_float_strings_and_scalar_range_arguments_cover_boundaries() {
+        for (value, expected) in [
+            (0.0, "0.0"),
+            (-0.0, "0.0"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (1e20, "100000000000000000000.0"),
+        ] {
+            assert_eq!(cypher_float_string(value), expected);
+        }
+
+        for (value, expected) in [
+            (ScalarValue::Int8(Some(-1)), -1),
+            (ScalarValue::Int16(Some(-2)), -2),
+            (ScalarValue::Int32(Some(-3)), -3),
+            (ScalarValue::Int64(Some(-4)), -4),
+            (ScalarValue::UInt8(Some(1)), 1),
+            (ScalarValue::UInt16(Some(2)), 2),
+            (ScalarValue::UInt32(Some(3)), 3),
+            (ScalarValue::UInt64(Some(4)), 4),
+        ] {
+            assert_eq!(scalar_as_i64_arg(&value, "bound").unwrap(), expected);
+        }
+        assert!(
+            scalar_as_i64_arg(&ScalarValue::UInt64(Some(u64::MAX)), "bound")
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds i64::MAX")
+        );
+        assert!(
+            scalar_as_i64_arg(&ScalarValue::Utf8(Some("1".into())), "bound")
+                .unwrap_err()
+                .to_string()
+                .contains("must be an integer")
+        );
+    }
+
+    #[test]
+    fn temporal_literal_render_dispatch_and_ir_scalar_round_trip_matrix() {
+        for (name, input) in [
+            ("date", "2024-02-29"),
+            ("localtime", "12:34:56"),
+            ("time", "12:34:56+01:00"),
+            ("localdatetime", "2024-02-29T12:34:56"),
+            ("datetime", "2024-02-29T12:34:56Z"),
+            ("duration", "P1M2DT3S"),
+        ] {
+            assert!(render_temporal(name, input).is_some(), "{name}({input})");
+        }
+        assert_eq!(render_temporal("unknown", "2024-01-01"), None);
+        assert_eq!(render_temporal("date", "not-a-date"), None);
+
+        let literals = [
+            IrLiteral::Null,
+            IrLiteral::Bool(true),
+            IrLiteral::Int(-7),
+            IrLiteral::Float(1.25),
+            IrLiteral::Str("value".into()),
+            IrLiteral::Duration {
+                months: 1,
+                days: 2,
+                seconds: 3,
+                nanos: 4,
+            },
+            IrLiteral::DateTime(123),
+            IrLiteral::Date(20_000),
+            IrLiteral::LocalDateTime {
+                days: 20_000,
+                nanos: 123,
+            },
+            IrLiteral::Time(456),
+            IrLiteral::ZonedTime {
+                nanos: 789,
+                offset: 3_600,
+            },
+            IrLiteral::ZonedDateTime {
+                days: 20_000,
+                nanos: 999,
+                offset: -3_600,
+                zone: Some("America/Denver".into()),
+            },
+            IrLiteral::List(vec![IrLiteral::Int(1), IrLiteral::Null]),
+            IrLiteral::Map(vec![("answer".into(), IrLiteral::Int(42))]),
+        ];
+        for literal in literals {
+            let scalar = ir_literal_to_scalar(&literal);
+            if !matches!(literal, IrLiteral::Map(_)) {
+                assert_eq!(scalar_to_ir_literal(&scalar).unwrap(), literal);
+            }
+        }
+
+        for (scalar, expected) in [
+            (
+                ScalarValue::DurationSecond(Some(-2)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -2,
+                    nanos: 0,
+                },
+            ),
+            (
+                ScalarValue::DurationMillisecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_000_000,
+                },
+            ),
+            (
+                ScalarValue::DurationMicrosecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_999_000,
+                },
+            ),
+            (
+                ScalarValue::DurationNanosecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_999_999,
+                },
+            ),
+        ] {
+            assert_eq!(scalar_to_ir_literal(&scalar).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn temporal_truncate_lowering_covers_arity_default_literal_override_and_rejection_paths() {
+        for name in [
+            "date.truncate",
+            "localtime.truncate",
+            "localdatetime.truncate",
+            "time.truncate",
+            "datetime.truncate",
+        ] {
+            let mut missing = ExprArena::new();
+            let call = missing.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![],
+            });
+            assert!(matches!(
+                make_lowerer(&missing, &VarMap::new()).lower(call),
+                Err(LoweringError::UnknownFunction(function)) if function == name
+            ));
+
+            let mut defaults = ExprArena::new();
+            let unit = defaults.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = defaults.push(IrExpr::Literal(IrLiteral::Null));
+            let call = defaults.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value],
+            });
+            let lowered = make_lowerer(&defaults, &VarMap::new()).lower(call).unwrap();
+            assert!(format!("{lowered}").contains("truncate"));
+
+            let mut overrides = ExprArena::new();
+            let unit = overrides.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = overrides.push(IrExpr::Literal(IrLiteral::Null));
+            let one = overrides.push(IrExpr::Literal(IrLiteral::Int(1)));
+            let zone = overrides.push(IrExpr::Literal(IrLiteral::Str("UTC".into())));
+            let map = overrides.push(IrExpr::MapLiteral(vec![
+                ("year".into(), one),
+                ("month".into(), one),
+                ("day".into(), one),
+                ("week".into(), one),
+                ("dayOfWeek".into(), one),
+                ("ordinalDay".into(), one),
+                ("quarter".into(), one),
+                ("dayOfQuarter".into(), one),
+                ("hour".into(), one),
+                ("minute".into(), one),
+                ("second".into(), one),
+                ("millisecond".into(), one),
+                ("microsecond".into(), one),
+                ("nanosecond".into(), one),
+                ("timezone".into(), zone),
+            ]));
+            let call = overrides.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value, map],
+            });
+            assert!(make_lowerer(&overrides, &VarMap::new()).lower(call).is_ok());
+
+            let mut dynamic = ExprArena::new();
+            let unit = dynamic.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = dynamic.push(IrExpr::Literal(IrLiteral::Null));
+            let parameter = dynamic.push(IrExpr::Parameter("overrides".into()));
+            let call = dynamic.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value, parameter],
+            });
+            assert!(
+                make_lowerer(&dynamic, &VarMap::new())
+                    .lower(call)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("override map must be a literal map")
+            );
+        }
+
+        for name in [
+            "duration.between",
+            "duration.inmonths",
+            "duration.indays",
+            "duration.inseconds",
+        ] {
+            let mut arena = ExprArena::new();
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![],
+            });
+            assert!(matches!(
+                make_lowerer(&arena, &VarMap::new()).lower(call),
+                Err(LoweringError::UnknownFunction(function)) if function == name
+            ));
+
+            let left = arena.push(IrExpr::Literal(IrLiteral::Null));
+            let right = arena.push(IrExpr::Literal(IrLiteral::Null));
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![left, right],
+            });
+            assert!(make_lowerer(&arena, &VarMap::new()).lower(call).is_ok());
+        }
+    }
+
+    #[test]
+    fn cypher_value_comparison_and_order_helpers_cover_cross_type_edges() {
+        use datafusion::scalar::ScalarValue as S;
+
+        for value in [
+            S::Int8(Some(1)),
+            S::Int16(Some(1)),
+            S::Int32(Some(1)),
+            S::Int64(Some(1)),
+            S::UInt8(Some(1)),
+            S::UInt16(Some(1)),
+            S::UInt32(Some(1)),
+            S::UInt64(Some(1)),
+            S::Float32(Some(1.0)),
+            S::Float64(Some(1.0)),
+        ] {
+            assert_eq!(scalar_as_f64(&value), Some(1.0));
+        }
+        assert_eq!(scalar_as_i128(&S::Float64(Some(1.0))), None);
+        assert_eq!(scalar_as_f64(&S::Boolean(Some(true))), None);
+
+        let one = S::List(S::new_list(&[S::Int64(Some(1))], &DataType::Int64, true));
+        let one_null = S::List(S::new_list(
+            &[S::Int64(Some(1)), S::Int64(None)],
+            &DataType::Int64,
+            true,
+        ));
+        let two = S::List(S::new_list(
+            &[S::Int64(Some(1)), S::Int64(Some(2))],
+            &DataType::Int64,
+            true,
+        ));
+        assert_eq!(cypher_value_eq(&one, &one), Some(true));
+        assert_eq!(cypher_value_eq(&one, &two), Some(false));
+        assert_eq!(cypher_value_eq(&one_null, &one_null), None);
+        assert_eq!(cypher_value_eq(&S::Null, &S::Int64(Some(1))), None);
+        assert_eq!(
+            cypher_value_eq(&S::Int64(Some(1)), &S::Float64(Some(1.0))),
+            Some(true)
+        );
+        assert_eq!(
+            cypher_value_eq(&S::Utf8(Some("a".into())), &S::Utf8(Some("b".into()))),
+            Some(false)
+        );
+
+        assert!(cypher_order_key(&S::Null).starts_with("99:null"));
+        assert!(cypher_order_key(&S::Utf8(Some("a".into()))).starts_with("60:str"));
+        assert!(cypher_order_key(&S::Boolean(Some(true))).starts_with("70:bool"));
+        assert!(cypher_order_key(&S::Float64(Some(f64::NAN))).starts_with("90:nan"));
+        assert!(cypher_order_key(&S::Binary(Some(vec![1]))).starts_with("98:other"));
+        assert!(cypher_order_key(&one).starts_with("40:list"));
+    }
 }

@@ -8747,4 +8747,202 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn expression_shape_comparison_covers_scalar_and_container_variants() {
+        let equal = [
+            ("1", "1"),
+            ("1.5", "1.5"),
+            ("'x'", "'x'"),
+            ("true", "true"),
+            ("null", "null"),
+            ("$value", "$value"),
+            ("a", "a"),
+            ("a.name", "a.name"),
+            ("a + 1", "a + 1"),
+            ("NOT a", "NOT a"),
+            ("coalesce(a, 1)", "COALESCE(a, 1)"),
+        ];
+        for (left, right) in equal {
+            assert!(
+                same_expr_shape(
+                    &parsed_return_expr(&format!("RETURN {left}")),
+                    &parsed_return_expr(&format!("RETURN {right}")),
+                ),
+                "{left} should have the same shape as {right}"
+            );
+        }
+
+        let unequal = [
+            ("1", "2"),
+            ("1.5", "2.5"),
+            ("'x'", "'y'"),
+            ("true", "false"),
+            ("$left", "$right"),
+            ("a", "b"),
+            ("a.name", "a.age"),
+            ("a + 1", "a - 1"),
+            ("NOT a", "-a"),
+            ("coalesce(a, 1)", "coalesce(a, 2)"),
+            ("[a, 1]", "[a]"),
+            ("{a: 1}", "{a: 2}"),
+            ("CASE WHEN true THEN 1 END", "1"),
+        ];
+        for (left, right) in unequal {
+            assert!(
+                !same_expr_shape(
+                    &parsed_return_expr(&format!("RETURN {left}")),
+                    &parsed_return_expr(&format!("RETURN {right}")),
+                ),
+                "{left} should differ from {right}"
+            );
+        }
+
+        assert!(same_grouping_expr(
+            &parsed_return_expr("RETURN [a, 1]"),
+            &parsed_return_expr("RETURN [a, 1]"),
+        ));
+        assert!(!same_grouping_expr(
+            &parsed_return_expr("RETURN [a, 1]"),
+            &parsed_return_expr("RETURN [a]"),
+        ));
+        assert!(same_grouping_expr(
+            &parsed_return_expr("RETURN {a: 1, b: true}"),
+            &parsed_return_expr("RETURN {b: true, a: 1}"),
+        ));
+        assert!(!same_grouping_expr(
+            &parsed_return_expr("RETURN {a: 1}"),
+            &parsed_return_expr("RETURN {a: 2}"),
+        ));
+    }
+
+    #[test]
+    fn row_count_constant_classification_covers_every_ast_shape() {
+        for source in ["1", "(1)", "-1", "$n", "1 + 2", "toInteger(1.5)"] {
+            assert!(
+                row_count_expr_is_integer(&parsed_return_expr(&format!("RETURN {source}"))),
+                "{source}"
+            );
+        }
+        assert!(!row_count_expr_is_integer(&parsed_return_expr(
+            "RETURN 1.5"
+        )));
+
+        for source in ["1.5", "(1.5)", "-1.5"] {
+            assert!(
+                is_float_constant(&parsed_return_expr(&format!("RETURN {source}"))),
+                "{source}"
+            );
+        }
+        assert!(!is_float_constant(&parsed_return_expr("RETURN 1")));
+
+        assert_eq!(
+            extract_parameter_name(&parsed_return_expr("RETURN ($rows)")),
+            Some("rows".into())
+        );
+        assert_eq!(
+            extract_parameter_name(&parsed_return_expr("RETURN 1")),
+            None
+        );
+        assert_eq!(
+            extract_int_constant(&parsed_return_expr("RETURN -(-1)")),
+            Some(1)
+        );
+        assert_eq!(
+            extract_int_constant(&parsed_return_expr("RETURN true")),
+            None
+        );
+        assert_eq!(
+            extract_non_negative_int_constant(&parsed_return_expr("RETURN -1")),
+            None
+        );
+    }
+
+    #[test]
+    fn procedure_literal_type_checks_cover_nullability_and_scalar_domains() {
+        let field = |type_name: &str, nullable| ProcedureField {
+            name: "arg".into(),
+            type_name: type_name.into(),
+            nullable,
+        };
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN null"),
+            &field("STRING", true)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN null"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("NUMBER", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1.5"),
+            &field("FLOAT", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1.5"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 'x'"),
+            &field("STRING", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 'x'"),
+            &field("BOOLEAN", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN true"),
+            &field("BOOLEAN", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN true"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN (1)"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN a"),
+            &field("ANY", false)
+        ));
+    }
+
+    #[test]
+    fn binder_exercises_fragmented_clause_and_expression_error_paths() {
+        let cases = [
+            "MATCH (n) WHERE n.active = true RETURN n",
+            "MATCH (n) SET missing.value = 1 RETURN n",
+            "MATCH (n) REMOVE missing.value RETURN n",
+            "MATCH (n) DELETE n.name",
+            "MATCH (n) WITH n.name RETURN n",
+            "MATCH (n) WITH count(*) AS total RETURN total",
+            "MATCH (n) RETURN n ORDER BY n.name DESC SKIP (1 + 2) LIMIT toInteger(3.5)",
+            "MATCH (n) RETURN percentileCont(n.value)",
+            "MATCH (n) RETURN percentileCont(DISTINCT n.value, 0.5)",
+            "MATCH (n) RETURN 'a' + 'b'",
+            "MATCH (n) RETURN NOT (n.value IN [1, 2])",
+            "MATCH (n) WHERE exists { (n)-->(m) WHERE count(*) > 0 } RETURN n",
+            "MATCH (n) RETURN [(n)-->(m) WHERE count(*) > 0 | m]",
+            "MATCH (n) WHERE (n)-->(m) OR (n)-->(x) RETURN n",
+            "MATCH (n) WHERE n.active OR (n)-->(m) RETURN n",
+            "UNWIND [1, 2] AS x RETURN x",
+        ];
+        for query in cases {
+            let ast = parse(query).unwrap_or_else(|error| panic!("query={query}: {error}"));
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let _ = binder.bind(&ast);
+        }
+    }
 }
