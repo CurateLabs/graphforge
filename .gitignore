@@ -219,6 +219,9 @@ dist/
 crates/graphforge-bindings-node/coverage/
 target-py-cov/
 
+# Local pre-push validation evidence and reports (#376)
+.graphforge/validation/
+
 # Keep @curatelabs/graphforge first-party JS (root lib/ ignore is for Python venvs)
 !crates/graphforge-bindings-node/lib/
 !crates/graphforge-bindings-node/lib/**

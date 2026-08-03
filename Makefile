@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -212,14 +212,14 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@$(MAKE) docstring-coverage
 	@echo "✅ Fast checks passed! Run 'make pre-push' to include coverage."
 
-pre-push:  ## Run local policy checks plus multi-surface coverage thresholds
-	@$(MAKE) pre-push-fast
-	@uv run --no-sync python scripts/ci/test-rust-coverage-ledger.py
-	@echo "━━━ Coverage + thresholds (Rust + Python + Node) ━━━━━━━━━━━━━━━━━━━━━━━"
-	@$(MAKE) coverage
-	@echo "━━━ Public API BDD mutation sentinels ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@uv run --no-sync python scripts/ci/test-api-bdd-mutations.py
-	@echo "✅ All pre-push checks passed!"
+pre-push:  ## Run prerequisite-aware, resumable full local validation
+	@python3 scripts/pre_push_validation.py run
+
+pre-push-clean:  ## Discard local validation evidence and force a full revalidation
+	@python3 scripts/pre_push_validation.py run --force-clean
+
+pre-push-preflight:  ## Check local pre-push prerequisites and disk before compilation
+	@python3 scripts/pre_push_validation.py preflight
 
 clean:  ## Clean up cache files
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
