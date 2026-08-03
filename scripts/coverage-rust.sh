@@ -47,7 +47,8 @@ cargo llvm-cov report --html --output-dir "$OUT_DIR/core-html"
 
 # Export the exact instrumentation environment used by cargo-llvm-cov. Native
 # artifacts are built once, sequentially, and then reused by all acceptance.
-eval "$(cargo llvm-cov show-env --sh)"
+COVERAGE_ENV="$(cargo llvm-cov show-env --sh)"
+eval "$COVERAGE_ENV"
 
 echo "━━━ Instrumented native artifacts ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml

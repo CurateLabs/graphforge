@@ -30,7 +30,12 @@ def sha256(path: Path) -> str:
 
 
 def git_head(root: Path) -> str:
-    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE
+        ).strip()
+    except (subprocess.CalledProcessError, OSError) as error:
+        raise LedgerError("failed to resolve git HEAD") from error
 
 
 def normalize_source(raw: str, root: Path) -> str | None:

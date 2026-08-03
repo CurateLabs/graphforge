@@ -34,6 +34,7 @@ def main() -> None:
     head = ledger_module.git_head(ROOT)
     with tempfile.TemporaryDirectory(prefix="gf-rust-coverage-ledger-") as directory:
         temp = Path(directory)
+        expect_error("failed to resolve git HEAD", lambda: ledger_module.git_head(temp))
         artifact = temp / "adapter.so"
         runtime = temp / "loaded.so"
         profile = temp / "adapter.profraw"
