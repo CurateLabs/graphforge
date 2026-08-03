@@ -5200,6 +5200,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::Schema;
     use datafusion::logical_expr::{Extension, LogicalPlanBuilder, lit};
     use datafusion::physical_plan::empty::EmptyExec;
     use graphforge_ir::RuntimeCatalog;
@@ -5223,9 +5224,131 @@ mod tests {
     }
 
     #[test]
+    fn write_summary_reads_named_counters_and_ignores_missing_or_empty_rows() {
+        let batch = RecordBatch::try_from_iter([
+            (
+                "properties_set",
+                Arc::new(UInt64Array::from(vec![7])) as ArrayRef,
+            ),
+            (
+                "nodes_created",
+                Arc::new(UInt64Array::from(vec![2])) as ArrayRef,
+            ),
+            (
+                "edges_deleted",
+                Arc::new(UInt64Array::from(vec![3])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            SideEffects::from_summary(&[batch]),
+            SideEffects {
+                nodes_created: 2,
+                relationships_deleted: 3,
+                properties_set: 7,
+                ..SideEffects::default()
+            }
+        );
+        assert_eq!(SideEffects::from_summary(&[]), SideEffects::default());
+        assert_eq!(
+            SideEffects::from_summary(&[RecordBatch::new_empty(Arc::new(Schema::empty()))]),
+            SideEffects::default()
+        );
+    }
+
+    #[test]
+    fn referenced_node_columns_resolve_qualified_unqualified_and_struct_shapes() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+        use datafusion::common::TableReference;
+
+        let qualified = DFSchema::new_with_metadata(
+            vec![
+                (
+                    Some(TableReference::bare("var_2")),
+                    Arc::new(Field::new(
+                        "node_uuid",
+                        DataType::FixedSizeBinary(16),
+                        false,
+                    )),
+                ),
+                (
+                    Some(TableReference::bare("var_2")),
+                    Arc::new(Field::new("node_id", DataType::UInt64, false)),
+                ),
+            ],
+            HashMap::new(),
+        )
+        .unwrap();
+        let resolved = RefNodeCols::resolve(&qualified, 2).unwrap();
+        assert_eq!(
+            (resolved.var, resolved.uuid_idx, resolved.node_id_idx),
+            (2, 0, Some(1))
+        );
+        assert_eq!(resolved.uuid_child_idx, None);
+
+        let unqualified = DFSchema::try_from(Schema::new(vec![
+            Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("node_id", DataType::UInt64, false),
+        ]))
+        .unwrap();
+        let resolved = RefNodeCols::resolve_with_alias(&unqualified, 4, "renamed").unwrap();
+        assert_eq!(
+            (resolved.var, resolved.uuid_idx, resolved.node_id_idx),
+            (4, 0, Some(1))
+        );
+
+        let node_fields = Fields::from(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]);
+        let direct_struct = DFSchema::try_from(Schema::new(vec![Field::new(
+            "entity",
+            DataType::Struct(node_fields.clone()),
+            true,
+        )]))
+        .unwrap();
+        let resolved = RefNodeCols::resolve_with_alias(&direct_struct, 6, "entity").unwrap();
+        assert_eq!(
+            (
+                resolved.uuid_idx,
+                resolved.uuid_child_idx,
+                resolved.node_id_idx
+            ),
+            (0, Some(0), None)
+        );
+
+        let dynamic_struct = DFSchema::try_from(Schema::new(vec![Field::new(
+            "dynamic",
+            DataType::Struct(Fields::from(vec![Field::new(
+                "__het_value_8",
+                DataType::Struct(node_fields),
+                true,
+            )])),
+            true,
+        )]))
+        .unwrap();
+        let resolved = RefNodeCols::resolve_struct_at(&dynamic_struct, 8, 0).unwrap();
+        assert_eq!(resolved.uuid_child_idx, None);
+        assert!(RefNodeCols::resolve_struct_at(&unqualified, 9, 0).is_none());
+        assert!(RefNodeCols::resolve_with_alias(&direct_struct, 10, "missing").is_none());
+    }
+
+    #[test]
     fn write_execs_expose_stable_plan_contracts_and_reject_invalid_shape() {
         let dir = TempDir::new().unwrap();
         let (logical, physical) = empty_write_input();
+        let create: Arc<dyn ExecutionPlan> = Arc::new(GraphCreateExec::new(
+            &GraphCreateNode::new(
+                logical.clone(),
+                vec![],
+                vec![],
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            ),
+            physical.clone(),
+        ));
         let delete: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec::new(
             &GraphDeleteNode::new(
                 logical.clone(),
@@ -5270,13 +5393,15 @@ mod tests {
         ));
 
         for (plan, expected_name) in [
+            (create, "GraphCreateExec"),
             (delete, "GraphDeleteExec"),
             (set, "GraphSetExec"),
             (remove, "GraphRemoveExec"),
         ] {
             assert_eq!(plan.name(), expected_name);
             assert!(
-                plan.as_any().is::<GraphDeleteExec>()
+                plan.as_any().is::<GraphCreateExec>()
+                    || plan.as_any().is::<GraphDeleteExec>()
                     || plan.as_any().is::<GraphSetExec>()
                     || plan.as_any().is::<GraphRemoveExec>()
             );
@@ -5308,6 +5433,16 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let (logical, physical) = empty_write_input();
         let plans: Vec<Arc<dyn ExecutionPlan>> = vec![
+            Arc::new(GraphCreateExec::new(
+                &GraphCreateNode::new(
+                    logical.clone(),
+                    vec![],
+                    vec![],
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                ),
+                physical.clone(),
+            )),
             Arc::new(GraphDeleteExec::new(
                 &GraphDeleteNode::new(
                     logical.clone(),

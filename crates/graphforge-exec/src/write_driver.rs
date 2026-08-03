@@ -3527,9 +3527,12 @@ pub(crate) fn statement_summary_batch(c: &WriteCounters) -> Result<RecordBatch, 
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, Int64Array};
+    use arrow::array::{Array, FixedSizeBinaryBuilder, Int64Array, StringArray, UInt32Array};
     use datafusion::common::TableReference;
-    use graphforge_ir::{CreateEdgeSpec, CreateNodeSpec, CreatePattern, VarId};
+    use graphforge_ir::{
+        CreateEdgeSpec, CreateNodeSpec, CreatePattern, IrLiteral, PropId, RemovePropItem,
+        SetPropItem, VarId,
+    };
 
     use super::*;
 
@@ -3797,5 +3800,235 @@ mod tests {
         assert_eq!(input_schema, schema);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    fn nullable_uuids(values: &[Option<[u8; 16]>]) -> ArrayRef {
+        let mut builder = FixedSizeBinaryBuilder::with_capacity(values.len(), 16);
+        for value in values {
+            match value {
+                Some(value) => builder.append_value(value).unwrap(),
+                None => builder.append_null(),
+            }
+        }
+        Arc::new(builder.finish())
+    }
+
+    fn write_frontier(is_edge: bool) -> Frontier {
+        let uuid_name = if is_edge { "edge_uuid" } else { "node_uuid" };
+        let mut fields = vec![Field::new(uuid_name, DataType::FixedSizeBinary(16), true)];
+        let mut columns = vec![nullable_uuids(&[Some([7; 16]), Some([7; 16]), None])];
+        if is_edge {
+            fields.push(Field::new("rel_type_name", DataType::Utf8, false));
+            columns.push(Arc::new(StringArray::from(vec!["KNOWS"; 3])));
+        } else {
+            fields.push(Field::new("type_id", DataType::UInt32, false));
+            columns.push(Arc::new(UInt32Array::from(vec![3; 3])));
+        }
+        fields.push(Field::new("score", DataType::Int64, true));
+        columns.push(Arc::new(Int64Array::from(vec![Some(1), Some(1), Some(1)])));
+        let schema = Arc::new(Schema::new(fields.clone()));
+        let qualifier = TableReference::bare("var_1");
+        Frontier {
+            df_schema: DFSchema::new_with_metadata(
+                fields
+                    .into_iter()
+                    .map(|field| (Some(qualifier.clone()), Arc::new(field)))
+                    .collect(),
+                HashMap::new(),
+            )
+            .unwrap(),
+            batches: vec![RecordBatch::try_new(schema, columns).unwrap()],
+        }
+    }
+
+    fn phase_env<'a>(
+        lowerer: &'a GraphPlanLowerer<'a>,
+        exprs: &'a ExprArena,
+        dir: &'a Path,
+        params: &'a HashMap<String, IrLiteral>,
+    ) -> PhaseEnv<'a> {
+        PhaseEnv {
+            lowerer,
+            exprs,
+            dir,
+            mode: OntologyMode::Exploratory,
+            params,
+            type_map: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn set_accumulates_nodes_and_edges_once_across_duplicate_and_null_rows() {
+        for is_edge in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let lowerer =
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            let mut exprs = ExprArena::new();
+            let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
+            let params = HashMap::new();
+            let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+            let mut frontier = write_frontier(is_edge);
+            let mut var_map = VarMap::new();
+            var_map.insert(VarId(1), "var_1");
+            let mut ctx =
+                StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+
+            run_set_phase(
+                &env,
+                &[SetPropItem {
+                    target: VarId(1),
+                    prop: PropId(9),
+                    prop_name: "score".into(),
+                    value,
+                }],
+                &mut frontier,
+                &var_map,
+                &mut ctx,
+            )
+            .unwrap();
+
+            let accumulated = if is_edge {
+                &ctx.set_acc.edges["KNOWS"]
+            } else {
+                &ctx.set_acc.nodes["_untyped"]
+            };
+            assert_eq!(
+                accumulated[&[7; 16]]["score"],
+                IrLiteral::Int(42),
+                "wrong accumulated value for is_edge={is_edge}"
+            );
+            assert_eq!(accumulated.len(), 1, "duplicate rows must coalesce");
+            assert_eq!(ctx.counters.properties_set, 1);
+            assert_eq!(ctx.counters.properties_removed, 1);
+        }
+    }
+
+    #[test]
+    fn remove_accumulates_nodes_and_edges_and_ignores_null_optional_rows() {
+        for is_edge in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let lowerer =
+                GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+            let exprs = ExprArena::new();
+            let params = HashMap::new();
+            let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+            let mut frontier = write_frontier(is_edge);
+            frontier.batches[0] = RecordBatch::try_new(
+                Arc::clone(frontier.batches[0].schema_ref()),
+                vec![
+                    nullable_uuids(&[Some([7; 16]), Some([8; 16]), None]),
+                    Arc::clone(frontier.batches[0].column(1)),
+                    Arc::clone(frontier.batches[0].column(2)),
+                ],
+            )
+            .unwrap();
+            let mut ctx =
+                StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+
+            run_remove_phase(
+                &env,
+                &[RemovePropItem {
+                    target: VarId(1),
+                    prop: PropId(9),
+                    prop_name: "score".into(),
+                }],
+                &mut frontier,
+                &mut ctx,
+            )
+            .unwrap();
+
+            let accumulated = if is_edge {
+                &ctx.remove_acc.edges["KNOWS"]
+            } else {
+                &ctx.remove_acc.nodes["_untyped"]
+            };
+            assert_eq!(accumulated[&[7; 16]], HashSet::from(["score".into()]));
+            assert_eq!(accumulated[&[8; 16]], HashSet::from(["score".into()]));
+            assert_eq!(accumulated.len(), 2);
+            assert_eq!(ctx.counters.properties_removed, 2);
+        }
+    }
+
+    #[test]
+    fn set_and_remove_reject_malformed_identity_and_edge_routing_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let lowerer =
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+        let mut exprs = ExprArena::new();
+        let value = exprs.push(IrExpr::Literal(IrLiteral::Int(42)));
+        let params = HashMap::new();
+        let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+        let mut var_map = VarMap::new();
+        var_map.insert(VarId(1), "var_1");
+
+        let mut malformed_uuid = write_frontier(false);
+        malformed_uuid.batches[0] = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::Int64, false),
+                Field::new("type_id", DataType::UInt32, false),
+                Field::new("score", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])),
+                Arc::clone(malformed_uuid.batches[0].column(1)),
+                Arc::clone(malformed_uuid.batches[0].column(2)),
+            ],
+        )
+        .unwrap();
+        let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        let err = run_set_phase(
+            &env,
+            &[SetPropItem {
+                target: VarId(1),
+                prop: PropId(9),
+                prop_name: "score".into(),
+                value,
+            }],
+            &mut malformed_uuid,
+            &var_map,
+            &mut ctx,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "execution error: expected FixedSizeBinary(16) at column 0"
+        );
+        assert!(ctx.set_acc.nodes.is_empty());
+        assert!(ctx.set_acc.edges.is_empty());
+        assert_eq!(ctx.counters, WriteCounters::default());
+
+        let mut malformed_route = write_frontier(true);
+        malformed_route.batches[0] = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("edge_uuid", DataType::FixedSizeBinary(16), true),
+                Field::new("rel_type_name", DataType::Int64, false),
+                Field::new("score", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::clone(malformed_route.batches[0].column(0)),
+                Arc::new(Int64Array::from(vec![1, 1, 1])),
+                Arc::clone(malformed_route.batches[0].column(2)),
+            ],
+        )
+        .unwrap();
+        let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        let err = run_remove_phase(
+            &env,
+            &[RemovePropItem {
+                target: VarId(1),
+                prop: PropId(9),
+                prop_name: "score".into(),
+            }],
+            &mut malformed_route,
+            &mut ctx,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "execution error: rel_type_name is not a string column"
+        );
+        assert!(ctx.remove_acc.nodes.is_empty());
+        assert!(ctx.remove_acc.edges.is_empty());
+        assert_eq!(ctx.counters, WriteCounters::default());
     }
 }
