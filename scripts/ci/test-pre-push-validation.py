@@ -285,6 +285,10 @@ class PrePushValidationTests(unittest.TestCase):
         self.assertEqual(coverage.artifacts, ("crates/graphforge-bindings-node/*.node",))
         self.assertFalse(any(command[0] == "uv" and "maturin" in command for command in commands))
         self.assertFalse(any("napi" in command and "build" in command for command in commands))
+        final_thresholds = next(
+            stage for stage in GATE.stages() if stage.name == "final-thresholds"
+        )
+        self.assertTrue(final_thresholds.profile_isolation)
 
     def test_failure_summary_is_fail_closed_and_separate_from_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

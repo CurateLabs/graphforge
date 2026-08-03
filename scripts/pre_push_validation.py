@@ -651,6 +651,7 @@ def stages() -> tuple[Stage, ...]:
                 "api-bdd-acceptance",
             ),
             inputs=inputs("scripts/check-coverage-rust.sh"),
+            profile_isolation=True,
         ),
     )
 
