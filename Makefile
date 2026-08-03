@@ -67,6 +67,8 @@ test-tck:  ## Run TCK compliance tests via Rust BDD runner
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
 COVERAGE_FAIL_UNDER_RUST ?= 85
+COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER ?= 80
+COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER ?= 80
 COVERAGE_FAIL_UNDER_PYTHON ?= 85
 COVERAGE_FAIL_UNDER_NODE ?= 85
 # Back-compat alias used by coverage-python.
@@ -88,7 +90,7 @@ coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Node JS surface coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage-node
 	@echo "━━━ Coverage complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "Rust:   build/coverage-rust/ (lcov + html + summary)"
+	@echo "Rust:   build/coverage-rust/ (ledger + merged lcov + core HTML + summary)"
 	@echo "Python: coverage.xml + htmlcov/"
 	@echo "Node:   crates/graphforge-bindings-node/coverage/"
 	@echo "✅ All surfaces collected; thresholds enforced per surface"
@@ -96,7 +98,7 @@ coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 coverage-python:  ## Run unit tests with Python wrapper coverage (requires maturin develop)
 	@$(MAKE) _ensure-graphforge
 	uv run coverage erase
-	uv run pytest tests/unit \
+	uv run pytest tests/unit crates/graphforge-bindings-py/tests/cli_entrypoint.py \
 		-n $${PYTEST_WORKERS:-4} \
 		--cov=$(PYTHON_COVERAGE_SRC) --cov-branch \
 		--cov-report=term-missing \
@@ -137,10 +139,13 @@ check-coverage-python:  ## Validate Python wrapper coverage (≥85% default)
 		(echo "❌ Python wrapper coverage below $(COVERAGE_FAIL_UNDER_PYTHON)%" && exit 1)
 	@echo "✅ Python wrapper coverage meets threshold"
 
-check-coverage-rust:  ## Validate Rust line coverage from llvm-cov summary (≥85% default)
-	@test -f build/coverage-rust/summary.txt || \
-		(echo "❌ Missing build/coverage-rust/summary.txt — run make coverage-rust first"; exit 1)
-	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) bash scripts/check-coverage-rust.sh
+check-coverage-rust:  ## Validate core Rust (≥85%) and each native adapter (≥80%)
+	@test -f build/coverage-rust/ledger.json || \
+		(echo "❌ Missing build/coverage-rust/ledger.json — run make coverage-rust first"; exit 1)
+	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \
+		COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER=$(COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER) \
+		COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER=$(COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER) \
+		bash scripts/check-coverage-rust.sh
 
 coverage-strict:  ## Strict 90% coverage check for new features
 	@echo "Checking strict coverage (90%)..."
@@ -205,6 +210,7 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 
 pre-push:  ## Run local policy checks plus multi-surface coverage thresholds
 	@$(MAKE) pre-push-fast
+	@uv run --no-sync python scripts/ci/test-rust-coverage-ledger.py
 	@echo "━━━ Coverage + thresholds (Rust + Python + Node) ━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage
 	@echo "━━━ Public API BDD mutation sentinels ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -242,8 +248,11 @@ cargo-test:  ## Run all Rust workspace tests
 #   cargo install cargo-llvm-cov
 #   rustup component add llvm-tools-preview
 # Prefer an isolated CARGO_TARGET_DIR when other builds are running (AGENTS.md).
-coverage-rust:  ## Workspace Rust coverage via cargo-llvm-cov (term + lcov + html under build/coverage-rust)
-	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) bash scripts/coverage-rust.sh
+coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
+	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \
+		COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER=$(COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER) \
+		COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER=$(COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER) \
+		bash scripts/coverage-rust.sh
 	@$(MAKE) check-coverage-rust
 
 bench-traversal:  ## Run the #767 traversal scaling benchmark (release, manual; see benchmarks/traversal_scaling.md)

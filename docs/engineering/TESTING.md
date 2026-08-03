@@ -165,6 +165,24 @@ weakened assertions (`AGENTS.md`).
 
 ## Behavior coverage
 
+### Rust coverage evidence
+
+`make coverage-rust` measures four explicit totals: core Rust, Python adapter
+Rust, Node adapter Rust, and their merged workspace. The adapter totals come
+from the functional native acceptance suites—not placeholder binding tests—and
+therefore include persistence/reopen, structured lifecycle errors, parity, and
+no-fallback behavior executed through the instrumented PyO3 and napi-rs
+artifacts.
+
+The run uses an isolated `CARGO_TARGET_DIR` (defaulting under its output tree),
+builds each native artifact once, and verifies that the loaded artifact hash
+matches the measured object.
+`build/coverage-rust/ledger.json` also binds the evidence to `HEAD` and the LLVM
+toolchain. Missing, empty, stale, wrong-artifact, or wrong-SHA adapter profiles
+fail before totals are accepted. Core has an 85% floor and each Rust binding
+adapter has an independent 80% floor; the merged workspace percentage cannot
+average away a failed surface.
+
 | Experience / Requirement | Scenario (Given/When/Then) | Test / evidence |
 | ------------------------ | -------------------------- | ---- |
 | FR-1 Cypher → Arrow | Given a graph, when `execute` runs, then Arrow rows match | Workspace/`graphforge-api` query tests; TCK corpus |

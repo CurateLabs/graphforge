@@ -247,6 +247,17 @@ def check_composite_transaction(project: Path) -> None:
     )
     assert project_digest(project) == before
 
+    try:
+        forge.publish_composite_transaction(
+            operation_uuid="018f0f4e-7b8c-7000-8000-00000000e020",
+            graph_mutations=[{"kind": "unknown_mutation"}],
+        )
+    except TypeError as exc:
+        assert "unknown composite graph mutation kind" in str(exc)
+    else:
+        raise SystemExit("expected an unknown composite mutation TypeError")
+    assert project_digest(project) == before
+
     # Invalid identity (nil operation UUID) stays in Rust validation.
     expect_code(
         "GF_VALIDATION",
@@ -358,10 +369,140 @@ def check_strict_ontology_composite(project: Path) -> None:
     assert project_digest(project) == before
 
 
+def check_all_explicit_participant_conversions(project: Path) -> None:
+    """Every documented participant family crosses the thin adapter."""
+    project.mkdir()
+    forge = g.GraphForge(str(project))
+    enable_capabilities(forge)
+    operation = "018f0f4e-7b8c-7000-8000-00000000e001"
+    provenance = "018f0f4e-7b8c-7000-8000-00000000e002"
+    assertion = "018f0f4e-7b8c-7000-8000-00000000e003"
+    confidence = "018f0f4e-7b8c-7000-8000-00000000e004"
+    reasoning = "018f0f4e-7b8c-7000-8000-00000000e005"
+    group = "018f0f4e-7b8c-7000-8000-00000000e006"
+    before = project_digest(project)
+
+    # These rows are structurally valid at the language boundary but deliberately
+    # reference an absent provenance event. Rust must reject the entire request
+    # without publishing the graph mutation.
+    expect_code(
+        "GF_NOT_FOUND",
+        lambda: forge.publish_composite_transaction(
+            operation_uuid=operation,
+            graph_mutations=[
+                {
+                    "kind": "create_node",
+                    "node_uuid": "018f0f4e-7b8c-7000-8000-00000000e010",
+                    "label": "Person",
+                    "properties": {"name": "Grace"},
+                }
+            ],
+            knowledge={
+                "confidence_assessments": [
+                    {
+                        "confidence_uuid": confidence,
+                        "assertion_uuid": assertion,
+                        "policy": "conservative_min",
+                        "value": 0.5,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "confidence_inputs": [
+                    {
+                        "confidence_uuid": confidence,
+                        "input_confidence_uuid": "018f0f4e-7b8c-7000-8000-00000000e007",
+                        "input_value": 0.5,
+                        "ordinal": 0,
+                    }
+                ],
+                "evidence": [
+                    {
+                        "evidence_uuid": "018f0f4e-7b8c-7000-8000-00000000e008",
+                        "assertion_uuid": assertion,
+                        "source_uuid": "018f0f4e-7b8c-7000-8000-00000000e009",
+                        "source_kind": "document",
+                        "role": "supports",
+                        "weight": 0.8,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "reasoning": [
+                    {
+                        "reasoning_uuid": reasoning,
+                        "assertion_uuid": assertion,
+                        "kind": "methodological_note",
+                        "content_format": "text/plain",
+                        "content": b"explicit participant conversion",
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "assertion_supersessions": [
+                    {
+                        "supersession_uuid": "018f0f4e-7b8c-7000-8000-00000000e00a",
+                        "prior_assertion_uuid": assertion,
+                        "replacement_assertion_uuid": "018f0f4e-7b8c-7000-8000-00000000e00b",
+                        "status_event_uuid": "018f0f4e-7b8c-7000-8000-00000000e00c",
+                        "reasoning_uuid": reasoning,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "hypothesis_groups": [
+                    {
+                        "group_uuid": group,
+                        "question_key": "which hypothesis",
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "hypothesis_membership": [
+                    {
+                        "membership_event_uuid": "018f0f4e-7b8c-7000-8000-00000000e00d",
+                        "operation_uuid": operation,
+                        "group_uuid": group,
+                        "assertion_uuid": assertion,
+                        "action": "added",
+                        "reasoning_uuid": reasoning,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "hypothesis_selection": [
+                    {
+                        "selection_event_uuid": "018f0f4e-7b8c-7000-8000-00000000e00e",
+                        "operation_uuid": operation,
+                        "group_uuid": group,
+                        "selected_assertion_uuid": assertion,
+                        "reasoning_uuid": reasoning,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+                "assertion_validity": [
+                    {
+                        "validity_event_uuid": "018f0f4e-7b8c-7000-8000-00000000e00f",
+                        "assertion_uuid": assertion,
+                        "valid_from": 1,
+                        "valid_to": 2,
+                        "reasoning_uuid": reasoning,
+                        "provenance_uuid": provenance,
+                        "recorded_at_micros": RECORDED_AT,
+                    }
+                ],
+            },
+        ),
+    )
+    assert project_digest(project) == before
+
+
 if __name__ == "__main__":
     check_no_inference_helpers()
     with tempfile.TemporaryDirectory(prefix="gf-composite-py-") as directory:
         check_composite_transaction(Path(directory))
+        check_all_explicit_participant_conversions(Path(directory) / "participants")
         onto_root = Path(directory) / "strict"
         onto_root.mkdir()
         project = onto_root / "project"
