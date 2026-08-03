@@ -5200,13 +5200,372 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::logical_expr::{Extension, LogicalPlanBuilder, lit};
+    use datafusion::physical_plan::empty::EmptyExec;
     use graphforge_ir::RuntimeCatalog;
+    use graphforge_plan::{
+        GraphDeleteNode, GraphRemoveNode, GraphSetNode, RemoveTarget, SetTarget,
+    };
     use tempfile::TempDir;
 
     fn make_session() -> ExecutionSession {
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
         ExecutionSession::new(catalog, None).unwrap()
+    }
+
+    fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {
+        let logical = Arc::new(LogicalPlanBuilder::empty(false).build().unwrap());
+        let physical: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(
+            logical.schema().as_arrow().clone(),
+        )));
+        (logical, physical)
+    }
+
+    #[test]
+    fn write_execs_expose_stable_plan_contracts_and_reject_invalid_shape() {
+        let dir = TempDir::new().unwrap();
+        let (logical, physical) = empty_write_input();
+        let delete: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec::new(
+            &GraphDeleteNode::new(
+                logical.clone(),
+                vec![DeleteTarget {
+                    var: 0,
+                    is_edge: false,
+                }],
+                true,
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            ),
+            physical.clone(),
+        ));
+        let set: Arc<dyn ExecutionPlan> = Arc::new(GraphSetExec::new(
+            &GraphSetNode::new(
+                logical.clone(),
+                vec![SetTarget {
+                    var: 0,
+                    is_edge: false,
+                    prop_name: "score".into(),
+                    value: lit(1_i64),
+                }],
+                HashMap::new(),
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            ),
+            physical.clone(),
+        ));
+        let remove: Arc<dyn ExecutionPlan> = Arc::new(GraphRemoveExec::new(
+            &GraphRemoveNode::new(
+                logical,
+                vec![RemoveTarget {
+                    var: 0,
+                    is_edge: false,
+                    prop_name: "score".into(),
+                }],
+                HashMap::new(),
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            ),
+            physical,
+        ));
+
+        for (plan, expected_name) in [
+            (delete, "GraphDeleteExec"),
+            (set, "GraphSetExec"),
+            (remove, "GraphRemoveExec"),
+        ] {
+            assert_eq!(plan.name(), expected_name);
+            assert!(
+                plan.as_any().is::<GraphDeleteExec>()
+                    || plan.as_any().is::<GraphSetExec>()
+                    || plan.as_any().is::<GraphRemoveExec>()
+            );
+            assert_eq!(plan.children().len(), 1);
+            assert_eq!(plan.properties().output_partitioning().partition_count(), 1);
+            assert!(format!("{plan:?}").contains(expected_name));
+            assert!(
+                datafusion::physical_plan::displayable(plan.as_ref())
+                    .one_line()
+                    .to_string()
+                    .contains(expected_name)
+            );
+            let missing_child = plan.clone().with_new_children(vec![]).unwrap_err();
+            assert!(missing_child.to_string().contains("needs one child"));
+            let invalid_partition = match plan.execute(1, SessionContext::new().task_ctx()) {
+                Ok(_) => panic!("{expected_name} accepted invalid partition 1"),
+                Err(error) => error,
+            };
+            assert!(
+                invalid_partition
+                    .to_string()
+                    .contains("only has partition 0")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_write_execs_dispatch_and_report_zero_changes() {
+        let dir = TempDir::new().unwrap();
+        let (logical, physical) = empty_write_input();
+        let plans: Vec<Arc<dyn ExecutionPlan>> = vec![
+            Arc::new(GraphDeleteExec::new(
+                &GraphDeleteNode::new(
+                    logical.clone(),
+                    vec![],
+                    false,
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                ),
+                physical.clone(),
+            )),
+            Arc::new(GraphSetExec::new(
+                &GraphSetNode::new(
+                    logical.clone(),
+                    vec![],
+                    HashMap::new(),
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                ),
+                physical.clone(),
+            )),
+            Arc::new(GraphRemoveExec::new(
+                &GraphRemoveNode::new(
+                    logical,
+                    vec![],
+                    HashMap::new(),
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                ),
+                physical,
+            )),
+        ];
+
+        for plan in plans {
+            let batches =
+                datafusion::physical_plan::collect(plan, SessionContext::new().task_ctx())
+                    .await
+                    .unwrap();
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].num_rows(), 1);
+            assert_eq!(
+                batches[0]
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap()
+                    .value(0),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_planner_dispatches_every_write_extension_to_its_physical_exec() {
+        let dir = TempDir::new().unwrap();
+        let (input, _) = empty_write_input();
+        let logical_nodes: Vec<(Arc<dyn UserDefinedLogicalNode>, &str)> = vec![
+            (
+                Arc::new(GraphCreateNode::new(
+                    input.clone(),
+                    vec![],
+                    vec![],
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                )),
+                "GraphCreateExec",
+            ),
+            (
+                Arc::new(GraphDeleteNode::new(
+                    input.clone(),
+                    vec![],
+                    false,
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                )),
+                "GraphDeleteExec",
+            ),
+            (
+                Arc::new(GraphSetNode::new(
+                    input.clone(),
+                    vec![],
+                    HashMap::new(),
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                )),
+                "GraphSetExec",
+            ),
+            (
+                Arc::new(GraphRemoveNode::new(
+                    input,
+                    vec![],
+                    HashMap::new(),
+                    dir.path().to_path_buf(),
+                    OntologyMode::Exploratory,
+                )),
+                "GraphRemoveExec",
+            ),
+        ];
+        let context = SessionContext::new();
+        let state = context.state();
+        let planner = GraphForgeQueryPlanner;
+
+        for (node, expected_name) in logical_nodes {
+            let logical = LogicalPlan::Extension(Extension { node });
+            let physical = planner
+                .create_physical_plan(&logical, &state)
+                .await
+                .unwrap();
+            assert_eq!(physical.name(), expected_name);
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_planner_rejects_missing_write_inputs_and_declines_unknown_nodes() {
+        let dir = TempDir::new().unwrap();
+        let (input, _) = empty_write_input();
+        let nodes: Vec<Arc<dyn UserDefinedLogicalNode>> = vec![
+            Arc::new(GraphCreateNode::new(
+                input.clone(),
+                vec![],
+                vec![],
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )),
+            Arc::new(GraphDeleteNode::new(
+                input.clone(),
+                vec![],
+                false,
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )),
+            Arc::new(GraphSetNode::new(
+                input.clone(),
+                vec![],
+                HashMap::new(),
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )),
+            Arc::new(GraphRemoveNode::new(
+                input,
+                vec![],
+                HashMap::new(),
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )),
+        ];
+        let state = SessionContext::new().state();
+        let physical_planner = DefaultPhysicalPlanner::default();
+
+        for node in nodes {
+            let error = GraphForgeExtensionPlanner
+                .plan_extension(&physical_planner, node.as_ref(), &[], &[], &state)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("requires one physical input"));
+        }
+
+        let unknown = graphforge_plan::GraphMergeNode::new();
+        assert!(
+            GraphForgeExtensionPlanner
+                .plan_extension(&physical_planner, &unknown, &[], &[], &state)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn deleted_entity_expression_walkers_cover_every_ir_container() {
+        let deleted_var = VarId(7);
+        let deleted = HashSet::from([deleted_var]);
+        let mut arena = ExprArena::new();
+        let var = arena.push(IrExpr::VarRef(deleted_var));
+        let literal = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let parameter = arena.push(IrExpr::Parameter("value".into()));
+        let property = arena.push(IrExpr::PropertyAccess {
+            base: var,
+            prop: graphforge_ir::PropId(0),
+        });
+        let binary = arena.push(IrExpr::BinaryOp {
+            op: graphforge_ir::BinaryOpKind::Add,
+            left: literal,
+            right: property,
+        });
+        let unary = arena.push(IrExpr::UnaryOp {
+            op: graphforge_ir::UnaryOpKind::Neg,
+            expr: property,
+        });
+        let function = arena.push(IrExpr::FunctionCall {
+            name: "properties".into(),
+            args: vec![var],
+        });
+        let type_function = arena.push(IrExpr::FunctionCall {
+            name: "type".into(),
+            args: vec![var],
+        });
+        let list = arena.push(IrExpr::ListLiteral(vec![literal, property]));
+        let map = arena.push(IrExpr::MapLiteral(vec![("key".into(), property)]));
+        let case = arena.push(IrExpr::Case {
+            operand: Some(literal),
+            arms: vec![graphforge_ir::CaseArm {
+                when: literal,
+                then: var,
+            }],
+            else_expr: Some(parameter),
+        });
+        let quantifier = arena.push(IrExpr::Quantifier {
+            kind: graphforge_ir::QuantifierKind::Any,
+            loop_var: VarId(8),
+            list,
+            predicate: var,
+        });
+        let comprehension = arena.push(IrExpr::ListComprehension {
+            loop_var: VarId(9),
+            list,
+            filter: Some(literal),
+            projection: Some(var),
+        });
+
+        for id in [
+            var,
+            property,
+            binary,
+            unary,
+            function,
+            list,
+            map,
+            case,
+            quantifier,
+            comprehension,
+        ] {
+            assert!(ExecutionSession::expr_references_vars(&arena, id, &deleted));
+        }
+        assert!(!ExecutionSession::expr_references_vars(
+            &arena, parameter, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, property, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, function, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, binary, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, unary, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, list, &deleted
+        ));
+        assert!(ExecutionSession::expr_accesses_deleted_vars(
+            &arena, map, &deleted
+        ));
+        assert!(!ExecutionSession::expr_accesses_deleted_vars(
+            &arena,
+            type_function,
+            &deleted
+        ));
     }
 
     #[test]

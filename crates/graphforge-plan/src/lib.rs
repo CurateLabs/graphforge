@@ -2143,6 +2143,70 @@ mod tests {
         assert_eq!(ha.finish(), hb.finish());
     }
 
+    #[test]
+    fn graph_create_hashes_every_literal_shape_deterministically() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let literals = vec![
+            IrLiteral::Null,
+            IrLiteral::Bool(true),
+            IrLiteral::Int(7),
+            IrLiteral::Float(1.5),
+            IrLiteral::Str("value".into()),
+            IrLiteral::Uuid([1; 16]),
+            IrLiteral::Duration {
+                months: 1,
+                days: 2,
+                seconds: 3,
+                nanos: 4,
+            },
+            IrLiteral::DateTime(5),
+            IrLiteral::Date(6),
+            IrLiteral::LocalDateTime { days: 7, nanos: 8 },
+            IrLiteral::Time(9),
+            IrLiteral::ZonedTime {
+                nanos: 10,
+                offset: 3_600,
+            },
+            IrLiteral::ZonedDateTime {
+                days: 11,
+                nanos: 12,
+                offset: -3_600,
+                zone: Some("UTC".into()),
+            },
+            IrLiteral::List(vec![IrLiteral::Int(13)]),
+            IrLiteral::Map(vec![("key".into(), IrLiteral::Int(14))]),
+        ];
+        let make = || {
+            GraphCreateNode::new(
+                empty_plan(),
+                vec![ResolvedNodeSpec {
+                    var: 0,
+                    label_ids: vec![1],
+                    label_names: vec!["Person".into()],
+                    properties: literals
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, literal)| (index.to_string(), literal))
+                        .collect(),
+                    computed_properties: vec![],
+                    is_reference: false,
+                }],
+                vec![],
+                PathBuf::from("/tmp/gf"),
+                OntologyMode::Strict,
+            )
+        };
+        let (first, second) = (make(), make());
+        let mut first_hash = DefaultHasher::new();
+        let mut second_hash = DefaultHasher::new();
+        first.hash(&mut first_hash);
+        second.hash(&mut second_hash);
+        assert_eq!(first, second);
+        assert_eq!(first_hash.finish(), second_hash.finish());
+    }
+
     fn set_node(value: Expr) -> GraphSetNode {
         GraphSetNode::new(
             empty_plan(),
@@ -2228,6 +2292,126 @@ mod tests {
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn graph_create_rebuilds_computed_properties_and_preserves_emit_mode() {
+        use datafusion::logical_expr::lit;
+
+        let output_schema = Arc::new(DFSchema::empty());
+        let node = GraphCreateNode::new_emitting(
+            empty_plan(),
+            vec![ResolvedNodeSpec {
+                var: 0,
+                label_ids: vec![1],
+                label_names: vec!["Person".into()],
+                properties: vec![],
+                computed_properties: vec![("score".into(), lit(1_i64))],
+                is_reference: false,
+            }],
+            vec![ResolvedEdgeSpec {
+                var: 1,
+                src: 0,
+                dst: 2,
+                rel_type_id: Some(3),
+                rel_type_name: Some("KNOWS".into()),
+                direction: Direction::Out,
+                properties: vec![],
+                computed_properties: vec![("weight".into(), lit(2_i64))],
+            }],
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Strict,
+            output_schema.clone(),
+        );
+        assert!(node.emits_rows());
+        assert_eq!(UserDefinedLogicalNodeCore::expressions(&node).len(), 2);
+
+        let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &node,
+            vec![lit(10_i64), lit(20_i64)],
+            vec![(*empty_plan()).clone()],
+        )
+        .unwrap();
+        assert!(rebuilt.emits_rows());
+        assert_eq!(rebuilt.schema(), &output_schema);
+        assert_eq!(rebuilt.nodes[0].computed_properties[0].1, lit(10_i64));
+        assert_eq!(rebuilt.edges[0].computed_properties[0].1, lit(20_i64));
+
+        let short =
+            UserDefinedLogicalNodeCore::with_exprs_and_inputs(&node, vec![lit(99_i64)], vec![])
+                .unwrap();
+        assert_eq!(short.nodes[0].computed_properties[0].1, lit(1_i64));
+        assert_eq!(short.edges[0].computed_properties[0].1, lit(2_i64));
+    }
+
+    #[test]
+    fn graph_delete_contract_round_trips_and_distinguishes_detach() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let node = GraphDeleteNode::new(
+            empty_plan(),
+            vec![DeleteTarget {
+                var: 7,
+                is_edge: false,
+            }],
+            true,
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Exploratory,
+        );
+        assert_eq!(UserDefinedLogicalNodeCore::name(&node), "GraphDelete");
+        assert_eq!(UserDefinedLogicalNodeCore::inputs(&node).len(), 1);
+        assert_eq!(UserDefinedLogicalNodeCore::schema(&node).fields().len(), 2);
+        assert!(UserDefinedLogicalNodeCore::expressions(&node).is_empty());
+
+        let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &node,
+            vec![],
+            vec![(*empty_plan()).clone()],
+        )
+        .unwrap();
+        assert_eq!(node, rebuilt);
+        assert_ne!(
+            node,
+            GraphDeleteNode::new(
+                empty_plan(),
+                node.targets.clone(),
+                false,
+                node.dir.clone(),
+                node.mode,
+            )
+        );
+        let mut first = DefaultHasher::new();
+        let mut second = DefaultHasher::new();
+        node.hash(&mut first);
+        rebuilt.hash(&mut second);
+        assert_eq!(first.finish(), second.finish());
+    }
+
+    #[test]
+    fn optimizer_nodes_are_intentionally_not_orderable() {
+        use datafusion::logical_expr::lit;
+
+        let set = set_node(lit(1_i64));
+        let remove = remove_node();
+        let create = GraphCreateNode::new(
+            empty_plan(),
+            vec![],
+            vec![],
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Strict,
+        );
+        let delete = GraphDeleteNode::new(
+            empty_plan(),
+            vec![],
+            false,
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Strict,
+        );
+
+        assert_eq!(create.partial_cmp(&create), None);
+        assert_eq!(delete.partial_cmp(&delete), None);
+        assert_eq!(set.partial_cmp(&set), None);
+        assert_eq!(remove.partial_cmp(&remove), None);
     }
 
     #[test]

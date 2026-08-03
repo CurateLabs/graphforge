@@ -70,6 +70,53 @@ fn token_non_trivia() {
 }
 
 #[test]
+fn every_token_variant_preserves_its_source_span() {
+    let span = Span::new(7, 19);
+    let tokens = vec![
+        Token::Keyword(Keyword::Match, span),
+        Token::IntLit(42, span),
+        Token::FloatLit(4.2, span),
+        Token::StrLit("value".into(), span),
+        Token::BoolLit(true, span),
+        Token::NullLit(span),
+        Token::Ident("name".into(), span),
+        Token::Param("parameter".into(), span),
+        Token::LParen(span),
+        Token::RParen(span),
+        Token::LBracket(span),
+        Token::RBracket(span),
+        Token::LBrace(span),
+        Token::RBrace(span),
+        Token::Dot(span),
+        Token::Comma(span),
+        Token::Colon(span),
+        Token::Semi(span),
+        Token::Pipe(span),
+        Token::DotDot(span),
+        Token::Eq(span),
+        Token::Neq(span),
+        Token::Lt(span),
+        Token::Lte(span),
+        Token::Gt(span),
+        Token::Gte(span),
+        Token::Plus(span),
+        Token::Minus(span),
+        Token::Star(span),
+        Token::Slash(span),
+        Token::Percent(span),
+        Token::Caret(span),
+        Token::RegexMatch(span),
+        Token::Whitespace(span),
+        Token::Comment("comment".into(), span),
+        Token::Eof(span),
+    ];
+
+    for token in tokens {
+        assert_eq!(token.span(), span, "token {token:?} lost its source span");
+    }
+}
+
+#[test]
 fn token_int_lit() {
     let tok = Token::IntLit(42, Span::new(0, 2));
     assert_eq!(tok.span(), Span::new(0, 2));
@@ -202,6 +249,26 @@ fn ast_expr_var_span() {
 }
 
 #[test]
+fn ast_leaf_and_parenthesized_expression_spans() {
+    let span = Span::new(4, 9);
+    let expressions = [
+        Expr::Literal(Literal::Int(1, span)),
+        Expr::Param(ParamRef {
+            name: "value".into(),
+            span,
+        }),
+        Expr::Parenthesized {
+            inner: Box::new(Expr::Literal(Literal::Int(1, span))),
+            span,
+        },
+    ];
+
+    for expression in expressions {
+        assert_eq!(expression.span(), span);
+    }
+}
+
+#[test]
 fn ast_expr_property_access() {
     let e = Expr::Property(PropertyAccess {
         object: Box::new(Expr::Var(VarRef {
@@ -228,6 +295,7 @@ fn ast_binary_op_roundtrip() {
         right: Box::new(Expr::Literal(Literal::Int(1, zero()))),
         span: Span::new(0, 5),
     });
+    assert_eq!(e.span(), Span::new(0, 5));
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -245,6 +313,7 @@ fn ast_function_call_roundtrip() {
         })],
         span: Span::new(0, 10),
     });
+    assert_eq!(e.span(), Span::new(0, 10));
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -259,6 +328,7 @@ fn ast_list_literal_roundtrip() {
         ],
         span: zero(),
     });
+    assert_eq!(e.span(), zero());
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -278,6 +348,7 @@ fn ast_map_literal_roundtrip() {
         key_spans,
         span: zero(),
     });
+    assert_eq!(e.span(), zero());
     assert_eq!(e.clone(), e);
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
@@ -315,6 +386,7 @@ fn ast_is_null_expr_roundtrip() {
         negated: false,
         span: Span::new(0, 10),
     };
+    assert_eq!(e.span(), Span::new(0, 10));
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -334,6 +406,7 @@ fn ast_in_list_expr_roundtrip() {
         negated: false,
         span: zero(),
     };
+    assert_eq!(e.span(), zero());
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -350,6 +423,7 @@ fn ast_string_op_roundtrip() {
         pattern: Box::new(Expr::Literal(Literal::Str("Al".into(), zero()))),
         span: zero(),
     };
+    assert_eq!(e.span(), zero());
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -365,6 +439,7 @@ fn ast_regex_match_roundtrip() {
         pattern: Box::new(Expr::Literal(Literal::Str("A.*".into(), zero()))),
         span: zero(),
     };
+    assert_eq!(e.span(), zero());
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);
@@ -382,6 +457,7 @@ fn ast_case_expr_roundtrip() {
         else_expr: Some(Box::new(Expr::Literal(Literal::Int(0, zero())))),
         span: zero(),
     });
+    assert_eq!(e.span(), zero());
     let json = serde_json::to_string(&e).unwrap();
     let back: Expr = serde_json::from_str(&json).unwrap();
     assert_eq!(e, back);

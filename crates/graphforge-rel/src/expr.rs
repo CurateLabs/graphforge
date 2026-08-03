@@ -14630,6 +14630,108 @@ mod tests {
     }
 
     #[test]
+    fn scalar_to_ir_literal_normalizes_all_native_widths_and_rejects_overflow() {
+        let cases = [
+            (ScalarValue::Int8(Some(-8)), IrLiteral::Int(-8)),
+            (ScalarValue::Int16(Some(-16)), IrLiteral::Int(-16)),
+            (ScalarValue::UInt16(Some(16)), IrLiteral::Int(16)),
+            (ScalarValue::UInt32(Some(32)), IrLiteral::Int(32)),
+            (ScalarValue::UInt64(Some(64)), IrLiteral::Int(64)),
+            (ScalarValue::Float32(Some(1.25)), IrLiteral::Float(1.25)),
+            (
+                ScalarValue::LargeUtf8(Some("large".into())),
+                IrLiteral::Str("large".into()),
+            ),
+            (
+                ScalarValue::Utf8View(Some("view".into())),
+                IrLiteral::Str("view".into()),
+            ),
+            (
+                ScalarValue::TimestampSecond(Some(2), None),
+                IrLiteral::DateTime(2_000_000),
+            ),
+            (
+                ScalarValue::TimestampMillisecond(Some(3), None),
+                IrLiteral::DateTime(3_000),
+            ),
+            (
+                ScalarValue::TimestampNanosecond(Some(4_000), None),
+                IrLiteral::DateTime(4),
+            ),
+            (ScalarValue::Time64Nanosecond(Some(5)), IrLiteral::Time(5)),
+        ];
+        for (scalar, expected) in cases {
+            assert_eq!(scalar_to_ir_literal(&scalar).unwrap(), expected);
+        }
+        assert!(matches!(
+            scalar_to_ir_literal(&ScalarValue::UInt64(Some(u64::MAX))),
+            Err(LoweringError::UnsupportedExpr(message)) if message.contains("exceeds the i64 range")
+        ));
+        assert!(matches!(
+            scalar_to_ir_literal(&ScalarValue::Binary(Some(vec![1, 2]))),
+            Err(LoweringError::InvalidType(message)) if message.contains("invalid property type")
+        ));
+    }
+
+    #[test]
+    fn dynamic_access_helpers_cover_null_bounds_types_and_schema_errors() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        for (scalar, expected) in [
+            (ScalarValue::Int8(Some(-1)), Some(-1)),
+            (ScalarValue::Int16(Some(2)), Some(2)),
+            (ScalarValue::Int32(Some(3)), Some(3)),
+            (ScalarValue::Int64(Some(4)), Some(4)),
+            (ScalarValue::UInt8(Some(5)), Some(5)),
+            (ScalarValue::UInt16(Some(6)), Some(6)),
+            (ScalarValue::UInt32(Some(7)), Some(7)),
+            (ScalarValue::UInt64(Some(8)), Some(8)),
+            (ScalarValue::Null, None),
+        ] {
+            assert_eq!(scalar_list_index(&scalar).unwrap(), expected);
+        }
+        assert!(scalar_list_index(&ScalarValue::UInt64(Some(u64::MAX))).is_err());
+        assert!(scalar_list_index(&ScalarValue::Utf8(Some("one".into()))).is_err());
+        assert_eq!(scalar_access_key(&ScalarValue::Null).unwrap(), None);
+        assert_eq!(
+            scalar_access_key(&ScalarValue::LargeUtf8(Some("key".into()))).unwrap(),
+            Some("key".into())
+        );
+        assert!(scalar_access_key(&ScalarValue::Int64(Some(1))).is_err());
+
+        let homogeneous = Fields::from(vec![
+            Field::new("a", DataType::Null, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("c", DataType::Int64, false),
+        ]);
+        assert_eq!(
+            common_struct_field_type(&homogeneous).unwrap(),
+            DataType::Int64
+        );
+        let mixed = Fields::from(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Utf8, true),
+        ]);
+        assert!(common_struct_field_type(&mixed).is_err());
+
+        for dtype in [
+            DataType::Struct(Fields::empty()),
+            DataType::Struct(Fields::from(vec![Field::new(
+                "__het_map",
+                DataType::Utf8,
+                true,
+            )])),
+            DataType::Struct(Fields::from(vec![Field::new(
+                "__het_map",
+                DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                true,
+            )])),
+        ] {
+            assert!(het_value_access_return_type(&dtype).is_err());
+        }
+    }
+
+    #[test]
     fn scalar_to_ir_literal_round_trips_a_list() {
         // A homogeneous list now stores (#1006): scalar List → IrLiteral::List
         // and back, element-wise — including a list of typed temporals.

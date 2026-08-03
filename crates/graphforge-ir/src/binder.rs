@@ -6563,6 +6563,63 @@ mod tests {
         (binder, catalog)
     }
 
+    fn parsed_return_expr(source: &str) -> Expr {
+        let ast =
+            parse(source).unwrap_or_else(|error| panic!("failed to parse {source:?}: {error}"));
+        let Some(AstClause::Return(clause)) = ast.clauses.last() else {
+            panic!("expected RETURN clause for {source:?}");
+        };
+        clause.items[0].expr.clone()
+    }
+
+    #[test]
+    fn expression_rewriters_traverse_every_public_ast_container() {
+        let expressions = [
+            "RETURN a + 1",
+            "RETURN NOT a",
+            "RETURN (a)",
+            "RETURN a.name",
+            "RETURN coalesce(a, 1)",
+            "RETURN [a, 1]",
+            "RETURN {k: a}",
+            "RETURN CASE a WHEN 1 THEN a ELSE 0 END",
+            "RETURN [x IN a WHERE x > 0 | x]",
+            "RETURN all(x IN a WHERE x > 0)",
+            "RETURN a IS NULL",
+            "RETURN a IN [1]",
+            "RETURN a STARTS WITH 'x'",
+            "RETURN a =~ 'x'",
+            "RETURN a:Person",
+            "RETURN [(a)-->(b) WHERE a.name = 'x' | a]",
+            "RETURN exists { (a)-->(b) WHERE a.name = 'x' }",
+        ]
+        .map(parsed_return_expr);
+        let alias_projection = ReturnItem {
+            expr: Expr::Literal(Literal::Int(7, Span::new(0, 1))),
+            alias: Some("a".into()),
+            display: None,
+            span: Span::new(0, 1),
+        };
+        let grouping = parsed_return_expr("RETURN a");
+        let bindings = [(grouping, "group_a".into(), VarId(0))];
+
+        for expression in expressions {
+            let mut refs = Vec::new();
+            collect_grouping_refs(&expression, &mut refs);
+            let alias_rewritten = rewrite_projection_alias_refs(
+                expression.clone(),
+                std::slice::from_ref(&alias_projection),
+            );
+            let grouping_rewritten = rewrite_grouping_refs(expression.clone(), &bindings);
+            assert_eq!(alias_rewritten.span(), expression.span());
+            assert_eq!(grouping_rewritten.span(), expression.span());
+            let _ = expr_contains_pattern_comprehension(&expression);
+            let _ = expr_contains_pattern_predicate(&expression);
+            let _ = expr_contains_volatile_function(&expression);
+            let _ = expr_contains_aggregate_inside_aggregate(&expression, false);
+        }
+    }
+
     fn catalog_entry(catalog: &RuntimeCatalog, kind: &str, name: &str) -> (u32, u64) {
         let batch = catalog.to_record_batch();
         let kinds = batch
