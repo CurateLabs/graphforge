@@ -2675,6 +2675,144 @@ mod tests {
             .code(),
             "GF_READ_ONLY_VIEW"
         );
+        let context = |seed| crate::WriteContext {
+            operation_uuid: operation(seed),
+            actor_uuid: None,
+        };
+        let assertion = |seed| crate::CreateAssertionRequest {
+            context: context(seed),
+            assertion_uuid: uuid7(seed as u8),
+            claim: format!("checkpoint view assertion {seed}"),
+            graph_refs: Vec::new(),
+        };
+        let assertion_uuid = uuid7(20);
+        let provenance_uuid = uuid7(21);
+        let reasoning_uuid = uuid7(22);
+        let group_uuid = uuid7(23);
+        let knowledge_errors = [
+            view.create_assertion(assertion(20)).unwrap_err(),
+            view.create_assertion_with_status(crate::CreateAssertionWithStatusRequest {
+                assertion: assertion(21),
+                first_status: crate::FirstAssertionStatusInput {
+                    status_event_uuid: uuid7(24),
+                    status: graphforge_knowledge::AssertionStatus::Hypothesis,
+                },
+            })
+            .unwrap_err(),
+            view.create_assertion_with_evidence(crate::CreateAssertionWithEvidenceRequest {
+                assertion: assertion(22),
+                evidence: vec![crate::EvidenceInput {
+                    evidence_uuid: uuid7(25),
+                    source_uuid: uuid7(26),
+                    source_kind: graphforge_knowledge::EvidenceSourceKind::Document,
+                    role: graphforge_knowledge::EvidenceRole::Context,
+                    weight: None,
+                }],
+            })
+            .unwrap_err(),
+            view.assess_confidence(crate::AssessConfidenceRequest {
+                context: context(23),
+                confidence_uuid: uuid7(27),
+                assertion_uuid,
+                policy: crate::ConfidencePolicyRequest::Explicit { value: 0.5 },
+            })
+            .unwrap_err(),
+            view.attach_evidence(crate::AttachEvidenceRequest {
+                context: context(24),
+                evidence_uuid: uuid7(28),
+                assertion_uuid,
+                source_uuid: uuid7(29),
+                source_kind: graphforge_knowledge::EvidenceSourceKind::Observation,
+                role: graphforge_knowledge::EvidenceRole::Supports,
+                weight: Some(0.75),
+            })
+            .unwrap_err(),
+            view.record_reasoning(crate::RecordReasoningRequest {
+                context: context(25),
+                reasoning_uuid,
+                assertion_uuid,
+                kind: graphforge_knowledge::ReasoningKind::DecisionRationale,
+                content_format: graphforge_knowledge::ReasoningContentFormat::TextPlain,
+                content: b"immutable checkpoint".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_assertion_status(crate::RecordAssertionStatusRequest {
+                context: context(26),
+                status_event_uuid: uuid7(30),
+                assertion_uuid,
+                status: graphforge_knowledge::AssertionStatus::Supported,
+                confidence_uuid: None,
+                reasoning_uuid: Some(reasoning_uuid),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.supersede_assertion(crate::SupersedeAssertionRequest {
+                context: context(27),
+                supersession_uuid: uuid7(31),
+                prior_assertion_uuid: assertion_uuid,
+                replacement_assertion_uuid: uuid7(32),
+                status_event_uuid: uuid7(33),
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.create_hypothesis_group(crate::CreateHypothesisGroupRequest {
+                context: context(28),
+                group_uuid,
+                question_key: "checkpoint.view.v1".into(),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_hypothesis_membership(&crate::RecordHypothesisMembershipRequest {
+                context: context(29),
+                membership_event_uuid: uuid7(34),
+                group_uuid,
+                assertion_uuid,
+                action: graphforge_knowledge::HypothesisMembershipAction::Added,
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_hypothesis_selection(&crate::RecordHypothesisSelectionRequest {
+                context: context(30),
+                selection_event_uuid: uuid7(35),
+                group_uuid,
+                selected_assertion_uuid: Some(assertion_uuid),
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.remove_hypothesis_member(&crate::RemoveHypothesisMemberRequest {
+                context: context(31),
+                membership_event_uuid: uuid7(36),
+                selection_event_uuid: uuid7(37),
+                group_uuid,
+                assertion_uuid,
+                selected_assertion_uuid: None,
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_assertion_validity(crate::RecordAssertionValidityRequest {
+                context: context(32),
+                validity_event_uuid: uuid7(38),
+                assertion_uuid,
+                valid_from_micros: Some(100),
+                valid_to_micros: Some(200),
+                reasoning_uuid: Some(reasoning_uuid),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+        ];
+        for error in knowledge_errors {
+            assert_eq!(error.code(), "GF_READ_ONLY_VIEW");
+            assert_eq!(
+                error.to_string(),
+                "GF_READ_ONLY_VIEW: checkpoint views are read-only"
+            );
+        }
         assert_eq!(
             view.execute("MATCH (n) RETURN count(n) AS total")
                 .unwrap()

@@ -3048,6 +3048,105 @@ mod tests {
     }
 
     #[test]
+    fn pending_query_and_label_edits_are_exact_before_flush_and_reopen() {
+        let dir = TempDir::new().unwrap();
+        let (alice, bob, edge) = (new_v7(), new_v7(), new_v7());
+        let (alice_bytes, bob_bytes, edge_bytes) =
+            (to_bytes(&alice), to_bytes(&bob), to_bytes(&edge));
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS).unwrap();
+        writer
+            .create_node_with_labels(alice, &[TypeId(3), TypeId(7)])
+            .unwrap();
+        writer.create_node(bob, TypeId(3)).unwrap();
+        writer
+            .set_properties(
+                &alice,
+                Some("Person"),
+                HashMap::from([
+                    ("name".into(), IrLiteral::Str("Alice".into())),
+                    ("age".into(), IrLiteral::Int(42)),
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            writer.pending_node_labels(&HashSet::from([alice_bytes, bob_bytes])),
+            HashSet::from([3, 7])
+        );
+        let matched = writer
+            .find_pending_node(&[3, 7], &[("name".into(), IrLiteral::Str("Alice".into()))])
+            .unwrap();
+        assert_eq!(matched.0, alice_bytes);
+        assert_eq!(matched.2, 3);
+        assert_eq!(matched.3, vec![3, 7]);
+        assert_eq!(matched.4["age"], IrLiteral::Int(42));
+        assert!(writer.find_pending_node(&[9], &[]).is_none());
+        assert!(
+            writer
+                .find_pending_node(&[3], &[("name".into(), IrLiteral::Str("Bob".into()))])
+                .is_none()
+        );
+
+        assert_eq!(writer.add_pending_node_labels(&alice_bytes, &[7, 9]), 1);
+        assert_eq!(writer.add_pending_node_labels(&[0xff; 16], &[1]), 0);
+        assert_eq!(writer.remove_pending_node_labels(&alice_bytes, &[7, 99]), 1);
+        assert_eq!(writer.remove_pending_node_labels(&[0xff; 16], &[1]), 0);
+        assert_eq!(
+            writer.pending_node_labels(&HashSet::from([alice_bytes])),
+            HashSet::from([3, 9])
+        );
+
+        writer.create_edge(edge, "KNOWS", &alice, &bob).unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("KNOWS"),
+                HashMap::from([("since".into(), IrLiteral::Int(2024))]),
+            )
+            .unwrap();
+        let direct = writer
+            .find_pending_edge(
+                "KNOWS",
+                &alice_bytes,
+                &bob_bytes,
+                false,
+                &[("since".into(), IrLiteral::Int(2024))],
+            )
+            .unwrap();
+        assert_eq!(direct.0, edge_bytes);
+        assert_eq!(direct.1, alice_bytes);
+        assert_eq!(direct.2, bob_bytes);
+        assert_eq!(direct.3["since"], IrLiteral::Int(2024));
+        assert!(
+            writer
+                .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, false, &[])
+                .is_none()
+        );
+        assert!(
+            writer
+                .find_pending_edge("KNOWS", &bob_bytes, &alice_bytes, true, &[])
+                .is_some()
+        );
+        assert!(
+            writer
+                .find_pending_edge("IGNORES", &alice_bytes, &bob_bytes, false, &[])
+                .is_none()
+        );
+
+        writer.flush().unwrap();
+        let mut reopened = GraphWriter::open_at(dir.path(), OntologyMode::Strict, TS + 1).unwrap();
+        assert_eq!(reopened.create_node(new_v7(), TypeId(3)).unwrap(), 3);
+        assert_eq!(
+            read_node_props(dir.path(), "Person")[&alice_bytes]["name"],
+            IrLiteral::Str("Alice".into())
+        );
+        assert_eq!(
+            read_edge_props(dir.path(), "KNOWS")[&edge_bytes]["since"],
+            IrLiteral::Int(2024)
+        );
+    }
+
+    #[test]
     fn merge_and_remove_pending_props_edit_buffered_rows() {
         let dir = TempDir::new().unwrap();
         let a = new_v7();

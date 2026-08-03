@@ -114,6 +114,238 @@ def merge_records(*reports: dict[str, dict[int, int]]) -> dict[str, dict[int, in
     return merged
 
 
+def _rust_tokens(source: str, path: str) -> list[tuple[str, int]]:
+    """Tokenize enough Rust syntax to locate cfg(test) item boundaries safely."""
+    tokens: list[tuple[str, int]] = []
+    index = 0
+    line = 1
+    length = len(source)
+
+    def advance(end: int) -> None:
+        nonlocal index, line
+        line += source.count("\n", index, end)
+        index = end
+
+    while index < length:
+        char = source[index]
+        if char.isspace():
+            advance(index + 1)
+            continue
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            advance(length if end < 0 else end)
+            continue
+        if source.startswith("/*", index):
+            start_line = line
+            depth = 1
+            cursor = index + 2
+            while cursor < length and depth:
+                if source.startswith("/*", cursor):
+                    depth += 1
+                    cursor += 2
+                elif source.startswith("*/", cursor):
+                    depth -= 1
+                    cursor += 2
+                else:
+                    cursor += 1
+            if depth:
+                raise LedgerError(f"unclosed Rust block comment in {path}:{start_line}")
+            advance(cursor)
+            continue
+
+        raw_start = index
+        if source.startswith("br", index):
+            raw_start += 1
+        if raw_start < length and source[raw_start] == "r":
+            cursor = raw_start + 1
+            while cursor < length and source[cursor] == "#":
+                cursor += 1
+            if cursor < length and source[cursor] == '"':
+                hashes = source[raw_start + 1 : cursor]
+                terminator = '"' + hashes
+                end = source.find(terminator, cursor + 1)
+                if end < 0:
+                    raise LedgerError(f"unclosed Rust raw string in {path}:{line}")
+                advance(end + len(terminator))
+                continue
+
+        quote_index = index + int(char == "b" and index + 1 < length)
+        if quote_index < length and source[quote_index] == '"':
+            cursor = quote_index + 1
+            while cursor < length:
+                if source[cursor] == "\\":
+                    cursor += 2
+                elif source[cursor] == '"':
+                    cursor += 1
+                    break
+                else:
+                    cursor += 1
+            else:
+                raise LedgerError(f"unclosed Rust string in {path}:{line}")
+            advance(cursor)
+            continue
+        if char == "'":
+            lifetime_end = index + 1
+            if lifetime_end < length and (
+                source[lifetime_end] == "_" or source[lifetime_end].isalpha()
+            ):
+                lifetime_end += 1
+                while lifetime_end < length and (
+                    source[lifetime_end] == "_" or source[lifetime_end].isalnum()
+                ):
+                    lifetime_end += 1
+                if lifetime_end >= length or source[lifetime_end] != "'":
+                    tokens.append((char, line))
+                    advance(index + 1)
+                    continue
+            cursor = index + 1
+            escaped = False
+            closed = False
+            while cursor < length and source[cursor] != "\n":
+                if not escaped and source[cursor] == "'":
+                    advance(cursor + 1)
+                    closed = True
+                    break
+                if not escaped and source[cursor] == "\\":
+                    escaped = True
+                else:
+                    escaped = False
+                cursor += 1
+            if closed:
+                continue
+
+        token_line = line
+        if char == "_" or char.isalpha():
+            cursor = index + 1
+            while cursor < length and (source[cursor] == "_" or source[cursor].isalnum()):
+                cursor += 1
+            tokens.append((source[index:cursor], token_line))
+            advance(cursor)
+        else:
+            tokens.append((char, token_line))
+            advance(index + 1)
+    return tokens
+
+
+def _cfg_test_analysis(source: str, path: str) -> tuple[set[int], set[str]]:
+    """Return cfg(test) item lines and out-of-line module names."""
+    tokens = _rust_tokens(source, path)
+    delimiter_stack: list[tuple[str, int]] = []
+    brace_close: dict[int, int] = {}
+    pairs = {"}": "{", ")": "(", "]": "["}
+    for position, (token, token_line) in enumerate(tokens):
+        if token in {"{", "(", "["}:
+            delimiter_stack.append((token, position))
+        elif token in pairs:
+            if not delimiter_stack or delimiter_stack[-1][0] != pairs[token]:
+                raise LedgerError(f"unbalanced Rust delimiter in {path}:{token_line}")
+            opening, opening_position = delimiter_stack.pop()
+            if opening == "{":
+                brace_close[opening_position] = position
+    if delimiter_stack:
+        _, opening_position = delimiter_stack[-1]
+        _, token_line = tokens[opening_position]
+        raise LedgerError(f"unbalanced Rust delimiter in {path}:{token_line}")
+
+    excluded: set[int] = set()
+    modules: set[str] = set()
+    position = 0
+    while position + 6 < len(tokens):
+        values = [value for value, _ in tokens[position : position + 7]]
+        if values != ["#", "[", "cfg", "(", "test", ")", "]"]:
+            position += 1
+            continue
+        attribute_line = tokens[position][1]
+        cursor = position + 7
+        paren_depth = bracket_depth = 0
+        boundary: int | None = None
+        while cursor < len(tokens):
+            token = tokens[cursor][0]
+            if token == "(":
+                paren_depth += 1
+            elif token == ")":
+                paren_depth -= 1
+            elif token == "[":
+                bracket_depth += 1
+            elif token == "]":
+                bracket_depth -= 1
+            elif paren_depth == 0 and bracket_depth == 0 and token in ("{", ";"):
+                boundary = cursor
+                break
+            cursor += 1
+        if boundary is None or paren_depth or bracket_depth:
+            raise LedgerError(f"ambiguous cfg(test) item in {path}:{attribute_line}")
+        if tokens[boundary][0] == "{":
+            close = brace_close.get(boundary)
+            if close is None:
+                raise LedgerError(f"unbalanced cfg(test) item in {path}:{attribute_line}")
+            end_line = tokens[close][1]
+            position = close + 1
+        else:
+            end_line = tokens[boundary][1]
+            item_tokens = [value for value, _ in tokens[position + 7 : boundary]]
+            if "mod" in item_tokens:
+                module_index = item_tokens.index("mod")
+                if module_index + 1 >= len(item_tokens):
+                    raise LedgerError(f"ambiguous cfg(test) module in {path}:{attribute_line}")
+                modules.add(item_tokens[module_index + 1])
+            position = boundary + 1
+        excluded.update(range(attribute_line, end_line + 1))
+    return excluded, modules
+
+
+def cfg_test_lines(source: str, path: str) -> set[int]:
+    """Return source lines belonging to items gated exclusively by cfg(test)."""
+    return _cfg_test_analysis(source, path)[0]
+
+
+def production_records(
+    records: dict[str, dict[int, int]], root: Path
+) -> dict[str, dict[int, int]]:
+    """Filter test-only Rust code from production coverage records."""
+    production: dict[str, dict[int, int]] = {}
+    analyses: dict[str, tuple[set[int], set[str]]] = {}
+    test_module_paths: set[str] = set()
+    for path in records:
+        parts = Path(path).parts
+        if not path.endswith(".rs") or "src" not in parts:
+            continue
+        source_path = root / path
+        try:
+            source = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise LedgerError(f"failed to inspect Rust coverage source: {path}") from error
+        analysis = _cfg_test_analysis(source, path)
+        analyses[path] = analysis
+        parent = Path(path).parent
+        stem = Path(path).stem
+        module_parent = parent if stem in {"lib", "main", "mod"} else parent / stem
+        for module in analysis[1]:
+            test_module_paths.add((module_parent / f"{module}.rs").as_posix())
+            test_module_paths.add((module_parent / module / "mod.rs").as_posix())
+            test_module_paths.add((module_parent / module).as_posix() + "/")
+    for path, lines in records.items():
+        parts = Path(path).parts
+        if len(parts) >= 3 and parts[0] == "crates" and parts[2] in {
+            "tests",
+            "benches",
+            "examples",
+        }:
+            continue
+        if path in test_module_paths or any(
+            marker.endswith("/") and path.startswith(marker) for marker in test_module_paths
+        ):
+            continue
+        if not path.endswith(".rs") or "src" not in parts:
+            production[path] = lines
+            continue
+        excluded = analyses[path][0]
+        retained = {line: hits for line, hits in lines.items() if line not in excluded}
+        if retained:
+            production[path] = retained
+    return production
+
+
 def select_surface(records: dict[str, dict[int, int]], surface: str) -> dict[str, dict[int, int]]:
     if surface == "core":
         return {
@@ -267,7 +499,7 @@ def build_ledger(args: argparse.Namespace) -> dict[str, Any]:
     merged = merge_records(core_report, python_report, node_report)
     if args.workspace_lcov is not None:
         write_lcov(merged, args.workspace_lcov, root)
-    core_records = select_surface(core_report, "core")
+    core_records = production_records(select_surface(core_report, "core"), root)
     patch_base_sha, patch = patch_totals(core_records, root, args.patch_base)
     surfaces = {
         "core": totals(core_records),

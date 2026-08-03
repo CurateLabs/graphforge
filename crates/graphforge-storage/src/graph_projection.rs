@@ -306,10 +306,11 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut relation_names = BTreeSet::new();
     for path in sorted_parquet_files(&target.join("topology/edges"))? {
         let stem = parquet_stem(&path)?;
-        if stem != "_exploratory" {
+        let batches = read_parquet(&path)?;
+        if stem != "_exploratory" && batches.iter().any(|batch| batch.num_rows() != 0) {
             relation_names.insert(stem);
         }
-        for batch in read_parquet(&path)? {
+        for batch in batches {
             if let Some(column) = batch.column_by_name("rel_type_name") {
                 let values = column
                     .as_any()
@@ -1373,6 +1374,120 @@ mod tests {
     }
 
     #[test]
+    fn typed_projection_keeps_exact_owned_catalog_and_reopens_graph_rows() {
+        let source = TempDir::new().unwrap();
+        let (alice, bob, excluded) = (uuid(31), uuid(32), uuid(33));
+        let (knows, ignores) = (uuid(41), uuid(42));
+        let mut catalog = RuntimeCatalog::new();
+        let person = catalog.intern_label("Person");
+        let company = catalog.intern_label("Company");
+        catalog.intern_relation_type("KNOWS");
+        catalog.intern_relation_type("IGNORES");
+        catalog.intern_property("name", Some("Person"));
+        catalog.intern_property("global", None);
+        catalog.intern_property("since", Some("KNOWS"));
+        catalog.intern_property("noise", Some("Company"));
+
+        let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
+        writer.create_node(alice, TypeId(person.0)).unwrap();
+        writer.create_node(bob, TypeId(person.0)).unwrap();
+        writer.create_node(excluded, TypeId(company.0)).unwrap();
+        writer.create_edge(knows, "KNOWS", &alice, &bob).unwrap();
+        writer
+            .create_edge(ignores, "IGNORES", &alice, &excluded)
+            .unwrap();
+        writer
+            .set_properties(
+                &alice,
+                Some("Person"),
+                HashMap::from([
+                    ("name".into(), IrLiteral::Str("Alice".into())),
+                    ("global".into(), IrLiteral::Bool(true)),
+                ]),
+            )
+            .unwrap();
+        writer
+            .set_properties(
+                &excluded,
+                Some("Company"),
+                HashMap::from([("noise".into(), IrLiteral::Str("exclude".into()))]),
+            )
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &knows,
+                Some("KNOWS"),
+                HashMap::from([("since".into(), IrLiteral::Int(2020))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        write_parquet(
+            &source.path().join("topology/runtime_catalog.parquet"),
+            &catalog.to_record_batch(),
+        )
+        .unwrap();
+
+        let target = TempDir::new().unwrap();
+        let summary = materialize_graph_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: BTreeSet::from([*alice.as_bytes()]),
+                edge_uuids: BTreeSet::from([*knows.as_bytes()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.node_uuids, vec![*alice.as_bytes(), *bob.as_bytes()]);
+        assert_eq!(summary.edge_uuids, vec![*knows.as_bytes()]);
+        assert_eq!(summary.endpoint_node_uuids, vec![*bob.as_bytes()]);
+
+        let projected = read_parquet(&target.path().join("topology/runtime_catalog.parquet"))
+            .unwrap()
+            .remove(0);
+        let kinds = string_column(&projected, "entry_kind").unwrap();
+        let names = string_column(&projected, "name").unwrap();
+        let owners = string_column(&projected, "owner_label").unwrap();
+        let inventory = (0..projected.num_rows())
+            .map(|row| {
+                (
+                    kinds.value(row).to_owned(),
+                    names.value(row).to_owned(),
+                    (!owners.is_null(row)).then(|| owners.value(row).to_owned()),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            inventory,
+            BTreeSet::from([
+                ("entity_type".into(), "Person".into(), None),
+                ("relation_type".into(), "KNOWS".into(), None),
+                ("property".into(), "global".into(), None),
+                ("property".into(), "name".into(), Some("Person".into())),
+                ("property".into(), "since".into(), Some("KNOWS".into())),
+            ])
+        );
+
+        let reopened_nodes = read_nodes(target.path()).unwrap();
+        assert_eq!(
+            reopened_nodes
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            read_properties(target.path(), "Person").unwrap()[0].num_rows(),
+            1
+        );
+        assert_eq!(
+            read_edge_properties(target.path(), "KNOWS").unwrap()[0].num_rows(),
+            1
+        );
+        let projected_again = projected_graph_fingerprint(target.path()).unwrap();
+        assert_eq!(projected_again, summary.graph_content_fingerprint);
+    }
+
+    #[test]
     fn existing_graph_empty_hydrated_workspace_is_a_valid_target() {
         let (source, nodes, _) = fixture();
         let target = TempDir::new().unwrap();
@@ -1432,6 +1547,106 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, GfError::Validation(_)));
         assert_eq!(fs::read(target.path().join("owned")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn projection_rejects_overlapping_and_nonempty_targets_without_mutation() {
+        let (source, _, _) = fixture();
+        let empty = GraphProjectionSelection::default();
+        let same_error =
+            materialize_graph_projection(source.path(), source.path(), &empty).unwrap_err();
+        assert_eq!(same_error.code(), "GF_VALIDATION");
+        assert!(same_error.to_string().contains("must be disjoint"));
+
+        let child = source.path().join("projection-child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("sentinel"), b"child").unwrap();
+        let child_error = materialize_graph_projection(source.path(), &child, &empty).unwrap_err();
+        assert_eq!(child_error.code(), "GF_VALIDATION");
+        assert_eq!(fs::read(child.join("sentinel")).unwrap(), b"child");
+
+        let ancestor = TempDir::new().unwrap();
+        let nested_source = ancestor.path().join("source");
+        fs::create_dir(&nested_source).unwrap();
+        let ancestor_error =
+            materialize_graph_projection(&nested_source, ancestor.path(), &empty).unwrap_err();
+        assert_eq!(ancestor_error.code(), "GF_VALIDATION");
+        assert!(nested_source.exists());
+
+        let regular_root = TempDir::new().unwrap();
+        let regular_target = regular_root.path().join("target");
+        fs::write(&regular_target, b"regular").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), &regular_target, &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(fs::read(&regular_target).unwrap(), b"regular");
+
+        let unexpected = TempDir::new().unwrap();
+        fs::write(unexpected.path().join("knowledge.parquet"), b"owned").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), unexpected.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(unexpected.path().join("knowledge.parquet")).unwrap(),
+            b"owned"
+        );
+
+        let bad_topology = TempDir::new().unwrap();
+        fs::create_dir(bad_topology.path().join("topology")).unwrap();
+        fs::write(bad_topology.path().join("topology/unknown"), b"keep").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), bad_topology.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(bad_topology.path().join("topology/unknown")).unwrap(),
+            b"keep"
+        );
+
+        let bad_properties = TempDir::new().unwrap();
+        fs::create_dir(bad_properties.path().join("properties")).unwrap();
+        fs::write(
+            bad_properties.path().join("properties/not-parquet"),
+            b"keep",
+        )
+        .unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), bad_properties.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(bad_properties.path().join("properties/not-parquet")).unwrap(),
+            b"keep"
+        );
+
+        let nonempty = TempDir::new().unwrap();
+        let mut node_uuid = FixedSizeBinaryBuilder::new(16);
+        node_uuid.append_value(uuid(90).as_bytes()).unwrap();
+        let batch = RecordBatch::try_from_iter([
+            ("node_uuid", Arc::new(node_uuid.finish()) as ArrayRef),
+            ("value", Arc::new(Int64Array::from(vec![1])) as ArrayRef),
+        ])
+        .unwrap();
+        let nonempty_path = nonempty.path().join("properties/Person.parquet");
+        write_parquet(&nonempty_path, &batch).unwrap();
+        let before = fs::read(&nonempty_path).unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), nonempty.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(fs::read(&nonempty_path).unwrap(), before);
     }
 
     #[test]

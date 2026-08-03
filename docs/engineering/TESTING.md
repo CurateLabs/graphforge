@@ -186,7 +186,12 @@ binding adapter also retains its
 independent 80% floor; neither the merged workspace percentage nor a strong
 crate can average away a failed surface. Patch coverage uses executable lines
 from the core LCOV report, so documentation, tests, blank lines, and non-Rust
-changes do not manufacture measured production coverage.
+changes do not manufacture measured production coverage. Core, per-crate, and
+patch production totals exclude crate-level `tests/`, `benches/`, and
+`examples/` sources plus executable lines inside `#[cfg(test)]`-gated Rust
+items. The source scan is comment-, string-, and brace-aware and fails closed
+when it cannot prove an item's boundary; native binding adapter totals remain
+unfiltered because their functional runtime suites are the measured surface.
 
 | Experience / Requirement | Scenario (Given/When/Then) | Test / evidence |
 | ------------------------ | -------------------------- | ---- |

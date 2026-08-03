@@ -1715,4 +1715,143 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn composite_graph_mutations_cover_created_and_existing_objects() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        let left = uuid7(201);
+        let right = uuid7(202);
+        let old_edge = uuid7(203);
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(200)),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: left,
+                        label: "Person".into(),
+                        properties: HashMap::from([(
+                            "obsolete".into(),
+                            PropValue::Str("left".into()),
+                        )]),
+                    },
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: right,
+                        label: "Person".into(),
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::CreateEdge {
+                        edge_uuid: old_edge,
+                        rel_type: "KNOWS".into(),
+                        source_uuid: left,
+                        target_uuid: right,
+                        properties: HashMap::from([(
+                            "obsolete".into(),
+                            PropValue::Str("edge".into()),
+                        )]),
+                    },
+                ],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+
+        let created_node = uuid7(205);
+        let created_edge = uuid7(206);
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(204)),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: created_node,
+                        label: "Person".into(),
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::SetNodeProperty {
+                        node_uuid: created_node,
+                        property: "name".into(),
+                        value: PropValue::Str("created".into()),
+                    },
+                    CompositeGraphMutation::CreateEdge {
+                        edge_uuid: created_edge,
+                        rel_type: "KNOWS".into(),
+                        source_uuid: left,
+                        target_uuid: created_node,
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: created_edge,
+                        property: "weight".into(),
+                        value: PropValue::Int(7),
+                    },
+                    CompositeGraphMutation::SetNodeProperty {
+                        node_uuid: left,
+                        property: "nickname".into(),
+                        value: PropValue::Str("existing".into()),
+                    },
+                    CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: old_edge,
+                        property: "weight".into(),
+                        value: PropValue::Int(3),
+                    },
+                    CompositeGraphMutation::RemoveNodeProperty {
+                        node_uuid: left,
+                        property: "obsolete".into(),
+                    },
+                    CompositeGraphMutation::RemoveEdgeProperty {
+                        edge_uuid: old_edge,
+                        property: "obsolete".into(),
+                    },
+                    CompositeGraphMutation::DeleteEdge {
+                        edge_uuid: old_edge,
+                    },
+                    CompositeGraphMutation::DeleteNode { node_uuid: right },
+                ],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            graph
+                .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
+                .unwrap()
+                .batches[0]
+                .num_rows(),
+            2
+        );
+    }
+
+    #[test]
+    fn strict_composite_snapshot_uses_declared_ontology_types() {
+        let directory = TempDir::new().unwrap();
+        let mut graph = GraphForge::new(directory.path().to_str()).unwrap();
+        let ontology_path = directory.path().join("strict.yaml");
+        std::fs::write(
+            &ontology_path,
+            "ontology_id: composite\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n",
+        )
+        .unwrap();
+        graph
+            .adopt_ontology(crate::AdoptOntologyRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(210)),
+                    actor_uuid: None,
+                },
+                path: ontology_path,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+
+        graph
+            .publish_composite_transaction(graph_request(211, 212, "Ada"))
+            .unwrap();
+        assert_eq!(graph.ontology_mode(), OntologyMode::Strict);
+    }
 }

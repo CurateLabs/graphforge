@@ -8870,6 +8870,96 @@ mod tests {
     }
 
     #[test]
+    fn prepared_embedding_descriptors_round_trip_all_non_node2vec_variants() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .execute(
+                "CREATE (:Person {score:1.0, features:[1.0,0.0], kind:'human'})\
+                 -[:KNOWS {kind:'friend'}]->\
+                 (:Person {score:2.0, features:[0.0,1.0], kind:'human'})",
+            )
+            .unwrap();
+        let cases = [
+            EmbeddingAnalyzeOptions {
+                by: AnalyzeAlgorithm::GraphSage,
+                via: Some("KNOWS".into()),
+                directed: false,
+                weight: None,
+                options: EmbeddingOptions::GraphSage(GraphSageOptions {
+                    dimensions: 2,
+                    hidden_dimensions: 3,
+                    layers: 1,
+                    sample_sizes: vec![2],
+                    epochs: 1,
+                    negative_samples: 1,
+                    learning_rate: 0.001,
+                    feature_properties: vec!["score".into(), "features".into()],
+                    seed: 41,
+                    ..GraphSageOptions::default()
+                }),
+            },
+            EmbeddingAnalyzeOptions {
+                by: AnalyzeAlgorithm::FastRandomProjection,
+                via: Some("KNOWS".into()),
+                directed: false,
+                weight: None,
+                options: EmbeddingOptions::FastRandomProjection(FastRpOptions {
+                    dimensions: 3,
+                    iteration_weights: vec![0.5, 1.0],
+                    normalization_strength: -0.25,
+                    feature_weight: 0.75,
+                    feature_properties: vec!["score".into()],
+                    seed: 42,
+                }),
+            },
+            EmbeddingAnalyzeOptions {
+                by: AnalyzeAlgorithm::HashGnn,
+                via: Some("KNOWS".into()),
+                directed: true,
+                weight: None,
+                options: EmbeddingOptions::HashGnn(HashGnnOptions {
+                    dimensions: 8,
+                    iterations: 2,
+                    embedding_density: 0.25,
+                    heterogeneous: true,
+                    node_type_property: Some("kind".into()),
+                    relationship_type_property: Some("kind".into()),
+                    seed: 43,
+                }),
+            },
+        ];
+
+        for options in cases {
+            let direct = graph.analyze_embedding(Some("Person"), &options).unwrap();
+            let descriptor = graph
+                .prepare_embedding_invocation(Some("Person"), &options)
+                .unwrap();
+            let decoded =
+                InvocationDescriptor::from_canonical_bytes(descriptor.canonical_bytes()).unwrap();
+            assert_eq!(decoded, descriptor);
+            assert_eq!(descriptor.algorithm(), Algorithm::Analyze(options.by));
+            assert_eq!(
+                graph.invoke_embedding_descriptor(&descriptor).unwrap(),
+                direct
+            );
+            assert_eq!(graph.invoke_descriptor(&descriptor).unwrap(), direct);
+            assert_eq!(
+                direct.schema().metadata()["graphforge.algorithm"],
+                options.by.as_str()
+            );
+        }
+
+        let rank_descriptor = graph
+            .prepare_rank_invocation("Person", &degree_options(false, None))
+            .unwrap();
+        let error = graph
+            .invoke_embedding_descriptor(&rank_descriptor)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        assert!(error.to_string().contains("requires an analyze descriptor"));
+    }
+
+    #[test]
     fn graphsage_executes_through_typed_api_with_scalar_and_list_features() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
