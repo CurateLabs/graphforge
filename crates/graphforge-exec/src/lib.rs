@@ -5252,7 +5252,11 @@ mod tests {
         );
         assert_eq!(SideEffects::from_summary(&[]), SideEffects::default());
         assert_eq!(
-            SideEffects::from_summary(&[RecordBatch::new_empty(Arc::new(Schema::empty()))]),
+            SideEffects::from_summary(&[RecordBatch::try_from_iter([(
+                "nodes_created",
+                Arc::new(UInt64Array::from(Vec::<u64>::new())) as ArrayRef,
+            )])
+            .unwrap()]),
             SideEffects::default()
         );
     }
@@ -5482,15 +5486,16 @@ mod tests {
                     .unwrap();
             assert_eq!(batches.len(), 1);
             assert_eq!(batches[0].num_rows(), 1);
-            assert_eq!(
-                batches[0]
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap()
-                    .value(0),
-                0
-            );
+            for column in batches[0].columns() {
+                assert_eq!(
+                    column
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .value(0),
+                    0
+                );
+            }
         }
     }
 

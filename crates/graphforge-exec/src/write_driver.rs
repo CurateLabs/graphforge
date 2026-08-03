@@ -3306,13 +3306,13 @@ fn run_remove_phase(
                 ) {
                     continue;
                 }
+                let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
                 let keys = HashSet::from([item.prop_name.clone()]);
                 if is_edge && ctx.writer.contains_pending_edge(&uuid) {
                     ctx.writer.remove_pending_edge_props(&uuid, &keys);
                 } else if !is_edge && ctx.writer.contains_pending_node(&uuid) {
                     ctx.writer.remove_pending_node_props(&uuid, &keys);
                 } else {
-                    let stem = col.stem_for_row(batch, row, env.mode, &env.type_map)?;
                     ctx.set_acc.forget(is_edge, &stem, &uuid, &item.prop_name);
                     ctx.remove_acc
                         .record(is_edge, stem, uuid, item.prop_name.clone());
@@ -4030,5 +4030,44 @@ mod tests {
         assert!(ctx.remove_acc.nodes.is_empty());
         assert!(ctx.remove_acc.edges.is_empty());
         assert_eq!(ctx.counters, WriteCounters::default());
+
+        let mut pending_ctx =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        let src = graphforge_core::uuid::new_v7();
+        let dst = graphforge_core::uuid::new_v7();
+        let edge = graphforge_core::uuid::Uuid::from_bytes([7; 16]);
+        pending_ctx
+            .writer
+            .create_node(src, graphforge_core::TypeId(1))
+            .unwrap();
+        pending_ctx
+            .writer
+            .create_node(dst, graphforge_core::TypeId(1))
+            .unwrap();
+        pending_ctx
+            .writer
+            .create_edge(edge, "KNOWS", &src, &dst)
+            .unwrap();
+        pending_ctx.writer.merge_pending_edge_props(
+            &[7; 16],
+            Some("KNOWS"),
+            HashMap::from([("score".into(), IrLiteral::Int(1))]),
+        );
+        let err = run_remove_phase(
+            &env,
+            &[RemovePropItem {
+                target: VarId(1),
+                prop: PropId(9),
+                prop_name: "score".into(),
+            }],
+            &mut malformed_route,
+            &mut pending_ctx,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "execution error: rel_type_name is not a string column"
+        );
+        assert_eq!(pending_ctx.counters, WriteCounters::default());
     }
 }
