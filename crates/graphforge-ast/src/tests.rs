@@ -544,9 +544,33 @@ fn ast_return_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Return(rc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
+}
+
+#[test]
+fn ast_where_and_with_clause_spans_are_exact() {
+    let predicate = Expr::Var(VarRef {
+        name: "keep".into(),
+        span: zero(),
+    });
+    let where_clause = WhereClause {
+        predicate: predicate.clone(),
+        span: zero(),
+    };
+    assert_eq!(AstClause::Where(where_clause.clone()).span(), zero());
+    let with_clause = WithClause {
+        distinct: false,
+        items: vec![],
+        order_by: None,
+        skip: None,
+        limit: None,
+        where_clause: Some(where_clause),
+        span: zero(),
+    };
+    assert_eq!(AstClause::With(with_clause).span(), zero());
 }
 
 #[test]
@@ -560,6 +584,7 @@ fn ast_unwind_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Unwind(uc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -579,6 +604,7 @@ fn ast_delete_clause_detach_flag() {
     let back: DeleteClause = serde_json::from_str(&json).unwrap();
     assert_eq!(dc, back);
     assert!(back.detach);
+    assert_eq!(AstClause::Delete(dc).span(), zero());
 }
 
 #[test]
@@ -674,6 +700,7 @@ fn ast_optional_match_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::OptionalMatch(mc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -709,6 +736,7 @@ fn ast_create_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Create(cc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -738,6 +766,7 @@ fn ast_merge_clause_on_create_on_match() {
         span: zero(),
     };
     let clause = AstClause::Merge(mc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -769,6 +798,7 @@ fn ast_set_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Set(sc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -785,6 +815,7 @@ fn ast_remove_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Remove(rc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -797,6 +828,7 @@ fn ast_union_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Union(uc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);
@@ -823,6 +855,7 @@ fn ast_call_clause_roundtrip() {
         span: zero(),
     };
     let clause = AstClause::Call(cc);
+    assert_eq!(clause.span(), zero());
     let json = serde_json::to_string(&clause).unwrap();
     let back: AstClause = serde_json::from_str(&json).unwrap();
     assert_eq!(clause, back);

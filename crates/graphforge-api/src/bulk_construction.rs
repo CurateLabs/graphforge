@@ -1857,6 +1857,111 @@ mod tests {
     }
 
     #[test]
+    fn strict_ontology_arrow_compatibility_matrix_is_closed() {
+        let list_item = Arc::new(Field::new("item", DataType::Utf8, true));
+        let compatible = [
+            (PropertyValueType::Utf8, DataType::Utf8),
+            (PropertyValueType::Utf8, DataType::LargeUtf8),
+            (PropertyValueType::Int64, DataType::Int8),
+            (PropertyValueType::Int64, DataType::Int16),
+            (PropertyValueType::Int64, DataType::Int32),
+            (PropertyValueType::Int64, DataType::Int64),
+            (PropertyValueType::Int64, DataType::UInt8),
+            (PropertyValueType::Int64, DataType::UInt16),
+            (PropertyValueType::Int64, DataType::UInt32),
+            (PropertyValueType::Float64, DataType::Float32),
+            (PropertyValueType::Float64, DataType::Float64),
+            (PropertyValueType::Bool, DataType::Boolean),
+            (
+                PropertyValueType::List,
+                DataType::List(Arc::clone(&list_item)),
+            ),
+            (
+                PropertyValueType::List,
+                DataType::LargeList(Arc::clone(&list_item)),
+            ),
+        ];
+        for (expected, actual) in compatible {
+            validate_ontology_field(
+                BulkInputKind::Node,
+                7,
+                "property",
+                &Field::new("property", actual, false),
+                &expected,
+                false,
+            )
+            .unwrap();
+        }
+
+        for expected in [
+            PropertyValueType::Duration,
+            PropertyValueType::DateTime,
+            PropertyValueType::Map,
+        ] {
+            let error = validate_ontology_field(
+                BulkInputKind::Edge,
+                9,
+                "property",
+                &Field::new("property", DataType::Utf8, false),
+                &expected,
+                true,
+            )
+            .unwrap_err();
+            assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+            assert_eq!(error.row_ordinal, Some(9));
+        }
+
+        let mismatch = validate_ontology_field(
+            BulkInputKind::Node,
+            11,
+            "property",
+            &Field::new("property", DataType::Boolean, false),
+            &PropertyValueType::Utf8,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.reason, BulkValidationReason::PropertyTypeMismatch);
+        let nullable = validate_ontology_field(
+            BulkInputKind::Node,
+            12,
+            "property",
+            &Field::new("property", DataType::Utf8, true),
+            &PropertyValueType::Utf8,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(nullable.reason, BulkValidationReason::NullabilityMismatch);
+    }
+
+    #[test]
+    fn generated_bulk_identities_are_deterministic_typed_and_domain_separated() {
+        let operation = operation(42);
+        let node_zero = generated_uuid(operation, BulkInputKind::Node, 0);
+        assert_eq!(node_zero, generated_uuid(operation, BulkInputKind::Node, 0));
+        assert_ne!(node_zero, generated_uuid(operation, BulkInputKind::Node, 1));
+        assert_ne!(node_zero, generated_uuid(operation, BulkInputKind::Edge, 0));
+        assert_eq!(node_zero.get_version_num(), 7);
+        assert!(validate_operation_uuid(BulkInputKind::Node, operation).is_ok());
+        let invalid =
+            validate_operation_uuid(BulkInputKind::Edge, OperationId(Uuid::from_u128(42)))
+                .unwrap_err();
+        assert_eq!(invalid.reason, BulkValidationReason::InvalidUuid);
+        assert_eq!(invalid.field.as_deref(), Some("operation_uuid"));
+
+        for valid in ["a", "_a", "alpha_1", "Δelta"] {
+            assert!(validate_property_name(BulkInputKind::Node, valid).is_ok());
+        }
+        for invalid in ["", "1a", "a-b", "a b", "\n"] {
+            assert_eq!(
+                validate_property_name(BulkInputKind::Edge, invalid)
+                    .unwrap_err()
+                    .reason,
+                BulkValidationReason::InvalidIdentifier
+            );
+        }
+    }
+
+    #[test]
     fn public_error_vocabulary_is_complete_and_stable() {
         assert_eq!(BulkInputKind::Node.as_str(), "node");
         assert_eq!(BulkInputKind::Edge.as_str(), "edge");

@@ -3330,6 +3330,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn facade_label_and_clear_boundaries_are_exact_and_non_mutating() {
+        let graph = GraphForge::new(None).unwrap();
+        for invalid in ["", " Person", "Person ", "Per\nson", "\0Person"] {
+            assert!(matches!(
+                graph.algorithm_label(invalid, "rank"),
+                Err(GfError::Validation(_))
+            ));
+        }
+        let (unknown, stem) = graph.algorithm_label("Unknown", "rank").unwrap();
+        assert_eq!(unknown, TypeId(u32::MAX));
+        assert_eq!(stem, "_untyped");
+
+        graph
+            .register_procedure(ProcedureDefinition {
+                name: "test.clear".into(),
+                inputs: vec![],
+                outputs: vec![ProcedureField {
+                    name: "value".into(),
+                    type_name: "INTEGER".into(),
+                    nullable: false,
+                }],
+                rows: vec![vec![IrLiteral::Int(1)]],
+            })
+            .unwrap();
+        graph.add_node("Person", &HashMap::new()).unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 1);
+        graph.clear().unwrap();
+        assert_eq!(graph.node_count("Person").unwrap(), 0);
+        assert!(graph.labels().unwrap().is_empty());
+        assert!(graph.execute("CALL test.clear()").is_err());
+
+        let directory = tempfile::tempdir().unwrap();
+        let persistent = GraphForge::new(directory.path().to_str()).unwrap();
+        persistent.add_node("Person", &HashMap::new()).unwrap();
+        let error = persistent.clear().unwrap_err();
+        assert!(matches!(error, GfError::Storage(_)));
+        assert_eq!(persistent.node_count("Person").unwrap(), 1);
+        drop(persistent);
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        assert_eq!(reopened.node_count("Person").unwrap(), 1);
+    }
+
     fn degree_options(directed: bool, via: Option<&str>) -> RankOptions {
         RankOptions {
             by: RankAlgorithm::Degree,

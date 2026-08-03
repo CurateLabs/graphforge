@@ -3813,6 +3813,123 @@ mod tests {
     }
 
     #[test]
+    fn project_and_target_validation_rejects_every_cross_field_conflict() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        let base: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        let invalid = |config: ProjectConfig| {
+            assert_eq!(
+                config.validate(&context).unwrap_err().code(),
+                "GF_VALIDATION"
+            );
+        };
+
+        let mut config = base.clone();
+        config.schema_version = 2;
+        invalid(config);
+        let mut config = base.clone();
+        config.targets.clear();
+        invalid(config);
+        let mut config = base.clone();
+        config.project.ontology = "ontology\\schema.yaml".into();
+        invalid(config);
+        let mut config = base.clone();
+        config.project.schemas = "../outside".into();
+        invalid(config);
+
+        let source = Source {
+            id: "input".into(),
+            uri: "https://example.invalid/data.parquet".into(),
+            sha256: "a".repeat(64),
+            media_type: Some("application/vnd.apache.parquet".into()),
+        };
+        let mut config = base.clone();
+        config.sources = vec![source.clone(), source.clone()];
+        invalid(config);
+        let mut config = base.clone();
+        config.sources = vec![Source {
+            sha256: "not-a-digest".into(),
+            ..source.clone()
+        }];
+        invalid(config);
+        let mut config = base.clone();
+        config.sources = vec![source];
+        config.targets.get_mut("local").unwrap().source_ids = vec!["missing".into()];
+        invalid(config);
+
+        let secret = SecretReference {
+            id: "token".into(),
+            source: SecretSource::Environment,
+        };
+        let mut config = base.clone();
+        config.secrets = vec![secret.clone(), secret];
+        invalid(config);
+        let mut config = base.clone();
+        config.targets.get_mut("local").unwrap().secret_ids = vec!["missing".into()];
+        invalid(config);
+
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.capabilities = vec![
+            CapabilityRequirement {
+                id: "search".into(),
+                version: 1,
+            },
+            CapabilityRequirement {
+                id: "search".into(),
+                version: 2,
+            },
+        ];
+        invalid(config);
+        let mut config = base.clone();
+        config.targets.get_mut("local").unwrap().capabilities = vec![CapabilityRequirement {
+            id: "search".into(),
+            version: 0,
+        }];
+        invalid(config);
+
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.write.mode = WriteMode::Single;
+        target.write.queue_capacity = Some(1);
+        invalid(config);
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.write.mode = WriteMode::Queued;
+        target.write.queue_capacity = None;
+        invalid(config);
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.write.mode = WriteMode::OptimisticMulti;
+        target.write.max_rebase_attempts = None;
+        invalid(config);
+
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.kind = TargetKind::Service;
+        target.ownership = Some(TargetOwnership::External);
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Container),
+            scheduling: Some(SchedulingKind::LongRunning),
+            replicas: Some(1),
+        });
+        target.storage.kind = StorageKind::Volume;
+        target.network = Some(Network {
+            exposure: Some(Exposure::Public),
+            port: Some(443),
+            tls_required: Some(false),
+        });
+        invalid(config);
+        let mut config = base.clone();
+        let target = config.targets.get_mut("local").unwrap();
+        target.backup = Some(Backup {
+            checkpoints: Some(false),
+            retention_count: Some(2),
+        });
+        invalid(config);
+    }
+
+    #[test]
     fn status_waits_for_the_writer_lock_and_recovers_before_reading() {
         let root = tempdir().unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();

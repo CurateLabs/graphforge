@@ -611,6 +611,147 @@ mod tests {
         }
     }
 
+    #[test]
+    fn refresh_artifact_and_api_failure_classes_cover_every_public_domain() {
+        use std::path::PathBuf;
+
+        use EmbeddingRefreshFailureClass as Refresh;
+        use EmbeddingRefreshOutcomeStatus::{Cancelled, Failed};
+
+        let path = PathBuf::from("redacted-artifact");
+        let artifacts = [
+            (SearchArtifactError::Cancelled, Cancelled),
+            (
+                SearchArtifactError::ResourceExhausted {
+                    resource: "vectors",
+                    limit: 1,
+                },
+                Failed(Refresh::ResourceExhausted),
+            ),
+            (
+                SearchArtifactError::ConcurrentMutation,
+                Failed(Refresh::ConcurrentMutation),
+            ),
+            (
+                SearchArtifactError::InvalidSelector {
+                    field: "space",
+                    reason: "mismatch".into(),
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::CorruptManifest {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::CorruptDerivedIndex {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::CorruptPrimaryVectors {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::IncompatibleManifest {
+                    path: path.clone(),
+                    found: 2,
+                    supported: 1,
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::Stale {
+                    reason: "generation changed".into(),
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::Missing { path: path.clone() },
+                Failed(Refresh::Unavailable),
+            ),
+            (
+                SearchArtifactError::Build("build".into()),
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::SourceSnapshot {
+                    reason: "snapshot".into(),
+                },
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::Lock {
+                    path: path.clone(),
+                    reason: "busy".into(),
+                },
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::Io {
+                    operation: "read",
+                    path,
+                    source: std::io::Error::other("io"),
+                },
+                Failed(Refresh::Storage),
+            ),
+        ];
+        for (input, expected) in artifacts {
+            assert_eq!(artifact_outcome(&input), expected);
+        }
+
+        for input in [
+            GfError::Plan("plan".into()),
+            GfError::Api {
+                code: graphforge_core::ApiErrorCode::UnknownArgument,
+                message: "api".into(),
+            },
+            GfError::Provider {
+                class: "timeout".into(),
+                provider: "vendor".into(),
+                model: "model".into(),
+            },
+        ] {
+            let expected = if matches!(&input, GfError::Provider { .. }) {
+                Refresh::Provider
+            } else {
+                Refresh::Validation
+            };
+            assert_eq!(api_outcome(&input), Failed(expected));
+        }
+    }
+
+    #[test]
+    fn execution_error_conversions_preserve_source_and_redaction() {
+        let request = request();
+        let provider = ProviderError::new(&request.contract, ProviderFailureClass::Authentication);
+        let execution = ProviderEmbeddingExecutionError::from(provider);
+        assert!(execution.source().is_some());
+        assert!(matches!(
+            execution,
+            ProviderEmbeddingExecutionError::Publication(
+                ProviderPublicationError::Provider(ref error)
+            ) if error.class() == ProviderFailureClass::Authentication
+        ));
+
+        let execution = ProviderEmbeddingExecutionError::from(SearchArtifactError::Cancelled);
+        assert!(execution.source().is_some());
+        assert!(matches!(
+            execution,
+            ProviderEmbeddingExecutionError::Publication(ProviderPublicationError::Artifact(
+                SearchArtifactError::Cancelled
+            ))
+        ));
+    }
+
     struct FakeProvider<'a> {
         contract: ProviderModelContract,
         mutate: Option<&'a GraphForge>,

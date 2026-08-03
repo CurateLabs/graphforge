@@ -833,6 +833,24 @@ mod tests {
             .collect()
     }
 
+    fn mutate_header(envelope: &[u8], mutate: impl FnOnce(&mut EnvelopeHeader)) -> Vec<u8> {
+        let prefix = MAGIC.len() + HEADER_LENGTH_BYTES;
+        let header_length =
+            u64::from_be_bytes(envelope[MAGIC.len()..prefix].try_into().unwrap()) as usize;
+        let header_end = prefix + header_length;
+        let mut header: EnvelopeHeader =
+            serde_json::from_slice(&envelope[prefix..header_end]).unwrap();
+        mutate(&mut header);
+        let mut header_bytes = serde_json::to_vec(&header).unwrap();
+        header_bytes.push(b'\n');
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(MAGIC);
+        rebuilt.extend_from_slice(&u64::try_from(header_bytes.len()).unwrap().to_be_bytes());
+        rebuilt.extend_from_slice(&header_bytes);
+        rebuilt.extend_from_slice(&envelope[header_end..]);
+        rebuilt
+    }
+
     #[test]
     fn subprocess_portable_import_writer() {
         let Ok(target) = std::env::var("GRAPHFORGE_TEST_PROJECT_ROOT") else {
@@ -1297,6 +1315,88 @@ mod tests {
         }
         assert!(enforce_count(4, 4).is_ok());
         assert_eq!(enforce_count(5, 4).unwrap_err().code(), "GF_RESOURCE_LIMIT");
+    }
+
+    #[test]
+    fn portable_header_contract_matrix_rejects_noncanonical_or_inconsistent_inventory() {
+        let source = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(source.path()).unwrap();
+        let limits = PortableProjectLimits::default();
+        let (envelope, _) = encode_portable_project(&generation, limits).unwrap();
+        let supported = supported(&generation);
+
+        let malformed = [
+            mutate_header(&envelope, |header| header.format = "other".into()),
+            mutate_header(&envelope, |header| header.format_version += 1),
+            mutate_header(&envelope, |header| {
+                header.capabilities[0].capability_version = 0;
+            }),
+            mutate_header(&envelope, |header| {
+                header.capabilities.swap(0, 1);
+            }),
+            mutate_header(&envelope, |header| {
+                header.participants.swap(0, 1);
+            }),
+            mutate_header(&envelope, |header| {
+                header.participants[0].encoding = "opaque".into();
+            }),
+            mutate_header(&envelope, |header| {
+                header.participants[0].capability_version += 1;
+            }),
+            mutate_header(&envelope, |header| {
+                header.participants[0].content_sha256 = "00".repeat(32);
+            }),
+            mutate_header(&envelope, |header| {
+                header.participants[0].byte_length += 1;
+            }),
+        ];
+        for candidate in malformed {
+            let error = validate_envelope(&candidate, &supported, limits)
+                .err()
+                .expect("malformed header must fail");
+            assert!(
+                matches!(
+                    error.code(),
+                    "GF_PROJECT_CORRUPT"
+                        | "GF_UNSUPPORTED_PROJECT_FORMAT"
+                        | "GF_UNSUPPORTED_CAPABILITY_VERSION"
+                ),
+                "unexpected error contract: {error}"
+            );
+        }
+
+        let prefix = MAGIC.len() + HEADER_LENGTH_BYTES;
+        let header_length =
+            u64::from_be_bytes(envelope[MAGIC.len()..prefix].try_into().unwrap()) as usize;
+        let header_end = prefix + header_length;
+        let mut noncanonical = Vec::new();
+        noncanonical.extend_from_slice(MAGIC);
+        noncanonical.extend_from_slice(&u64::try_from(header_length + 1).unwrap().to_be_bytes());
+        noncanonical.push(b' ');
+        noncanonical.extend_from_slice(&envelope[prefix..header_end]);
+        noncanonical.extend_from_slice(&envelope[header_end..]);
+        assert_eq!(
+            validate_envelope(&noncanonical, &supported, limits)
+                .err()
+                .expect("noncanonical header must fail")
+                .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+
+        for truncated in [
+            Vec::new(),
+            MAGIC[..MAGIC.len() - 1].to_vec(),
+            envelope[..prefix].to_vec(),
+            envelope[..header_end - 1].to_vec(),
+        ] {
+            assert_eq!(
+                validate_envelope(&truncated, &supported, limits)
+                    .err()
+                    .expect("truncated envelope must fail")
+                    .code(),
+                "GF_PROJECT_CORRUPT"
+            );
+        }
     }
 
     #[test]

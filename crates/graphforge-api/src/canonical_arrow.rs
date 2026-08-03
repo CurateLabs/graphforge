@@ -606,4 +606,78 @@ mod tests {
             Err(CanonicalArrowError::Unsupported(DataType::Date32))
         ));
     }
+
+    #[test]
+    fn canonical_schema_rejects_invalid_nested_widths_and_preserves_semantic_metadata() {
+        let child = Arc::new(Field::new("item", DataType::UInt64, true));
+        let struct_fields =
+            arrow::datatypes::Fields::from(vec![Field::new("child", DataType::Utf8, false)]);
+        for data_type in [
+            DataType::List(Arc::clone(&child)),
+            DataType::LargeList(Arc::clone(&child)),
+            DataType::FixedSizeList(Arc::clone(&child), 2),
+            DataType::Struct(struct_fields),
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            encode_type(&mut writer, &data_type).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
+
+        for data_type in [
+            DataType::FixedSizeBinary(-1),
+            DataType::FixedSizeList(Arc::clone(&child), -1),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            assert!(matches!(
+                encode_type(&mut writer, &data_type),
+                Err(CanonicalArrowError::Schema(_))
+            ));
+        }
+
+        let metadata = std::collections::HashMap::from([
+            ("graphforge.contract.result".to_owned(), "v1".to_owned()),
+            ("graphforge.seed".to_owned(), "7".to_owned()),
+            ("graphforge.ontology_mode".to_owned(), "strict".to_owned()),
+        ]);
+        let with_metadata =
+            Schema::new_with_metadata(vec![Field::new("value", DataType::Utf8, false)], metadata);
+        assert!(!canonical_schema_bytes(&with_metadata).unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_nullability_physical_mismatch_and_float_normalization_are_explicit() {
+        let nulls: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>]));
+        let mut writer = CanonicalWriter::new();
+        assert!(matches!(
+            encode_value(&mut writer, &DataType::Utf8, &nulls, 0, false),
+            Err(CanonicalArrowError::Schema(
+                "non-nullable Arrow field contains null"
+            ))
+        ));
+        let mut writer = CanonicalWriter::new();
+        encode_value(&mut writer, &DataType::Utf8, &nulls, 0, true).unwrap();
+        assert!(!writer.finish().is_empty());
+
+        let integers: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let mut writer = CanonicalWriter::new();
+        assert!(matches!(
+            encode_present_value(&mut writer, &DataType::Utf8, &integers, 0),
+            Err(CanonicalArrowError::Schema("Arrow array/type mismatch"))
+        ));
+
+        assert_eq!(normalize_f32(0.0), normalize_f32(-0.0));
+        assert_eq!(normalize_f32(f32::NAN), normalize_f32(-f32::NAN));
+        assert_ne!(normalize_f32(1.5), 0);
+        assert_ne!(normalize_f64(1.5), 0);
+        for timezone in [
+            None,
+            Some("UTC"),
+            Some("Etc/UTC"),
+            Some("Z"),
+            Some("+00:00"),
+        ] {
+            assert!(validate_timestamp_timezone(timezone).is_ok());
+        }
+    }
 }

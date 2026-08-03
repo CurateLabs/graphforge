@@ -1047,8 +1047,11 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{
-        ArrayRef, FixedSizeBinaryBuilder, Float32Array, Float64Array, Int64Array, ListArray,
-        StringArray, Time64MicrosecondArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+        ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryBuilder, Float32Array, Float64Array,
+        Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, ListArray, StringArray,
+        Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+        UInt64Array,
     };
     use graphforge_core::uuid::Uuid;
     use graphforge_core::{OntologyMode, TypeId};
@@ -1774,6 +1777,81 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn canonical_value_encoding_covers_every_scalar_and_time_representation() {
+        let values: Vec<(DataType, ArrayRef)> = vec![
+            (DataType::Boolean, Arc::new(BooleanArray::from(vec![true]))),
+            (DataType::Int32, Arc::new(Int32Array::from(vec![-7]))),
+            (DataType::Int64, Arc::new(Int64Array::from(vec![-9]))),
+            (DataType::UInt32, Arc::new(UInt32Array::from(vec![7]))),
+            (DataType::UInt64, Arc::new(UInt64Array::from(vec![9]))),
+            (DataType::Utf8, Arc::new(StringArray::from(vec!["small"]))),
+            (
+                DataType::LargeUtf8,
+                Arc::new(LargeStringArray::from(vec!["large"])),
+            ),
+            (
+                DataType::Binary,
+                Arc::new(BinaryArray::from_vec(vec![b"small".as_slice()])),
+            ),
+            (
+                DataType::LargeBinary,
+                Arc::new(LargeBinaryArray::from_vec(vec![b"large".as_slice()])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Second, None),
+                Arc::new(TimestampSecondArray::from(vec![1_i64])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Millisecond, Some("Z".into())),
+                Arc::new(TimestampMillisecondArray::from(vec![2_i64]).with_timezone("Z")),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                Arc::new(TimestampMicrosecondArray::from(vec![3_i64]).with_timezone("UTC")),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("Etc/UTC".into())),
+                Arc::new(TimestampNanosecondArray::from(vec![4_i64]).with_timezone("Etc/UTC")),
+            ),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                Arc::new(Time64MicrosecondArray::from(vec![5_i64])),
+            ),
+            (
+                DataType::Time64(TimeUnit::Nanosecond),
+                Arc::new(Time64NanosecondArray::from(vec![6_i64])),
+            ),
+        ];
+        let mut encodings = Vec::new();
+        for (data_type, array) in values {
+            let mut writer = CanonicalWriter::new();
+            encode_present_value(&mut writer, &data_type, &array, 0).unwrap();
+            let encoded = writer.finish();
+            assert!(!encoded.is_empty(), "{data_type} must emit canonical bytes");
+            encodings.push(encoded);
+        }
+        assert_eq!(encodings.len(), 15);
+
+        let seconds: ArrayRef = Arc::new(TimestampSecondArray::from(vec![11_i64]));
+        let millis: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![12_i64]));
+        let nanos: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![13_i64]));
+        assert_eq!(timestamp_value(&seconds, TimeUnit::Second, 0).unwrap(), 11);
+        assert_eq!(
+            timestamp_value(&millis, TimeUnit::Millisecond, 0).unwrap(),
+            12
+        );
+        assert_eq!(
+            timestamp_value(&nanos, TimeUnit::Nanosecond, 0).unwrap(),
+            13
+        );
+        let time_nanos: ArrayRef = Arc::new(Time64NanosecondArray::from(vec![14_i64]));
+        assert_eq!(
+            time64_value(&time_nanos, TimeUnit::Nanosecond, 0).unwrap(),
+            14
         );
     }
 

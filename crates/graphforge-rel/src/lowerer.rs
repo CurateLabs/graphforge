@@ -4611,6 +4611,222 @@ mod tests {
     }
 
     #[test]
+    fn statement_driver_only_write_forms_are_rejected_by_relational_lowering() {
+        use graphforge_ir::{LabelItem, RemovePropItem, SetMapItem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            None,
+            None,
+            dir.path(),
+            graphforge_core::OntologyMode::Exploratory,
+        );
+
+        let mut set_builder = GraphPlan::builder("openCypher");
+        let map = set_builder.push_expr(IrExpr::MapLiteral(vec![]));
+        let set_map = set_builder
+            .push_op(GraphOp::Set {
+                items: vec![],
+                map_items: vec![SetMapItem {
+                    target: VarId(1),
+                    map,
+                    replace: false,
+                }],
+                label_items: vec![],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&set_map)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+
+        let set_labels = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Set {
+                items: vec![],
+                map_items: vec![],
+                label_items: vec![LabelItem {
+                    target: VarId(1),
+                    labels: vec![TypeId(7)],
+                }],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&set_labels)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+
+        let remove_labels = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Remove {
+                items: Vec::<RemovePropItem>::new(),
+                label_items: vec![LabelItem {
+                    target: VarId(1),
+                    labels: vec![TypeId(7)],
+                }],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&remove_labels)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+    }
+
+    #[test]
+    fn correlated_subquery_shapes_fail_with_precise_contract_errors() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+
+        let no_alternatives = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Exists {
+                child: Box::new(
+                    GraphPlan::builder("openCypher")
+                        .push_op(GraphOp::Union {
+                            all: true,
+                            inputs: vec![],
+                        })
+                        .build(),
+                ),
+                negated: false,
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&no_alternatives)
+                .unwrap_err()
+                .to_string()
+                .contains("no alternatives")
+        );
+
+        let uncorrelated = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Exists {
+                child: Box::new(GraphPlan::builder("openCypher").build()),
+                negated: true,
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&uncorrelated)
+                .unwrap_err()
+                .to_string()
+                .contains("share at least one bound variable")
+        );
+
+        let empty_comprehension = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::PatternComprehension {
+                child: Box::new(GraphPlan::builder("openCypher").build()),
+                output: VarId(10),
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&empty_comprehension)
+                .unwrap_err()
+                .to_string()
+                .contains("child is empty")
+        );
+
+        let wrong_terminal = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::PatternComprehension {
+                child: Box::new(
+                    GraphPlan::builder("openCypher")
+                        .push_op(GraphOp::Limit { count: 1 })
+                        .build(),
+                ),
+                output: VarId(10),
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&wrong_terminal)
+                .unwrap_err()
+                .to_string()
+                .contains("must end in a value projection")
+        );
+    }
+
+    #[test]
+    fn pattern_comprehension_projection_contract_is_strict() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let cases = [
+            (
+                true,
+                PATTERN_COMPREHENSION_VALUE_ALIAS,
+                "exactly one non-distinct",
+            ),
+            (false, "wrong_alias", "invalid value projection"),
+        ];
+        for (distinct, alias, expected) in cases {
+            let mut child = GraphPlan::builder("openCypher");
+            let value = child.push_expr(IrExpr::Literal(IrLiteral::Int(1)));
+            child.push_op_mut(GraphOp::Project {
+                items: vec![ProjectItem {
+                    expr: value,
+                    alias: Some(alias.into()),
+                    out_var: None,
+                }],
+                distinct,
+            });
+            let plan = GraphPlan::builder("openCypher")
+                .push_op(GraphOp::PatternComprehension {
+                    child: Box::new(child.build()),
+                    output: VarId(11),
+                })
+                .build();
+            assert!(
+                lowerer
+                    .lower_plan(&plan)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_suffix_uses_supplied_schema_and_preserves_scope() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::DFSchema;
+
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let schema = Arc::new(
+            DFSchema::try_from(Schema::new(vec![Field::new(
+                "seed",
+                DataType::Int64,
+                false,
+            )]))
+            .unwrap(),
+        );
+        let mut arena = ExprArena::new();
+        let literal = arena.push(IrExpr::Literal(IrLiteral::Int(9)));
+        let mut vars = VarMap::new();
+        vars.insert(VarId(4), "seed");
+        let suffix = lowerer
+            .lower_terminal_suffix(
+                &[GraphOp::Project {
+                    items: vec![ProjectItem {
+                        expr: literal,
+                        alias: Some("answer".into()),
+                        out_var: Some(VarId(5)),
+                    }],
+                    distinct: false,
+                }],
+                &arena,
+                &mut vars,
+                schema,
+            )
+            .unwrap();
+        assert!(matches!(suffix, DfLogicalPlan::Projection(_)));
+        assert_eq!(vars.get(VarId(5)), Some("answer"));
+    }
+
+    #[test]
     fn lower_plan_empty_ops_succeeds() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
         let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
