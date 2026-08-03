@@ -1857,6 +1857,8 @@ fn safe_cause(cause: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::open_or_initialize_project;
 
@@ -2375,5 +2377,87 @@ mod tests {
                 .generation_uuid(),
             parent
         );
+    }
+
+    #[test]
+    fn malformed_generation_contracts_fail_before_staging_or_current_change() {
+        let root = project();
+        let before = fs::read(root.path().join(CURRENT_FILE)).unwrap();
+
+        let mut cases = Vec::new();
+        let mut no_capability = request(vec![]);
+        no_capability.capabilities.clear();
+        cases.push((no_capability, "at least one capability"));
+
+        let mut zero_capability = request(vec![]);
+        zero_capability.capabilities[0].capability_version = 0;
+        cases.push((zero_capability, "capability contract versions"));
+
+        let mut missing_graph = request(vec![]);
+        missing_graph.capabilities[0].capability_id = "knowledge".into();
+        cases.push((missing_graph, "graph capability version 1"));
+
+        let mut duplicate_capability = request(vec![]);
+        duplicate_capability
+            .capabilities
+            .push(duplicate_capability.capabilities[0].clone());
+        cases.push((duplicate_capability, "duplicate capability identity"));
+
+        let mut undeclared = request(vec![participant("knowledge", "events", b"event")]);
+        undeclared
+            .capabilities
+            .retain(|entry| entry.capability_id == "graph");
+        cases.push((undeclared, "participant capability is not declared"));
+
+        let mut version_mismatch = request(vec![participant("knowledge", "events", b"event")]);
+        version_mismatch.participants[0].capability_version = 2;
+        cases.push((version_mismatch, "version conflicts with declaration"));
+
+        let duplicate = participant("graph", "nodes", b"same");
+        cases.push((
+            request(vec![duplicate.clone(), duplicate]),
+            "duplicate participant identity",
+        ));
+
+        let mut zero_record = request(vec![participant("graph", "nodes", b"node")]);
+        zero_record.participants[0].record_version = 0;
+        cases.push((zero_record, "participant contract versions"));
+
+        let mut invalid_id = request(vec![participant("graph", "nodes", b"node")]);
+        invalid_id.participants[0].record_family_id = "../nodes".into();
+        cases.push((invalid_id, "machine ID"));
+
+        for (candidate, expected) in cases {
+            let error = stage_project_generation(root.path(), &candidate)
+                .err()
+                .expect("malformed request must fail");
+            assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(fs::read(root.path().join(CURRENT_FILE)).unwrap(), before);
+            assert!(!journal_path(root.path(), candidate.transaction_uuid).exists());
+        }
+    }
+
+    #[test]
+    fn publication_error_redacts_unsafe_cause_and_digest_parser_is_canonical() {
+        let transaction = Uuid::now_v7();
+        let generation = Uuid::now_v7();
+        let error = publication_error_from_parts(
+            transaction,
+            generation,
+            "STAGED",
+            false,
+            "bad/path:\nsecret=<value>!",
+        );
+        let text = error.to_string();
+        assert!(text.contains("phase=STAGED committed=false cause=badpathsecretvalue"));
+        assert!(!text.contains('/') && !text.contains('<') && !text.contains('!'));
+
+        let bytes = [0xabu8; 32];
+        let canonical = hex_digest(bytes);
+        assert_eq!(parse_digest(&canonical), Some(bytes));
+        for malformed in ["", "ab", &"A".repeat(64), &"g".repeat(64)] {
+            assert_eq!(parse_digest(malformed), None);
+        }
     }
 }

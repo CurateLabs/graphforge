@@ -375,7 +375,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--root", type=Path, required=True)
     result.add_argument("--ledger", type=Path, required=True)
-    result.add_argument("--core-floor", type=float, default=93.5)
+    result.add_argument("--core-floor", type=float, default=95.0)
     result.add_argument("--crate-floor", type=float, default=80.0)
     result.add_argument("--patch-floor", type=float, default=90.0)
     result.add_argument("--patch-base", default="origin/main")

@@ -180,10 +180,9 @@ matches the measured object.
 `build/coverage-rust/ledger.json` also binds the evidence to `HEAD`, the current
 `origin/main` merge base, and the LLVM toolchain. Missing, empty, malformed,
 stale, wrong-artifact, or wrong-SHA evidence fails before totals are accepted.
-Core has an interim 93.5% ratchet, every non-binding production crate has an
-independent 80% floor, and changed executable Rust lines have a 90% floor.
-Canonical issue #360 raises the aggregate ratchet to 95% after its remaining
-behavioral-test tranches land. Each Rust binding adapter also retains its
+Core has a 95% ratchet, every non-binding production crate has an independent
+80% floor, and changed executable Rust lines have a 90% floor. Each Rust
+binding adapter also retains its
 independent 80% floor; neither the merged workspace percentage nor a strong
 crate can average away a failed surface. Patch coverage uses executable lines
 from the core LCOV report, so documentation, tests, blank lines, and non-Rust

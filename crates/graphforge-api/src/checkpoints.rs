@@ -2592,6 +2592,45 @@ mod tests {
             view.index_adjacency().unwrap_err().code(),
             "GF_READ_ONLY_VIEW"
         );
+        for error in [
+            view.checkpoint(CheckpointRequest {
+                name: "Nested".into(),
+                description: None,
+                idempotency_key: operation(4),
+                actor_uuid: None,
+            })
+            .unwrap_err(),
+            view.delete_checkpoint(DeleteCheckpointRequest {
+                name: "Missing".into(),
+                idempotency_key: operation(5),
+                actor_uuid: None,
+            })
+            .unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "GF_READ_ONLY_VIEW");
+        }
+        assert_eq!(
+            view.bind_embedding_space_alias("alias", "space", false)
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.remove_embedding_space_alias("alias")
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.delete_embedding_space(Some("space"))
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.set_default_embedding_space(None).unwrap_err().code(),
+            "GF_READ_ONLY_VIEW"
+        );
         assert_eq!(
             view.execute("MATCH (n) RETURN count(n) AS total")
                 .unwrap()

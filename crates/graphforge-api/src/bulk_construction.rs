@@ -1856,6 +1856,113 @@ mod tests {
         OperationId(uuid(seed))
     }
 
+    #[test]
+    fn public_error_vocabulary_is_complete_and_stable() {
+        assert_eq!(BulkInputKind::Node.as_str(), "node");
+        assert_eq!(BulkInputKind::Edge.as_str(), "edge");
+
+        let expected = [
+            (BulkValidationReason::SchemaMismatch, "schema_mismatch"),
+            (BulkValidationReason::ReservedField, "reserved_field"),
+            (BulkValidationReason::DuplicateField, "duplicate_field"),
+            (
+                BulkValidationReason::UnsupportedPropertyType,
+                "unsupported_property_type",
+            ),
+            (
+                BulkValidationReason::InvalidIdentifier,
+                "invalid_identifier",
+            ),
+            (BulkValidationReason::InvalidUuid, "invalid_uuid"),
+            (BulkValidationReason::IdentityConflict, "identity_conflict"),
+            (BulkValidationReason::MissingEndpoint, "missing_endpoint"),
+            (
+                BulkValidationReason::UnknownOntologyType,
+                "unknown_ontology_type",
+            ),
+            (
+                BulkValidationReason::UnknownOntologyProperty,
+                "unknown_ontology_property",
+            ),
+            (
+                BulkValidationReason::PropertyTypeMismatch,
+                "property_type_mismatch",
+            ),
+            (
+                BulkValidationReason::NullabilityMismatch,
+                "nullability_mismatch",
+            ),
+            (
+                BulkValidationReason::GenerationMismatch,
+                "generation_mismatch",
+            ),
+            (BulkValidationReason::ProjectState, "project_state"),
+            (BulkValidationReason::OrdinalOverflow, "ordinal_overflow"),
+        ];
+        for (reason, spelling) in expected {
+            assert_eq!(reason.as_str(), spelling);
+        }
+
+        let error = BulkValidationError {
+            kind: BulkInputKind::Edge,
+            reason: BulkValidationReason::MissingEndpoint,
+            batch_index: Some(2),
+            row_ordinal: Some(7),
+            field: Some("source_uuid".into()),
+            message: "endpoint does not exist".into(),
+        };
+        assert_eq!(error.code(), "GF_BULK_VALIDATION");
+        assert_eq!(
+            error.to_string(),
+            "GF_BULK_VALIDATION(missing_endpoint): bulk edge batch 2 row 7 field \"source_uuid\": endpoint does not exist"
+        );
+    }
+
+    #[test]
+    fn property_value_normalization_covers_every_supported_arrow_scalar() {
+        let cases: Vec<(ArrayRef, PropValue)> = vec![
+            (
+                Arc::new(BooleanArray::from(vec![true])),
+                PropValue::Bool(true),
+            ),
+            (Arc::new(Int8Array::from(vec![-8])), PropValue::Int(-8)),
+            (Arc::new(Int16Array::from(vec![-16])), PropValue::Int(-16)),
+            (Arc::new(Int32Array::from(vec![-32])), PropValue::Int(-32)),
+            (Arc::new(Int64Array::from(vec![-64])), PropValue::Int(-64)),
+            (Arc::new(UInt8Array::from(vec![8])), PropValue::Int(8)),
+            (Arc::new(UInt16Array::from(vec![16])), PropValue::Int(16)),
+            (Arc::new(UInt32Array::from(vec![32])), PropValue::Int(32)),
+            (
+                Arc::new(Float32Array::from(vec![1.5])),
+                PropValue::Float(1.5),
+            ),
+            (
+                Arc::new(Float64Array::from(vec![2.5])),
+                PropValue::Float(2.5),
+            ),
+            (
+                Arc::new(StringArray::from(vec!["utf8"])),
+                PropValue::Str("utf8".into()),
+            ),
+            (
+                Arc::new(LargeStringArray::from(vec!["large-utf8"])),
+                PropValue::Str("large-utf8".into()),
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(property_value_at(array.as_ref(), 0).unwrap(), expected);
+        }
+
+        let nullable = StringArray::from(vec![None::<&str>]);
+        assert_eq!(property_value_at(&nullable, 0).unwrap(), PropValue::Null);
+
+        let unsupported = UInt64Array::from(vec![u64::MAX]);
+        assert_eq!(
+            property_value_at(&unsupported, 0).unwrap_err(),
+            "unsupported property type UInt64"
+        );
+    }
+
     fn node_batch(ids: &[Uuid], labels: &[&str], names: &[Option<&str>]) -> RecordBatch {
         let schema =
             bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, true)]).unwrap();

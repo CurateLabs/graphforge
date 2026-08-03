@@ -3043,4 +3043,107 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn checkpoint_text_and_identity_boundaries_are_canonical() {
+        for invalid in [
+            "",
+            " leading",
+            "trailing ",
+            ".",
+            "..",
+            "two  spaces",
+            "bad/name",
+        ] {
+            assert_eq!(validate_name(invalid).unwrap_err().code(), "GF_VALIDATION");
+        }
+        assert_eq!(validate_name("Résumé.v1").unwrap(), "Résumé.v1");
+        let combining_acute = char::from_u32(0x301).unwrap();
+        let decomposed = format!("Re{combining_acute}sume{combining_acute}");
+        assert_eq!(
+            validate_name(&decomposed).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        assert!(validate_description(None).is_ok());
+        assert!(validate_description(Some("bounded description")).is_ok());
+        assert_eq!(
+            validate_description(Some("contains\ncontrol"))
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            validate_description(Some(&"x".repeat(MAX_DESCRIPTION_BYTES + 1)))
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            validate_reason("  restored after audit  ").unwrap(),
+            "restored after audit"
+        );
+        assert_eq!(validate_reason("   ").unwrap_err().code(), "GF_VALIDATION");
+
+        let operation = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        let digest = create_request_digest_values(operation, "baseline", Some("desc"), Some(actor));
+        let checkpoint = checkpoint_uuid(operation, digest);
+        let encoded = hex(&digest);
+        assert_eq!(decode_digest(&encoded).unwrap(), digest);
+        assert!(
+            validate_record_identity(
+                checkpoint,
+                operation,
+                "baseline",
+                Some("desc"),
+                Some(actor),
+                &encoded,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_record_identity(
+                Uuid::nil(),
+                operation,
+                "baseline",
+                Some("desc"),
+                Some(actor),
+                &encoded,
+            )
+            .unwrap_err()
+            .code(),
+            "GF_CHECKPOINT_REGISTRY_CORRUPT"
+        );
+        for malformed in ["0", &"A".repeat(64), &"g".repeat(64)] {
+            assert_eq!(
+                decode_digest(malformed).unwrap_err().code(),
+                "GF_CHECKPOINT_REGISTRY_CORRUPT"
+            );
+        }
+        assert!(valid_private_name(
+            &format!(".registry.{operation}.json.next"),
+            operation,
+            "json"
+        ));
+        assert!(!valid_private_name(
+            ".registry.other.json.next",
+            operation,
+            "json"
+        ));
+        assert_eq!(
+            parse_uuid("not-a-uuid").unwrap_err().code(),
+            "GF_CHECKPOINT_REGISTRY_CORRUPT"
+        );
+    }
+
+    #[test]
+    fn empty_checkpoint_registry_has_stable_canonical_bytes() {
+        let registry = Registry::empty();
+        let first = registry.canonical_bytes().unwrap();
+        let second = registry.canonical_bytes().unwrap();
+        assert_eq!(first, second);
+        assert!(first.ends_with(b"\n"));
+        let decoded: Registry = serde_json::from_slice(&first).unwrap();
+        assert_eq!(decoded, registry);
+    }
 }

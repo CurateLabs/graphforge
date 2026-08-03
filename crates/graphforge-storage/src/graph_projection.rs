@@ -1043,8 +1043,12 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    use arrow::array::{FixedSizeBinaryBuilder, Int64Array, ListArray, UInt32Array, UInt64Array};
+    use arrow::array::{
+        ArrayRef, FixedSizeBinaryBuilder, Float32Array, Float64Array, Int64Array, ListArray,
+        StringArray, Time64MicrosecondArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    };
     use graphforge_core::uuid::Uuid;
     use graphforge_core::{OntologyMode, TypeId};
     use graphforge_ir::{IrLiteral, RuntimeCatalog};
@@ -1454,6 +1458,108 @@ mod tests {
         assert!(matches!(error, GfError::Validation(_)));
         assert!(error.to_string().contains("UUID column contains null"));
         assert!(!target.path().join("properties/Person.parquet").exists());
+    }
+
+    #[test]
+    fn canonical_graph_encoding_normalizes_floats_timezones_and_nested_types() {
+        assert_eq!(normalize_f32(f32::NAN), 0x7fc0_0000);
+        assert_eq!(normalize_f32(-0.0), 0);
+        assert_eq!(normalize_f64(f64::NAN), 0x7ff8_0000_0000_0000);
+        assert_eq!(normalize_f64(-0.0), 0);
+        assert_eq!(time_unit_tag(TimeUnit::Second), 0);
+        assert_eq!(time_unit_tag(TimeUnit::Millisecond), 1);
+        assert_eq!(time_unit_tag(TimeUnit::Microsecond), 2);
+        assert_eq!(time_unit_tag(TimeUnit::Nanosecond), 3);
+        for timezone in [
+            None,
+            Some("UTC"),
+            Some("Etc/UTC"),
+            Some("Z"),
+            Some("+00:00"),
+        ] {
+            assert!(validate_timezone(timezone).is_ok());
+        }
+        assert_eq!(
+            validate_timezone(Some("America/Denver"))
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let supported = [
+            DataType::Boolean,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::FixedSizeBinary(16),
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            DataType::Time64(TimeUnit::Nanosecond),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::UInt64, false)), 2),
+            DataType::Struct(vec![Field::new("name", DataType::Utf8, false)].into()),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        ];
+        for data_type in supported {
+            let mut writer = CanonicalWriter::new();
+            encode_type(&mut writer, &data_type).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_type(&mut writer, &DataType::Date32)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![TS]));
+        assert_eq!(
+            timestamp_value(&micros, TimeUnit::Microsecond, 0).unwrap(),
+            TS
+        );
+        let time: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![123_i64]));
+        assert_eq!(time64_value(&time, TimeUnit::Microsecond, 0).unwrap(), 123);
+        assert_eq!(
+            time64_value(&time, TimeUnit::Second, 0).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn canonical_value_encoding_rejects_type_mismatch_and_nonnullable_null() {
+        let floats: ArrayRef = Arc::new(Float32Array::from(vec![Some(-0.0), Some(f32::NAN)]));
+        let doubles: ArrayRef = Arc::new(Float64Array::from(vec![Some(-0.0), Some(f64::NAN)]));
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("value"), None]));
+        let mut writer = CanonicalWriter::new();
+        encode_present_value(&mut writer, &DataType::Float32, &floats, 0).unwrap();
+        encode_present_value(&mut writer, &DataType::Float32, &floats, 1).unwrap();
+        encode_present_value(&mut writer, &DataType::Float64, &doubles, 0).unwrap();
+        encode_present_value(&mut writer, &DataType::Float64, &doubles, 1).unwrap();
+        encode_value(&mut writer, &DataType::Utf8, &strings, 0, false).unwrap();
+        encode_value(&mut writer, &DataType::Utf8, &strings, 1, true).unwrap();
+        assert!(!writer.finish().is_empty());
+
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_value(&mut writer, &DataType::Utf8, &strings, 1, false)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_present_value(&mut writer, &DataType::UInt64, &strings, 0)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
     }
 
     fn id_map(batch: &RecordBatch, uuid_name: &str, id_name: &str) -> BTreeMap<[u8; 16], u64> {
