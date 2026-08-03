@@ -8,6 +8,9 @@ LEDGER="${COVERAGE_RUST_LEDGER:-$ROOT/build/coverage-rust/ledger.json}"
 python3 "$ROOT/scripts/coverage_rust_ledger.py" \
   --root "$ROOT" \
   --ledger "$LEDGER" \
-  --core-floor "${COVERAGE_FAIL_UNDER_RUST:-85}" \
+  --core-floor "${COVERAGE_FAIL_UNDER_RUST:-93.5}" \
+  --crate-floor "${COVERAGE_FAIL_UNDER_RUST_CRATE:-80}" \
+  --patch-floor "${COVERAGE_FAIL_UNDER_RUST_PATCH:-90}" \
+  --patch-base "${COVERAGE_RUST_PATCH_BASE:-origin/main}" \
   --python-floor "${COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER:-80}" \
   --node-floor "${COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER:-80}"

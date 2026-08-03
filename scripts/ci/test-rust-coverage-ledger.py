@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 from types import SimpleNamespace
 
@@ -35,6 +36,32 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-rust-coverage-ledger-") as directory:
         temp = Path(directory)
         expect_error("failed to resolve git HEAD", lambda: ledger_module.git_head(temp))
+        repository = temp / "repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+        tracked = repository / "tracked.txt"
+        tracked.write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=repository, check=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=GraphForge Test",
+                "-c",
+                "user.email=graphforge-test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            cwd=repository,
+            check=True,
+        )
+        ledger_module.validate_source_tree_clean(repository)
+        tracked.write_text("dirty\n", encoding="utf-8")
+        expect_error(
+            "uncommitted changes",
+            lambda: ledger_module.validate_source_tree_clean(repository),
+        )
         artifact = temp / "adapter.so"
         runtime = temp / "loaded.so"
         profile = temp / "adapter.profraw"
@@ -106,19 +133,39 @@ def main() -> None:
 
         args = SimpleNamespace(
             root=ROOT,
+            patch_base="HEAD",
             core_floor=85.0,
+            crate_floor=80.0,
+            patch_floor=90.0,
             python_floor=80.0,
             node_floor=80.0,
         )
         valid_ledger = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_sha": head,
+            "patch_base_sha": head,
             "surfaces": {
                 name: {"covered_lines": 90, "measured_lines": 100, "line_percent": 90.0}
                 for name in ("core", "python_adapter", "node_adapter", "workspace")
             },
+            "crates": {
+                crate: {
+                    "covered_lines": 90,
+                    "measured_lines": 100,
+                    "line_percent": 90.0,
+                }
+                for crate in ledger_module.expected_production_crates(ROOT)
+            },
+            "patch": {"covered_lines": 9, "measured_lines": 10, "line_percent": 90.0},
         }
         ledger_module.validate_floors(valid_ledger, args)
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["patch_base_sha"] = "0" * 40
+        expect_error(
+            "stale for the current merge base",
+            lambda: ledger_module.validate_floors(mutated, args),
+        )
 
         mutated = json.loads(json.dumps(valid_ledger))
         mutated["surfaces"]["python_adapter"]["line_percent"] = 79.99
@@ -142,6 +189,38 @@ def main() -> None:
         mutated = json.loads(json.dumps(valid_ledger))
         mutated["surfaces"]["core"].pop("covered_lines")
         expect_error("malformed core", lambda: ledger_module.validate_floors(mutated, args))
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["crates"]["graphforge-core"]["line_percent"] = 79.99
+        expect_error(
+            "graphforge-core Rust coverage below",
+            lambda: ledger_module.validate_floors(mutated, args),
+        )
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["patch"]["line_percent"] = 89.99
+        expect_error(
+            "changed Rust coverage below", lambda: ledger_module.validate_floors(mutated, args)
+        )
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated.pop("crates")
+        expect_error("missing per-crate", lambda: ledger_module.validate_floors(mutated, args))
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["crates"].pop(next(iter(mutated["crates"])))
+        expect_error(
+            "crate inventory mismatch",
+            lambda: ledger_module.validate_floors(mutated, args),
+        )
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["patch"]["measured_lines"] = "ten"
+        expect_error("malformed patch", lambda: ledger_module.validate_floors(mutated, args))
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["patch"]["line_percent"] = float("nan")
+        expect_error("malformed patch", lambda: ledger_module.validate_floors(mutated, args))
 
     print("rust coverage ledger mutation sentinels: ok")
 

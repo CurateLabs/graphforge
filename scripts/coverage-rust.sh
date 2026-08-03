@@ -19,7 +19,10 @@ SUMMARY="$OUT_DIR/summary.txt"
 COVERAGE_RUST_ARGS="${COVERAGE_RUST_ARGS:---workspace}"
 PYTHON_FLOOR="${COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER:-80}"
 NODE_FLOOR="${COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER:-80}"
-CORE_FLOOR="${COVERAGE_FAIL_UNDER_RUST:-85}"
+CORE_FLOOR="${COVERAGE_FAIL_UNDER_RUST:-93.5}"
+CRATE_FLOOR="${COVERAGE_FAIL_UNDER_RUST_CRATE:-80}"
+PATCH_FLOOR="${COVERAGE_FAIL_UNDER_RUST_PATCH:-90}"
+PATCH_BASE="${COVERAGE_RUST_PATCH_BASE:-origin/main}"
 
 if ! cargo llvm-cov --version >/dev/null 2>&1; then
   echo "Rust coverage evidence error: cargo-llvm-cov is not installed" >&2
@@ -187,6 +190,9 @@ python3 scripts/coverage_rust_ledger.py \
   --workspace-lcov "$WORKSPACE_LCOV" \
   --evidence "$EVIDENCE" \
   --core-floor "$CORE_FLOOR" \
+  --crate-floor "$CRATE_FLOOR" \
+  --patch-floor "$PATCH_FLOOR" \
+  --patch-base "$PATCH_BASE" \
   --python-floor "$PYTHON_FLOOR" \
   --node-floor "$NODE_FLOOR" | tee "$SUMMARY"
 
