@@ -99,10 +99,7 @@ export LLVM_PROFILE_FILE="$PROFILE_DIR/python-%p-%10m.profraw"
 for test_file in crates/graphforge-bindings-py/tests/*.py; do
   CARGO_TARGET_DIR="$CORE_TARGET_DIR" uv run --no-sync python "$test_file"
 done
-# The publication dry-run invokes pnpm publish hooks that replace the measured
-# addon; #365 tracks separating that integration check from adapter acceptance.
 uv run --no-sync pytest tests/unit tests/integration tests/features \
-  --ignore=tests/unit/test_publish_dry_run.py \
   -n "${PYTEST_WORKERS:-4}" --tb=short
 
 echo "━━━ Node native acceptance ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
