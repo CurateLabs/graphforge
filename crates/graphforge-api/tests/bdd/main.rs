@@ -37,6 +37,8 @@ pub struct GraphForgeWorld {
     pub ontology_path: Option<std::path::PathBuf>,
     /// Last error returned by a When step.
     pub last_error: Option<String>,
+    /// Stable public code for the last typed Rust facade error.
+    pub last_error_code: Option<&'static str>,
     /// Last interim `RecordBatch` returned by a stubbed When step (schema()/etc.).
     pub last_result: Option<graphforge_api::RecordBatch>,
     /// Last Arrow-backed result returned by `execute()`.
@@ -77,6 +79,9 @@ async fn main() {
     // issue-backed exclusion inventory and never contribute to passing totals.
     let api_results = std::sync::Arc::new(std::sync::Mutex::new(ScenarioOutcomes::default()));
     let api_only = std::env::var("API_ONLY").ok();
+    if let Some(needle) = &api_only {
+        eprintln!("API_ONLY subset: only scenarios matching {needle:?} will be evaluated");
+    }
     GraphForgeWorld::cucumber()
         .with_writer(cucumber::writer::Tee::new(
             cucumber::writer::Basic::stdout().summarized(),
@@ -214,6 +219,7 @@ async fn main() {
     );
 
     let api_failures = non_passing_scenario_keys(&timing_records, Suite::Api);
+    eprintln!("API BDD required: {api_passing} passed, {api_failed} failed, {api_skipped} skipped");
     assert!(
         api_failures.is_empty(),
         "API BDD correctness failure(s):\n{}",
@@ -223,8 +229,6 @@ async fn main() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    eprintln!("API BDD required: {api_passing} passed, {api_failed} failed, {api_skipped} skipped");
-
     let actual = outcomes.passing;
 
     // `TCK_ONLY` subset run (local iteration): report the subset's pass count and

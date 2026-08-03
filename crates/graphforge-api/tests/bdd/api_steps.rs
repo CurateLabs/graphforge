@@ -17,6 +17,7 @@ async fn given_empty_graph(world: &mut GraphForgeWorld) {
     world.nodes.clear();
     world.index_calls = 0;
     world.last_error = None;
+    world.last_error_code = None;
     world.last_result = None;
     world.last_algorithm_result = None;
 }
@@ -532,8 +533,15 @@ async fn when_analyze(world: &mut GraphForgeWorld, algorithm: String) {
 async fn when_execute(world: &mut GraphForgeWorld, query: String) {
     if let Some(forge) = &world.forge {
         match forge.execute(&query) {
-            Ok(r) => world.last_exec = Some(r),
-            Err(e) => world.last_error = Some(e.to_string()),
+            Ok(r) => {
+                world.last_exec = Some(r);
+                world.last_error = None;
+                world.last_error_code = None;
+            }
+            Err(error) => {
+                world.last_error_code = Some(error.code());
+                world.last_error = Some(error.to_string());
+            }
         }
     }
 }
@@ -1086,8 +1094,14 @@ async fn when_load_ontology(world: &mut GraphForgeWorld) {
         .expect("ontology fixture forge")
         .load_ontology(&path)
     {
-        Ok(()) => world.last_error = None,
-        Err(error) => world.last_error = Some(error.to_string()),
+        Ok(()) => {
+            world.last_error = None;
+            world.last_error_code = None;
+        }
+        Err(error) => {
+            world.last_error_code = Some(error.code());
+            world.last_error = Some(error.to_string());
+        }
     }
 }
 
@@ -1243,17 +1257,21 @@ fn result_batches(world: &GraphForgeWorld) -> Vec<&arrow::record_batch::RecordBa
 }
 
 fn result_batch(world: &GraphForgeWorld) -> &arrow::record_batch::RecordBatch {
-    result_batches(world)
-        .into_iter()
-        .next()
+    let batches = result_batches(world);
+    batches
+        .iter()
+        .find(|batch| batch.num_rows() > 0)
+        .or_else(|| batches.first())
+        .copied()
         .expect("result batch")
 }
 
 #[then(regex = r#"^a ParseError is raised$"#)]
 async fn then_parse_error(world: &mut GraphForgeWorld) {
     let error = world.last_error.as_deref().expect("parse error");
-    assert!(
-        error.to_ascii_lowercase().contains("parse"),
+    assert_eq!(
+        world.last_error_code,
+        Some("GF_PARSE"),
         "expected parse error, got {error}"
     );
 }
@@ -1262,10 +1280,13 @@ async fn then_parse_error(world: &mut GraphForgeWorld) {
 async fn then_has_span(world: &mut GraphForgeWorld) {
     let error = world.last_error.as_deref().expect("parse error");
     let lower = error.to_ascii_lowercase();
-    let named_position = ["line", "column", "offset"]
-        .iter()
-        .any(|name| lower.contains(name))
-        && lower.chars().any(|value| value.is_ascii_digit());
+    let named_position = ["line", "column", "offset"].iter().any(|name| {
+        lower.match_indices(name).any(|(index, _)| {
+            lower[index + name.len()..]
+                .trim_start_matches(|value: char| value == ' ' || value == ':' || value == '=')
+                .starts_with(|value: char| value.is_ascii_digit())
+        })
+    });
     let numeric_range = lower.split("at ").skip(1).any(|suffix| {
         let token = suffix
             .split_whitespace()
@@ -1285,8 +1306,9 @@ async fn then_has_span(world: &mut GraphForgeWorld) {
 #[then(regex = r#"^an ExecutionError is raised$"#)]
 async fn then_execution_error(world: &mut GraphForgeWorld) {
     let error = world.last_error.as_deref().expect("execution error");
-    assert!(
-        error.to_ascii_lowercase().contains("execution"),
+    assert_eq!(
+        world.last_error_code,
+        Some("GF_EXECUTION"),
         "expected execution error, got {error}"
     );
 }
@@ -1326,9 +1348,11 @@ async fn then_validation_error(world: &mut GraphForgeWorld) {
 
 #[then(regex = r#"^an OntologyError is raised$"#)]
 async fn then_ontology_error(world: &mut GraphForgeWorld) {
-    assert!(
-        world.last_error.is_some(),
-        "expected an error but none was recorded"
+    assert_eq!(
+        world.last_error_code,
+        Some("GF_ONTOLOGY"),
+        "expected ontology error, got {:?}",
+        world.last_error
     );
 }
 
@@ -1644,9 +1668,17 @@ fn community_by_uuid(world: &GraphForgeWorld) -> std::collections::HashMap<Vec<u
         .collect()
 }
 
-#[then(regex = r#"^no explicit index call was made before find$"#)]
-async fn then_no_index_call(_world: &mut GraphForgeWorld) {
-    assert_eq!(_world.index_calls, 0, "an explicit index call was recorded");
+#[then(regex = r#"^no index call was made before find$"#)]
+async fn then_no_index_call(world: &mut GraphForgeWorld) {
+    assert_eq!(world.index_calls, 0, "an explicit index call was recorded");
+    let rows = result_batches(world)
+        .iter()
+        .map(|batch| batch.num_rows())
+        .sum::<usize>();
+    assert!(
+        rows > 0,
+        "find must return matches without an explicit index call"
+    );
 }
 
 #[then(
@@ -1661,6 +1693,7 @@ async fn then_ids_addressable(world: &mut GraphForgeWorld) {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .expect("fixed-size UUID column");
     assert!(!ids.is_empty(), "find must return at least one node");
+    assert_eq!(ids.null_count(), 0, "find returned a null node_uuid");
     for value in ids.iter().flatten() {
         let bytes: [u8; 16] = value.try_into().expect("16-byte UUID");
         let params = std::collections::HashMap::from([(
@@ -1697,6 +1730,7 @@ async fn then_all_rows_label(world: &mut GraphForgeWorld, label: String) {
         .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
         .expect("fixed-size UUID column");
     assert!(!ids.is_empty(), "find must return at least one node");
+    assert_eq!(ids.null_count(), 0, "find returned a null node_uuid");
     for value in ids.iter().flatten() {
         let bytes: [u8; 16] = value.try_into().expect("16-byte UUID");
         let params = std::collections::HashMap::from([(

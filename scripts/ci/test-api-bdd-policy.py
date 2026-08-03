@@ -69,6 +69,13 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         path.write_text(json.dumps(inventory))
         self.assert_rejected("must be an object")
 
+    def test_null_inventory_languages_are_rejected_cleanly(self) -> None:
+        path = self.root / "tests/contracts/api-bdd-exclusions.json"
+        inventory = json.loads(path.read_text())
+        inventory["exclusions"][0]["languages"] = None
+        path.write_text(json.dumps(inventory))
+        self.assert_rejected("invalid languages []")
+
     def test_issue_tag_must_match_inventory(self) -> None:
         path = self.root / "tests/features/api/edge_cases.feature"
         path.write_text(path.read_text().replace("@issue-352", "@issue-999", 1))

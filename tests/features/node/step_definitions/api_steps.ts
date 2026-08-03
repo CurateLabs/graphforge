@@ -74,7 +74,7 @@ class GraphForgeWorld extends World implements GFWorld {
   error: Error | null = null;
   nodes: Record<string, any> = {};
   edges: any[] = [];
-  extra: Record<string, unknown> = {};
+  extra: Record<string, unknown> = { index_called: false };
   tmpDir: string | null = null;
 
   constructor(options: IWorldOptions) {
@@ -221,7 +221,7 @@ Before(function (this: GraphForgeWorld) {
   this.error = null;
   this.nodes = {};
   this.edges = [];
-  this.extra = {};
+  this.extra = { index_called: false };
   this.tmpDir = null;
 });
 
@@ -1028,7 +1028,8 @@ When("I call clear", function (this: GraphForgeWorld) {
 });
 
 When("I open a graph at that path", function (this: GraphForgeWorld) {
-  const p = (this.extra["path"] as string) || "/nonexistent/path";
+  const p = this.extra["path"] as string | undefined;
+  if (!p) throw new Error("no path fixture was set before opening a graph");
   _catch(this, () => {
     const forge = new GraphForge(p);
     this.forge = forge;
@@ -1434,16 +1435,15 @@ Then("the 2 isolated nodes share a different community_id", function (this: Grap
   }
 });
 
-// Used as both Given (setup) and Then (assertion) in find.feature
-Given("no explicit index call was made before find", function (this: GraphForgeWorld) {
+Then("no index call was made before find", function (this: GraphForgeWorld) {
   if (!("index_called" in this.extra)) {
-    // Given context — initialise the flag
-    this.extra["index_called"] = false;
-  } else {
-    // Then context — assert
-    if (this.extra["index_called"]) {
-      throw new Error("Index was called before find");
-    }
+    throw new Error("index tracking was never initialised for this scenario");
+  }
+  if (this.extra["index_called"]) {
+    throw new Error("Index was called before find");
+  }
+  if (resultTable(this).numRows < 1) {
+    throw new Error("find returned no matches without an explicit index call");
   }
 });
 
@@ -1520,7 +1520,9 @@ Then(
   /^the result does not contain a row for "([^"]*)"$/,
   function (this: GraphForgeWorld, name: string) {
     const table = resultTable(this);
-    const names = [...(table.getChild("name")?.toArray() ?? [])].map(String);
+    const column = table.getChild("name");
+    if (!column) throw new Error('result is missing the "name" column');
+    const names = [...column.toArray()].map(String);
     if (names.includes(name)) throw new Error(`result unexpectedly included row for ${name}`);
   },
 );

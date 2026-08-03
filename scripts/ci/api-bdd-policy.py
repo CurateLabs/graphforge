@@ -132,7 +132,8 @@ def validate(root: Path, *, check_issues: bool = False) -> tuple[dict, list[str]
             errors.append(f"{key}: issue must be a positive integer")
             continue
         issue_numbers.add(issue)
-        languages = set(entry.get("languages", []))
+        raw_languages = entry.get("languages")
+        languages = set(raw_languages) if isinstance(raw_languages, list) else set()
         if not languages or not languages <= LANGUAGES:
             errors.append(f"{key}: invalid languages {sorted(languages)}")
         matching_tags = set(PRODUCT_TAGS) & set(scenario.tags)

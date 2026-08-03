@@ -5,6 +5,7 @@ Required public API behavior runs strictly and fails closed.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 import uuid
 
@@ -26,6 +27,16 @@ from graphforge.exceptions import (
     StorageError,
     ValidationError,
 )
+
+
+def _uuid7() -> str:
+    """Return a distinct RFC 9562 UUIDv7 on Python versions without uuid.uuid7()."""
+    raw = bytearray(uuid.uuid4().bytes)
+    raw[:6] = int(time.time_ns() // 1_000_000).to_bytes(6, "big")
+    raw[6] = (raw[6] & 0x0F) | 0x70
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(raw)))
+
 
 # ---------------------------------------------------------------------------
 # Shared context holder
@@ -53,7 +64,7 @@ def ctx():
     c = _Ctx()
     c.nodes = {}
     c.edges = []
-    c.extra = {}
+    c.extra = {"index_called": False}
     yield c
     if c.forge is not None:
         try:
@@ -176,7 +187,7 @@ def given_paper_node(title):
     c = _Ctx()
     c.nodes = {}
     c.edges = []
-    c.extra = {}
+    c.extra = {"index_called": False}
     c.forge = GraphForge()
     h = c.forge.add_node("Paper", title=title)
     c.nodes[title] = h
@@ -653,11 +664,6 @@ def given_store_embedding(ctx):
     ctx.extra["embedding"] = np.ones(128, dtype=float)
 
 
-@given("no explicit index call was made before find")
-def given_no_index_call(ctx):
-    ctx.extra["index_called"] = False
-
-
 # ---------------------------------------------------------------------------
 # WHEN steps
 # ---------------------------------------------------------------------------
@@ -803,7 +809,7 @@ def when_bulk_add_edges(ctx):
         ctx.forge.add_edges,
         "KNOWS",
         records,
-        operation_uuid=nodes[0].uuid,
+        operation_uuid=_uuid7(),
         src="src_id",
         dst="dst_id",
     )
@@ -1327,9 +1333,12 @@ def then_scores_differ(ctx):
         raise AssertionError("required public API contract was not satisfied")
     if d.num_rows == 0:
         raise AssertionError("required public API contract was not satisfied")
-    # Compare score columns
-    if d.equals(u):
-        raise AssertionError("required public API contract was not satisfied")
+    if "score" not in d.schema.names or "score" not in u.schema.names:
+        raise AssertionError('rank result is missing the "score" column')
+    directed = d.column("score").to_pylist()
+    undirected = u.column("score").to_pylist()
+    if directed == undirected:
+        raise AssertionError(f"directed and undirected scores were identical: {directed!r}")
 
 
 @then("the 2 connected nodes share the same community_id")
@@ -1359,9 +1368,12 @@ def then_isolated_different_community(ctx):
     assert values["Alice"] != values["Carol"]
 
 
-@then("no explicit index call was made before find")
+@then("no index call was made before find")
 def then_no_index_call(ctx):
-    assert not ctx.extra.get("index_called", False)
+    if "index_called" not in ctx.extra:
+        raise AssertionError("index tracking was never initialized for this scenario")
+    assert not ctx.extra["index_called"]
+    assert ctx.result.num_rows > 0, "find returned no matches without an explicit index call"
 
 
 @then('for each result row the id is valid in execute "MATCH (n) WHERE n.node_uuid = $id RETURN n"')

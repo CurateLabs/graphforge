@@ -5,7 +5,7 @@ Feature: Find API
     Given a graph with a Paper node titled "Graph Neural Networks"
     When I find "graph neural networks" in label "Paper"
     Then the result is an Arrow Table
-    And no explicit index call was made before find
+    And no index call was made before find
 
   Scenario: find by text returns score and matched_on columns
     Given a graph with a Paper node titled "Graph Neural Networks"

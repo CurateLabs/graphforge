@@ -6,13 +6,14 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[2]
-PYTHON = Path(os.environ.get("PYTHON", sys.executable))
+PYTHON = os.environ.get("PYTHON", sys.executable)
 
 MUTATIONS = {
     "wrong_row_count": (
@@ -117,7 +118,7 @@ def run_mutation(name: str, feature: str, expected_failure: str) -> None:
 
 
 def main() -> int:
-    if not PYTHON.exists():
+    if shutil.which(PYTHON) is None:
         print(f"Python runtime not found: {PYTHON}", file=sys.stderr)
         return 2
     for name, (feature, expected_failure) in MUTATIONS.items():
