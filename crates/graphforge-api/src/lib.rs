@@ -3289,6 +3289,47 @@ mod tests {
     use arrow::datatypes::DataType;
     use std::collections::HashSet;
 
+    #[test]
+    fn facade_debug_empty_batch_and_procedure_width_contracts_are_exact() {
+        let empty = RecordBatch::empty(vec!["node_uuid".into(), "name".into()]);
+        assert_eq!(empty.schema, ["node_uuid", "name"]);
+        assert_eq!(empty.columns, [Vec::<String>::new(), Vec::new()]);
+
+        let graph = GraphForge::new(None).unwrap();
+        let debug = format!("{graph:?}");
+        for field in [
+            "GraphForge",
+            "identity",
+            "path",
+            "generation_uuid",
+            "dir",
+            "ontology_mode",
+            "write_options",
+            "has_ontology",
+        ] {
+            assert!(debug.contains(field), "missing {field:?} in {debug}");
+        }
+        assert!(debug.contains("has_ontology: false"));
+
+        let error = graph
+            .register_procedure(ProcedureDefinition {
+                name: "test.bad_width".into(),
+                inputs: vec![ProcedureField {
+                    name: "input".into(),
+                    type_name: "STRING".into(),
+                    nullable: false,
+                }],
+                outputs: vec![],
+                rows: vec![vec![]],
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert_eq!(
+            error.to_string(),
+            "validation error: procedure test.bad_width expects 1 fixture columns, found 0"
+        );
+    }
+
     fn degree_options(directed: bool, via: Option<&str>) -> RankOptions {
         RankOptions {
             by: RankAlgorithm::Degree,

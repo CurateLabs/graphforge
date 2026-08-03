@@ -2526,6 +2526,8 @@ mod tests {
     fn checkpoint_view_stays_pinned_and_rejects_writes() {
         let directory = tempdir().unwrap();
         let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let source = graph.add_node("Endpoint", &HashMap::new()).unwrap();
+        let target = graph.add_node("Endpoint", &HashMap::new()).unwrap();
         graph.execute("CREATE (:Person {name: 'before'})").unwrap();
         graph
             .checkpoint(CheckpointRequest {
@@ -2537,7 +2539,7 @@ mod tests {
             .unwrap();
         graph.execute("CREATE (:Person {name: 'after'})").unwrap();
 
-        let view = graph.open_checkpoint("Before").unwrap();
+        let mut view = graph.open_checkpoint("Before").unwrap();
         let result = view
             .execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
             .unwrap();
@@ -2589,7 +2591,25 @@ mod tests {
             "GF_READ_ONLY_VIEW"
         );
         assert_eq!(
+            view.add_edge(&source, "LINK", &target, &HashMap::new())
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
             view.index_adjacency().unwrap_err().code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.index_search(
+                "Person",
+                crate::SearchIndexOptions::Text {
+                    properties: Some(vec!["name".into()]),
+                    rebuild: false,
+                },
+            )
+            .unwrap_err()
+            .code(),
             "GF_READ_ONLY_VIEW"
         );
         for error in [
@@ -2629,6 +2649,30 @@ mod tests {
         );
         assert_eq!(
             view.set_default_embedding_space(None).unwrap_err().code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.adopt_ontology(crate::AdoptOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: operation(6),
+                    actor_uuid: None,
+                },
+                path: directory.path().join("unused.yaml"),
+                mode: OntologyMode::Strict,
+            })
+            .unwrap_err()
+            .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.clear_ontology(crate::ClearOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: operation(7),
+                    actor_uuid: None,
+                },
+            })
+            .unwrap_err()
+            .code(),
             "GF_READ_ONLY_VIEW"
         );
         assert_eq!(

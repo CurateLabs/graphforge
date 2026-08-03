@@ -814,6 +814,7 @@ fn project_error(code: ProjectErrorCode, message: impl Into<String>) -> GfError 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::process::Command;
 
     use super::*;
@@ -1192,6 +1193,81 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn file_import_round_trip_reopens_complete_generation() {
+        let source = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(source.path()).unwrap();
+        let capabilities = supported(&generation);
+        let envelope_path = source.path().join("snapshot.gfproject");
+        let exported = export_portable_project(
+            &generation,
+            &envelope_path,
+            PortableProjectLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(exported.generation_uuid, generation.generation_uuid());
+
+        let target = tempfile::tempdir().unwrap();
+        let target_path = target.path().join("imported");
+        let transaction_uuid = Uuid::now_v7();
+        let generation_uuid = Uuid::now_v7();
+        let first = import_portable_project_file(
+            &envelope_path,
+            &target_path,
+            transaction_uuid,
+            generation_uuid,
+            &capabilities,
+            PortableProjectLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(first.envelope_sha256, exported.envelope_sha256);
+        assert_eq!(first.source_generation_uuid, generation.generation_uuid());
+        assert_eq!(first.publication.generation_uuid, generation_uuid);
+        assert!(!first.publication.idempotent_replay);
+        drop(generation);
+
+        let reopened = resolve_project_generation(&target_path).unwrap();
+        assert_eq!(reopened.generation_uuid(), generation_uuid);
+        reopened.validate_complete_participant_inventory().unwrap();
+        let snapshots = reopened.participant_snapshots().unwrap();
+        assert!(!snapshots.is_empty());
+    }
+
+    #[test]
+    fn file_import_rejects_nonregular_and_oversized_sources_before_target_creation() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let error = import_portable_project_file(
+            root.path(),
+            &target,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &[],
+            PortableProjectLimits::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(!target.exists());
+
+        let source = root.path().join("oversized.gfproject");
+        fs::write(&source, b"too large").unwrap();
+        let limits = PortableProjectLimits {
+            max_envelope_bytes: 1,
+            ..PortableProjectLimits::default()
+        };
+        let error = import_portable_project_file(
+            &source,
+            &target,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &[],
+            limits,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_RESOURCE_LIMIT");
         assert!(!target.exists());
     }
 }

@@ -2526,6 +2526,13 @@ mod tests {
     use std::sync::mpsc;
     use tempfile::tempdir;
 
+    fn assert_validation_message(result: Result<(), GfError>, expected: &str) {
+        match result.unwrap_err() {
+            GfError::Validation(message) => assert_eq!(message, expected),
+            error => panic!("expected validation error, got {error}"),
+        }
+    }
+
     fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
         let files = [
             SkillBundleFile {
@@ -2549,6 +2556,308 @@ mod tests {
         }))
         .unwrap();
         (manifest, files)
+    }
+
+    #[test]
+    fn definition_documents_reject_every_malformed_contract_shape() {
+        assert_validation_message(
+            validate_definition_document(&[0xff], "json"),
+            "definition file must be canonical UTF-8 text",
+        );
+        assert_validation_message(
+            validate_definition_document(b"{\0}", "json"),
+            "definition file contains binary data",
+        );
+        assert_validation_message(
+            validate_definition_document(b"{", "json"),
+            "JSON definition is malformed",
+        );
+        assert_validation_message(
+            validate_definition_document(b"[]", "json"),
+            "JSON definition must be an object",
+        );
+        assert_validation_message(
+            validate_definition_document(b"[", "yaml"),
+            "YAML definition is malformed",
+        );
+        assert_validation_message(
+            validate_definition_document(b"value", "yml"),
+            "YAML definition must be a mapping",
+        );
+        assert_validation_message(
+            validate_definition_document(b" \n\t", "cypher"),
+            "Cypher migration definition is empty",
+        );
+        assert_validation_message(
+            validate_definition_document(b"{}", "toml"),
+            "unregistered definition file type",
+        );
+
+        assert!(validate_definition_document(b"{}", "json").is_ok());
+        assert!(validate_definition_document(b"key: value", "yaml").is_ok());
+        assert!(validate_definition_document(b"RETURN 1", "cypher").is_ok());
+    }
+
+    #[test]
+    fn definition_tree_enforces_containment_types_and_size() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("nested/valid.JSON"), "{}").unwrap();
+        let digest = digest_definition_tree(root.path(), DefinitionKind::Schemas).unwrap();
+        assert_eq!(digest.len(), 64);
+
+        fs::write(root.path().join("missing-extension"), "{}").unwrap();
+        assert_eq!(
+            digest_definition_tree(root.path(), DefinitionKind::Schemas)
+                .unwrap_err()
+                .to_string(),
+            "validation error: definition files require a registered extension"
+        );
+        fs::remove_file(root.path().join("missing-extension")).unwrap();
+
+        fs::write(root.path().join("unsupported.cypher"), "RETURN 1").unwrap();
+        assert_eq!(
+            digest_definition_tree(root.path(), DefinitionKind::Ontology)
+                .unwrap_err()
+                .to_string(),
+            "validation error: ontology definitions do not allow .cypher files"
+        );
+        assert!(digest_definition_tree(root.path(), DefinitionKind::Migrations).is_ok());
+        fs::remove_file(root.path().join("unsupported.cypher")).unwrap();
+
+        fs::write(
+            root.path().join("oversized.json"),
+            vec![b' '; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            digest_definition_tree(root.path(), DefinitionKind::Schemas)
+                .unwrap_err()
+                .to_string(),
+            "validation error: definition file exceeds byte bound"
+        );
+
+        #[cfg(unix)]
+        {
+            fs::remove_file(root.path().join("oversized.json")).unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("nested/valid.JSON"),
+                root.path().join("linked.json"),
+            )
+            .unwrap();
+            assert_eq!(
+                digest_definition_tree(root.path(), DefinitionKind::Schemas)
+                    .unwrap_err()
+                    .to_string(),
+                "validation error: symlinks are not allowed in definitions"
+            );
+        }
+    }
+
+    #[test]
+    fn repository_scalar_contracts_cover_boundaries_and_credentials() {
+        for valid in ["a", "a0", "alpha-beta", "alpha_beta"] {
+            assert!(stable_id(valid).is_ok(), "{valid}");
+        }
+        for invalid in ["", "A", "0alpha", "alpha-", "alpha__beta", &"a".repeat(65)] {
+            assert_eq!(
+                stable_id(invalid).unwrap_err().to_string(),
+                "validation error: invalid stable id"
+            );
+        }
+
+        let digest_value = "ab".repeat(32);
+        assert!(digest(&digest_value).is_ok());
+        for invalid in ["a".repeat(63), "A".repeat(64), "g".repeat(64)] {
+            assert_eq!(
+                digest(&invalid).unwrap_err().to_string(),
+                "validation error: invalid sha256 digest"
+            );
+        }
+
+        assert!(bounded("a", 1, 2, "value").is_ok());
+        assert!(bounded("ab", 1, 2, "value").is_ok());
+        assert_eq!(
+            bounded("", 1, 2, "value").unwrap_err().to_string(),
+            "validation error: value exceeds contract bounds"
+        );
+        assert!(uri_has_inline_credentials("https://user@example.com/path"));
+        assert!(!uri_has_inline_credentials(
+            "https://example.com/user@example"
+        ));
+        assert!(!uri_has_inline_credentials("relative/user@example"));
+    }
+
+    #[test]
+    fn packaged_skill_manifest_rejects_each_contract_mismatch() {
+        let (manifest_bytes, files) = test_skill_manifest();
+        let manifest: Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        let error_for = |manifest: Value, files: &[SkillBundleFile<'_>]| {
+            let bytes = serde_json::to_vec(&manifest).unwrap();
+            validate_skill_bundle(&SkillBundle {
+                manifest: &bytes,
+                files,
+            })
+            .unwrap_err()
+            .to_string()
+        };
+
+        assert!(
+            validate_skill_bundle(&SkillBundle {
+                manifest: &manifest_bytes,
+                files: &files,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_skill_bundle(&SkillBundle {
+                manifest: b"not-json",
+                files: &files,
+            })
+            .unwrap_err()
+            .to_string()
+            .starts_with("validation error: invalid project skill manifest:")
+        );
+
+        let mut changed = manifest.clone();
+        changed["bundle_version"] = json!(0);
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: unsupported project skill manifest version"
+        );
+        let mut changed = manifest.clone();
+        changed["graphforge_compatibility"] = json!(">=9.0.0");
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: project skill bundle is incompatible with this GraphForge release"
+        );
+        let mut changed = manifest.clone();
+        changed["skills"] = json!(["graphforge-bootstrap"]);
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: project skill manifest must name the supported managed directories"
+        );
+        let mut changed = manifest.clone();
+        changed["files"] = json!([]);
+        assert_eq!(
+            error_for(changed, &[]),
+            "validation error: project skill manifest does not match packaged files"
+        );
+
+        let mut changed = manifest.clone();
+        let duplicate_path = changed["files"][0]["path"].clone();
+        changed["files"][1]["path"] = duplicate_path;
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: project skill manifest files must be unique and sorted"
+        );
+        let mut changed = manifest.clone();
+        changed["files"][0]["path"] = json!("graphforge-bootstrap/OTHER.md");
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: project skill manifest does not match packaged file paths"
+        );
+        let mut changed = manifest.clone();
+        changed["files"][0]["sha256"] = json!("invalid");
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: invalid sha256 digest"
+        );
+        let mut changed = manifest.clone();
+        changed["files"][0]["sha256"] = json!("00".repeat(32));
+        assert_eq!(
+            error_for(changed, &files),
+            "validation error: packaged project skill digest mismatch: graphforge-bootstrap/SKILL.md"
+        );
+
+        let only_bootstrap = [files[0]];
+        let mut changed = manifest;
+        let bootstrap_entry = changed["files"][0].clone();
+        changed["files"] = json!([bootstrap_entry]);
+        assert_eq!(
+            error_for(changed, &only_bootstrap),
+            "validation error: project skill bundle is missing graphforge-build-knowledge/SKILL.md"
+        );
+
+        assert_eq!(
+            validate_skill_path("").unwrap_err().to_string(),
+            "validation error: project skill file path is empty"
+        );
+        for invalid in [
+            "/graphforge-bootstrap/SKILL.md",
+            "other/SKILL.md",
+            "graphforge-bootstrap",
+            "graphforge-bootstrap/../SKILL.md",
+            "graphforge-bootstrap\\SKILL.md",
+        ] {
+            assert_eq!(
+                validate_skill_path(invalid).unwrap_err().to_string(),
+                "validation error: project skill file path is not contained",
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_skill_manifest_rejects_invalid_versions_provenance_and_files() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("manifest.json");
+        let valid = json!({
+            "schema_version": 1,
+            "bundle_version": 1,
+            "graphforge_compatibility": ">=0.5.0 <0.6.0",
+            "source": "graphforge-packaged-bundle",
+            "files": [{
+                "path": "graphforge-bootstrap/SKILL.md",
+                "sha256": "00".repeat(32),
+            }],
+        });
+        let error_for = |value: &Value| {
+            fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+            read_installed_manifest(&path).unwrap_err().to_string()
+        };
+
+        fs::write(&path, b"not-json").unwrap();
+        assert!(
+            read_installed_manifest(&path)
+                .unwrap_err()
+                .to_string()
+                .starts_with("validation error: invalid managed skill manifest:")
+        );
+        fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
+        assert_eq!(read_installed_manifest(&path).unwrap().files.len(), 1);
+
+        let mut changed = valid.clone();
+        changed["schema_version"] = json!(2);
+        assert_eq!(
+            error_for(&changed),
+            "validation error: unsupported managed skill manifest version"
+        );
+        let mut changed = valid.clone();
+        changed["source"] = json!("unknown");
+        assert_eq!(
+            error_for(&changed),
+            "validation error: invalid managed skill provenance"
+        );
+        let mut changed = valid.clone();
+        changed["files"] = json!([]);
+        assert_eq!(
+            error_for(&changed),
+            "validation error: managed skill manifest files are required"
+        );
+        let mut changed = valid.clone();
+        changed["files"][0]["sha256"] = json!("invalid");
+        assert_eq!(
+            error_for(&changed),
+            "validation error: invalid sha256 digest"
+        );
+        let mut changed = valid;
+        let first = changed["files"][0].clone();
+        changed["files"] = json!([first.clone(), first]);
+        assert_eq!(
+            error_for(&changed),
+            "validation error: managed skill manifest files must be unique and sorted"
+        );
     }
 
     #[test]

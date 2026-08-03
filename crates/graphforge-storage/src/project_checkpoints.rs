@@ -3146,4 +3146,90 @@ mod tests {
         let decoded: Registry = serde_json::from_slice(&first).unwrap();
         assert_eq!(decoded, registry);
     }
+
+    #[test]
+    fn checkpoint_operation_identities_remain_disjoint_across_tombstones() {
+        let root = tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let create_operation = Uuid::now_v7();
+        let create = create_request(create_operation, "Baseline");
+        let created = create_checkpoint(root.path(), &create).unwrap();
+        let exact_create_replay = create_checkpoint(root.path(), &create).unwrap();
+        assert_eq!(exact_create_replay, created);
+
+        let changed_create = CheckpointCreateRequest {
+            name: "Changed".into(),
+            ..create.clone()
+        };
+        assert_eq!(
+            create_checkpoint(root.path(), &changed_create)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(list_checkpoints(root.path()).unwrap().len(), 1);
+
+        let delete_operation = Uuid::now_v7();
+        let delete = CheckpointDeleteRequest {
+            operation_uuid: delete_operation,
+            name: "Baseline".into(),
+            actor_uuid: create.actor_uuid,
+        };
+        let deleted = delete_checkpoint(root.path(), &delete).unwrap();
+        let exact_delete_replay = delete_checkpoint(root.path(), &delete).unwrap();
+        assert_eq!(exact_delete_replay, deleted);
+        assert!(list_checkpoints(root.path()).unwrap().is_empty());
+
+        let tombstone_create_replay = create_checkpoint(root.path(), &create).unwrap();
+        assert_eq!(
+            tombstone_create_replay.checkpoint_uuid,
+            created.checkpoint_uuid
+        );
+        assert_eq!(tombstone_create_replay, created);
+        assert!(list_checkpoints(root.path()).unwrap().is_empty());
+
+        let changed_delete = CheckpointDeleteRequest {
+            name: "Other".into(),
+            ..delete.clone()
+        };
+        assert_eq!(
+            delete_checkpoint(root.path(), &changed_delete)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            create_checkpoint(root.path(), &create_request(delete_operation, "Other"))
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            delete_checkpoint(
+                root.path(),
+                &CheckpointDeleteRequest {
+                    operation_uuid: create_operation,
+                    name: "Missing".into(),
+                    actor_uuid: None,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            delete_checkpoint(
+                root.path(),
+                &CheckpointDeleteRequest {
+                    operation_uuid: Uuid::now_v7(),
+                    name: "Missing".into(),
+                    actor_uuid: None,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "GF_CHECKPOINT_NOT_FOUND"
+        );
+        assert!(list_checkpoints(root.path()).unwrap().is_empty());
+    }
 }

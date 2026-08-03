@@ -2460,4 +2460,44 @@ mod tests {
             assert_eq!(parse_digest(malformed), None);
         }
     }
+
+    #[test]
+    fn published_transaction_probe_verifies_durable_manifest_on_reopen() {
+        let root = project();
+        let input = request(vec![
+            participant("graph", "nodes", b"nodes"),
+            participant("graph", "edges", b"edges"),
+        ]);
+        let receipt = publish(root.path(), input.clone());
+        let probed = published_project_transaction(root.path(), input.transaction_uuid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(probed.transaction_uuid, receipt.transaction_uuid);
+        assert_eq!(probed.generation_uuid, receipt.generation_uuid);
+        assert_eq!(
+            probed.generation_manifest_sha256,
+            receipt.generation_manifest_sha256
+        );
+        assert!(probed.idempotent_replay);
+        assert!(
+            published_project_transaction(root.path(), Uuid::now_v7())
+                .unwrap()
+                .is_none()
+        );
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), receipt.generation_uuid);
+        reopened.validate_complete_participant_inventory().unwrap();
+        drop(reopened);
+
+        let manifest = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(receipt.generation_uuid.hyphenated().to_string())
+            .join(MANIFEST_FILE);
+        fs::write(&manifest, b"tampered\n").unwrap();
+        let error = published_project_transaction(root.path(), input.transaction_uuid).unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(error.to_string().contains("does not match its journal"));
+    }
 }

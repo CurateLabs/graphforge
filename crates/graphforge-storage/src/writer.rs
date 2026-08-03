@@ -2019,7 +2019,11 @@ fn decode_value(
             let elems = larr.value(r);
             let mut items = Vec::with_capacity(elems.len());
             for j in 0..elems.len() {
-                items.push(decode_value(&elems, inner, j)?);
+                if elems.is_null(j) {
+                    items.push(IrLiteral::Null);
+                } else {
+                    items.push(decode_value(&elems, inner, j)?);
+                }
             }
             IrLiteral::List(items)
         }
@@ -2586,6 +2590,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_heterogeneous_scalar_tag_round_trips_exactly() {
+        let dir = TempDir::new().unwrap();
+        let cases = [
+            IrLiteral::Int(-1),
+            IrLiteral::Float(2.25),
+            IrLiteral::Str("three".into()),
+            IrLiteral::Bool(true),
+        ];
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        let mut expected = HashMap::new();
+        for value in cases {
+            let node = new_v7();
+            writer.create_node(node, TypeId(0)).unwrap();
+            writer
+                .set_properties(
+                    &node,
+                    None,
+                    HashMap::from([("mixed".into(), value.clone())]),
+                )
+                .unwrap();
+            expected.insert(to_bytes(&node), value);
+        }
+        writer.flush().unwrap();
+
+        let reopened = read_node_props(dir.path(), "_untyped");
+        assert_eq!(reopened.len(), expected.len());
+        for (node, value) in expected {
+            assert_eq!(reopened[&node].get("mixed"), Some(&value));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // SET / REMOVE rewrite primitives (#791)
     // -----------------------------------------------------------------------
@@ -3105,5 +3141,163 @@ mod tests {
             !read_node_props(dir.path(), "_untyped").contains_key(&to_bytes(&a)),
             "deleted node's props gone"
         );
+    }
+
+    #[test]
+    fn every_persisted_property_family_round_trips_through_parquet_reopen() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let values = HashMap::from([
+            ("int".into(), IrLiteral::Int(-7)),
+            ("float".into(), IrLiteral::Float(2.5)),
+            ("bool".into(), IrLiteral::Bool(true)),
+            ("str".into(), IrLiteral::Str("value".into())),
+            (
+                "duration".into(),
+                IrLiteral::Duration {
+                    months: 1,
+                    days: -2,
+                    seconds: 3,
+                    nanos: 4,
+                },
+            ),
+            ("datetime".into(), IrLiteral::DateTime(TS)),
+            ("date".into(), IrLiteral::Date(19_000)),
+            (
+                "local_datetime".into(),
+                IrLiteral::LocalDateTime {
+                    days: 19_001,
+                    nanos: 123,
+                },
+            ),
+            ("time".into(), IrLiteral::Time(456)),
+            (
+                "zoned_time".into(),
+                IrLiteral::ZonedTime {
+                    nanos: 789,
+                    offset: -21_600,
+                },
+            ),
+            (
+                "zoned_datetime".into(),
+                IrLiteral::ZonedDateTime {
+                    days: 19_002,
+                    nanos: 987,
+                    offset: 3_600,
+                    zone: Some("Europe/Paris".into()),
+                },
+            ),
+            (
+                "offset_datetime".into(),
+                IrLiteral::ZonedDateTime {
+                    days: 19_003,
+                    nanos: 654,
+                    offset: 0,
+                    zone: None,
+                },
+            ),
+            (
+                "ints".into(),
+                IrLiteral::List(vec![IrLiteral::Int(1), IrLiteral::Null, IrLiteral::Int(3)]),
+            ),
+            (
+                "dates".into(),
+                IrLiteral::List(vec![IrLiteral::Date(19_004), IrLiteral::Date(19_005)]),
+            ),
+            ("empty".into(), IrLiteral::List(Vec::new())),
+            ("null".into(), IrLiteral::Null),
+        ]);
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        writer.set_properties(&node, None, values.clone()).unwrap();
+        writer.flush().unwrap();
+
+        let reopened = read_node_props(dir.path(), "_untyped");
+        let actual = reopened.get(&to_bytes(&node)).unwrap();
+        for (name, expected) in &values {
+            if matches!(expected, IrLiteral::Null) {
+                assert!(!actual.contains_key(name));
+            } else if name == "empty" {
+                assert_eq!(actual.get(name), Some(&IrLiteral::Str("[]".into())));
+            } else {
+                assert_eq!(actual.get(name), Some(expected), "property {name}");
+            }
+        }
+    }
+
+    #[test]
+    fn property_literal_rendering_and_nested_invalid_values_are_deterministic() {
+        let uuid = [0xabu8; 16];
+        let cases = [
+            (IrLiteral::Null, "".into()),
+            (IrLiteral::Bool(true), "true".into()),
+            (IrLiteral::Int(-2), "-2".into()),
+            (IrLiteral::Float(1.25), "1.25".into()),
+            (IrLiteral::Str("s".into()), "s".into()),
+            (IrLiteral::Uuid(uuid), "ab".repeat(16)),
+            (
+                IrLiteral::Duration {
+                    months: 1,
+                    days: 2,
+                    seconds: 3,
+                    nanos: 4,
+                },
+                "1mo2d3s4ns".into(),
+            ),
+            (IrLiteral::DateTime(5), "5".into()),
+            (IrLiteral::Date(6), "6".into()),
+            (
+                IrLiteral::LocalDateTime { days: 7, nanos: 8 },
+                "7d8ns".into(),
+            ),
+            (IrLiteral::Time(9), "9ns".into()),
+            (
+                IrLiteral::ZonedTime {
+                    nanos: 10,
+                    offset: -1,
+                },
+                "10ns-1s".into(),
+            ),
+            (
+                IrLiteral::ZonedDateTime {
+                    days: 11,
+                    nanos: 12,
+                    offset: 13,
+                    zone: Some("UTC".into()),
+                },
+                "11d12ns+13sUTC".into(),
+            ),
+            (
+                IrLiteral::List(vec![IrLiteral::Int(1), IrLiteral::Str("x".into())]),
+                "[1,x]".into(),
+            ),
+            (
+                IrLiteral::Map(vec![("a".into(), IrLiteral::Bool(false))]),
+                "{a:false}".into(),
+            ),
+        ];
+        for (literal, expected) in cases {
+            assert_eq!(literal_to_string(&literal), expected);
+        }
+
+        for invalid in [
+            IrLiteral::Uuid(uuid),
+            IrLiteral::List(vec![IrLiteral::Uuid(uuid)]),
+            IrLiteral::Map(vec![("nested".into(), IrLiteral::Uuid(uuid))]),
+        ] {
+            assert_eq!(
+                reject_map_property_value("p", &invalid).unwrap_err().code(),
+                "GF_VALIDATION"
+            );
+        }
+        for invalid in [
+            IrLiteral::Map(vec![]),
+            IrLiteral::List(vec![IrLiteral::Map(vec![])]),
+        ] {
+            assert_eq!(
+                reject_map_property_value("p", &invalid).unwrap_err().code(),
+                "GF_IO"
+            );
+        }
     }
 }
