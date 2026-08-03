@@ -14732,6 +14732,127 @@ mod tests {
     }
 
     #[test]
+    fn heterogeneous_map_access_returns_exact_values_and_rejects_non_maps() {
+        use datafusion::arrow::array::{ArrayRef, StringArray};
+        use datafusion::scalar::ScalarValue as S;
+
+        let map = const_map_scalar(&[
+            ("answer".to_owned(), S::Int64(Some(42))),
+            ("empty".to_owned(), S::Int64(None)),
+        ])
+        .expect("map scalar");
+        let encoded = build_het_struct(&[map], 1).expect("tagged map");
+        let return_type =
+            het_value_access_return_type(encoded.data_type()).expect("map value type");
+        let null_value = S::try_from(&return_type).expect("typed null");
+        let keys = |key: Option<&str>| -> ArrayRef { Arc::new(StringArray::from(vec![key])) };
+
+        let found = het_map_access_value(&encoded, &keys(Some("answer")), 0, &null_value)
+            .expect("existing map key");
+        assert_eq!(decode_het(&found), Some(S::Int64(Some(42))));
+
+        let stored_null = het_map_access_value(&encoded, &keys(Some("empty")), 0, &null_value)
+            .expect("stored null");
+        assert_eq!(decode_het(&stored_null), Some(S::Null));
+        assert_eq!(
+            het_map_access_value(&encoded, &keys(Some("missing")), 0, &null_value)
+                .expect("missing key"),
+            null_value
+        );
+        assert_eq!(
+            het_map_access_value(&encoded, &keys(None), 0, &null_value).expect("null key"),
+            null_value
+        );
+
+        let non_map = build_het_struct(&[S::Int64(Some(7))], 0).expect("tagged integer");
+        let error = het_map_access_value(&non_map, &keys(Some("answer")), 0, &null_value)
+            .expect_err("a tagged integer is not dynamically property-readable");
+        assert_eq!(
+            error.to_string(),
+            "Execution error: invalid argument type: dynamic value access requires a map"
+        );
+    }
+
+    #[test]
+    fn dynamic_struct_access_observes_missing_null_type_and_row_null_semantics() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+        use datafusion::arrow::buffer::NullBuffer;
+        use datafusion::arrow::datatypes::{Field, Fields};
+        use datafusion::config::ConfigOptions;
+
+        let values: ArrayRef = Arc::new(StructArray::new(
+            Fields::from(vec![Field::new("score", DataType::Int64, true)]),
+            vec![Arc::new(Int64Array::from(vec![Some(9), None, Some(11)]))],
+            Some(NullBuffer::from(vec![true, true, false])),
+        ));
+        let invoke = |keys: ArrayRef| -> datafusion::error::Result<ArrayRef> {
+            let udf = CypherValueAccess::new();
+            let result = udf.invoke_with_args(ScalarFunctionArgs {
+                args: vec![
+                    ColumnarValue::Array(Arc::clone(&values)),
+                    ColumnarValue::Array(keys),
+                ],
+                arg_fields: vec![
+                    Arc::new(Field::new("value", values.data_type().clone(), true)),
+                    Arc::new(Field::new("key", DataType::Utf8, true)),
+                ],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("out", DataType::Int64, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })?;
+            match result {
+                ColumnarValue::Array(array) => Ok(array),
+                ColumnarValue::Scalar(value) => value.to_array_of_size(3),
+            }
+        };
+
+        let result = invoke(Arc::new(StringArray::from(vec![
+            Some("score"),
+            Some("missing"),
+            Some("score"),
+        ])))
+        .expect("dynamic struct access");
+        let result = result.as_any().downcast_ref::<Int64Array>().expect("Int64");
+        assert_eq!(result.value(0), 9);
+        assert!(result.is_null(1), "an absent property is null");
+        assert!(result.is_null(2), "a null graph-element row is null");
+
+        let bad_keys: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let error = invoke(bad_keys).expect_err("numeric property key");
+        assert!(
+            error
+                .to_string()
+                .contains("dynamic map/property access key must be a string"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn temporal_accessor_type_matrix_distinguishes_values_from_properties() {
+        // Date and duration dispatch through their dedicated lowering paths.
+        assert!(!temporal_accessor_valid(&DataType::Date32, "year"));
+        assert!(!temporal_accessor_valid(&DataType::Date32, "timezone"));
+        assert!(temporal_accessor_valid(
+            &ScalarValue::Time64Nanosecond(None).data_type(),
+            "nanosecond"
+        ));
+        assert!(!temporal_accessor_valid(
+            &duration_scalar(None).data_type(),
+            "monthsOfYear"
+        ));
+        assert!(temporal_accessor_valid(
+            &localdatetime_scalar(None).data_type(),
+            "year"
+        ));
+        assert!(temporal_accessor_valid(
+            &datetime_scalar(None).data_type(),
+            "offsetSeconds"
+        ));
+        assert!(!temporal_accessor_valid(&DataType::Utf8, "year"));
+        assert!(!temporal_accessor_valid(&DataType::Int64, "day"));
+    }
+
+    #[test]
     fn scalar_to_ir_literal_round_trips_a_list() {
         // A homogeneous list now stores (#1006): scalar List → IrLiteral::List
         // and back, element-wise — including a list of typed temporals.

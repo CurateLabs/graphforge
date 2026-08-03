@@ -5153,6 +5153,161 @@ mod tests {
         );
     }
 
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn created_rows_schema_preserves_input_skips_references_and_types_minted_nodes() {
+        use std::collections::HashMap;
+
+        use datafusion::arrow::datatypes::{DataType, Field};
+        use datafusion::common::{DFSchema, TableReference};
+        use datafusion::logical_expr::{col, lit};
+        use graphforge_plan::ResolvedNodeSpec;
+
+        let input = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![(
+                    Some(TableReference::bare("input")),
+                    Arc::new(Field::new("seed", DataType::Int64, false)),
+                )],
+                HashMap::new(),
+            )
+            .unwrap(),
+        );
+        let reference = ResolvedNodeSpec {
+            var: 1,
+            label_ids: vec![7],
+            label_names: vec!["Existing".into()],
+            properties: vec![("ignored".into(), IrLiteral::Int(1))],
+            computed_properties: vec![],
+            is_reference: true,
+        };
+        let minted = ResolvedNodeSpec {
+            var: 2,
+            label_ids: vec![8, 9],
+            label_names: vec!["New".into(), "Tagged".into()],
+            properties: vec![("active".into(), IrLiteral::Bool(true))],
+            computed_properties: vec![("copied_seed".into(), col("seed") + lit(1_i64))],
+            is_reference: false,
+        };
+
+        let schema = GraphPlanLowerer::created_rows_schema(&[reference, minted], &input).unwrap();
+        let fields: Vec<_> = schema
+            .iter()
+            .map(|(qualifier, field)| {
+                (
+                    qualifier.map(ToString::to_string),
+                    field.name().clone(),
+                    field.data_type().clone(),
+                    field.is_nullable(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            fields.len(),
+            7,
+            "one input plus four identity and two property fields"
+        );
+        assert_eq!(
+            fields[0],
+            (Some("input".into()), "seed".into(), DataType::Int64, false)
+        );
+        assert_eq!(
+            fields[1..5]
+                .iter()
+                .map(|(q, name, ty, nullable)| { (q.clone(), name.clone(), ty.clone(), *nullable) })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    Some("var_2".into()),
+                    "node_uuid".into(),
+                    DataType::FixedSizeBinary(16),
+                    false
+                ),
+                (
+                    Some("var_2".into()),
+                    "node_id".into(),
+                    DataType::UInt64,
+                    false,
+                ),
+                (
+                    Some("var_2".into()),
+                    "type_id".into(),
+                    DataType::UInt32,
+                    false,
+                ),
+                (
+                    Some("var_2".into()),
+                    "type_ids".into(),
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+            ]
+        );
+        assert_eq!(
+            fields[5],
+            (
+                Some("var_2".into()),
+                "active".into(),
+                DataType::Boolean,
+                true
+            )
+        );
+        assert_eq!(
+            fields[6],
+            (
+                Some("var_2".into()),
+                "copied_seed".into(),
+                DataType::Int64,
+                true,
+            )
+        );
+        assert!(
+            fields
+                .iter()
+                .all(|(q, _, _, _)| q.as_deref() != Some("var_1")),
+            "reference nodes are passed through only and never duplicated"
+        );
+    }
+
+    #[test]
+    fn created_rows_schema_rejects_reserved_and_unbound_computed_properties() {
+        use graphforge_plan::ResolvedNodeSpec;
+
+        let input = Arc::new(datafusion::common::DFSchema::empty());
+        for reserved in ["node_uuid", "node_id", "type_id", "type_ids"] {
+            let spec = ResolvedNodeSpec {
+                var: 3,
+                label_ids: vec![],
+                label_names: vec![],
+                properties: vec![(reserved.into(), IrLiteral::Null)],
+                computed_properties: vec![],
+                is_reference: false,
+            };
+            let error = GraphPlanLowerer::created_rows_schema(&[spec], &input).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "unsupported expression: CREATE property `{reserved}` collides with a reserved node topology field"
+                )
+            );
+        }
+
+        let unbound = ResolvedNodeSpec {
+            var: 4,
+            label_ids: vec![],
+            label_names: vec![],
+            properties: vec![],
+            computed_properties: vec![("value".into(), datafusion::logical_expr::col("missing"))],
+            is_reference: false,
+        };
+        let error = GraphPlanLowerer::created_rows_schema(&[unbound], &input).unwrap_err();
+        assert!(
+            error.to_string().contains("No field named missing"),
+            "unbound computed properties must retain the DataFusion schema error: {error}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // DELETE lowering (#740)
     // -----------------------------------------------------------------------
