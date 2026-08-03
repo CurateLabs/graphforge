@@ -184,6 +184,9 @@ check-patch-coverage:  ## Validate patch coverage for changed files (90% thresho
 	fi
 
 pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstrings (no coverage, ~30s)
+	@echo "━━━ Public API BDD policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@python3 scripts/ci/api-bdd-policy.py --check-issues
+	@python3 scripts/ci/test-api-bdd-policy.py
 	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) format-check
 	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -204,6 +207,8 @@ pre-push:  ## Run local policy checks plus multi-surface coverage thresholds
 	@$(MAKE) pre-push-fast
 	@echo "━━━ Coverage + thresholds (Rust + Python + Node) ━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage
+	@echo "━━━ Public API BDD mutation sentinels ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@uv run --no-sync python scripts/ci/test-api-bdd-mutations.py
 	@echo "✅ All pre-push checks passed!"
 
 clean:  ## Clean up cache files

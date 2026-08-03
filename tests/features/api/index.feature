@@ -1,4 +1,4 @@
-@api @index @skip-node
+@api @index
 Feature: Index API
 
   Scenario: index with properties makes subsequent find faster
@@ -7,6 +7,7 @@ Feature: Index API
     And I find "neural networks" in label "Paper"
     Then the result is an Arrow Table with at least 1 row
 
+  @excluded-api-bdd @issue-352
   Scenario: index vector upsert stores a vector for a node
     Given a graph with a Paper node
     And I have stored the node id as "paper_id"
@@ -18,10 +19,13 @@ Feature: Index API
   Scenario: calling index twice is idempotent
     Given a graph with 3 Paper nodes with title properties
     When I index label "Paper" on property "title"
+    And I find "paper" in label "Paper"
     And I index label "Paper" on property "title"
+    And I find "paper" in label "Paper"
     Then no error is raised
     And find "paper" in label "Paper" returns the same results as after the first index call
 
+  @excluded-api-bdd @issue-352
   Scenario: find reflects nodes added after initial index build
     Given a graph with a Paper node titled "Graph Neural Networks"
     And I index label "Paper" on property "title"

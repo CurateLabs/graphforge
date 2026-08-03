@@ -1,11 +1,12 @@
 """pytest-bdd steps shared by the public API feature corpus.
 
-Implemented surfaces run strictly; unsupported milestone areas remain xfailed.
+Required public API behavior runs strictly and fails closed.
 """
 
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 import pyarrow as pa
 import pytest
@@ -64,10 +65,6 @@ def ctx():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _xfail_not_implemented():
-    pytest.xfail("Stub: real implementation not yet available")
 
 
 def _catch(fn, *args, **kwargs):
@@ -803,7 +800,12 @@ def when_bulk_add_edges(ctx):
         return
     records = [{"src_id": nodes[0].uuid, "dst_id": nodes[1].uuid}]
     ctx.result, ctx.error = _catch(
-        ctx.forge.add_edges, "KNOWS", records, src="src_id", dst="dst_id"
+        ctx.forge.add_edges,
+        "KNOWS",
+        records,
+        operation_uuid=nodes[0].uuid,
+        src="src_id",
+        dst="dst_id",
     )
 
 
@@ -925,7 +927,7 @@ def when_find_wrong_dim(ctx, n, label):
 def when_index_two_props(ctx, label, p1, p2):
     ctx.result, ctx.error = _catch(ctx.forge.index, label, properties=[p1, p2])
     if isinstance(ctx.error, TypeError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     ctx.extra["index_called"] = True
 
 
@@ -933,9 +935,10 @@ def when_index_two_props(ctx, label, p1, p2):
 def when_index_one_prop(ctx, label, prop):
     ctx.result, ctx.error = _catch(ctx.forge.index, label, properties=[prop])
     if isinstance(ctx.error, TypeError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     ctx.extra["index_called"] = True
     if "first_find_result" not in ctx.extra:
+        ctx.extra["first_find_result"] = ctx.forge.find("paper", label=label)
         ctx.extra["first_index_done"] = True
 
 
@@ -1067,18 +1070,16 @@ def when_find_text_shared(ctx, query_text, label):
 
 @then("the result is an Arrow Table")
 def then_arrow_table(ctx):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table), f"Expected Arrow Table, got {type(ctx.result)}"
 
 
 @then(parsers.parse('the table has column "{col}"'))
 def then_has_column(ctx, col):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table)
     if col not in ctx.result.schema.names:
-        _xfail_not_implemented()
+        raise AssertionError(f"missing result column: {col}")
 
 
 @then(parsers.parse('the result schema contains column "{col}"'))
@@ -1088,11 +1089,10 @@ def then_schema_has_column(ctx, col):
 
 @then(parsers.parse("the table has {n:d} rows"))
 def then_row_count(ctx, n):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table)
     if ctx.result.num_rows != n:
-        _xfail_not_implemented()
+        raise AssertionError(f"expected {n} rows, got {ctx.result.num_rows}")
 
 
 @then(parsers.parse("the table has {n:d} row"))
@@ -1108,83 +1108,81 @@ def then_is_dag_value(ctx, expected):
 
 @then(parsers.parse("the table has at most {n:d} rows"))
 def then_at_most_rows(ctx, n):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table)
     if ctx.result.num_rows > n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then(parsers.parse('the first row value for "{col}" is "{val}"'))
 def then_first_row_str(ctx, col, val):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table)
     if ctx.result.num_rows == 0 or col not in ctx.result.schema.names:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     actual = ctx.result.column(col)[0].as_py()
     if actual != val:
-        _xfail_not_implemented()
+        raise AssertionError(f"expected first {col} value {val!r}, got {actual!r}")
 
 
 @then(parsers.parse('the first row value for "{col}" is null'))
 def then_first_row_null(ctx, col):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, pa.Table)
     if ctx.result.num_rows == 0 or col not in ctx.result.schema.names:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     actual = ctx.result.column(col)[0].as_py()
     if actual is not None:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("a ParseError is raised")
 def then_parse_error(ctx):
     if not isinstance(ctx.error, ParseError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the error includes a source span")
 def then_has_span(ctx):
     if not isinstance(ctx.error, ParseError) or ctx.error.span is None:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("an ExecutionError is raised")
 def then_execution_error(ctx):
     if not isinstance(ctx.error, ExecutionError):
-        _xfail_not_implemented()
+        actual = type(ctx.error).__name__ if ctx.error is not None else "no error"
+        raise AssertionError(f"expected ExecutionError, got {actual}")
 
 
 @then("a StorageError is raised")
 def then_storage_error(ctx):
     if not isinstance(ctx.error, StorageError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("a LifecycleError is raised")
 def then_lifecycle_error(ctx):
     if not isinstance(ctx.error, LifecycleError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("a TypeError is raised")
 def then_type_error(ctx):
     if not isinstance(ctx.error, TypeError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("a ValidationError is raised")
 def then_validation_error(ctx):
     if not isinstance(ctx.error, ValidationError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("an OntologyError is raised")
 def then_ontology_error(ctx):
     if not isinstance(ctx.error, OntologyError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("no error is raised")
@@ -1196,7 +1194,7 @@ def then_no_error(ctx):
 @then(parsers.parse('the result is a NodeHandle with label "{label}"'))
 def then_node_handle(ctx, label):
     if ctx.error or not isinstance(ctx.result, NodeHandle):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     assert NodeHandle is graphforge.NodeHandle
     assert ctx.result.label == label
 
@@ -1204,7 +1202,7 @@ def then_node_handle(ctx, label):
 @then("the NodeHandle exposes UUID identity with no numeric surrogate")
 def then_node_handle_uuid_only(ctx):
     if ctx.error or not isinstance(ctx.result, NodeHandle):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     assert isinstance(ctx.result.uuid, str)
     assert not hasattr(ctx.result, "id")
     assert not hasattr(ctx.result, "get")
@@ -1224,7 +1222,7 @@ def then_execute_with_uuid_returns_name(ctx, name):
 @then("the result is an EdgeHandle with UUID identity and no numeric surrogate")
 def then_edge_handle(ctx):
     if ctx.error or not isinstance(ctx.result, EdgeHandle):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     assert isinstance(ctx.result.uuid, str)
     assert not hasattr(ctx.result, "id")
     assert not hasattr(ctx.result, "edge_id")
@@ -1234,27 +1232,30 @@ def then_edge_handle(ctx):
 def then_execute_n_rows(ctx, query, n):
     ctx.result = ctx.forge.execute(query)
     if ctx.result.num_rows != n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then(parsers.parse('execute "{query}" returns {n:d} row with value {val:d}'))
 def then_execute_1_row_value(ctx, query, n, val):
     result = ctx.forge.execute(query)
     if result.num_rows != n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
+    if result.num_rows == 0 or result.column(0)[0].as_py() != val:
+        raise AssertionError("required public API contract was not satisfied")
+    ctx.result = result
 
 
 @then("the string representation contains the NodeHandle UUID")
 def then_handle_repr_contains_uuid(ctx):
     if ctx.error or not isinstance(ctx.result, NodeHandle):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     assert ctx.result.uuid in str(ctx.result)
 
 
 @then(parsers.parse('the string representation does not contain cached property "{text}"'))
 def then_repr_excludes_cached_property(ctx, text):
     if ctx.error or not isinstance(ctx.result, NodeHandle):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     assert text not in str(ctx.result)
 
 
@@ -1273,35 +1274,31 @@ def then_structured_selector_error(ctx):
 
 @then(parsers.parse("the result is {n:d}"))
 def then_result_is_n(ctx, n):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     if ctx.result != n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the result is a non-empty string")
 def then_nonempty_string(ctx):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert isinstance(ctx.result, str) and len(ctx.result) > 0
 
 
 @then(parsers.parse('the result contains "{text}"'))
 def then_result_contains_text(ctx, text):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     if isinstance(ctx.result, str):
         assert text in ctx.result, f"{text!r} not in explain output"
     elif isinstance(ctx.result, list):
         assert text in ctx.result, f"{text!r} not in list result"
     else:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the result is an empty list")
 def then_empty_list(ctx):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     assert ctx.result == []
 
 
@@ -1314,12 +1311,12 @@ def then_rel_types_empty(ctx):
 @then(parsers.parse('the table contains an entry for label "{label}"'))
 def then_schema_has_label(ctx, label):
     if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     if "label" not in ctx.result.schema.names:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     labels = ctx.result.column("label").to_pylist()
     if label not in labels:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the two score results are not identical")
@@ -1327,12 +1324,12 @@ def then_scores_differ(ctx):
     d = ctx.extra.get("rank_directed")
     u = ctx.extra.get("rank_undirected")
     if d is None or u is None:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     if d.num_rows == 0:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     # Compare score columns
     if d.equals(u):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the 2 connected nodes share the same community_id")
@@ -1367,80 +1364,109 @@ def then_no_index_call(ctx):
     assert not ctx.extra.get("index_called", False)
 
 
-@then('for each result row the id is valid in execute "MATCH (n) WHERE id(n) = $id RETURN n"')
+@then('for each result row the id is valid in execute "MATCH (n) WHERE n.node_uuid = $id RETURN n"')
 def then_ids_addressable(ctx):
-    if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
-    if ctx.result.num_rows == 0:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
+    assert isinstance(ctx.result, pa.Table)
+    ids = ctx.result.column("node_uuid").to_pylist()
+    assert ids
+    for value in ids:
+        identifier = uuid.UUID(bytes=value) if isinstance(value, bytes) else uuid.UUID(str(value))
+        result = ctx.forge.execute(
+            "MATCH (n) WHERE n.node_uuid = $id RETURN n",
+            {"id": identifier},
+        )
+        assert result.num_rows == 1
 
 
 @then(parsers.parse('all result rows have label "{label}"'))
 def then_all_rows_label(ctx, label):
-    if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
-    if ctx.result.num_rows == 0:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
+    assert isinstance(ctx.result, pa.Table)
+    ids = ctx.result.column("node_uuid").to_pylist()
+    assert ids
+    for value in ids:
+        identifier = uuid.UUID(bytes=value) if isinstance(value, bytes) else uuid.UUID(str(value))
+        result = ctx.forge.execute(
+            f"MATCH (n:{label}) WHERE n.node_uuid = $id RETURN n.node_uuid",
+            {"id": identifier},
+        )
+        assert result.num_rows == 1
 
 
 @then("the result contains that node")
 def then_result_contains_node(ctx):
     if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     if ctx.result.num_rows == 0:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
+    if "node_uuid" not in ctx.result.schema.names:
+        raise AssertionError("required public API contract was not satisfied")
+    expected = str(ctx.extra["paper_id"]).replace("-", "").lower()
+    actual = {
+        value.hex() if isinstance(value, bytes) else str(value).replace("-", "").lower()
+        for value in ctx.result.column("node_uuid").to_pylist()
+    }
+    if expected not in actual:
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then('find "paper" in label "Paper" returns the same results as after the first index call')
 def then_idempotent_index(ctx):
-    if ctx.error:
-        _xfail_not_implemented()
-    # Idempotency: second call should not error. Result equality is out of scope for stub.
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
+    second = ctx.forge.find("paper", label="Paper")
+    assert ctx.extra["first_find_result"].equals(second)
 
 
 @then(parsers.parse('the result contains a row with title "{title}"'))
 def then_result_has_title(ctx, title):
     if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     if "title" not in ctx.result.schema.names or ctx.result.num_rows == 0:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     titles = ctx.result.column("title").to_pylist()
     if title not in titles:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then(parsers.parse('the result contains a row for "{name}"'))
 def then_result_has_row_for(ctx, name):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     if isinstance(ctx.result, pa.Table):
-        if ctx.result.num_rows == 0:
-            _xfail_not_implemented()
+        if "name" not in ctx.result.schema.names:
+            raise AssertionError("required public API contract was not satisfied")
+        if name not in ctx.result.column("name").to_pylist():
+            raise AssertionError("required public API contract was not satisfied")
     elif isinstance(ctx.result, list):
         names = [r.get("name") or r.get("canonical") for r in ctx.result]
         if name not in names:
-            _xfail_not_implemented()
+            raise AssertionError("required public API contract was not satisfied")
+    else:
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then(parsers.parse('the result does not contain a row for "{name}"'))
 def then_result_no_row_for(ctx, name):
-    if ctx.error:
-        _xfail_not_implemented()
+    assert ctx.error is None, f"unexpected error: {ctx.error!r}"
     if isinstance(ctx.result, pa.Table):
-        if ctx.result.num_rows == 0:
-            return  # empty — does not contain it, pass
+        if "name" not in ctx.result.schema.names:
+            raise AssertionError("required public API contract was not satisfied")
+        if name in ctx.result.column("name").to_pylist():
+            raise AssertionError("required public API contract was not satisfied")
     elif isinstance(ctx.result, list):
         names = [r.get("name") or r.get("canonical") for r in ctx.result]
         if name in names:
-            _xfail_not_implemented()
+            raise AssertionError("required public API contract was not satisfied")
+    else:
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then("the result is an Arrow Table with at least 1 row")
 def then_arrow_at_least_1(ctx):
     if ctx.error or not isinstance(ctx.result, pa.Table):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     if ctx.result.num_rows < 1:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 # ---------------------------------------------------------------------------
@@ -1455,14 +1481,14 @@ def then_arrow_at_least_1(ctx):
 def then_execute_returns_n_rows(ctx, query, n):
     ctx.result = ctx.forge.execute(query)
     if ctx.result.num_rows != n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 @then(parsers.parse('execute "{query}" returns {n:d} row'))
 def then_execute_returns_n_row(ctx, query, n):
     ctx.result = ctx.forge.execute(query)
     if ctx.result.num_rows != n:
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
 
 
 # Given step used in construction Background (Given form, not When)
@@ -1485,7 +1511,7 @@ def given_2_nodes_for_edges_given():
 def given_index_one_prop(ctx, label, prop):
     _, error = _catch(ctx.forge.index, label, properties=[prop])
     if isinstance(error, TypeError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")
     ctx.extra["index_called"] = True
     ctx.extra["first_index_done"] = True
 
@@ -1520,14 +1546,6 @@ def given_add_node_inline(ctx, label, name):
     ctx.nodes[name] = h
 
 
-# Then "execute ... returns 1 row" with value for introspection
-@then(parsers.parse('execute "{query}" returns {n:d} row with value {val:d}'))
-def then_execute_row_value(ctx, query, n, val):
-    result = ctx.forge.execute(query)
-    if result.num_rows != n:
-        _xfail_not_implemented()
-
-
 # StorageError test needs forge=None handling in when_execute
 # The scenario uses "Given a path that does not exist" then "When I open" then "execute"
 # The forge is set during "When I open" — if StorageError was raised during open,
@@ -1535,4 +1553,4 @@ def then_execute_row_value(ctx, query, n, val):
 @then("a StorageError is raised")
 def then_storage_error_v2(ctx):
     if not isinstance(ctx.error, StorageError):
-        _xfail_not_implemented()
+        raise AssertionError("required public API contract was not satisfied")

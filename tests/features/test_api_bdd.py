@@ -3,8 +3,8 @@
 scenarios() is called here (in the test file) so pytest-bdd can resolve
 feature paths relative to this file's location.
 
-All scenarios are expected to xfail at the stub stage. They are un-xfailed
-milestone by milestone as real implementations land.
+Required scenarios fail on missing behavior, incorrect results, and unexpected
+exceptions. Deliberate exclusions are validated separately by policy.
 """
 
 from pathlib import Path

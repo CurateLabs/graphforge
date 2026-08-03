@@ -14,7 +14,7 @@ Feature: Cypher Execute API
     Then the result schema contains column "person_name"
     And the result schema contains column "person_age"
 
-  @skip-node
+
   Scenario: empty result returns Arrow Table with correct schema and zero rows
     Given an empty graph
     When I execute "MATCH (p:Person) RETURN p.name AS name"

@@ -7,54 +7,24 @@ import pytest
 pytest_plugins = ["tests.features.steps.api_steps"]
 
 
-# Feature areas that are entirely unimplemented in the native engine (the write
-# API and explicit transactions land with M18/M19 + the write path). Their
-# scenarios set up state via add_node/add_edge/begin, so the NotImplementedError
-# is swallowed inside a When step and a *later* step fails with a different
-# exception (PlanError on an empty graph, an AssertionError, …). Mark the whole
-# area xfail so the cutover gate is honest; each flips to a real pass — surfaced
-# as an xpass — the moment its native implementation lands.
-_UNIMPLEMENTED_TAGS = ("construction", "transactions")
-
-
-def pytest_collection_modifyitems(config, items):
+def pytest_collection_modifyitems(items):
+    """Report issue-backed product gaps as excluded, never passed or xfailed."""
     for item in items:
-        for tag in _UNIMPLEMENTED_TAGS:
-            if item.get_closest_marker(tag) is not None:
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason=f"native '{tag}' implementation pending (M18/M19 + write API)",
-                        strict=False,
-                    )
-                )
-                break
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    """Convert a ``NotImplementedError`` (setup or call) into an xfail.
-
-    This cannot mask a regression in an *implemented* area: the native engine
-    raises ``NotImplementedError`` **only** from the genuinely-pending surface —
-    the ``GfError::NotImplemented`` mapping (analyst verbs, introspection,
-    transactions) and the ``add_node``/``add_edge`` write stubs, including the
-    ``Given`` setup steps that build graphs through them. The implemented
-    operations (execute/explain, parse, ontology loading, lifecycle) raise typed
-    ``GfError`` variants (Parse/Plan/Execution/Storage/Lifecycle/…), never
-    ``NotImplementedError`` — so a regression there still surfaces as a different
-    exception or an assertion and fails loudly. Each converted xfail flips to a
-    real pass automatically once its native implementation lands.
-    """
-    outcome = yield
-    rep = outcome.get_result()
-    if (
-        rep.when in ("setup", "call")
-        and rep.failed
-        and call.excinfo is not None
-        and call.excinfo.errisinstance(NotImplementedError)
-    ):
-        rep.outcome = "skipped"
-        rep.wasxfail = "native implementation pending (M18/M19 + write API)"
+        if (
+            item.get_closest_marker("excluded-api-bdd") is None
+            and item.get_closest_marker("excluded_api_bdd") is None
+        ):
+            continue
+        issue_markers = [
+            marker.name.removeprefix("issue_").removeprefix("issue-")
+            for marker in item.iter_markers()
+            if marker.name.startswith(("issue_", "issue-"))
+        ]
+        if len(issue_markers) != 1:
+            raise RuntimeError("excluded API BDD scenario needs one issue tag")
+        item.add_marker(
+            pytest.mark.skip(reason=f"excluded API BDD contract: issue #{issue_markers[0]}")
+        )
 
 
 # Register markers so --strict-markers doesn't reject them.
@@ -75,13 +45,19 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "ontology: ontology API scenarios")
     config.addinivalue_line("markers", "transactions: transaction scenarios")
     config.addinivalue_line("markers", "persistence: persistence scenarios")
-    # The @skip-node tag (added in #872) gates only the Node BDD strict run; it
-    # is a no-op for Python (whose own NotImplementedError->xfail hook handles
-    # the unimplemented surface). Register both the verbatim and underscored
-    # forms so --strict-markers accepts it regardless of how pytest-bdd maps the
-    # tag. Tracked for removal in #971.
-    config.addinivalue_line("markers", "skip-node: excluded from the Node BDD strict gate (#971)")
-    config.addinivalue_line("markers", "skip_node: excluded from the Node BDD strict gate (#971)")
+    config.addinivalue_line("markers", "excluded-api-bdd: issue-backed product exclusion")
+    config.addinivalue_line("markers", "excluded_api_bdd: issue-backed product exclusion")
+    config.addinivalue_line("markers", "excluded-node-api-bdd: Node-only issue-backed exclusion")
+    config.addinivalue_line("markers", "excluded_node_api_bdd: Node-only issue-backed exclusion")
+    config.addinivalue_line(
+        "markers", "binding-only: runtime binding contract not applicable to Rust"
+    )
+    config.addinivalue_line(
+        "markers", "binding_only: runtime binding contract not applicable to Rust"
+    )
+    for issue in (352, 353, 354, 355, 356, 357):
+        config.addinivalue_line("markers", f"issue-{issue}: exclusion tracking issue")
+        config.addinivalue_line("markers", f"issue_{issue}: exclusion tracking issue")
 
 
 @pytest.fixture

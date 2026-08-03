@@ -1,4 +1,4 @@
-@api @validation @skip-node
+@api @validation
 Feature: Input Validation Errors
 
   Background:

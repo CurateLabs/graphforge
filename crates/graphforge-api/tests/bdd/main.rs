@@ -1,8 +1,8 @@
 //! cucumber-rs BDD runner for the GraphForge API and TCK feature files.
 //!
 //! Two suites run per `cargo test --test bdd`:
-//!   * GraphForge public-API scenarios under `tests/features/api/` (skeleton:
-//!     pending steps pass as "skipped").
+//!   * Required GraphForge public-API scenarios under `tests/features/api/`,
+//!     which fail closed on failed, skipped, or undefined steps.
 //!   * the WHOLE vendored openCypher TCK corpus under `tests/tck/features/`, run
 //!     **advisorily** — every scenario, no `@skip-rust` filter, via cucumber
 //!     `run()` (which does not exit on failure). A custom writer records the set
@@ -21,7 +21,7 @@ use futures::FutureExt;
 
 use timing::{
     ScenarioTimer, ScenarioTiming, Suite, annotation_messages, baseline_candidate, build_report,
-    escape_github_command, failed_scenario_keys, load_baseline, load_policy, write_artifacts,
+    escape_github_command, load_baseline, load_policy, non_passing_scenario_keys, write_artifacts,
 };
 
 /// Shared cucumber [`World`] for the GraphForge BDD suites (public API + TCK).
@@ -31,6 +31,10 @@ pub struct GraphForgeWorld {
     pub forge: Option<graphforge_api::GraphForge>,
     /// Owns a persistent-project fixture directory for lifecycle scenarios.
     pub persistent_fixture: Option<tempfile::TempDir>,
+    /// Owns an ontology fixture directory for load scenarios.
+    pub ontology_fixture: Option<tempfile::TempDir>,
+    /// Ontology fixture path selected by the Given step.
+    pub ontology_path: Option<std::path::PathBuf>,
     /// Last error returned by a When step.
     pub last_error: Option<String>,
     /// Last interim `RecordBatch` returned by a stubbed When step (schema()/etc.).
@@ -47,6 +51,10 @@ pub struct GraphForgeWorld {
     pub nodes: std::collections::HashMap<String, graphforge_api::NodeHandle>,
     /// Most recently created node handle for result-focused assertions.
     pub last_node_handle: Option<graphforge_api::NodeHandle>,
+    /// Most recently created edge handle for result-focused assertions.
+    pub last_edge_handle: Option<graphforge_api::EdgeHandle>,
+    /// Number of explicit public index calls made in this scenario.
+    pub index_calls: usize,
 }
 
 #[tokio::main]
@@ -65,15 +73,25 @@ async fn main() {
 
     let features_dir = workspace_root.join("tests/features");
 
-    // GraphForge public-API scenarios (skeleton: pending steps pass as skipped).
+    // Required public-API scenarios run strictly. Product gaps use the single
+    // issue-backed exclusion inventory and never contribute to passing totals.
     let api_results = std::sync::Arc::new(std::sync::Mutex::new(ScenarioOutcomes::default()));
+    let api_only = std::env::var("API_ONLY").ok();
     GraphForgeWorld::cucumber()
         .with_writer(cucumber::writer::Tee::new(
             cucumber::writer::Basic::stdout().summarized(),
             ScenarioCollector::new(Suite::Api, std::sync::Arc::clone(&api_results), false),
         ))
         .with_default_cli()
-        .run(features_dir.join("api"))
+        .filter_run(features_dir.join("api"), move |_, _, scenario| {
+            !scenario
+                .tags
+                .iter()
+                .any(|tag| tag == "excluded-api-bdd" || tag == "binding-only")
+                && api_only
+                    .as_deref()
+                    .is_none_or(|needle| scenario.name.contains(needle))
+        })
         .await;
     let api_results = std::sync::Arc::into_inner(api_results)
         .expect("API collector dropped after run")
@@ -143,6 +161,17 @@ async fn main() {
         .expect("collector dropped after run")
         .into_inner()
         .expect("outcomes mutex");
+    let api_passing = api_results.passing.len();
+    let api_skipped = api_results
+        .timings
+        .iter()
+        .filter(|record| record.outcome == timing::ScenarioOutcome::Skipped)
+        .count();
+    let api_failed = api_results
+        .timings
+        .iter()
+        .filter(|record| record.outcome == timing::ScenarioOutcome::Failed)
+        .count();
     let mut timing_records = api_results.timings;
     timing_records.extend(outcomes.timings.iter().cloned());
 
@@ -184,7 +213,7 @@ async fn main() {
         tck_only_filter().is_some(),
     );
 
-    let api_failures = failed_scenario_keys(&timing_records, Suite::Api);
+    let api_failures = non_passing_scenario_keys(&timing_records, Suite::Api);
     assert!(
         api_failures.is_empty(),
         "API BDD correctness failure(s):\n{}",
@@ -194,6 +223,7 @@ async fn main() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+    eprintln!("API BDD required: {api_passing} passed, {api_failed} failed, {api_skipped} skipped");
 
     let actual = outcomes.passing;
 
