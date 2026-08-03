@@ -191,6 +191,11 @@ Rust and Node project onto the same bulk contracts. Identity, ontology
 validation, idempotency, and publication stay Rust-owned; bindings only convert
 at the boundary.
 
+Node intentionally exposes only `publishBulkNodes` / `publishBulkEdges` for
+bulk construction. The Python-only `add_nodes` / `add_edges` helpers normalize
+Python containers before calling those same Rust-owned publication operations;
+there are no Node `addNodes` / `addEdges` stubs or JavaScript publication path.
+
 ```rust
 // Rust — publish_bulk_nodes / publish_bulk_edges on graphforge_api::GraphForge
 ```

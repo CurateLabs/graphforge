@@ -1184,22 +1184,6 @@ impl GraphForge {
         }
     }
 
-    /// Bulk-add nodes of one label.
-    ///
-    /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the write API is wired.
-    pub fn add_nodes(&self) -> Result<(), GfError> {
-        Err(GfError::NotImplemented("add_nodes"))
-    }
-
-    /// Bulk-add edges of one relationship type.
-    ///
-    /// # Errors
-    /// Returns [`GfError::NotImplemented`] until the write API is wired.
-    pub fn add_edges(&self) -> Result<(), GfError> {
-        Err(GfError::NotImplemented("add_edges"))
-    }
-
     /// Remove all nodes and edges (in-memory instances only).
     ///
     /// # Errors

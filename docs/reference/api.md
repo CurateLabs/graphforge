@@ -126,6 +126,15 @@ derived provenance identity used by explicit lineage and knowledge rows.
 
 ### Construction
 
+Python exposes `add_nodes` / `add_edges` as language-specific container
+normalizers over the Rust-owned publication methods. Node accepts canonical
+Arrow IPC through `publishBulkNodes` / `publishBulkEdges`; it does not expose
+`addNodes` / `addEdges` convenience methods. Both bindings therefore exercise
+the same atomic publication, receipt, idempotency, and reopen contract without
+duplicating normalization behavior in JavaScript.
+The former Node convenience stubs were removed as an intentional compile-time
+break; callers migrate directly to the two `publishBulk*` methods.
+
 #### `add_node(label, **props)` → `NodeHandle`
 
 Add a single node. Returns a `NodeHandle` exposing stable `.uuid` identity and
@@ -146,7 +155,7 @@ bulk receipt table (`entity_uuid`, `row_ordinal`, generation identity, …).
 receipt = forge.publish_bulk_nodes(operation_uuid, node_table)
 ```
 
-#### `add_nodes(label, data, *, operation_uuid)` → `pyarrow.Table`
+#### Python: `add_nodes(label, data, *, operation_uuid)` → `pyarrow.Table`
 
 Convenience projection onto `publish_bulk_nodes`. `data` may be an Arrow Table,
 a pandas or Polars DataFrame, or a `list[dict]`. Missing `label` / `node_uuid`
@@ -178,7 +187,7 @@ Returns the canonical bulk receipt table.
 receipt = forge.publish_bulk_edges(operation_uuid, edge_table)
 ```
 
-#### `add_edges(rel_type, data, *, operation_uuid, src="src_id", dst="dst_id")` → `pyarrow.Table`
+#### Python: `add_edges(rel_type, data, *, operation_uuid, src="src_id", dst="dst_id")` → `pyarrow.Table`
 
 Convenience projection onto `publish_bulk_edges`. `src` / `dst` name endpoint
 columns (default `src_id` / `dst_id`) and are renamed to `source_uuid` /

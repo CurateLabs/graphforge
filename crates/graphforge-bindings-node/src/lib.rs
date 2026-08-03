@@ -5686,22 +5686,6 @@ impl GraphForge {
         composite::publish_composite_transaction(&graph, request)
     }
 
-    /// Bulk-add nodes (Arrow IPC / records).
-    #[napi]
-    #[allow(unused_variables)]
-    pub fn add_nodes(&self, label: String, data: Buffer) -> Result<()> {
-        let g = self.open_guard()?;
-        g.add_nodes().map_err(|e| to_napi_err(&e))
-    }
-
-    /// Bulk-add edges (Arrow IPC / records).
-    #[napi]
-    #[allow(unused_variables)]
-    pub fn add_edges(&self, rel_type: String, data: Buffer) -> Result<()> {
-        let g = self.open_guard()?;
-        g.add_edges().map_err(|e| to_napi_err(&e))
-    }
-
     /// Remove all nodes and edges (in-memory instances only).
     #[napi]
     pub fn clear(&self) -> Result<()> {

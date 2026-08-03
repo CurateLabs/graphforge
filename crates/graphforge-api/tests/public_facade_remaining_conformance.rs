@@ -111,8 +111,6 @@ fn public_lifecycle_inventory_covers_remaining_facade_methods() {
         )
         .unwrap();
 
-    assert_eq!(graph.add_nodes().unwrap_err().code(), "GF_NOT_IMPLEMENTED");
-    assert_eq!(graph.add_edges().unwrap_err().code(), "GF_NOT_IMPLEMENTED");
     assert_eq!(graph.labels().unwrap(), ["Person".to_owned()]);
     assert!(graph.relationship_types().unwrap().is_empty());
     assert_eq!(graph.node_count("").unwrap(), 1);
