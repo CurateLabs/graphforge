@@ -34,7 +34,7 @@ CORE_TARGET_DIR="$CARGO_TARGET_DIR/llvm-cov-target"
 
 rm -rf "$PROFILE_DIR" "$OUT_DIR/core-html"
 rm -f "$CORE_LCOV" "$PYTHON_LCOV" "$NODE_LCOV" "$WORKSPACE_LCOV" \
-  "$LEDGER" "$EVIDENCE" "$SUMMARY"
+  "$LEDGER" "$EVIDENCE" "$SUMMARY" "$OUT_DIR/python.profdata" "$OUT_DIR/node.profdata"
 mkdir -p "$PROFILE_DIR"
 
 echo "━━━ Core Rust coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -53,10 +53,25 @@ echo "━━━ Instrumented native artifacts ━━━━━━━━━━━�
 uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 pnpm --filter @curatelabs/graphforge exec napi build --platform --release
 
-PYTHON_OBJECT="$(find "$CARGO_TARGET_DIR" -type f \( -name 'libgraphforge_bindings_py.so' -o -name 'libgraphforge_bindings_py.dylib' -o -name 'graphforge_bindings_py.dll' \) | head -1)"
-NODE_OBJECT="$(find "$CARGO_TARGET_DIR" -type f \( -name 'libgraphforge_bindings_node.so' -o -name 'libgraphforge_bindings_node.dylib' -o -name 'graphforge_bindings_node.dll' \) | head -1)"
+find_one() {
+  local description="$1"
+  shift
+  local matches=()
+  while IFS= read -r match; do
+    matches+=("$match")
+  done < <(find "$@" -print | sort)
+  if [[ "${#matches[@]}" -ne 1 ]]; then
+    echo "Rust coverage evidence error: expected exactly one $description, got ${#matches[@]}" >&2
+    printf '%s\n' "${matches[@]}" >&2
+    exit 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
+PYTHON_OBJECT="$(find_one 'Python adapter object' "$CARGO_TARGET_DIR" -type f ! -path '*/deps/*' \( -name 'libgraphforge_bindings_py.so' -o -name 'libgraphforge_bindings_py.dylib' -o -name 'graphforge_bindings_py.dll' \))"
+NODE_OBJECT="$(find_one 'Node adapter object' "$CARGO_TARGET_DIR" -type f ! -path '*/deps/*' \( -name 'libgraphforge_bindings_node.so' -o -name 'libgraphforge_bindings_node.dylib' -o -name 'graphforge_bindings_node.dll' \))"
 PYTHON_RUNTIME="$(uv run --no-sync python -c 'from graphforge import _graphforge_rs; print(_graphforge_rs.__file__)')"
-NODE_RUNTIME="$(find crates/graphforge-bindings-node -maxdepth 1 -type f -name 'graphforge.*.node' | head -1)"
+NODE_RUNTIME="$(find_one 'Node runtime addon' crates/graphforge-bindings-node -maxdepth 1 -type f -name 'graphforge.*.node')"
 for artifact in "$PYTHON_OBJECT" "$NODE_OBJECT" "$PYTHON_RUNTIME" "$NODE_RUNTIME"; do
   if [[ -z "$artifact" || ! -s "$artifact" ]]; then
     echo "Rust coverage evidence error: expected instrumented native artifact is missing" >&2
@@ -83,6 +98,8 @@ export LLVM_PROFILE_FILE="$PROFILE_DIR/python-%p-%10m.profraw"
 for test_file in crates/graphforge-bindings-py/tests/*.py; do
   CARGO_TARGET_DIR="$CORE_TARGET_DIR" uv run --no-sync python "$test_file"
 done
+# The publication dry-run invokes pnpm publish hooks that replace the measured
+# addon; #365 tracks separating that integration check from adapter acceptance.
 uv run --no-sync pytest tests/unit tests/integration tests/features \
   --ignore=tests/unit/test_publish_dry_run.py \
   -n "${PYTEST_WORKERS:-4}" --tb=short
@@ -102,17 +119,26 @@ pnpm --filter @curatelabs/graphforge test
 )
 
 TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
-"$TOOLS_DIR/llvm-profdata" merge -sparse "$PROFILE_DIR"/python-*.profraw -o "$OUT_DIR/python.profdata"
-"$TOOLS_DIR/llvm-profdata" merge -sparse "$PROFILE_DIR"/node-*.profraw -o "$OUT_DIR/node.profdata"
+shopt -s nullglob
+python_profiles=("$PROFILE_DIR"/python-*.profraw)
+node_profiles=("$PROFILE_DIR"/node-*.profraw)
+shopt -u nullglob
+if [[ "${#python_profiles[@]}" -eq 0 || "${#node_profiles[@]}" -eq 0 ]]; then
+  echo "Rust coverage evidence error: an acceptance suite produced no instrumented profiles" >&2
+  exit 1
+fi
+"$TOOLS_DIR/llvm-profdata" merge -sparse "${python_profiles[@]}" -o "$OUT_DIR/python.profdata"
+"$TOOLS_DIR/llvm-profdata" merge -sparse "${node_profiles[@]}" -o "$OUT_DIR/node.profdata"
 "$TOOLS_DIR/llvm-cov" export "$PYTHON_OBJECT" \
   -instr-profile="$OUT_DIR/python.profdata" -format=lcov > "$PYTHON_LCOV"
 "$TOOLS_DIR/llvm-cov" export "$NODE_OBJECT" \
   -instr-profile="$OUT_DIR/node.profdata" -format=lcov > "$NODE_LCOV"
 
 export GF_COVERAGE_ROOT="$ROOT"
-export GF_COVERAGE_SOURCE_SHA="$(git rev-parse HEAD)"
-export GF_COVERAGE_RUSTC="$(rustc --version)"
-export GF_COVERAGE_LLVM_COV="$(cargo llvm-cov --version)"
+GF_COVERAGE_SOURCE_SHA="$(git rev-parse HEAD)"
+GF_COVERAGE_RUSTC="$(rustc --version)"
+GF_COVERAGE_LLVM_COV="$(cargo llvm-cov --version)"
+export GF_COVERAGE_SOURCE_SHA GF_COVERAGE_RUSTC GF_COVERAGE_LLVM_COV
 export GF_COVERAGE_PYTHON_OBJECT="$PYTHON_OBJECT"
 export GF_COVERAGE_PYTHON_RUNTIME="$PYTHON_RUNTIME"
 export GF_COVERAGE_PYTHON_HASH="$python_hash"

@@ -38,10 +38,6 @@ def normalize_source(raw: str, root: Path) -> str | None:
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
-        marker = "/crates/"
-        normalized = path.as_posix()
-        if marker in normalized:
-            return f"crates/{normalized.split(marker, 1)[1]}"
         return None
 
 
@@ -194,20 +190,29 @@ def validate_floors(ledger: dict[str, Any], args: argparse.Namespace) -> None:
         raise LedgerError("unsupported or missing Rust coverage ledger schema")
     if ledger.get("source_sha") != expected_sha:
         raise LedgerError("Rust coverage ledger is stale for the current HEAD")
-    floors = {
+    floors: dict[str, float | None] = {
         "core": args.core_floor,
         "python_adapter": args.python_floor,
         "node_adapter": args.node_floor,
+        "workspace": None,
     }
     for surface, floor in floors.items():
         data = ledger.get("surfaces", {}).get(surface)
         if not isinstance(data, dict):
             raise LedgerError(f"Rust coverage ledger is missing {surface}")
+        covered = data.get("covered_lines")
         measured = data.get("measured_lines")
         percent = data.get("line_percent")
-        if not isinstance(measured, int) or measured <= 0 or not isinstance(percent, (int, float)):
+        if (
+            not isinstance(covered, int)
+            or covered < 0
+            or not isinstance(measured, int)
+            or measured <= 0
+            or covered > measured
+            or not isinstance(percent, (int, float))
+        ):
             raise LedgerError(f"Rust coverage ledger has malformed {surface} totals")
-        if float(percent) < floor:
+        if floor is not None and float(percent) < floor:
             raise LedgerError(
                 f"{surface} Rust coverage below {floor:.2f}% (got {float(percent):.2f}%)"
             )
@@ -246,12 +251,15 @@ def main() -> int:
                 raise LedgerError(f"missing Rust coverage ledger: {args.ledger}")
             ledger = json.loads(args.ledger.read_text(encoding="utf-8"))
         validate_floors(ledger, args)
-    except (LedgerError, json.JSONDecodeError) as error:
+        report = [
+            (name, ledger["surfaces"][name])
+            for name in ("core", "python_adapter", "node_adapter", "workspace")
+        ]
+    except (LedgerError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"Rust coverage evidence error: {error}", file=sys.stderr)
         return 1
 
-    for name in ("core", "python_adapter", "node_adapter", "workspace"):
-        data = ledger["surfaces"][name]
+    for name, data in report:
         print(
             f"{name}: {data['covered_lines']}/{data['measured_lines']} "
             f"lines ({data['line_percent']:.2f}%)"

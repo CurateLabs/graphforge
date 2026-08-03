@@ -8,14 +8,14 @@ import json
 import os
 from pathlib import Path
 import tempfile
-import time
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
     "coverage_rust_ledger", ROOT / "scripts" / "coverage_rust_ledger.py"
 )
-assert SPEC is not None and SPEC.loader is not None
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError("failed to load the Rust coverage ledger module")
 ledger_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ledger_module)
 
@@ -24,7 +24,8 @@ def expect_error(fragment: str, call) -> None:
     try:
         call()
     except ledger_module.LedgerError as error:
-        assert fragment in str(error), (fragment, str(error))
+        if fragment not in str(error):
+            raise AssertionError(f"expected {fragment!r} in {str(error)!r}") from error
     else:
         raise AssertionError(f"expected LedgerError containing {fragment!r}")
 
@@ -38,8 +39,9 @@ def main() -> None:
         profile = temp / "adapter.profraw"
         artifact.write_bytes(b"same instrumented artifact")
         runtime.write_bytes(artifact.read_bytes())
-        time.sleep(0.01)
         profile.write_bytes(b"non-empty profile")
+        artifact_mtime = artifact.stat().st_mtime
+        os.utime(profile, (artifact_mtime + 10, artifact_mtime + 10))
         artifact_hash = ledger_module.sha256(artifact)
         evidence = {
             "source_sha": head,
@@ -93,7 +95,10 @@ def main() -> None:
             f"SF:{ROOT / 'crates/graphforge-api/src/lib.rs'}\nDA:1,1\nend_of_record\n",
             encoding="utf-8",
         )
-        assert ledger_module.parse_lcov(lcov, ROOT)
+        if not ledger_module.parse_lcov(lcov, ROOT):
+            raise AssertionError("valid LCOV fixture produced no records")
+        if ledger_module.normalize_source("/tmp/dependency/crates/foreign/src/lib.rs", ROOT):
+            raise AssertionError("out-of-tree crate path entered workspace coverage")
         malformed = temp / "malformed.lcov"
         malformed.write_text("SF:no-lines.rs\nend_of_record\n", encoding="utf-8")
         expect_error("no executable lines", lambda: ledger_module.parse_lcov(malformed, ROOT))
@@ -108,8 +113,8 @@ def main() -> None:
             "schema_version": 1,
             "source_sha": head,
             "surfaces": {
-                name: {"measured_lines": 100, "line_percent": 90.0}
-                for name in ("core", "python_adapter", "node_adapter")
+                name: {"covered_lines": 90, "measured_lines": 100, "line_percent": 90.0}
+                for name in ("core", "python_adapter", "node_adapter", "workspace")
             },
         }
         ledger_module.validate_floors(valid_ledger, args)
@@ -128,6 +133,14 @@ def main() -> None:
         mutated = json.loads(json.dumps(valid_ledger))
         mutated["schema_version"] = 99
         expect_error("unsupported or missing", lambda: ledger_module.validate_floors(mutated, args))
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["surfaces"].pop("workspace")
+        expect_error("missing workspace", lambda: ledger_module.validate_floors(mutated, args))
+
+        mutated = json.loads(json.dumps(valid_ledger))
+        mutated["surfaces"]["core"].pop("covered_lines")
+        expect_error("malformed core", lambda: ledger_module.validate_floors(mutated, args))
 
     print("rust coverage ledger mutation sentinels: ok")
 
