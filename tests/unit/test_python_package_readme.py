@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import email.parser
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -25,7 +26,19 @@ def _has_unpinned_pip_install(text: str) -> bool:
 
 
 def _has_pinned_pip_install(text: str) -> bool:
-    return "pip install graphforge==" in text or 'pip install "graphforge==' in text
+    return bool(
+        re.search(
+            r"""\bpip\s+install\b[^\n]*?[\"']?graphforge(?:\[[^\]\n]+\])?[\"']?\s*(?:===|==|~=|!=|<=|>=|<|>|@)""",
+            text,
+        )
+    )
+
+
+def test_pinned_pip_install_detector_covers_quotes_and_options() -> None:
+    assert _has_pinned_pip_install('pip install "graphforge==0.5.1"')
+    assert _has_pinned_pip_install("pip install 'graphforge==0.5.1'")
+    assert _has_pinned_pip_install("pip install --upgrade graphforge==0.5.1")
+    assert _has_pinned_pip_install("pip install --upgrade 'graphforge==0.5.1'")
 
 
 def test_python_readme_is_concise_pypi_landing_page() -> None:
