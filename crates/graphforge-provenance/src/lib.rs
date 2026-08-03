@@ -1343,4 +1343,73 @@ mod tests {
             "GF_PROVENANCE_DUPLICATE"
         );
     }
+
+    #[test]
+    fn closed_provenance_vocabularies_round_trip_and_reject_unknown_tokens() {
+        let events = [
+            EventKind::CreateNode,
+            EventKind::CreateEdge,
+            EventKind::MergeCreate,
+            EventKind::MergeMatchedNoop,
+            EventKind::SetProperty,
+            EventKind::RemoveProperty,
+            EventKind::AddLabel,
+            EventKind::RemoveLabel,
+            EventKind::Delete,
+            EventKind::DetachDelete,
+            EventKind::OntologyInference,
+            EventKind::CreateAssertion,
+            EventKind::AssessConfidence,
+            EventKind::RecordEvidence,
+            EventKind::RecordAlgorithmRun,
+            EventKind::RecordBeliefProjectionAttachment,
+        ];
+        for value in events {
+            assert_eq!(EventKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(EventKind::parse("create_vertex").is_err());
+        let subjects = [
+            SubjectKind::Node,
+            SubjectKind::Edge,
+            SubjectKind::Assertion,
+            SubjectKind::EvidenceLink,
+            SubjectKind::ConfidenceAssessment,
+            SubjectKind::AlgorithmRun,
+            SubjectKind::BeliefProjectionAttachment,
+        ];
+        for value in subjects {
+            assert_eq!(SubjectKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(SubjectKind::parse("vertex").is_err());
+        for value in [LineageRole::Input, LineageRole::Output] {
+            assert_eq!(LineageRole::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(LineageRole::parse("context").is_err());
+    }
+
+    #[test]
+    fn provenance_error_codes_are_closed_and_exact() {
+        let cases = [
+            (invalid("field", "bad"), "GF_PROVENANCE_INVALID"),
+            (
+                ProvenanceError::Limit {
+                    participant: "events",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (ProvenanceError::Duplicate("id"), "GF_PROVENANCE_DUPLICATE"),
+            (ProvenanceError::Dangling("id"), "GF_PROVENANCE_DANGLING"),
+            (ProvenanceError::Conflict("id"), "GF_IDEMPOTENCY_CONFLICT"),
+            (
+                ProvenanceError::Arrow(arrow::error::ArrowError::SchemaError("bad".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code);
+            assert!(!error.to_string().is_empty());
+        }
+    }
 }

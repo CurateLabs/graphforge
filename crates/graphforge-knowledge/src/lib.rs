@@ -3089,6 +3089,88 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn closed_domain_vocabularies_round_trip_and_reject_unknown_tokens() {
+        for value in [GraphObjectKind::Node, GraphObjectKind::Edge] {
+            assert_eq!(GraphObjectKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(GraphObjectKind::parse("vertex").is_err());
+        for value in [
+            AssertionGraphRole::Subject,
+            AssertionGraphRole::Object,
+            AssertionGraphRole::Context,
+        ] {
+            assert_eq!(AssertionGraphRole::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(AssertionGraphRole::parse("target").is_err());
+        for value in [
+            EvidenceSourceKind::Document,
+            EvidenceSourceKind::Observation,
+            EvidenceSourceKind::GraphNode,
+            EvidenceSourceKind::GraphEdge,
+        ] {
+            assert_eq!(EvidenceSourceKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(EvidenceSourceKind::parse("web").is_err());
+        for value in [
+            EvidenceRole::Supports,
+            EvidenceRole::Contradicts,
+            EvidenceRole::Context,
+        ] {
+            assert_eq!(EvidenceRole::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(EvidenceRole::parse("proves").is_err());
+        for value in [
+            ConfidencePolicy::Explicit,
+            ConfidencePolicy::ConservativeMin,
+        ] {
+            assert_eq!(ConfidencePolicy::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(ConfidencePolicy::parse("average").is_err());
+        for value in [
+            AlgorithmRunState::Started,
+            AlgorithmRunState::Completed,
+            AlgorithmRunState::Failed,
+            AlgorithmRunState::Cancelled,
+            AlgorithmRunState::Interrupted,
+        ] {
+            assert_eq!(AlgorithmRunState::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(!AlgorithmRunState::Started.is_terminal());
+        assert!(AlgorithmRunState::Completed.is_terminal());
+        assert!(AlgorithmRunState::parse("running").is_err());
+    }
+
+    #[test]
+    fn knowledge_error_codes_are_closed_and_exact() {
+        let cases = [
+            (invalid("field", "bad"), "GF_KNOWLEDGE_INVALID"),
+            (
+                KnowledgeError::Limit {
+                    participant: "assertions",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (KnowledgeError::Duplicate("id"), "GF_KNOWLEDGE_DUPLICATE"),
+            (KnowledgeError::Dangling("id"), "GF_KNOWLEDGE_DANGLING"),
+            (KnowledgeError::Conflict("id"), "GF_IDEMPOTENCY_CONFLICT"),
+            (
+                KnowledgeError::TransactionConflict("id"),
+                "GF_TRANSACTION_CONFLICT",
+            ),
+            (
+                KnowledgeError::Arrow(arrow::error::ArrowError::SchemaError("bad".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code);
+            assert!(!error.to_string().is_empty());
+        }
+    }
 }
 pub use belief_projection::{
     ALGORITHM_INTERPRETATION_ATTACHMENT_SCHEMA, BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION,

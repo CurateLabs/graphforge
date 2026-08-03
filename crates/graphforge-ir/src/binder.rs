@@ -8662,4 +8662,89 @@ mod tests {
             }));
         }
     }
+
+    #[test]
+    fn nested_aggregate_rewrite_covers_scalar_container_shapes() {
+        let cases = [
+            "MATCH (n:Person) RETURN count(*) + 1 AS value",
+            "MATCH (n:Person) RETURN -count(*) AS value",
+            "MATCH (n:Person) RETURN (count(*)) AS value",
+            "MATCH (n:Person) RETURN coalesce(count(*), 0) AS value",
+            "MATCH (n:Person) RETURN [count(*), 1] AS value",
+            "MATCH (n:Person) RETURN {total: count(*), fallback: 0} AS value",
+            "MATCH (n:Person) RETURN CASE count(*) WHEN 0 THEN 1 ELSE count(*) END AS value",
+            "MATCH (n:Person) RETURN count(*) IS NULL AS value",
+            "MATCH (n:Person) RETURN count(*) IN [0, 1] AS value",
+            "MATCH (n:Person) RETURN toString(count(*)) STARTS WITH '1' AS value",
+            "MATCH (n:Person) RETURN toString(count(*)) =~ '.*' AS value",
+            "MATCH (n:Person) RETURN [x IN collect(n.name) | x] AS value",
+            "MATCH (n:Person) RETURN all(x IN collect(n.name) WHERE x IS NOT NULL) AS value",
+        ];
+
+        for query in cases {
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let plan = binder
+                .bind(&parse(query).unwrap())
+                .unwrap_or_else(|errors| panic!("query={query} errors={errors:?}"));
+            let aggregate_count = plan
+                .ops
+                .iter()
+                .filter(|op| matches!(op, GraphOp::Aggregate { .. }))
+                .count();
+            assert_eq!(aggregate_count, 1, "query={query} ops={:?}", plan.ops);
+            assert!(
+                plan.ops
+                    .iter()
+                    .any(|op| matches!(op, GraphOp::Project { .. })),
+                "nested aggregate needs a final projection: query={query} ops={:?}",
+                plan.ops
+            );
+        }
+    }
+
+    #[test]
+    fn typed_uuid_discovery_traverses_every_expression_container() {
+        let params = HashMap::from([("id".into(), IrLiteral::Uuid([0x55; 16]))]);
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let binder = binder.with_parameter_literals(&params);
+        let cases = [
+            "$id",
+            "($id)",
+            "-$id",
+            "[$id]",
+            "{value: $id}",
+            "coalesce(null, $id)",
+            "1 + $id",
+            "CASE $id WHEN null THEN 0 ELSE 1 END",
+            "CASE 1 WHEN $id THEN 0 ELSE 1 END",
+            "CASE 1 WHEN 0 THEN $id ELSE 1 END",
+            "CASE 1 WHEN 0 THEN 1 ELSE $id END",
+            "[x IN [$id] WHERE x IS NOT NULL | x]",
+            "[x IN [1] WHERE $id IS NOT NULL | x]",
+            "[x IN [1] | $id]",
+            "all(x IN [$id] WHERE x IS NOT NULL)",
+            "all(x IN [1] WHERE $id IS NOT NULL)",
+            "[(a)-->(b) WHERE $id IS NOT NULL | a]",
+            "[(a)-->(b) | $id]",
+            "$id IS NULL",
+            "$id IN [1]",
+            "1 IN [$id]",
+            "$id STARTS WITH 'x'",
+            "'x' STARTS WITH $id",
+            "$id =~ 'x'",
+            "'x' =~ $id",
+        ];
+        for source in cases {
+            let expression = parsed_return_expr(&format!("RETURN {source}"));
+            assert_eq!(
+                binder.typed_uuid_param_in(&expression),
+                Some("id"),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            binder.typed_uuid_param_in(&parsed_return_expr("RETURN [1, 2, 3]")),
+            None
+        );
+    }
 }

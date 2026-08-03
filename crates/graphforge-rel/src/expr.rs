@@ -15063,4 +15063,158 @@ mod tests {
             "Execution error: list + requires at least one list operand"
         );
     }
+
+    #[test]
+    fn scalar_udf_runtime_truth_tables_strings_and_ranges() {
+        use datafusion::arrow::array::{Array, BooleanArray, ListArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        fn invoke<U: ScalarUDFImpl>(
+            udf: &U,
+            values: Vec<ScalarValue>,
+            return_type: DataType,
+        ) -> datafusion::error::Result<ColumnarValue> {
+            let fields = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    Arc::new(Field::new(format!("arg_{index}"), value.data_type(), true))
+                })
+                .collect();
+            udf.invoke_with_args(ScalarFunctionArgs {
+                args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+                arg_fields: fields,
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        }
+
+        let booleans = [None, Some(false), Some(true)];
+        for kind in [
+            CypherBoolOpKind::And,
+            CypherBoolOpKind::Or,
+            CypherBoolOpKind::Xor,
+        ] {
+            for left in booleans {
+                for right in booleans {
+                    let output = invoke(
+                        &CypherBoolOp::new(kind),
+                        vec![ScalarValue::Boolean(left), ScalarValue::Boolean(right)],
+                        DataType::Boolean,
+                    )
+                    .unwrap();
+                    let output = match output {
+                        ColumnarValue::Array(array) => array,
+                        ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+                    };
+                    let output = output.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    let actual = (!output.is_null(0)).then(|| output.value(0));
+                    let expected = match kind {
+                        CypherBoolOpKind::And => match (left, right) {
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            (Some(true), Some(true)) => Some(true),
+                            _ => None,
+                        },
+                        CypherBoolOpKind::Or => match (left, right) {
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            (Some(false), Some(false)) => Some(false),
+                            _ => None,
+                        },
+                        CypherBoolOpKind::Xor => left.zip(right).map(|(l, r)| l ^ r),
+                    };
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        assert!(
+            invoke(
+                &CypherBoolOp::new(CypherBoolOpKind::And),
+                vec![
+                    ScalarValue::Int64(Some(1)),
+                    ScalarValue::Boolean(Some(true))
+                ],
+                DataType::Boolean,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("expected boolean operand")
+        );
+
+        for (kind, expected) in [
+            (StringPredicate::Starts, true),
+            (StringPredicate::Ends, false),
+            (StringPredicate::Contains, true),
+        ] {
+            let output = invoke(
+                &CypherStringPredicate::new(kind),
+                vec![
+                    ScalarValue::LargeUtf8(Some("GraphForge".into())),
+                    ScalarValue::Utf8(Some("Graph".into())),
+                ],
+                DataType::Boolean,
+            )
+            .unwrap();
+            let output = match output {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            assert_eq!(
+                output
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+
+        let range_type = DataType::new_list(DataType::Int64, true);
+        for (start, end, step, expected) in [(1, 5, 2, vec![1, 3, 5]), (5, 1, -2, vec![5, 3, 1])] {
+            let output = invoke(
+                &CypherRange::new(),
+                vec![
+                    ScalarValue::Int64(Some(start)),
+                    ScalarValue::Int64(Some(end)),
+                    ScalarValue::Int64(Some(step)),
+                ],
+                range_type.clone(),
+            )
+            .unwrap();
+            let output = match output {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            let list = output
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap()
+                .value(0);
+            assert_eq!(
+                (0..list.len())
+                    .map(|row| ScalarValue::try_from_array(&list, row).unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for (step, fragment) in [(0, "must not be zero"), (2, "overflowed i64")] {
+            let start = if step == 0 { 1 } else { i64::MAX - 1 };
+            let end = if step == 0 { 2 } else { i64::MAX };
+            let error = invoke(
+                &CypherRange::new(),
+                vec![
+                    ScalarValue::Int64(Some(start)),
+                    ScalarValue::Int64(Some(end)),
+                    ScalarValue::Int64(Some(step)),
+                ],
+                range_type.clone(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(fragment));
+        }
+    }
 }

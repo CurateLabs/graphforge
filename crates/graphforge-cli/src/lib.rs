@@ -1727,4 +1727,73 @@ mod tests {
             String::from_utf8_lossy(&remove.stderr)
         );
     }
+
+    #[test]
+    fn clap_error_vocabulary_is_total_and_stable() {
+        let cases = [
+            (ErrorKind::InvalidValue, "invalid_value"),
+            (ErrorKind::UnknownArgument, "unknown_argument"),
+            (ErrorKind::InvalidSubcommand, "invalid_subcommand"),
+            (ErrorKind::NoEquals, "missing_equals"),
+            (ErrorKind::ValueValidation, "value_validation"),
+            (ErrorKind::TooManyValues, "too_many_values"),
+            (ErrorKind::TooFewValues, "too_few_values"),
+            (ErrorKind::WrongNumberOfValues, "wrong_number_of_values"),
+            (ErrorKind::ArgumentConflict, "argument_conflict"),
+            (
+                ErrorKind::MissingRequiredArgument,
+                "missing_required_argument",
+            ),
+            (ErrorKind::MissingSubcommand, "missing_subcommand"),
+            (ErrorKind::DisplayHelp, "display_help"),
+            (
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "display_help_on_missing_input",
+            ),
+            (ErrorKind::DisplayVersion, "display_version"),
+            (ErrorKind::Io, "io"),
+            (ErrorKind::Format, "format"),
+        ];
+        for (kind, token) in cases {
+            assert_eq!(clap_error_kind(kind), token);
+        }
+    }
+
+    #[test]
+    fn canonical_json_uuid_conversion_is_exact_and_rejects_malformed_hex() {
+        let ty = DataType::FixedSizeBinary(16);
+        assert_eq!(
+            canonical_json_value(
+                serde_json::Value::String("000102030405060708090a0b0c0d0e0f".into()),
+                &ty,
+            )
+            .unwrap(),
+            serde_json::Value::String("00010203-0405-0607-0809-0a0b0c0d0e0f".into())
+        );
+        for value in ["00", "zz0102030405060708090a0b0c0d0e0f"] {
+            assert!(matches!(
+                canonical_json_value(serde_json::Value::String(value.into()), &ty),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+        let ordinary = serde_json::json!({"nested": [true, 1, null]});
+        assert_eq!(
+            canonical_json_value(ordinary.clone(), &DataType::Utf8).unwrap(),
+            ordinary
+        );
+    }
+
+    #[test]
+    fn selector_requires_exactly_one_source_and_preserves_named_current() {
+        assert!(selector(None, false, "from").is_err());
+        assert!(selector(Some("named".into()), true, "from").is_err());
+        assert!(matches!(
+            selector(Some("current".into()), false, "from").unwrap(),
+            CheckpointSelector::Named(value) if value == "current"
+        ));
+        assert!(matches!(
+            selector(None, true, "from").unwrap(),
+            CheckpointSelector::Current
+        ));
+    }
 }

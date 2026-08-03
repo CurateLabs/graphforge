@@ -1183,4 +1183,68 @@ mod tests {
         query("DETACH DELETE n");
         query("CALL { MATCH (n) RETURN n }");
     }
+
+    #[test]
+    fn every_reserved_word_has_a_stable_alias_spelling() {
+        let cases = [
+            (Tok::Count, "count"),
+            (Tok::Exists, "exists"),
+            (Tok::Filter, "filter"),
+            (Tok::Reduce, "reduce"),
+            (Tok::Extract, "extract"),
+            (Tok::Match, "match"),
+            (Tok::Return, "return"),
+            (Tok::Where, "where"),
+            (Tok::With, "with"),
+            (Tok::As, "as"),
+            (Tok::Distinct, "distinct"),
+            (Tok::Union, "union"),
+            (Tok::All, "all"),
+            (Tok::Create, "create"),
+            (Tok::Merge, "merge"),
+            (Tok::On, "on"),
+            (Tok::Set, "set"),
+            (Tok::Remove, "remove"),
+            (Tok::Delete, "delete"),
+            (Tok::Detach, "detach"),
+            (Tok::Call, "call"),
+            (Tok::Yield, "yield"),
+            (Tok::Unwind, "unwind"),
+            (Tok::Order, "order"),
+            (Tok::By, "by"),
+            (Tok::Skip, "skip"),
+            (Tok::Limit, "limit"),
+            (Tok::Is, "is"),
+            (Tok::In, "in"),
+            (Tok::Starts, "starts"),
+            (Tok::Ends, "ends"),
+            (Tok::Contains, "contains"),
+            (Tok::Case, "case"),
+            (Tok::When, "when"),
+            (Tok::Then, "then"),
+            (Tok::Else, "else"),
+            (Tok::End, "end"),
+            (Tok::True, "true"),
+            (Tok::False, "false"),
+            (Tok::Null, "null"),
+            (Tok::Not, "not"),
+            (Tok::And, "and"),
+            (Tok::Or, "or"),
+            (Tok::Xor, "xor"),
+            (Tok::Optional, "optional"),
+            (Tok::Any, "any"),
+            (Tok::None, "none"),
+            (Tok::Single, "single"),
+            (Tok::ShortestPath, "shortestPath"),
+            (Tok::AllShortestPaths, "allShortestPaths"),
+            (Tok::Asc, "asc"),
+            (Tok::Desc, "desc"),
+            (Tok::Ascending, "ascending"),
+            (Tok::Descending, "descending"),
+        ];
+        for (token, spelling) in cases {
+            assert_eq!(tok_as_alias_str(&token), Some(spelling));
+        }
+        assert_eq!(tok_as_alias_str(&Tok::Comma), None);
+    }
 }
