@@ -1,6 +1,6 @@
 # Quick Start
 
-Get a graph running in five minutes on the v0.5.1 API. Choose **Python** or
+Get a graph running in five minutes. Choose **Python** or
 **Node** — both are thin bindings over the same Rust engine. Every query and
 analyst verb returns Apache Arrow results. Node and edge handles use stable
 `.uuid` identity (no numeric storage ids).
@@ -24,13 +24,13 @@ For full install options, see [Installation](installation.md).
 **pip**
 
 ```bash
-pip install "graphforge==0.5.1"
+pip install graphforge
 ```
 
 **uv** (recommended)
 
 ```bash
-uv add "graphforge==0.5.1"
+uv add graphforge
 ```
 
 ### Node
@@ -38,13 +38,13 @@ uv add "graphforge==0.5.1"
 **npm**
 
 ```bash
-npm install @curatelabs/graphforge@0.5.1
+npm install @curatelabs/graphforge
 ```
 
 **pnpm**
 
 ```bash
-pnpm add @curatelabs/graphforge@0.5.1
+pnpm add @curatelabs/graphforge
 ```
 
 Node query and analyst-verb results are Arrow IPC buffers. Decode them with

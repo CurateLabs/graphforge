@@ -9,13 +9,13 @@ JavaScript fallback engine.
 **npm**
 
 ```bash
-npm install @curatelabs/graphforge@0.5.1
+npm install @curatelabs/graphforge
 ```
 
 **pnpm**
 
 ```bash
-pnpm add @curatelabs/graphforge@0.5.1
+pnpm add @curatelabs/graphforge
 ```
 
 Decode Arrow IPC results with [`apache-arrow`](https://www.npmjs.com/package/apache-arrow)

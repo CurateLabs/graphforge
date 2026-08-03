@@ -2,7 +2,8 @@
 
 **Composable graph tooling for analysis, construction, and refinement**
 
-[![Version](https://img.shields.io/badge/version-v0.5.1-F59E0B.svg)](guide/installation.md)
+[![PyPI](https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi)](https://pypi.org/project/graphforge/)
+[![npm](https://img.shields.io/npm/v/%40curatelabs/graphforge.svg?label=npm&logo=npm)](https://www.npmjs.com/package/@curatelabs/graphforge)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](guide/installation.md)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white)](guide/installation.md)
 [![Rust](https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white)](development/contributing.md)
@@ -15,10 +16,10 @@ results, and Parquet persistence. It brings openCypher and analyst-intent verbs 
 scripts, repositories, and editor workflows without requiring a database server. The current
 v0.5 engine passes all **3,897 openCypher TCK scenarios**.
 
-> **Install tip:** Pin GraphForge **v0.5.1** from PyPI (`graphforge==0.5.1`) or npm
-> (`@curatelabs/graphforge@0.5.1`). PyPI also lists an unrelated pure-Python `graphforge`
-> **0.4.0**; do not assume an unpinned install resolves to the CurateLabs native engine.
-> See [Installation](guide/installation.md).
+> **Install tip:** Install GraphForge from PyPI (`pip install graphforge`) or npm
+> (`npm install @curatelabs/graphforge`) to receive the current native release.
+> Earlier pure-Python releases under the `graphforge` PyPI name predate the
+> CurateLabs engine. See [Installation](guide/installation.md).
 
 ```python
 from graphforge import GraphForge
