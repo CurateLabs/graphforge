@@ -758,7 +758,18 @@ impl StagedProjectGeneration {
             "VALIDATED",
             false,
         )?;
-        composite_validation(&self.parent, &self.participants)?;
+        if let Err(error) = composite_validation(&self.parent, &self.participants) {
+            // An optimistic caller uses `GF_WRITE_CONFLICT` to request a rebase
+            // after CURRENT changes between staging and composite validation.
+            // Retaining that private attempt would make the retry collide with
+            // its own non-published journal even though the logical operation
+            // identity is unchanged. Abort only that transaction-owned attempt
+            // before returning the stable conflict to the caller.
+            if self.requires_promotion && error.code() == "GF_WRITE_CONFLICT" {
+                abort_stale_generation(&self)?;
+            }
+            return Err(error);
+        }
         project_failpoint::hit(
             "project.after_composite_validation",
             Some(self.transaction_uuid),
@@ -2207,6 +2218,65 @@ mod tests {
                 .generation_uuid(),
             second.generation_uuid
         );
+    }
+
+    #[test]
+    fn optimistic_validation_conflict_aborts_only_its_own_rebase_attempt() {
+        let root = project();
+        let mut stale_request = request(vec![participant("graph", "nodes", b"attempt")]);
+        let operation: [u8; 32] = Sha256::digest(b"logical-validation-rebase").into();
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &stale_request, operation).unwrap()
+        else {
+            panic!("optimistic operation replayed unexpectedly");
+        };
+
+        publish(
+            root.path(),
+            request(vec![participant("graph", "nodes", b"concurrent")]),
+        );
+        let error = staged
+            .validate(
+                |_| Ok(()),
+                |parent, _| {
+                    let current = resolve_project_generation(root.path())?;
+                    if current.generation_uuid() != parent.generation_uuid() {
+                        return Err(project_error(
+                            ProjectErrorCode::WriteConflict,
+                            "project generation changed before composite validation",
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .err()
+            .expect("stale optimistic validation must request a rebase");
+        assert_eq!(error.code(), "GF_WRITE_CONFLICT");
+        assert_eq!(
+            read_journal(&journal_path(root.path(), stale_request.transaction_uuid,))
+                .unwrap()
+                .phase,
+            JournalPhase::Aborted
+        );
+
+        let different_operation: [u8; 32] = Sha256::digest(b"different-operation").into();
+        let identity_error =
+            stage_project_generation_optimistic(root.path(), &stale_request, different_operation)
+                .err()
+                .expect("different logical identity must not reuse the aborted transaction");
+        assert_eq!(identity_error.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        stale_request.participants[0].bytes = b"rebased-attempt".to_vec();
+        let ProjectStageOutcome::Staged(rebased) =
+            stage_project_generation_optimistic(root.path(), &stale_request, operation).unwrap()
+        else {
+            panic!("aborted optimistic operation did not permit a rebase attempt");
+        };
+        rebased
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
     }
 
     #[test]
