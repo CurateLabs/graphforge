@@ -197,9 +197,9 @@ make test-unit
 make test-integration
 make test-tck
 
-# With coverage (Rust + Python + Node; ≥85% lines per surface)
+# With coverage (core Rust ≥85%; Rust adapters ≥80%; wrappers ≥85%)
 make coverage            # all surfaces + thresholds
-make coverage-rust       # cargo llvm-cov → build/coverage-rust/
+make coverage-rust       # core + same-SHA native adapter ledger
 make coverage-python     # pytest-cov on graphforge-bindings-py/python/graphforge
 make coverage-node       # c8 on @curatelabs/graphforge lib/ (needs *.node)
 make coverage-report     # open Python HTML report
@@ -229,17 +229,31 @@ def tmp_db(tmp_path):
 
 ### Coverage Requirements
 
-Local `make coverage` instruments three surfaces independently (pytest does **not**
-cover Rust; Codecov CI is separate/out of scope for this gate):
+Local `make coverage` instruments the shipped surfaces independently. The Rust
+run builds PyO3 and napi-rs once with LLVM instrumentation and executes the real
+Python and Node native acceptance suites against those exact artifacts. The
+command defaults to an isolated target under `build/coverage-rust/`; set
+`CARGO_TARGET_DIR` to choose a different isolated location.
 
 | Surface | Tool | Scope | Threshold |
 |---------|------|-------|-----------|
-| Rust | `cargo llvm-cov` | workspace crates via `cargo test --workspace` | ≥85% lines |
+| Core Rust | `cargo llvm-cov` | workspace Rust excluding binding adapters | ≥85% lines |
+| Python adapter Rust | `cargo llvm-cov` + native acceptance | `graphforge-bindings-py` Rust | ≥80% lines |
+| Node adapter Rust | `cargo llvm-cov` + native acceptance | `graphforge-bindings-node` Rust | ≥80% lines |
 | Python | `pytest-cov` | `crates/graphforge-bindings-py/python/graphforge` | ≥85% lines; ≥90% patch on changed wrapper files |
 | Node | `c8` | hand-written `@curatelabs/graphforge` `lib/**/*.mjs` | ≥85% lines |
 
-Override floors with `COVERAGE_FAIL_UNDER_RUST`, `COVERAGE_FAIL_UNDER_PYTHON`,
-and `COVERAGE_FAIL_UNDER_NODE`.
+`build/coverage-rust/ledger.json` is the machine-readable source of truth. It
+records the exact source SHA, toolchain, artifact hashes, profile counts, and
+separate core, adapter, and merged-workspace totals. `summary.txt` is the human
+view and `lcov.info` is the merged report. A high workspace average never
+substitutes for a missing profile or a failed adapter floor; stale, empty,
+wrong-artifact, and wrong-SHA evidence fails closed.
+
+Override floors with `COVERAGE_FAIL_UNDER_RUST`,
+`COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER`,
+`COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER`, `COVERAGE_FAIL_UNDER_PYTHON`, and
+`COVERAGE_FAIL_UNDER_NODE`.
 
 ### Required Checks (all PRs)
 

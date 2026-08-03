@@ -264,3 +264,136 @@ test("Node exposes one composite publish entrypoint with no inference helpers", 
   assert.equal(typeof forge.publishCompositeKnowledgeTransaction, "undefined");
   assert.equal(typeof forge.inferCompositeParticipants, "undefined");
 });
+
+test("every explicit composite participant family crosses the Node adapter", async () => {
+  const project = mkdtempSync(
+    join(tmpdir(), "gf-composite-participants-node-"),
+  );
+  try {
+    const forge = new GraphForge(project);
+    await enableCapabilities(forge);
+    const operationUuid = "018f0f4e-7b8c-7000-8000-00000000e001";
+    const provenanceUuid = "018f0f4e-7b8c-7000-8000-00000000e002";
+    const assertionUuid = "018f0f4e-7b8c-7000-8000-00000000e003";
+    const confidenceUuid = "018f0f4e-7b8c-7000-8000-00000000e004";
+    const reasoningUuid = "018f0f4e-7b8c-7000-8000-00000000e005";
+    const groupUuid = "018f0f4e-7b8c-7000-8000-00000000e006";
+    const before = projectDigest(project);
+    assert.throws(
+      () =>
+        forge.publishCompositeTransaction({
+          contractVersion: 1,
+          operationUuid,
+          graphMutations: [
+            {
+              kind: "create_node",
+              nodeUuid: "018f0f4e-7b8c-7000-8000-00000000e010",
+              label: "Person",
+              properties: { name: "Grace" },
+            },
+          ],
+          knowledge: {
+            confidenceAssessments: [
+              {
+                confidenceUuid,
+                assertionUuid,
+                policy: "conservative_min",
+                value: 0.5,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            confidenceInputs: [
+              {
+                confidenceUuid,
+                inputConfidenceUuid: "018f0f4e-7b8c-7000-8000-00000000e007",
+                inputValue: 0.5,
+                ordinal: 0,
+              },
+            ],
+            evidence: [
+              {
+                evidenceUuid: "018f0f4e-7b8c-7000-8000-00000000e008",
+                assertionUuid,
+                sourceUuid: "018f0f4e-7b8c-7000-8000-00000000e009",
+                sourceKind: "document",
+                role: "supports",
+                weight: 0.8,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            reasoning: [
+              {
+                reasoningUuid,
+                assertionUuid,
+                kind: "methodological_note",
+                contentFormat: "text/plain",
+                content: Buffer.from("explicit participant conversion"),
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            assertionSupersessions: [
+              {
+                supersessionUuid: "018f0f4e-7b8c-7000-8000-00000000e00a",
+                priorAssertionUuid: assertionUuid,
+                replacementAssertionUuid:
+                  "018f0f4e-7b8c-7000-8000-00000000e00b",
+                statusEventUuid: "018f0f4e-7b8c-7000-8000-00000000e00c",
+                reasoningUuid,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            hypothesisGroups: [
+              {
+                groupUuid,
+                questionKey: "which hypothesis",
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            hypothesisMembership: [
+              {
+                membershipEventUuid: "018f0f4e-7b8c-7000-8000-00000000e00d",
+                operationUuid,
+                groupUuid,
+                assertionUuid,
+                action: "added",
+                reasoningUuid,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            hypothesisSelection: [
+              {
+                selectionEventUuid: "018f0f4e-7b8c-7000-8000-00000000e00e",
+                operationUuid,
+                groupUuid,
+                selectedAssertionUuid: assertionUuid,
+                reasoningUuid,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+            assertionValidity: [
+              {
+                validityEventUuid: "018f0f4e-7b8c-7000-8000-00000000e00f",
+                assertionUuid,
+                validFromMicros: 1,
+                validToMicros: 2,
+                reasoningUuid,
+                provenanceUuid,
+                recordedAtMicros: RECORDED_AT,
+              },
+            ],
+          },
+        }),
+      (error) => error?.code === "GF_NOT_FOUND",
+    );
+    assert.equal(projectDigest(project), before);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});

@@ -80,6 +80,9 @@ jobs:
       - name: Test Rust non-Cypher surface inventory
         run: python3 scripts/ci/test-non-cypher-surface-gate.py
 
+      - name: Test Rust coverage ledger failure modes
+        run: python3 scripts/ci/test-rust-coverage-ledger.py
+
       - name: Test Python and Node non-Cypher parity policy
         run: python3 scripts/ci/check-binding-parity-policy.py
 

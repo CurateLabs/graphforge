@@ -1,98 +1,169 @@
 #!/usr/bin/env bash
-# Run workspace Rust tests under cargo-llvm-cov and emit term + lcov + HTML.
-# Prerequisites:
-#   cargo install cargo-llvm-cov
-#   rustup component add llvm-tools-preview
-#
-# Outputs (gitignored via build/):
-#   build/coverage-rust/lcov.info
-#   build/coverage-rust/html/index.html
-#   build/coverage-rust/summary.txt
+# Measure core Rust plus the Rust code executed by real Python and Node acceptance.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 OUT_DIR="${COVERAGE_RUST_DIR:-build/coverage-rust}"
-LCOV_PATH="${OUT_DIR}/lcov.info"
-# cargo-llvm-cov appends /html under --output-dir
-HTML_DIR="${OUT_DIR}/html"
-SUMMARY_PATH="${OUT_DIR}/summary.txt"
-# Default: whole workspace. Override for focused runs, e.g. COVERAGE_RUST_ARGS='-p graphforge-api'
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+PROFILE_DIR="$OUT_DIR/profiles"
+CORE_LCOV="$OUT_DIR/core.lcov.info"
+PYTHON_LCOV="$OUT_DIR/python-adapter.lcov.info"
+NODE_LCOV="$OUT_DIR/node-adapter.lcov.info"
+WORKSPACE_LCOV="$OUT_DIR/lcov.info"
+LEDGER="$OUT_DIR/ledger.json"
+EVIDENCE="$OUT_DIR/evidence.json"
+SUMMARY="$OUT_DIR/summary.txt"
 COVERAGE_RUST_ARGS="${COVERAGE_RUST_ARGS:---workspace}"
+PYTHON_FLOOR="${COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER:-80}"
+NODE_FLOOR="${COVERAGE_FAIL_UNDER_RUST_NODE_ADAPTER:-80}"
+CORE_FLOOR="${COVERAGE_FAIL_UNDER_RUST:-85}"
 
-if ! command -v cargo-llvm-cov >/dev/null 2>&1 && ! cargo llvm-cov --version >/dev/null 2>&1; then
-  echo "❌ cargo-llvm-cov not found."
-  echo "   Install with:  cargo install cargo-llvm-cov"
-  echo "   Also require:  rustup component add llvm-tools-preview"
+if ! cargo llvm-cov --version >/dev/null 2>&1; then
+  echo "Rust coverage evidence error: cargo-llvm-cov is not installed" >&2
   exit 1
 fi
-
 if ! rustup component list --installed 2>/dev/null | grep -Eq '^llvm-tools'; then
-  echo "❌ rustup llvm-tools component not installed."
-  echo "   Install with:  rustup component add llvm-tools-preview"
+  echo "Rust coverage evidence error: rustup llvm-tools is not installed" >&2
   exit 1
 fi
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$OUT_DIR/native-target}"
+CORE_TARGET_DIR="$CARGO_TARGET_DIR/llvm-cov-target"
 
-mkdir -p "${OUT_DIR}"
-rm -rf "${HTML_DIR}" "${LCOV_PATH}" "${SUMMARY_PATH}"
+rm -rf "$PROFILE_DIR" "$OUT_DIR/core-html"
+rm -f "$CORE_LCOV" "$PYTHON_LCOV" "$NODE_LCOV" "$WORKSPACE_LCOV" \
+  "$LEDGER" "$EVIDENCE" "$SUMMARY"
+mkdir -p "$PROFILE_DIR"
 
-echo "━━━ Rust coverage (cargo llvm-cov ${COVERAGE_RUST_ARGS}) ━━━━━━━━━━━━━━━"
-echo "   CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<default target/>}"
-echo "   output: ${OUT_DIR}/"
-echo
-
+echo "━━━ Core Rust coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 # shellcheck disable=SC2086
 cargo llvm-cov clean ${COVERAGE_RUST_ARGS}
-
-# Instrument + run once; generate reports from the collected data (lcov/html are mutually exclusive flags).
 # shellcheck disable=SC2086
 cargo llvm-cov ${COVERAGE_RUST_ARGS} --no-report
+cargo llvm-cov report --lcov --output-path "$CORE_LCOV"
+cargo llvm-cov report --html --output-dir "$OUT_DIR/core-html"
 
-echo
-echo "━━━ Generating reports ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-cargo llvm-cov report 2>&1 | tee "${SUMMARY_PATH}"
-cargo llvm-cov report --lcov --output-path "${LCOV_PATH}"
-# --output-dir receives the parent; llvm-cov writes <dir>/html/index.html
-cargo llvm-cov report --html --output-dir "${OUT_DIR}"
+# Export the exact instrumentation environment used by cargo-llvm-cov. Native
+# artifacts are built once, sequentially, and then reused by all acceptance.
+eval "$(cargo llvm-cov show-env --sh)"
 
-if [[ ! -s "${LCOV_PATH}" ]]; then
-  echo "❌ Rust coverage produced empty or missing lcov at ${LCOV_PATH}"
+echo "━━━ Instrumented native artifacts ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
+pnpm --filter @curatelabs/graphforge exec napi build --platform --release
+
+PYTHON_OBJECT="$(find "$CARGO_TARGET_DIR" -type f \( -name 'libgraphforge_bindings_py.so' -o -name 'libgraphforge_bindings_py.dylib' -o -name 'graphforge_bindings_py.dll' \) | head -1)"
+NODE_OBJECT="$(find "$CARGO_TARGET_DIR" -type f \( -name 'libgraphforge_bindings_node.so' -o -name 'libgraphforge_bindings_node.dylib' -o -name 'graphforge_bindings_node.dll' \) | head -1)"
+PYTHON_RUNTIME="$(uv run --no-sync python -c 'from graphforge import _graphforge_rs; print(_graphforge_rs.__file__)')"
+NODE_RUNTIME="$(find crates/graphforge-bindings-node -maxdepth 1 -type f -name 'graphforge.*.node' | head -1)"
+for artifact in "$PYTHON_OBJECT" "$NODE_OBJECT" "$PYTHON_RUNTIME" "$NODE_RUNTIME"; do
+  if [[ -z "$artifact" || ! -s "$artifact" ]]; then
+    echo "Rust coverage evidence error: expected instrumented native artifact is missing" >&2
+    exit 1
+  fi
+done
+
+hash_file() {
+  python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "$1"
+}
+python_hash="$(hash_file "$PYTHON_OBJECT")"
+node_hash="$(hash_file "$NODE_OBJECT")"
+if [[ "$(hash_file "$PYTHON_RUNTIME")" != "$python_hash" ]]; then
+  echo "Rust coverage evidence error: Python did not import the measured artifact" >&2
+  exit 1
+fi
+if [[ "$(hash_file "$NODE_RUNTIME")" != "$node_hash" ]]; then
+  echo "Rust coverage evidence error: Node did not load the measured artifact" >&2
   exit 1
 fi
 
-if ! grep -q '^SF:' "${LCOV_PATH}"; then
-  echo "❌ Rust coverage lcov has no source file records (SF:) at ${LCOV_PATH}"
-  exit 1
-fi
+echo "━━━ Python native acceptance ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+export LLVM_PROFILE_FILE="$PROFILE_DIR/python-%p-%10m.profraw"
+for test_file in crates/graphforge-bindings-py/tests/*.py; do
+  CARGO_TARGET_DIR="$CORE_TARGET_DIR" uv run --no-sync python "$test_file"
+done
+uv run --no-sync pytest tests/unit tests/integration tests/features \
+  --ignore=tests/unit/test_publish_dry_run.py \
+  -n "${PYTEST_WORKERS:-4}" --tb=short
 
-if [[ ! -f "${HTML_DIR}/index.html" ]]; then
-  echo "❌ Rust coverage HTML report missing at ${HTML_DIR}/index.html"
-  exit 1
-fi
+echo "━━━ Node native acceptance ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+export LLVM_PROFILE_FILE="$PROFILE_DIR/node-%p-%10m.profraw"
+pnpm --filter @curatelabs/graphforge test:smoke
+pnpm --filter @curatelabs/graphforge test
+(
+  cd tests/features/node
+  node node_modules/@cucumber/cucumber/bin/cucumber.js \
+    "../api/**/*.feature" \
+    --require-module ts-node/register \
+    --require "step_definitions/**/*.ts" \
+    --tags "not @excluded-api-bdd and not @excluded-node-api-bdd" \
+    --format summary
+)
 
-if [[ ! -s "${SUMMARY_PATH}" ]]; then
-  echo "❌ Rust coverage term summary is empty at ${SUMMARY_PATH}"
-  exit 1
-fi
+TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
+"$TOOLS_DIR/llvm-profdata" merge -sparse "$PROFILE_DIR"/python-*.profraw -o "$OUT_DIR/python.profdata"
+"$TOOLS_DIR/llvm-profdata" merge -sparse "$PROFILE_DIR"/node-*.profraw -o "$OUT_DIR/node.profdata"
+"$TOOLS_DIR/llvm-cov" export "$PYTHON_OBJECT" \
+  -instr-profile="$OUT_DIR/python.profdata" -format=lcov > "$PYTHON_LCOV"
+"$TOOLS_DIR/llvm-cov" export "$NODE_OBJECT" \
+  -instr-profile="$OUT_DIR/node.profdata" -format=lcov > "$NODE_LCOV"
 
-if ! grep -q '^TOTAL' "${SUMMARY_PATH}"; then
-  echo "❌ Rust coverage term summary has no TOTAL row at ${SUMMARY_PATH}"
-  exit 1
-fi
+export GF_COVERAGE_ROOT="$ROOT"
+export GF_COVERAGE_SOURCE_SHA="$(git rev-parse HEAD)"
+export GF_COVERAGE_RUSTC="$(rustc --version)"
+export GF_COVERAGE_LLVM_COV="$(cargo llvm-cov --version)"
+export GF_COVERAGE_PYTHON_OBJECT="$PYTHON_OBJECT"
+export GF_COVERAGE_PYTHON_RUNTIME="$PYTHON_RUNTIME"
+export GF_COVERAGE_PYTHON_HASH="$python_hash"
+export GF_COVERAGE_NODE_OBJECT="$NODE_OBJECT"
+export GF_COVERAGE_NODE_RUNTIME="$NODE_RUNTIME"
+export GF_COVERAGE_NODE_HASH="$node_hash"
+export GF_COVERAGE_PROFILE_DIR="$PROFILE_DIR"
+export GF_COVERAGE_EVIDENCE="$EVIDENCE"
+python3 - <<'PY'
+import glob
+import json
+import os
+from pathlib import Path
 
-lines=$(grep -c '^SF:' "${LCOV_PATH}" || true)
-bytes=$(wc -c < "${LCOV_PATH}" | tr -d ' ')
-echo
-echo "✅ Rust coverage report ready"
-echo "   lcov:    ${LCOV_PATH} (${bytes} bytes, ${lines} source files)"
-echo "   html:    ${HTML_DIR}/index.html"
-echo "   summary: ${SUMMARY_PATH}"
+profiles = Path(os.environ["GF_COVERAGE_PROFILE_DIR"])
+data = {
+    "source_sha": os.environ["GF_COVERAGE_SOURCE_SHA"],
+    "rustc": os.environ["GF_COVERAGE_RUSTC"],
+    "cargo_llvm_cov": os.environ["GF_COVERAGE_LLVM_COV"],
+    "surfaces": {
+        "python_adapter": {
+            "artifact": os.environ["GF_COVERAGE_PYTHON_OBJECT"],
+            "runtime_artifact": os.environ["GF_COVERAGE_PYTHON_RUNTIME"],
+            "artifact_sha256": os.environ["GF_COVERAGE_PYTHON_HASH"],
+            "profiles": sorted(glob.glob(str(profiles / "python-*.profraw"))),
+        },
+        "node_adapter": {
+            "artifact": os.environ["GF_COVERAGE_NODE_OBJECT"],
+            "runtime_artifact": os.environ["GF_COVERAGE_NODE_RUNTIME"],
+            "artifact_sha256": os.environ["GF_COVERAGE_NODE_HASH"],
+            "profiles": sorted(glob.glob(str(profiles / "node-*.profraw"))),
+        },
+    },
+}
+Path(os.environ["GF_COVERAGE_EVIDENCE"]).write_text(
+    json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
 
-# Optional fail-under (coordinator aggregation). Empty/0 skips the check here;
-# `make check-coverage-rust` always enforces COVERAGE_FAIL_UNDER_RUST.
-if [[ -n "${COVERAGE_FAIL_UNDER_RUST:-}" && "${COVERAGE_FAIL_UNDER_RUST}" != "0" ]]; then
-  COVERAGE_RUST_SUMMARY="${SUMMARY_PATH}" \
-    COVERAGE_FAIL_UNDER_RUST="${COVERAGE_FAIL_UNDER_RUST}" \
-    bash "${ROOT}/scripts/check-coverage-rust.sh"
-fi
+echo "━━━ Rust coverage ledger ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+python3 scripts/coverage_rust_ledger.py \
+  --root "$ROOT" \
+  --ledger "$LEDGER" \
+  --build \
+  --core-lcov "$CORE_LCOV" \
+  --python-lcov "$PYTHON_LCOV" \
+  --node-lcov "$NODE_LCOV" \
+  --workspace-lcov "$WORKSPACE_LCOV" \
+  --evidence "$EVIDENCE" \
+  --core-floor "$CORE_FLOOR" \
+  --python-floor "$PYTHON_FLOOR" \
+  --node-floor "$NODE_FLOOR" | tee "$SUMMARY"
+
+echo "✅ Rust coverage ledger ready: $LEDGER"
