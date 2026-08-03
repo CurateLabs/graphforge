@@ -1,4 +1,4 @@
-@api @cluster @skip-node
+@api @cluster
 Feature: Cluster API
 
   Background:

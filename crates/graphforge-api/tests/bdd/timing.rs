@@ -328,10 +328,10 @@ pub fn distribution(values: &[u64]) -> Distribution {
     }
 }
 
-pub fn failed_scenario_keys(records: &[ScenarioTiming], suite: Suite) -> Vec<&str> {
+pub fn non_passing_scenario_keys(records: &[ScenarioTiming], suite: Suite) -> Vec<&str> {
     let mut failures: Vec<&str> = records
         .iter()
-        .filter(|record| record.suite == suite && record.outcome == ScenarioOutcome::Failed)
+        .filter(|record| record.suite == suite && record.outcome != ScenarioOutcome::Passed)
         .map(|record| record.key.as_str())
         .collect();
     failures.sort_unstable();

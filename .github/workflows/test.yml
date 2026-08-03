@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -81,6 +82,13 @@ jobs:
 
       - name: Test Python and Node non-Cypher parity policy
         run: python3 scripts/ci/check-binding-parity-policy.py
+
+      - name: Validate fail-closed public API BDD policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ci/api-bdd-policy.py --check-issues
+          python3 scripts/ci/test-api-bdd-policy.py
 
       - uses: actions/setup-node@v6
         with:
@@ -518,6 +526,9 @@ jobs:
           uv run --no-sync pytest tests/unit tests/integration tests/features \
             -n auto --tb=short
 
+      - name: Prove public API BDD mutations fail closed
+        run: uv run --no-sync python scripts/ci/test-api-bdd-mutations.py
+
       - name: Run audited downstream consumers
         env:
           GRAPHFORGE_WHEEL_SHA: ${{ github.sha }}
@@ -621,8 +632,8 @@ jobs:
             "../api/**/*.feature" \
             --require-module ts-node/register \
             --require "step_definitions/**/*.ts" \
-            --tags "not @skip-node" \
-            --format progress
+            --tags "not @excluded-api-bdd and not @excluded-node-api-bdd" \
+            --format summary
 
       - name: Record and upload addon parity evidence
         shell: bash

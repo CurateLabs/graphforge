@@ -1,6 +1,7 @@
-@api @lifecycle @skip-node
+@api @lifecycle
 Feature: Lifecycle State
 
+  @binding-only
   Scenario Outline: LifecycleError on <method> after close
     Given a graph with a Person node named "Alice"
     And the forge instance is closed

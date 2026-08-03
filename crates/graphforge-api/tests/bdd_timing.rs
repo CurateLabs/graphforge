@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use timing::{
     SCHEMA_VERSION, ScenarioOutcome, ScenarioTimer, ScenarioTiming, Suite, TimingBaseline,
     TimingPolicy, annotation_messages, baseline_candidate, build_report, distribution,
-    escape_github_command, failed_scenario_keys, load_baseline, load_policy, render_markdown,
+    escape_github_command, load_baseline, load_policy, non_passing_scenario_keys, render_markdown,
     write_artifacts,
 };
 
@@ -169,16 +169,17 @@ fn distribution_uses_midpoint_median_and_nearest_rank_percentiles() {
 }
 
 #[test]
-fn correctness_failure_keys_are_suite_scoped_and_stably_ordered() {
+fn correctness_failure_keys_include_skips_and_are_suite_scoped_and_stably_ordered() {
     let records = vec![
         record(Suite::Api, "z:1:failed", "z", ScenarioOutcome::Failed, 1),
         record(Suite::Tck, "a:1:failed", "a", ScenarioOutcome::Failed, 1),
         record(Suite::Api, "a:1:failed", "a", ScenarioOutcome::Failed, 1),
+        record(Suite::Api, "s:1:skipped", "s", ScenarioOutcome::Skipped, 1),
         record(Suite::Api, "p:1:passed", "p", ScenarioOutcome::Passed, 1),
     ];
     assert_eq!(
-        failed_scenario_keys(&records, Suite::Api),
-        ["a:1:failed", "z:1:failed"]
+        non_passing_scenario_keys(&records, Suite::Api),
+        ["a:1:failed", "s:1:skipped", "z:1:failed"]
     );
 }
 

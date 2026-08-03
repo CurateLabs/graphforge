@@ -1,4 +1,4 @@
-@api @ontology @skip-node
+@api @ontology
 Feature: Ontology API
 
   Scenario: load_ontology from a valid YAML file succeeds

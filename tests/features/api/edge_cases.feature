@@ -1,4 +1,4 @@
-@api @edge_cases @skip-node
+@api @edge_cases
 Feature: Edge Cases and Graceful Empty Results
 
   Scenario Outline: rank on <condition> returns empty Arrow Table
@@ -23,12 +23,14 @@ Feature: Edge Cases and Graceful Empty Results
       | a label with no nodes  | a graph with Person nodes but no Paper nodes  | Paper       |
       | a non-existent label   | an empty graph                                | NonExistent |
 
+  @excluded-api-bdd @issue-352
   Scenario: find on a label with no indexed content returns empty Arrow Table
     Given an empty graph
     When I find "anything" in label "Paper"
     Then the result is an Arrow Table
     And the table has 0 rows
 
+  @excluded-api-bdd @issue-352
   Scenario: find with vector dimension mismatch returns empty Arrow Table
     Given a graph with Paper nodes indexed with 128-dimensional vectors
     When I find by a 64-dimensional vector in label "Paper"

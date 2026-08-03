@@ -1,4 +1,4 @@
-@api @rank @skip-node
+@api @rank
 Feature: Rank API
 
   Background:

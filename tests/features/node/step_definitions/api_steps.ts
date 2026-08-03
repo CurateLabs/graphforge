@@ -1,8 +1,8 @@
 /**
  * cucumber-js step definitions for tests/features/api/*.feature
  *
- * Implemented steps call the native addon strictly; unsupported milestone
- * areas remain pending. The same features run against Python, Rust, and Node.
+ * Required steps call the native addon strictly. Issue-backed product gaps are
+ * excluded by policy and never contribute to passing totals.
  */
 
 import {
@@ -14,7 +14,16 @@ import {
   IWorldOptions,
   World,
 } from "@cucumber/cucumber";
-import { Field, FixedSizeBinary, RecordBatchStreamWriter, Schema, tableFromIPC, Table, Utf8, vectorFromArray } from "apache-arrow";
+import {
+  Field,
+  FixedSizeBinary,
+  RecordBatchStreamWriter,
+  Schema,
+  tableFromIPC,
+  Table,
+  Utf8,
+  vectorFromArray,
+} from "apache-arrow";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -23,10 +32,14 @@ import * as path from "path";
 // Import the native binding (built by `napi build`; see the node-native-build
 // CI job). napi-rs cannot export JS Error subclasses, so the fault domain is
 // carried on `err.code` (see crates/graphforge-bindings-node/src/error.rs); assertions
-// below match on that code. Construction handles are native and UUID-only;
-// EdgeHandle values remain pending until the Rust construction path lands.
+// below match on that code. Construction handles are native and UUID-only.
 // ---------------------------------------------------------------------------
-const { GraphForge, NodeHandle, EdgeHandle, version } = require("../../../../crates/graphforge-bindings-node/index.js");
+const {
+  GraphForge,
+  NodeHandle,
+  EdgeHandle,
+  version,
+} = require("../../../../crates/graphforge-bindings-node/index.js");
 void version;
 
 /** The fault-domain code on a thrown native error (`err.code`). */
@@ -61,7 +74,7 @@ class GraphForgeWorld extends World implements GFWorld {
   error: Error | null = null;
   nodes: Record<string, any> = {};
   edges: any[] = [];
-  extra: Record<string, unknown> = {};
+  extra: Record<string, unknown> = { index_called: false };
   tmpDir: string | null = null;
 
   constructor(options: IWorldOptions) {
@@ -75,10 +88,7 @@ setWorldConstructor(GraphForgeWorld);
 // Helpers
 // ---------------------------------------------------------------------------
 
-function _catch(
-  world: GraphForgeWorld,
-  fn: () => unknown
-): void {
+function _catch(world: GraphForgeWorld, fn: () => unknown): void {
   try {
     world.result = fn();
     world.error = null;
@@ -99,7 +109,7 @@ function _mkTmp(world: GraphForgeWorld): string {
  * Decode the `execute()` result — an Arrow IPC stream `Buffer` (the native
  * binding returns `result_to_ipc` bytes) — into an Arrow `Table`. Throws
  * (failing the step) if the query errored or the result is not a Buffer, so
- * strict mode surfaces a misuse as a failure rather than a pending skeleton.
+ * strict mode surfaces a misuse as a failure.
  */
 function resultTable(world: GraphForgeWorld): Table {
   if (world.error) {
@@ -201,13 +211,17 @@ function createNode(world: GraphForgeWorld, label: string, props: Record<string,
 // ---------------------------------------------------------------------------
 
 Before(function (this: GraphForgeWorld) {
-  try { this.forge?.close(); } catch { /* ignore */ }
+  try {
+    this.forge?.close();
+  } catch {
+    /* ignore */
+  }
   this.forge = null;
   this.result = null;
   this.error = null;
   this.nodes = {};
   this.edges = [];
-  this.extra = {};
+  this.extra = { index_called: false };
   this.tmpDir = null;
 });
 
@@ -224,7 +238,7 @@ Given("a graph with a directed cycle", function (this: GraphForgeWorld) {
   this.forge.execute(
     "CREATE (a:Person {name:'Alice'})-[:KNOWS]->" +
       "(b:Person {name:'Bob'})-[:KNOWS]->" +
-      "(c:Person {name:'Carol'})-[:KNOWS]->(a)"
+      "(c:Person {name:'Carol'})-[:KNOWS]->(a)",
   );
 });
 
@@ -233,7 +247,7 @@ Given(
   function (this: GraphForgeWorld, name: string) {
     this.forge = new GraphForge();
     createNode(this, "Person", { name });
-  }
+  },
 );
 
 Given(
@@ -241,55 +255,46 @@ Given(
   function (this: GraphForgeWorld, name: string, ageStr: string) {
     this.forge = new GraphForge();
     createNode(this, "Person", { name, age: parseInt(ageStr, 10) });
-  }
+  },
 );
 
-Given(
-  /^a graph with (\d+) Person nodes$/,
-  function (this: GraphForgeWorld, nStr: string) {
-    const n = parseInt(nStr, 10);
-    this.forge = new GraphForge();
-    for (let i = 0; i < n; i++) {
-      createNode(this, "Person", { name: `Person${i}` });
-    }
+Given(/^a graph with (\d+) Person nodes$/, function (this: GraphForgeWorld, nStr: string) {
+  const n = parseInt(nStr, 10);
+  this.forge = new GraphForge();
+  for (let i = 0; i < n; i++) {
+    createNode(this, "Person", { name: `Person${i}` });
   }
-);
+});
 
-Given(
-  "a graph with 3 Person nodes connected by KNOWS edges",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const names = ["Alice", "Bob", "Carol"];
-    const handles = names.map((n) => {
-      const h = this.forge!.addNode("Person", { name: n });
-      this.nodes[n] = h;
-      return h;
-    });
-    this.forge.addEdge(handles[0], "KNOWS", handles[1]);
-    this.forge.addEdge(handles[1], "KNOWS", handles[2]);
-  }
-);
+Given("a graph with 3 Person nodes connected by KNOWS edges", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const names = ["Alice", "Bob", "Carol"];
+  const handles = names.map((n) => {
+    const h = this.forge!.addNode("Person", { name: n });
+    this.nodes[n] = h;
+    return h;
+  });
+  this.forge.addEdge(handles[0], "KNOWS", handles[1]);
+  this.forge.addEdge(handles[1], "KNOWS", handles[2]);
+});
 
-Given(
-  "a graph with 4 Person nodes in two connected groups",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const g1 = ["Alice", "Bob"].map((n) => {
-      const h = this.forge!.addNode("Person", { name: n });
-      this.nodes[n] = h;
-      return h;
-    });
-    const g2 = ["Carol", "Dave"].map((n) => {
-      const h = this.forge!.addNode("Person", { name: n });
-      this.nodes[n] = h;
-      return h;
-    });
-    this.forge.addEdge(g1[0], "KNOWS", g1[1]);
-    this.forge.addEdge(g2[0], "KNOWS", g2[1]);
-    this.extra["group1"] = g1;
-    this.extra["group2"] = g2;
-  }
-);
+Given("a graph with 4 Person nodes in two connected groups", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const g1 = ["Alice", "Bob"].map((n) => {
+    const h = this.forge!.addNode("Person", { name: n });
+    this.nodes[n] = h;
+    return h;
+  });
+  const g2 = ["Carol", "Dave"].map((n) => {
+    const h = this.forge!.addNode("Person", { name: n });
+    this.nodes[n] = h;
+    return h;
+  });
+  this.forge.addEdge(g1[0], "KNOWS", g1[1]);
+  this.forge.addEdge(g2[0], "KNOWS", g2[1]);
+  this.extra["group1"] = g1;
+  this.extra["group2"] = g2;
+});
 
 Given(
   /^a graph with a Paper node titled "([^"]*)"$/,
@@ -297,7 +302,7 @@ Given(
     this.forge = new GraphForge();
     const h = this.forge.addNode("Paper", { title });
     this.nodes[title] = h;
-  }
+  },
 );
 
 Given(
@@ -307,7 +312,7 @@ Given(
     const h = this.forge.addNode("Paper", { title: "Stub Paper" });
     this.nodes["Stub Paper"] = h;
     this.extra["vector"] = new Array(128).fill(1.0);
-  }
+  },
 );
 
 Given(
@@ -317,7 +322,7 @@ Given(
     const h = this.forge.addNode("Paper", { title });
     this.nodes[title] = h;
     this.extra["vector"] = new Array(128).fill(1.0);
-  }
+  },
 );
 
 Given(
@@ -326,7 +331,7 @@ Given(
     this.forge = new GraphForge();
     this.nodes[title] = this.forge.addNode("Paper", { title });
     this.nodes[name] = this.forge.addNode("Person", { name });
-  }
+  },
 );
 
 Given(
@@ -338,7 +343,7 @@ Given(
       const t = `Graph Theory Paper ${i}`;
       this.nodes[t] = this.forge.addNode("Paper", { title: t });
     }
-  }
+  },
 );
 
 Given(
@@ -350,29 +355,23 @@ Given(
       const t = `Neural Networks Paper ${i}`;
       this.nodes[t] = this.forge.addNode("Paper", { title: t, abstract: "About neural networks" });
     }
-  }
+  },
 );
 
-Given(
-  "a graph with a Paper node",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const h = this.forge.addNode("Paper", { title: "Stub Paper" });
-    this.nodes["paper"] = h;
-    this.extra["paper_id"] = h.uuid;
-  }
-);
+Given("a graph with a Paper node", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const h = this.forge.addNode("Paper", { title: "Stub Paper" });
+  this.nodes["paper"] = h;
+  this.extra["paper_id"] = h.uuid;
+});
 
-Given(
-  /^a graph with 3 Paper nodes with title properties$/,
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    for (let i = 0; i < 3; i++) {
-      const t = `Paper ${i}`;
-      this.nodes[t] = this.forge.addNode("Paper", { title: t });
-    }
+Given(/^a graph with 3 Paper nodes with title properties$/, function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  for (let i = 0; i < 3; i++) {
+    const t = `Paper ${i}`;
+    this.nodes[t] = this.forge.addNode("Paper", { title: t });
   }
-);
+});
 
 Given(
   /^a graph with a Person node named "([^"]*)" and a Paper node titled "([^"]*)"$/,
@@ -380,7 +379,7 @@ Given(
     this.forge = new GraphForge();
     this.nodes[name] = this.forge.addNode("Person", { name });
     this.nodes[title] = this.forge.addNode("Paper", { title });
-  }
+  },
 );
 
 Given(
@@ -395,7 +394,7 @@ Given(
     this.nodes["Alice"] = alice;
     this.nodes["Bob"] = bob;
     this.nodes["paper"] = paper;
-  }
+  },
 );
 
 Given(
@@ -410,18 +409,15 @@ Given(
     for (let i = 0; i < npa; i++) {
       this.nodes[`paper${i}`] = this.forge.addNode("Paper", { title: `Paper${i}` });
     }
-  }
+  },
 );
 
-Given(
-  "a graph with Person nodes but no Paper nodes",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    for (const name of ["Alice", "Bob"]) {
-      this.nodes[name] = this.forge.addNode("Person", { name });
-    }
+Given("a graph with Person nodes but no Paper nodes", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  for (const name of ["Alice", "Bob"]) {
+    this.nodes[name] = this.forge.addNode("Person", { name });
   }
-);
+});
 
 Given(
   /^a graph with Paper nodes indexed with (\d+)-dimensional vectors$/,
@@ -430,23 +426,20 @@ Given(
     const h = this.forge.addNode("Paper", { title: "Stub" });
     this.nodes["paper"] = h;
     this.extra["vector_dim"] = parseInt(nStr, 10);
-  }
+  },
 );
 
-Given(
-  "a graph with Person nodes connected by KNOWS edges",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const names = ["Alice", "Bob", "Carol"];
-    const handles = names.map((n) => {
-      const h = this.forge!.addNode("Person", { name: n });
-      this.nodes[n] = h;
-      return h;
-    });
-    this.forge.addEdge(handles[0], "KNOWS", handles[1]);
-    this.forge.addEdge(handles[1], "KNOWS", handles[2]);
-  }
-);
+Given("a graph with Person nodes connected by KNOWS edges", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const names = ["Alice", "Bob", "Carol"];
+  const handles = names.map((n) => {
+    const h = this.forge!.addNode("Person", { name: n });
+    this.nodes[n] = h;
+    return h;
+  });
+  this.forge.addEdge(handles[0], "KNOWS", handles[1]);
+  this.forge.addEdge(handles[1], "KNOWS", handles[2]);
+});
 
 Given(
   "a graph with Person nodes connected by both KNOWS and FOLLOWS edges",
@@ -458,7 +451,7 @@ Given(
     this.forge.addEdge(bob, "FOLLOWS", alice);
     this.nodes["Alice"] = alice;
     this.nodes["Bob"] = bob;
-  }
+  },
 );
 
 Given(
@@ -473,7 +466,7 @@ Given(
     });
     this.forge.addEdge(handles[0], "KNOWS", handles[1]);
     this.forge.addEdge(handles[1], "KNOWS", handles[2]);
-  }
+  },
 );
 
 Given(
@@ -485,29 +478,23 @@ Given(
     this.nodes["Carol"] = carol;
     this.nodes["Dave"] = dave;
     this.extra["group2"] = [carol, dave];
-  }
+  },
 );
 
-Given(
-  /^a graph with 2 Person nodes connected by a KNOWS edge$/,
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const alice = this.forge.addNode("Person", { name: "Alice" });
-    const bob = this.forge.addNode("Person", { name: "Bob" });
-    this.forge.addEdge(alice, "KNOWS", bob);
-    this.nodes["Alice"] = alice;
-    this.nodes["Bob"] = bob;
-    this.extra["group1"] = [alice, bob];
-  }
-);
+Given(/^a graph with 2 Person nodes connected by a KNOWS edge$/, function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const alice = this.forge.addNode("Person", { name: "Alice" });
+  const bob = this.forge.addNode("Person", { name: "Bob" });
+  this.forge.addEdge(alice, "KNOWS", bob);
+  this.nodes["Alice"] = alice;
+  this.nodes["Bob"] = bob;
+  this.extra["group1"] = [alice, bob];
+});
 
-Given(
-  /^a Person node named "([^"]*)"$/,
-  function (this: GraphForgeWorld, name: string) {
-    const h = this.forge!.addNode("Person", { name });
-    this.nodes[name] = h;
-  }
-);
+Given(/^a Person node named "([^"]*)"$/, function (this: GraphForgeWorld, name: string) {
+  const h = this.forge!.addNode("Person", { name });
+  this.nodes[name] = h;
+});
 
 Given(
   /^Person nodes named "([^"]*)" and "([^"]*)"$/,
@@ -515,7 +502,7 @@ Given(
     for (const name of [first, second]) {
       this.nodes[name] = this.forge!.addNode("Person", { name });
     }
-  }
+  },
 );
 
 Given(
@@ -523,55 +510,43 @@ Given(
   function (this: GraphForgeWorld, val: string) {
     this.forge = new GraphForge();
     createNode(this, "Person", { name: "Alice", age: val });
-  }
+  },
 );
 
-Given(
-  "a path that does not exist on disk",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    this.extra["path"] = path.join(tmp, "does_not_exist");
-    this.forge = null;
-  }
-);
+Given("a path that does not exist on disk", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  this.extra["path"] = path.join(tmp, "does_not_exist");
+  this.forge = null;
+});
 
-Given(
-  "a persistent graph backed by Parquet",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    const d = path.join(tmp, "graph");
-    fs.mkdirSync(d, { recursive: true });
-    this.forge = new GraphForge(d);
-    this.extra["path"] = d;
-  }
-);
+Given("a persistent graph backed by Parquet", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  const d = path.join(tmp, "graph");
+  fs.mkdirSync(d, { recursive: true });
+  this.forge = new GraphForge(d);
+  this.extra["path"] = d;
+});
 
-Given(
-  "a persistent graph at a temporary path",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    const d = path.join(tmp, "graph2");
-    fs.mkdirSync(d, { recursive: true });
-    this.forge = new GraphForge(d);
-    this.extra["path"] = d;
-  }
-);
+Given("a persistent graph at a temporary path", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  const d = path.join(tmp, "graph2");
+  fs.mkdirSync(d, { recursive: true });
+  this.forge = new GraphForge(d);
+  this.extra["path"] = d;
+});
 
-Given(
-  "the forge instance is closed",
-  function (this: GraphForgeWorld) {
-    this.forge!.close();
-  }
-);
+Given("the forge instance is closed", function (this: GraphForgeWorld) {
+  this.forge!.close();
+});
 
 Given(
   /^a graph with a Person node named "([^"]*)" connected by a KNOWS edge to a Person node named "([^"]*)"$/,
   function (this: GraphForgeWorld, name: string, name2: string) {
     this.forge = new GraphForge();
     this.forge.execute(
-      `CREATE (:Person {name: ${cypherLit(name)}})-[:KNOWS]->(:Person {name: ${cypherLit(name2)}})`
+      `CREATE (:Person {name: ${cypherLit(name)}})-[:KNOWS]->(:Person {name: ${cypherLit(name2)}})`,
     );
-  }
+  },
 );
 
 Given(
@@ -579,41 +554,43 @@ Given(
   function (this: GraphForgeWorld) {
     this.forge = new GraphForge();
     createNode(this, "Person", { name: "Alice" });
-  }
+  },
 );
 
-Given(
-  "a valid ontology YAML file defining a Person label",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    const p = path.join(tmp, "ontology.yaml");
-    fs.writeFileSync(p, "labels:\n  Person:\n    properties:\n      name: string\n");
-    this.extra["ontology_path"] = p;
-    this.forge = new GraphForge();
-  }
-);
+Given("a valid ontology YAML file defining a Person label", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  const p = path.join(tmp, "ontology.yaml");
+  fs.writeFileSync(
+    p,
+    'ontology_id: people\nversion: "2026.06"\nentity_types:\n  - name: Person\nproperties:\n  - name: name\n    owner: Person\n    type: utf8\n',
+  );
+  this.extra["ontology_path"] = p;
+  this.forge = new GraphForge();
+});
 
-Given(
-  "a valid ontology JSON file defining a Paper label",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    const p = path.join(tmp, "ontology.json");
-    fs.writeFileSync(p, JSON.stringify({ labels: { Paper: { properties: { title: "string" } } } }));
-    this.extra["ontology_path"] = p;
-    this.forge = new GraphForge();
-  }
-);
+Given("a valid ontology JSON file defining a Paper label", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  const p = path.join(tmp, "ontology.json");
+  fs.writeFileSync(
+    p,
+    JSON.stringify({
+      ontology_id: "papers",
+      version: "2026.06",
+      entity_types: [{ name: "Paper" }],
+      properties: [{ name: "title", owner: "Paper", type: "utf8" }],
+    }),
+  );
+  this.extra["ontology_path"] = p;
+  this.forge = new GraphForge();
+});
 
-Given(
-  "a file containing invalid YAML",
-  function (this: GraphForgeWorld) {
-    const tmp = _mkTmp(this);
-    const p = path.join(tmp, "bad.yaml");
-    fs.writeFileSync(p, ": this is not: valid: yaml: [");
-    this.extra["ontology_path"] = p;
-    this.forge = new GraphForge();
-  }
-);
+Given("a file containing invalid YAML", function (this: GraphForgeWorld) {
+  const tmp = _mkTmp(this);
+  const p = path.join(tmp, "bad.yaml");
+  fs.writeFileSync(p, ": this is not: valid: yaml: [");
+  this.extra["ontology_path"] = p;
+  this.forge = new GraphForge();
+});
 
 Given(
   "a graph with Person nodes connected by KNOWS edges up to 3 hops deep",
@@ -628,7 +605,7 @@ Given(
     for (let i = 0; i < handles.length - 1; i++) {
       this.forge.addEdge(handles[i], "KNOWS", handles[i + 1]);
     }
-  }
+  },
 );
 
 Given(
@@ -641,28 +618,22 @@ Given(
     this.forge.addEdge(alice, "KNOWS", bob);
     this.forge.addEdge(bob, "KNOWS", charlie);
     this.nodes = { Alice: alice, Bob: bob, Charlie: charlie };
-  }
+  },
 );
 
-Given(
-  "a graph where Alice knows Bob",
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const alice = this.forge.addNode("Person", { name: "Alice" });
-    const bob = this.forge.addNode("Person", { name: "Bob" });
-    this.forge.addEdge(alice, "KNOWS", bob);
-    this.nodes = { Alice: alice, Bob: bob };
-  }
-);
+Given("a graph where Alice knows Bob", function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const alice = this.forge.addNode("Person", { name: "Alice" });
+  const bob = this.forge.addNode("Person", { name: "Bob" });
+  this.forge.addEdge(alice, "KNOWS", bob);
+  this.nodes = { Alice: alice, Bob: bob };
+});
 
-Given(
-  'a graph with a single Person node named "Lone"',
-  function (this: GraphForgeWorld) {
-    this.forge = new GraphForge();
-    const h = this.forge.addNode("Person", { name: "Lone" });
-    this.nodes["Lone"] = h;
-  }
-);
+Given('a graph with a single Person node named "Lone"', function (this: GraphForgeWorld) {
+  this.forge = new GraphForge();
+  const h = this.forge.addNode("Person", { name: "Lone" });
+  this.nodes["Lone"] = h;
+});
 
 Given(
   'a graph with 2 Person nodes with ids in columns "src_id" and "dst_id"',
@@ -670,52 +641,43 @@ Given(
     this.forge = new GraphForge();
     this.nodes["SrcNode"] = this.forge.addNode("Person", { name: "SrcNode" });
     this.nodes["DstNode"] = this.forge.addNode("Person", { name: "DstNode" });
-  }
+  },
 );
 
-Given(
-  'I have stored the node id as "paper_id"',
-  function (this: GraphForgeWorld) {
-    const first = this.nodes["paper"] || Object.values(this.nodes)[0];
-    if (first) this.extra["paper_id"] = first.uuid;
-  }
-);
+Given('I have stored the node id as "paper_id"', function (this: GraphForgeWorld) {
+  const paper = this.nodes["paper"];
+  if (!paper) throw new Error('no "paper" node was created before storing the node id');
+  this.extra["paper_id"] = paper.uuid;
+});
 
-Given(
-  'I have an embedding vector stored as "embedding"',
-  function (this: GraphForgeWorld) {
-    this.extra["embedding"] = new Array(128).fill(1.0);
-  }
-);
-
-
+Given('I have an embedding vector stored as "embedding"', function (this: GraphForgeWorld) {
+  this.extra["embedding"] = new Array(128).fill(1.0);
+});
 
 // ---------------------------------------------------------------------------
 // WHEN steps
 // ---------------------------------------------------------------------------
 
-When(
-  /^I execute "([^"]*)"$/,
-  function (this: GraphForgeWorld, query: string) {
-    if (this.forge === null) return;
-    _catch(this, () => this.forge!.execute(query));
-  }
-);
+When(/^I execute "([^"]*)"$/, function (this: GraphForgeWorld, query: string) {
+  const priorError = this.error;
+  _catch(this, () => {
+    if (this.forge === null) {
+      throw priorError ?? new Error("no forge instance is open for this scenario");
+    }
+    return this.forge.execute(query);
+  });
+});
 
 When(
   /^I execute "([^"]*)" with parameter name "([^"]*)"$/,
   function (this: GraphForgeWorld, query: string, value: string) {
     _catch(this, () => this.forge!.execute(query, { name: value }));
-  }
+  },
 );
 
-
-When(
-  /^I execute "([^"]*)" without parameters$/,
-  function (this: GraphForgeWorld, query: string) {
-    _catch(this, () => this.forge!.execute(query, undefined));
-  }
-);
+When(/^I execute "([^"]*)" without parameters$/, function (this: GraphForgeWorld, query: string) {
+  _catch(this, () => this.forge!.execute(query, undefined));
+});
 
 When(
   /^I add a node with label "([^"]*)" named "([^"]*)"$/,
@@ -725,7 +687,7 @@ When(
       this.nodes[name] = h;
       return h;
     });
-  }
+  },
 );
 
 When(
@@ -736,7 +698,7 @@ When(
       this.nodes[name] = h;
       return h;
     });
-  }
+  },
 );
 
 When(
@@ -759,7 +721,7 @@ When(
       throw new Error(`unknown selector form ${selector}`);
     }
     _catch(this, () => this.forge!.paths(source, target, algorithm));
-  }
+  },
 );
 
 When(
@@ -782,27 +744,29 @@ When(
       throw new Error(`unknown invalid selector case ${selectorCase}`);
     }
     _catch(this, () => this.forge!.paths(source, bob, algorithm));
-  }
+  },
 );
 
-When(
-  /^I add a node with label "([^"]*)"$/,
-  function (this: GraphForgeWorld, label: string) {
-    _catch(this, () => this.forge!.addNode(label));
-  }
-);
-
+When(/^I add a node with label "([^"]*)"$/, function (this: GraphForgeWorld, label: string) {
+  _catch(this, () => this.forge!.addNode(label));
+});
 
 When(
   'I add a node with label "Person" with an unsupported property value',
   function (this: GraphForgeWorld) {
     _catch(this, () => this.forge!.addNode("Person", { data: function () {} }));
-  }
+  },
 );
 
 When(
   /^I add a "([^"]*)" edge from "([^"]*)" to "([^"]*)" with since (\d+)$/,
-  function (this: GraphForgeWorld, relType: string, srcName: string, dstName: string, yearStr: string) {
+  function (
+    this: GraphForgeWorld,
+    relType: string,
+    srcName: string,
+    dstName: string,
+    yearStr: string,
+  ) {
     const src = this.nodes[srcName];
     const dst = this.nodes[dstName];
     _catch(this, () => {
@@ -810,7 +774,7 @@ When(
       this.edges.push(h);
       return h;
     });
-  }
+  },
 );
 
 When(
@@ -823,16 +787,15 @@ When(
       return;
     }
     _catch(this, () => this.forge!.addEdge(src, relType, dst));
-  }
+  },
 );
-
 
 When(
   'I add a "KNOWS" edge from a raw integer to the node for "Alice"',
   function (this: GraphForgeWorld) {
     const dst = this.nodes["Alice"];
     _catch(this, () => this.forge!.addEdge(42, "KNOWS", dst));
-  }
+  },
 );
 
 When(
@@ -840,20 +803,14 @@ When(
   function (this: GraphForgeWorld) {
     const src = this.nodes["Alice"];
     _catch(this, () => this.forge!.addEdge(src, "KNOWS", 42));
-  }
+  },
 );
 
-When(
-  'I bulk add nodes with label "Person" and 2 records',
-  function (this: GraphForgeWorld) {
-    _catch(this, () =>
-      this.forge!.publishBulkNodes(
-        BDD_NODE_OPERATION,
-        tableToIpc(bulkNodeTable(["Alice", "Bob"]))
-      )
-    );
-  }
-);
+When('I bulk add nodes with label "Person" and 2 records', function (this: GraphForgeWorld) {
+  _catch(this, () =>
+    this.forge!.publishBulkNodes(BDD_NODE_OPERATION, tableToIpc(bulkNodeTable(["Alice", "Bob"]))),
+  );
+});
 
 When(
   'I bulk add nodes with label "Person" from an Arrow Table of 5 rows',
@@ -885,130 +842,121 @@ When(
 When(
   /^I rank "([^"]*)" by "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.rank(label, { by: algorithm }));
+    _catch(this, () => this.forge!.rank(label, algorithm));
     this.extra["last_rank"] = this.result;
-  }
+  },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" writing result to property "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, prop: string) {
-    _catch(this, () => this.forge!.rank(label, { by: algorithm, writeProperty: prop }));
-  }
+    _catch(this, () => this.forge!.rank(label, algorithm, undefined, undefined, prop));
+  },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" via relationship type "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, via: string) {
-    _catch(this, () => this.forge!.rank(label, { by: algorithm, via }));
-  }
+    _catch(this, () => this.forge!.rank(label, algorithm, via));
+  },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" treating edges as directed$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.rank(label, { by: algorithm, directed: true }));
+    _catch(this, () => this.forge!.rank(label, algorithm, undefined, true));
     this.extra["rank_directed"] = this.result;
-  }
+    this.extra["rank_directed_error"] = this.error;
+  },
 );
 
 When(
   /^I rank "([^"]*)" by "([^"]*)" treating edges as undirected$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.rank(label, { by: algorithm, directed: false }));
+    _catch(this, () => this.forge!.rank(label, algorithm, undefined, false));
     this.extra["rank_undirected"] = this.result;
-  }
+    this.extra["rank_undirected_error"] = this.error;
+  },
 );
 
 When(
   /^I cluster "([^"]*)" by "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string) {
-    _catch(this, () => this.forge!.cluster(label, { by: algorithm }));
-  }
+    _catch(this, () => this.forge!.cluster(label, algorithm));
+  },
 );
 
 When(
   /^I cluster "([^"]*)" by "([^"]*)" writing result to property "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, algorithm: string, prop: string) {
-    _catch(this, () => this.forge!.cluster(label, { by: algorithm, writeProperty: prop }));
-  }
+    _catch(this, () => this.forge!.cluster(label, algorithm, undefined, undefined, prop));
+  },
 );
 
 When(
   /^I find "([^"]*)" in label "([^"]*)"$/,
   function (this: GraphForgeWorld, query: string, label: string) {
-    _catch(this, () => this.forge!.find(query, { label }));
+    _catch(this, () => this.forge!.find(query, label));
     if (!("first_find_result" in this.extra) && this.extra["first_index_done"]) {
       this.extra["first_find_result"] = this.result;
     }
-  }
+  },
 );
 
 When(
   /^I find "([^"]*)" in label "([^"]*)" with limit (\d+)$/,
   function (this: GraphForgeWorld, query: string, label: string, limitStr: string) {
-    _catch(this, () => this.forge!.find(query, { label, limit: parseInt(limitStr, 10) }));
-  }
+    _catch(this, () =>
+      this.forge!.find(query, label, undefined, undefined, undefined, parseInt(limitStr, 10)),
+    );
+  },
 );
 
-When(
-  'I find by the stored vector in label "Paper"',
-  function (this: GraphForgeWorld) {
-    const vec = this.extra["vector"] as number[];
-    _catch(this, () => this.forge!.find(undefined, { label: "Paper", vector: vec }));
-  }
-);
+When('I find by the stored vector in label "Paper"', function (this: GraphForgeWorld) {
+  const vec = this.extra["vector"] as number[];
+  _catch(this, () => this.forge!.find(undefined, "Paper", vec));
+});
 
 When(
   /^I find by the stored embedding in label "([^"]*)" in space "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, space: string) {
     const vec = this.extra["embedding"] as number[];
-    _catch(this, () => this.forge!.find(undefined, { label, vector: vec, space }));
-  }
+    _catch(this, () =>
+      this.forge!.find(undefined, label, vec, undefined, undefined, undefined, space),
+    );
+  },
 );
 
 When(
   /^I find "([^"]*)" with the stored vector in label "([^"]*)"$/,
   function (this: GraphForgeWorld, query: string, label: string) {
     const vec = this.extra["vector"] as number[];
-    _catch(this, () => this.forge!.find(query, { label, vector: vec }));
-  }
+    _catch(this, () => this.forge!.find(query, label, vec));
+  },
 );
 
-When(
-  'I find with no query and no vector in label "Paper"',
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.find(undefined, { label: "Paper" }));
-  }
-);
+When('I find with no query and no vector in label "Paper"', function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.find(undefined, "Paper"));
+});
 
-When(
-  'I find by an empty vector in label "Paper"',
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.find(undefined, { label: "Paper", vector: [] }));
-  }
-);
+When('I find by an empty vector in label "Paper"', function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.find(undefined, "Paper", []));
+});
 
-When(
-  'I find by a vector containing NaN in label "Paper"',
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.find(undefined, { label: "Paper", vector: [NaN, 1.0] }));
-  }
-);
+When('I find by a vector containing NaN in label "Paper"', function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.find(undefined, "Paper", [NaN, 1.0]));
+});
 
-When(
-  'I find by a vector containing infinity in label "Paper"',
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.find(undefined, { label: "Paper", vector: [Infinity, 1.0] }));
-  }
-);
+When('I find by a vector containing infinity in label "Paper"', function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.find(undefined, "Paper", [Infinity, 1.0]));
+});
 
 When(
   /^I find by a (\d+)-dimensional vector in label "([^"]*)"$/,
   function (this: GraphForgeWorld, nStr: string, label: string) {
     const vec = new Array(parseInt(nStr, 10)).fill(1.0);
-    _catch(this, () => this.forge!.find(undefined, { label, vector: vec }));
-  }
+    _catch(this, () => this.forge!.find(undefined, label, vec));
+  },
 );
 
 When(
@@ -1016,7 +964,7 @@ When(
   function (this: GraphForgeWorld, label: string, p1: string, p2: string) {
     _catch(this, () => this.forge!.index(label, { properties: [p1, p2] }));
     this.extra["index_called"] = true;
-  }
+  },
 );
 
 When(
@@ -1025,156 +973,113 @@ When(
     _catch(this, () => this.forge!.index(label, { properties: [prop] }));
     this.extra["index_called"] = true;
     if (!("first_find_result" in this.extra)) {
+      this.extra["first_find_result"] = this.forge!.find("paper", label);
       this.extra["first_index_done"] = true;
     }
-  }
+  },
 );
 
 When(
   /^I index label "([^"]*)" storing the vector for node "([^"]*)" in space "([^"]*)"$/,
   function (this: GraphForgeWorld, label: string, nodeKey: string, space: string) {
-    const nodeId = (this.extra["paper_id"] as string) || (this.nodes[nodeKey]?.uuid);
     const vec = this.extra["embedding"] as number[];
-    _catch(this, () => this.forge!.index(label, { nodeId, vector: vec, space }));
-  }
+    _catch(this, () => {
+      const nodeId = this.nodes[nodeKey]?.uuid ?? (this.extra[nodeKey] as string | undefined);
+      if (!nodeId) throw new Error(`unknown stored node identifier: ${nodeKey}`);
+      return this.forge!.index(label, { nodeId, vector: vec, space });
+    });
+  },
 );
 
-When(
-  'I index label "Paper" on an empty properties list',
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.index("Paper", { properties: [] }));
-  }
-);
+When('I index label "Paper" on an empty properties list', function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.index("Paper", { properties: [] }));
+});
 
 When(
   'I add a node with label "Paper" titled "Deep Graph Learning"',
   function (this: GraphForgeWorld) {
     const h = this.forge!.addNode("Paper", { title: "Deep Graph Learning" });
     this.nodes["Deep Graph Learning"] = h;
-  }
+  },
 );
 
-When(
-  "I call schema",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.schema());
-  }
-);
+When("I call schema", function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.schema());
+});
 
-When(
-  "I call labels",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.labels());
-  }
-);
+When("I call labels", function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.labels());
+});
 
-When(
-  "I call relationship_types",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.relationshipTypes());
-  }
-);
+When("I call relationship_types", function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.relationshipTypes());
+});
 
-When(
-  /^I call node_count for label "([^"]*)"$/,
-  function (this: GraphForgeWorld, label: string) {
-    _catch(this, () => this.forge!.nodeCount(label));
-  }
-);
+When(/^I call node_count for label "([^"]*)"$/, function (this: GraphForgeWorld, label: string) {
+  _catch(this, () => this.forge!.nodeCount(label));
+});
 
-When(
-  /^I call explain on "([^"]*)"$/,
-  function (this: GraphForgeWorld, query: string) {
-    _catch(this, () => this.forge!.explain(query));
-  }
-);
+When(/^I call explain on "([^"]*)"$/, function (this: GraphForgeWorld, query: string) {
+  _catch(this, () => this.forge!.explain(query));
+});
 
-When(
-  "I call clear",
-  function (this: GraphForgeWorld) {
-    _catch(this, () => this.forge!.clear());
-  }
-);
+When("I call clear", function (this: GraphForgeWorld) {
+  _catch(this, () => this.forge!.clear());
+});
 
-When(
-  "I open a graph at that path",
-  function (this: GraphForgeWorld) {
-    const p = this.extra["path"] as string || "/nonexistent/path";
-    _catch(this, () => {
-      const forge = new GraphForge(p);
-      this.forge = forge;
-      return forge;
-    });
-  }
-);
+When("I open a graph at that path", function (this: GraphForgeWorld) {
+  const p = this.extra["path"] as string | undefined;
+  if (!p) throw new Error("no path fixture was set before opening a graph");
+  _catch(this, () => {
+    const forge = new GraphForge(p);
+    this.forge = forge;
+    return forge;
+  });
+});
 
-When(
-  "I reopen the forge at the same path",
-  function (this: GraphForgeWorld) {
-    const p = this.extra["path"] as string;
-    _catch(this, () => {
-      this.forge = new GraphForge(p);
-      return this.forge;
-    });
-  }
-);
+When("I reopen the forge at the same path", function (this: GraphForgeWorld) {
+  const p = this.extra["path"] as string;
+  _catch(this, () => {
+    this.forge = new GraphForge(p);
+    return this.forge;
+  });
+});
 
-When(
-  /^I attempt to call (.+)$/,
-  function (this: GraphForgeWorld, method: string) {
-    method = method.trim();
-    if (method.startsWith("execute with query")) {
-      const q = method.split('"')[1];
-      _catch(this, () => this.forge!.execute(q));
-    } else if (method.startsWith("rank with label")) {
-      const parts = method.split('"');
-      _catch(this, () => this.forge!.rank(parts[1], { by: parts[3] }));
-    } else if (method.startsWith("find with text")) {
-      const parts = method.split('"');
-      _catch(this, () => this.forge!.find(parts[1], { label: parts[3] }));
-    } else if (method.startsWith("add_node with label")) {
-      const parts = method.split('"');
-      _catch(this, () => this.forge!.addNode(parts[1], { name: parts[3] }));
-    } else {
-      this.error = codedError("LifecycleError", `Unknown method in step: ${method}`);
-    }
+When(/^I attempt to call (.+)$/, function (this: GraphForgeWorld, method: string) {
+  method = method.trim();
+  if (method.startsWith("execute with query")) {
+    const q = method.split('"')[1];
+    _catch(this, () => this.forge!.execute(q));
+  } else if (method.startsWith("rank with label")) {
+    const parts = method.split('"');
+    _catch(this, () => this.forge!.rank(parts[1], parts[3]));
+  } else if (method.startsWith("find with text")) {
+    const parts = method.split('"');
+    _catch(this, () => this.forge!.find(parts[1], parts[3]));
+  } else if (method.startsWith("add_node with label")) {
+    const parts = method.split('"');
+    _catch(this, () => this.forge!.addNode(parts[1], { name: parts[3] }));
+  } else {
+    throw new Error(`unmapped method in step: ${method}`);
   }
-);
+});
 
-When(
-  "I load the ontology from that file",
-  function (this: GraphForgeWorld) {
-    const p = this.extra["ontology_path"] as string;
-    _catch(this, () => this.forge!.loadOntology(p));
-  }
-);
+When("I load the ontology from that file", function (this: GraphForgeWorld) {
+  const p = this.extra["ontology_path"] as string;
+  _catch(this, () => this.forge!.loadOntology(p));
+});
 
-When(
-  /^I analyze by "([^"]*)"$/,
-  function (this: GraphForgeWorld, algorithm: string) {
-    _catch(this, () => this.forge!.analyze(algorithm));
-  }
-);
-
-When(
-  /^I call neighbourhood for "([^"]*)" with hops (\d+) in label "([^"]*)" using canonical property "([^"]*)"$/,
-  function (this: GraphForgeWorld, canonical: string, hopsStr: string, label: string, prop: string) {
-    // neighbourhood recipe not yet implemented at Node skeleton stage
-    this.result = null;
-    this.error = new Error("not implemented");
-  }
-);
+When(/^I analyze by "([^"]*)"$/, function (this: GraphForgeWorld, algorithm: string) {
+  _catch(this, () => this.forge!.analyze(algorithm));
+});
 
 // ---------------------------------------------------------------------------
 // THEN steps
 // ---------------------------------------------------------------------------
 
-Then(
-  "the result is an Arrow Table",
-  function (this: GraphForgeWorld) {
-    resultTable(this); // throws if the query errored or the result is not Arrow IPC
-  }
-);
+Then("the result is an Arrow Table", function (this: GraphForgeWorld) {
+  resultTable(this); // throws if the query errored or the result is not Arrow IPC
+});
 
 function assertHasColumn(world: GraphForgeWorld, col: string): void {
   const table = resultTable(world);
@@ -1192,7 +1097,7 @@ Then(
   /^the result schema contains column "([^"]*)"$/,
   function (this: GraphForgeWorld, col: string) {
     assertHasColumn(this, col);
-  }
+  },
 );
 
 function assertRowCount(world: GraphForgeWorld, n: number, atMost = false): void {
@@ -1227,20 +1132,19 @@ Then(
   function (this: GraphForgeWorld, col: string, val: string) {
     const got = firstRowValue(this, col);
     if (String(got) !== val) {
-      throw new Error(`first row "${col}": expected ${JSON.stringify(val)}, got ${JSON.stringify(got)}`);
+      throw new Error(
+        `first row "${col}": expected ${JSON.stringify(val)}, got ${JSON.stringify(got)}`,
+      );
     }
-  }
+  },
 );
 
-Then(
-  /^the first row value for "([^"]*)" is null$/,
-  function (this: GraphForgeWorld, col: string) {
-    const got = firstRowValue(this, col);
-    if (got !== null) {
-      throw new Error(`first row "${col}": expected null, got ${JSON.stringify(got)}`);
-    }
+Then(/^the first row value for "([^"]*)" is null$/, function (this: GraphForgeWorld, col: string) {
+  const got = firstRowValue(this, col);
+  if (got !== null) {
+    throw new Error(`first row "${col}": expected null, got ${JSON.stringify(got)}`);
   }
-);
+});
 
 function expectErrCode(world: GraphForgeWorld, code: string): void {
   const got = errCode(world.error);
@@ -1288,14 +1192,11 @@ Then("an OntologyError is raised", function (this: GraphForgeWorld) {
   expectErrCode(this, "OntologyError");
 });
 
-Then(
-  "no error is raised",
-  function (this: GraphForgeWorld) {
-    if (this.error !== null) {
-      throw new Error(`Unexpected error: ${this.error.message}`);
-    }
+Then("no error is raised", function (this: GraphForgeWorld) {
+  if (this.error !== null) {
+    throw new Error(`Unexpected error: ${this.error.message}`);
   }
-);
+});
 
 Then(
   /^the result is a NodeHandle with label "([^"]*)"$/,
@@ -1307,7 +1208,7 @@ Then(
     if (handle.label !== label) {
       throw new Error(`expected label ${label}, got ${handle.label}`);
     }
-  }
+  },
 );
 
 Then(
@@ -1320,7 +1221,7 @@ Then(
     if ("id" in handle || "get" in handle) {
       throw new Error("NodeHandle exposed a surrogate or property cache");
     }
-  }
+  },
 );
 
 Then(
@@ -1329,8 +1230,8 @@ Then(
     const escapedName = name.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
     const table = tableFromIPC(
       this.forge!.execute(
-        `MATCH (n {name: '${escapedName}'}) RETURN n.node_uuid AS uuid, n.name AS name`
-      )
+        `MATCH (n {name: '${escapedName}'}) RETURN n.node_uuid AS uuid, n.name AS name`,
+      ),
     );
     if (table.numRows !== 1 || table.getChild("name")?.get(0) !== name) {
       throw new Error(`UUID readback did not return ${name}`);
@@ -1340,32 +1241,34 @@ Then(
     if (actual !== this.nodes[name].uuid.replaceAll("-", "")) {
       throw new Error(`UUID readback ${actual} did not match ${this.nodes[name].uuid}`);
     }
-  }
+  },
 );
 
 Then(
   "the result is an EdgeHandle with UUID identity and no numeric surrogate",
   function (this: GraphForgeWorld) {
     if (!(this.result instanceof EdgeHandle)) {
-      return "pending";
+      throw new Error(`expected native EdgeHandle, got ${String(this.result)}`);
     }
     const handle = this.result as { uuid?: unknown; id?: unknown };
     if (typeof handle.uuid !== "string" || "id" in handle) {
       throw new Error("EdgeHandle exposed a numeric surrogate");
     }
-  }
+  },
 );
 
 Then(
   /^execute "([^"]*)" returns (\d+) rows$/,
   function (this: GraphForgeWorld, query: string, nStr: string) {
     const buf = this.forge!.execute(query);
+    this.result = buf;
+    this.error = null;
     const table = tableFromIPC(buf as Buffer);
     const want = parseInt(nStr, 10);
     if (table.numRows !== want) {
       throw new Error(`execute "${query}": expected ${want} rows, got ${table.numRows}`);
     }
-  }
+  },
 );
 
 Then(
@@ -1387,20 +1290,24 @@ Then(
 
 Then(
   /^execute "([^"]*)" returns (\d+) row$/,
-  function (this: GraphForgeWorld, _query: string, _nStr: string) {
-    return "pending";
-  }
+  function (this: GraphForgeWorld, query: string, nStr: string) {
+    const buf = this.forge!.execute(query) as Buffer;
+    this.result = buf;
+    this.error = null;
+    const table = tableFromIPC(buf);
+    const want = parseInt(nStr, 10);
+    if (table.numRows !== want) {
+      throw new Error(`execute "${query}": expected ${want} row, got ${table.numRows}`);
+    }
+  },
 );
 
-Then(
-  "the string representation contains the NodeHandle UUID",
-  function (this: GraphForgeWorld) {
-    const handle = this.result as { uuid: string; toString(): string };
-    if (!handle.toString().includes(handle.uuid)) {
-      throw new Error(`handle representation omitted UUID: ${handle.toString()}`);
-    }
+Then("the string representation contains the NodeHandle UUID", function (this: GraphForgeWorld) {
+  const handle = this.result as { uuid: string; toString(): string };
+  if (!handle.toString().includes(handle.uuid)) {
+    throw new Error(`handle representation omitted UUID: ${handle.toString()}`);
   }
-);
+});
 
 Then(
   /^the string representation does not contain cached property "([^"]*)"$/,
@@ -1408,7 +1315,7 @@ Then(
     if (String(this.result).includes(property)) {
       throw new Error(`handle representation cached property ${property}`);
     }
-  }
+  },
 );
 
 Then("the path request reaches Rust dispatch", function (this: GraphForgeWorld) {
@@ -1427,60 +1334,46 @@ Then("a structured selector error is raised", function (this: GraphForgeWorld) {
   expectErrCode(this, "ValidationError");
 });
 
-Then(
-  /^the result is (\d+)$/,
-  function (this: GraphForgeWorld, nStr: string) {
-    if (this.error) throw this.error;
-    const expected = parseInt(nStr, 10);
-    if (this.result !== expected) {
-      throw new Error(`expected ${expected}, got ${String(this.result)}`);
-    }
+Then(/^the result is (\d+)$/, function (this: GraphForgeWorld, nStr: string) {
+  if (this.error) throw this.error;
+  const expected = parseInt(nStr, 10);
+  if (this.result !== expected) {
+    throw new Error(`expected ${expected}, got ${String(this.result)}`);
   }
-);
+});
 
-Then(
-  "the result is a non-empty string",
-  function (this: GraphForgeWorld) {
-    if (this.error) throw new Error(`expected a string result, but errored: ${this.error.message}`);
-    if (typeof this.result !== "string" || this.result.length === 0) {
-      throw new Error(`expected a non-empty string, got: ${JSON.stringify(this.result)}`);
-    }
+Then("the result is a non-empty string", function (this: GraphForgeWorld) {
+  if (this.error) throw new Error(`expected a string result, but errored: ${this.error.message}`);
+  if (typeof this.result !== "string" || this.result.length === 0) {
+    throw new Error(`expected a non-empty string, got: ${JSON.stringify(this.result)}`);
   }
-);
+});
 
-Then(
-  /^the result contains "([^"]*)"$/,
-  function (this: GraphForgeWorld, text: string) {
-    if (this.error) throw new Error(`expected a result, but errored: ${this.error.message}`);
-    if (typeof this.result === "string") {
-      if (!this.result.includes(text)) throw new Error(`result string does not contain "${text}"`);
-    } else if (Array.isArray(this.result)) {
-      if (!(this.result as string[]).includes(text)) throw new Error(`result list does not contain "${text}"`);
-    } else {
-      throw new Error(`expected a string or list result, got: ${typeof this.result}`);
-    }
+Then(/^the result contains "([^"]*)"$/, function (this: GraphForgeWorld, text: string) {
+  if (this.error) throw new Error(`expected a result, but errored: ${this.error.message}`);
+  if (typeof this.result === "string") {
+    if (!this.result.includes(text)) throw new Error(`result string does not contain "${text}"`);
+  } else if (Array.isArray(this.result)) {
+    if (!(this.result as string[]).includes(text))
+      throw new Error(`result list does not contain "${text}"`);
+  } else {
+    throw new Error(`expected a string or list result, got: ${typeof this.result}`);
   }
-);
+});
 
-Then(
-  "the result is an empty list",
-  function (this: GraphForgeWorld) {
-    if (this.error) throw this.error;
-    if (!Array.isArray(this.result) || (this.result as unknown[]).length !== 0) {
-      throw new Error(`expected an empty list, got ${JSON.stringify(this.result)}`);
-    }
+Then("the result is an empty list", function (this: GraphForgeWorld) {
+  if (this.error) throw this.error;
+  if (!Array.isArray(this.result) || (this.result as unknown[]).length !== 0) {
+    throw new Error(`expected an empty list, got ${JSON.stringify(this.result)}`);
   }
-);
+});
 
-Then(
-  "calling relationship_types also returns an empty list",
-  function (this: GraphForgeWorld) {
-    const result = this.forge!.relationshipTypes();
-    if (!Array.isArray(result) || result.length !== 0) {
-      throw new Error(`expected no relationship types, got ${JSON.stringify(result)}`);
-    }
+Then("calling relationship_types also returns an empty list", function (this: GraphForgeWorld) {
+  const result = this.forge!.relationshipTypes();
+  if (!Array.isArray(result) || result.length !== 0) {
+    throw new Error(`expected no relationship types, got ${JSON.stringify(result)}`);
   }
-);
+});
 
 Then(
   /^the table contains an entry for label "([^"]*)"$/,
@@ -1490,106 +1383,151 @@ Then(
     if (!labels || ![...labels.toArray()].includes(label)) {
       throw new Error(`schema does not contain label ${label}`);
     }
-  }
+  },
 );
 
-Then(
-  "the two score results are not identical",
-  function (this: GraphForgeWorld) {
-    return "pending";
+Then("the two score results are not identical", function (this: GraphForgeWorld) {
+  const directedError = this.extra["rank_directed_error"] as Error | null;
+  const undirectedError = this.extra["rank_undirected_error"] as Error | null;
+  if (directedError) throw directedError;
+  if (undirectedError) throw undirectedError;
+  const scores = (value: unknown) => {
+    if (!(value instanceof Buffer)) throw new Error("rank result was not Arrow IPC");
+    return [...(tableFromIPC(value).getChild("score")?.toArray() ?? [])].map(Number);
+  };
+  const directed = scores(this.extra["rank_directed"]);
+  const undirected = scores(this.extra["rank_undirected"]);
+  if (JSON.stringify(directed) === JSON.stringify(undirected)) {
+    throw new Error(`directed and undirected scores were identical: ${JSON.stringify(directed)}`);
   }
-);
+});
 
-Then(
-  "the 2 connected nodes share the same community_id",
-  function (this: GraphForgeWorld) {
-    return "pending";
+Then("the 2 connected nodes share the same community_id", function (this: GraphForgeWorld) {
+  const table = resultTable(this);
+  const nameColumn = table.getChild("name");
+  const communityColumn = table.getChild("community_id");
+  if (!nameColumn || !communityColumn) {
+    throw new Error('cluster result requires "name" and "community_id" columns');
   }
-);
+  const names = nameColumn.toArray();
+  const communities = communityColumn.toArray();
+  const byName = new Map([...names].map((name, index) => [String(name), communities[index]]));
+  for (const required of ["Alice", "Bob"]) {
+    if (!byName.has(required)) throw new Error(`cluster result omitted row for ${required}`);
+  }
+  if (byName.get("Alice") !== byName.get("Bob")) {
+    throw new Error("Alice and Bob did not share a community_id");
+  }
+  this.extra["communities"] = byName;
+});
 
-Then(
-  "the 2 isolated nodes share a different community_id",
-  function (this: GraphForgeWorld) {
-    return "pending";
+Then("the 2 isolated nodes share a different community_id", function (this: GraphForgeWorld) {
+  const byName = this.extra["communities"] as Map<string, unknown>;
+  if (!byName) throw new Error("community map was not captured by the preceding step");
+  for (const required of ["Carol", "Dave"]) {
+    if (!byName.has(required)) throw new Error(`cluster result omitted row for ${required}`);
   }
-);
+  if (byName.get("Carol") !== byName.get("Dave")) {
+    throw new Error("Carol and Dave did not share a community_id");
+  }
+  if (byName.get("Alice") === byName.get("Carol")) {
+    throw new Error("disconnected groups shared a community_id");
+  }
+});
 
-// Used as both Given (setup) and Then (assertion) in find.feature
-Given(
-  "no explicit index call was made before find",
-  function (this: GraphForgeWorld) {
-    if (!("index_called" in this.extra)) {
-      // Given context — initialise the flag
-      this.extra["index_called"] = false;
-    } else {
-      // Then context — assert
-      if (this.extra["index_called"]) {
-        throw new Error("Index was called before find");
-      }
-    }
+Then("no index call was made before find", function (this: GraphForgeWorld) {
+  if (!("index_called" in this.extra)) {
+    throw new Error("index tracking was never initialised for this scenario");
   }
-);
+  if (this.extra["index_called"]) {
+    throw new Error("Index was called before find");
+  }
+  if (resultTable(this).numRows < 1) {
+    throw new Error("find returned no matches without an explicit index call");
+  }
+});
 
 Then(
   /^for each result row the id is valid in execute "([^"]*)"$/,
-  function (this: GraphForgeWorld, _query: string) {
-    if (this.error) return "pending";
-    return "pending";
-  }
+  function (this: GraphForgeWorld, query: string) {
+    const table = resultTable(this);
+    const ids = table.getChild("node_uuid");
+    if (!ids || table.numRows === 0) throw new Error("find returned no node_uuid rows");
+    for (const value of ids.toArray()) {
+      const hex = Buffer.from(value as Uint8Array).toString("hex");
+      const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      const readback = tableFromIPC(this.forge!.execute(query, { id: { $uuid: uuid } }));
+      if (readback.numRows !== 1) throw new Error(`node_uuid ${uuid} was not addressable`);
+    }
+  },
 );
 
-Then(
-  /^all result rows have label "([^"]*)"$/,
-  function (this: GraphForgeWorld, _label: string) {
-    if (this.error) return "pending";
-    return "pending";
+Then(/^all result rows have label "([^"]*)"$/, function (this: GraphForgeWorld, label: string) {
+  const table = resultTable(this);
+  const ids = table.getChild("node_uuid");
+  if (!ids || table.numRows === 0) throw new Error("find returned no rows to validate");
+  for (const value of ids.toArray()) {
+    const hex = Buffer.from(value as Uint8Array).toString("hex");
+    const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    const query = `MATCH (n:${label}) WHERE n.node_uuid = $id RETURN n.node_uuid`;
+    const readback = tableFromIPC(this.forge!.execute(query, { id: { $uuid: uuid } }));
+    if (readback.numRows !== 1) throw new Error(`node_uuid ${uuid} was not a ${label}`);
   }
-);
+});
 
-Then(
-  "the result contains that node",
-  function (this: GraphForgeWorld) {
-    if (this.error) return "pending";
-    return "pending";
-  }
-);
+Then("the result contains that node", function (this: GraphForgeWorld) {
+  const table = resultTable(this);
+  const ids = table.getChild("node_uuid");
+  const expected = String(this.extra["paper_id"] ?? "").replace(/-/g, "");
+  const actual = [...(ids?.toArray() ?? [])].map((value) =>
+    Buffer.from(value as Uint8Array).toString("hex"),
+  );
+  if (!actual.includes(expected)) throw new Error(`result omitted node ${expected}`);
+});
 
 Then(
   'find "paper" in label "Paper" returns the same results as after the first index call',
   function (this: GraphForgeWorld) {
-    if (this.error) return "pending";
-    return "pending";
-  }
+    if (this.error) throw this.error;
+    const first = this.extra["first_find_result"];
+    const second = this.forge!.find("paper", "Paper");
+    const rows = (value: unknown, which: string) => {
+      if (!(value instanceof Buffer)) throw new Error(`${which} find result was not Arrow IPC`);
+      return JSON.stringify(tableFromIPC(value).toArray());
+    };
+    if (rows(first, "first") !== rows(second, "second")) {
+      throw new Error("repeated index changed deterministic find results");
+    }
+  },
 );
 
 Then(
   /^the result contains a row with title "([^"]*)"$/,
-  function (this: GraphForgeWorld, _title: string) {
-    if (this.error) return "pending";
-    return "pending";
-  }
+  function (this: GraphForgeWorld, title: string) {
+    const table = resultTable(this);
+    const titles = [...(table.getChild("title")?.toArray() ?? [])].map(String);
+    if (!titles.includes(title)) throw new Error(`result omitted title ${title}`);
+  },
 );
 
-Then(
-  /^the result contains a row for "([^"]*)"$/,
-  function (this: GraphForgeWorld, _name: string) {
-    if (this.error) return "pending";
-    return "pending";
-  }
-);
+Then(/^the result contains a row for "([^"]*)"$/, function (this: GraphForgeWorld, name: string) {
+  const table = resultTable(this);
+  const names = [...(table.getChild("name")?.toArray() ?? [])].map(String);
+  if (!names.includes(name)) throw new Error(`result omitted row for ${name}`);
+});
 
 Then(
   /^the result does not contain a row for "([^"]*)"$/,
-  function (this: GraphForgeWorld, _name: string) {
-    if (this.error) return "pending";
-    return "pending";
-  }
+  function (this: GraphForgeWorld, name: string) {
+    const table = resultTable(this);
+    const column = table.getChild("name");
+    if (!column) throw new Error('result is missing the "name" column');
+    const names = [...column.toArray()].map(String);
+    if (names.includes(name)) throw new Error(`result unexpectedly included row for ${name}`);
+  },
 );
 
-Then(
-  "the result is an Arrow Table with at least 1 row",
-  function (this: GraphForgeWorld) {
-    if (this.error) return "pending";
-    return "pending";
-  }
-);
+Then("the result is an Arrow Table with at least 1 row", function (this: GraphForgeWorld) {
+  const table = resultTable(this);
+  if (table.numRows < 1) throw new Error("expected at least one Arrow row");
+});
