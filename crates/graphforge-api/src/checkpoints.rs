@@ -1040,9 +1040,8 @@ fn logical_records(
             }
             let snapshot = generation
                 .participant_snapshot(&descriptor.capability_id, &descriptor.record_family_id)?
-                .ok_or_else(|| GfError::Api {
-                    code: ApiErrorCode::SchemaMismatch,
-                    message: "workspace participant disappeared during checkpoint diff".into(),
+                .ok_or_else(|| {
+                    schema_mismatch("workspace participant disappeared during checkpoint diff")
                 })?;
             match descriptor.record_family_id.as_str() {
                 graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY => {
@@ -1059,10 +1058,9 @@ fn logical_records(
                     )?;
                 }
                 _ => {
-                    return Err(GfError::Api {
-                        code: ApiErrorCode::SchemaMismatch,
-                        message: "unregistered workspace checkpoint diff participant".into(),
-                    });
+                    return Err(schema_mismatch(
+                        "unregistered workspace checkpoint diff participant",
+                    ));
                 }
             }
             let identity: [u8; 32] =
@@ -1082,12 +1080,11 @@ fn logical_records(
             descriptor.capability_id.as_str(),
             descriptor.record_family_id.as_str(),
         );
-        let adapter = adapters.get(&key).ok_or_else(|| GfError::Api {
-            code: ApiErrorCode::SchemaMismatch,
-            message: format!(
+        let adapter = adapters.get(&key).ok_or_else(|| {
+            schema_mismatch(format!(
                 "no logical checkpoint diff adapter for {}@{}",
                 descriptor.capability_id, descriptor.record_family_id
-            ),
+            ))
         })?;
         if descriptor.encoding != adapter.encoding
             || descriptor.capability_version != adapter.capability_version
@@ -1095,38 +1092,31 @@ fn logical_records(
             || descriptor.schema_fingerprint != adapter.schema_fingerprint
             || descriptor.row_count > adapter.max_rows as u64
         {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: format!(
-                    "checkpoint diff contract mismatch for {}@{}",
-                    descriptor.capability_id, descriptor.record_family_id
-                ),
-            });
+            return Err(schema_mismatch(format!(
+                "checkpoint diff contract mismatch for {}@{}",
+                descriptor.capability_id, descriptor.record_family_id
+            )));
         }
         let snapshot = generation
             .participant_snapshot(&descriptor.capability_id, &descriptor.record_family_id)?
-            .ok_or_else(|| GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "manifest participant disappeared during checkpoint diff".into(),
+            .ok_or_else(|| {
+                schema_mismatch("manifest participant disappeared during checkpoint diff")
             })?;
         let batches = read_parquet(&snapshot.bytes, page)?;
         let decoded_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-        let expected_rows = usize::try_from(descriptor.row_count).map_err(|_| GfError::Api {
-            code: ApiErrorCode::SchemaMismatch,
-            message: "checkpoint participant row count exceeds this platform".into(),
+        let expected_rows = usize::try_from(descriptor.row_count).map_err(|_| {
+            schema_mismatch("checkpoint participant row count exceeds this platform")
         })?;
         if decoded_rows != expected_rows {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint participant row count does not match its manifest".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint participant row count does not match its manifest",
+            ));
         }
         for batch in batches {
             if batch.schema().fields() != adapter.schema.fields() {
-                return Err(GfError::Api {
-                    code: ApiErrorCode::SchemaMismatch,
-                    message: "checkpoint participant Arrow schema is incompatible".into(),
-                });
+                return Err(schema_mismatch(
+                    "checkpoint participant Arrow schema is incompatible",
+                ));
             }
             for row in 0..batch.num_rows() {
                 if row % 4096 == 0 {
@@ -1165,10 +1155,9 @@ fn logical_records(
                     )
                     .is_some()
                 {
-                    return Err(GfError::Api {
-                        code: ApiErrorCode::SchemaMismatch,
-                        message: "checkpoint participant has duplicate logical identity".into(),
-                    });
+                    return Err(schema_mismatch(
+                        "checkpoint participant has duplicate logical identity",
+                    ));
                 }
             }
         }
@@ -1180,10 +1169,9 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
     let mut out = BTreeMap::new();
     for entry in graphforge_knowledge::schema_registry() {
         if entry.diff_identity_fields.is_empty() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint diff adapter has no identity fields".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint diff adapter has no identity fields",
+            ));
         }
         let prior = out.insert(
             (entry.capability_id, entry.record_family),
@@ -1201,18 +1189,16 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
             },
         );
         if prior.is_some() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "duplicate checkpoint diff adapter registration".into(),
-            });
+            return Err(schema_mismatch(
+                "duplicate checkpoint diff adapter registration",
+            ));
         }
     }
     for entry in graphforge_provenance::schema_registry() {
         if entry.diff_identity_fields.is_empty() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint diff adapter has no identity fields".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint diff adapter has no identity fields",
+            ));
         }
         let prior = out.insert(
             (entry.capability_id, entry.record_family),
@@ -1230,10 +1216,9 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
             },
         );
         if prior.is_some() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "duplicate checkpoint diff adapter registration".into(),
-            });
+            return Err(schema_mismatch(
+                "duplicate checkpoint diff adapter registration",
+            ));
         }
     }
     Ok(out)
@@ -1592,6 +1577,21 @@ fn scope_matches(requested: CheckpointDiffScope, actual: &str) -> bool {
     )
 }
 
+fn checkpoint_api_error(code: ApiErrorCode, message: impl Into<String>) -> GfError {
+    GfError::Api {
+        code,
+        message: message.into(),
+    }
+}
+
+fn schema_mismatch(message: impl Into<String>) -> GfError {
+    checkpoint_api_error(ApiErrorCode::SchemaMismatch, message)
+}
+
+fn page_invalid(message: impl Into<String>) -> GfError {
+    checkpoint_api_error(ApiErrorCode::PageInvalid, message)
+}
+
 fn checkpoint_list_snapshot(rows: &[graphforge_storage::CheckpointRecord]) -> Uuid {
     let mut h = Sha256::new();
     h.update(b"graphforge-checkpoint-list-page/1");
@@ -1672,10 +1672,9 @@ fn page_bounds(
         Some(token) => {
             let (offset, cursor) = token.decode_bound(method, binding, snapshot, page.limit)?;
             if offset == 0 || cursors.get(offset - 1) != Some(&cursor) {
-                return Err(GfError::Api {
-                    code: ApiErrorCode::PageInvalid,
-                    message: "page token cursor is not the last complete sort tuple".into(),
-                });
+                return Err(page_invalid(
+                    "page token cursor is not the last complete sort tuple",
+                ));
             }
             offset
         }
@@ -1683,10 +1682,7 @@ fn page_bounds(
     };
     let count = cursors.len();
     if start > count {
-        return Err(GfError::Api {
-            code: graphforge_core::ApiErrorCode::PageInvalid,
-            message: "page token offset exceeds result rows".into(),
-        });
+        return Err(page_invalid("page token offset exceeds result rows"));
     }
     Ok((start, start.saturating_add(page.limit as usize).min(count)))
 }
@@ -2099,6 +2095,26 @@ mod tests {
 
     #[test]
     fn checkpoint_digest_and_scope_helpers_are_closed_and_exact() {
+        for (error, code, display) in [
+            (
+                schema_mismatch("schema detail"),
+                "GF_SCHEMA_MISMATCH",
+                "GF_SCHEMA_MISMATCH: schema detail",
+            ),
+            (
+                page_invalid("page detail"),
+                "GF_PAGE_INVALID",
+                "GF_PAGE_INVALID: page detail",
+            ),
+            (
+                checkpoint_api_error(ApiErrorCode::NotFound, "missing detail"),
+                "GF_NOT_FOUND",
+                "GF_NOT_FOUND: missing detail",
+            ),
+        ] {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.to_string(), display);
+        }
         assert_eq!(decode_hex(&"ab".repeat(32)).unwrap(), [0xab; 32]);
         for invalid in ["", "ab", &"gg".repeat(32)] {
             let error = decode_hex(invalid).unwrap_err();

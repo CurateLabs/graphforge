@@ -201,10 +201,8 @@ pub fn stage_project_generation(
     container_root: impl AsRef<Path>,
     request: &ProjectGenerationRequest,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request).map_err(|error| match error {
-        GfError::Storage(message) => publication_error(request, "STAGE", false, &message),
-        other => other,
-    })
+    stage_project_generation_inner(container_root.as_ref(), request)
+        .map_err(|error| map_stage_error(request, error))
 }
 
 /// Stage a complete private generation while allowing other transaction
@@ -228,10 +226,14 @@ pub fn stage_project_generation_optimistic(
         request,
         operation_fingerprint,
     )
-    .map_err(|error| match error {
+    .map_err(|error| map_stage_error(request, error))
+}
+
+fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfError {
+    match error {
         GfError::Storage(message) => publication_error(request, "STAGE", false, &message),
         other => other,
-    })
+    }
 }
 
 fn stage_project_generation_inner(

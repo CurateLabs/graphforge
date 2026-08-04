@@ -1249,20 +1249,16 @@ fn validate_registry(registry: &Registry) -> Result<(), GfError> {
     let mut create_operations = BTreeSet::new();
     let mut delete_operations = BTreeSet::new();
     for row in &registry.active {
-        validate_name(&row.name)
-            .map_err(|_| registry_corrupt("active checkpoint name is invalid"))?;
-        validate_description(row.description.as_deref())
-            .map_err(|_| registry_corrupt("active checkpoint description is invalid"))?;
-        validate_digest(&row.generation_manifest_sha256)?;
-        validate_digest(&row.create_request_sha256)?;
-        validate_record_identity(
-            row.checkpoint_uuid,
-            row.create_operation_uuid,
-            &row.name,
-            row.description.as_deref(),
-            row.created_by,
-            &row.create_request_sha256,
-        )?;
+        validate_checkpoint_content(&CheckpointContentRef {
+            label: "active checkpoint",
+            checkpoint_uuid: row.checkpoint_uuid,
+            create_operation_uuid: row.create_operation_uuid,
+            name: &row.name,
+            description: row.description.as_deref(),
+            created_by: row.created_by,
+            generation_manifest_sha256: &row.generation_manifest_sha256,
+            create_request_sha256: &row.create_request_sha256,
+        })?;
         if row.created_revision == 0
             || row.created_revision > registry.revision
             || !names.insert(row.name.as_str())
@@ -1275,21 +1271,17 @@ fn validate_registry(registry: &Registry) -> Result<(), GfError> {
         }
     }
     for row in &registry.tombstones {
-        validate_name(&row.name)
-            .map_err(|_| registry_corrupt("checkpoint tombstone name is invalid"))?;
-        validate_description(row.description.as_deref())
-            .map_err(|_| registry_corrupt("checkpoint tombstone description is invalid"))?;
-        validate_digest(&row.generation_manifest_sha256)?;
-        validate_digest(&row.create_request_sha256)?;
+        validate_checkpoint_content(&CheckpointContentRef {
+            label: "checkpoint tombstone",
+            checkpoint_uuid: row.checkpoint_uuid,
+            create_operation_uuid: row.create_operation_uuid,
+            name: &row.name,
+            description: row.description.as_deref(),
+            created_by: row.created_by,
+            generation_manifest_sha256: &row.generation_manifest_sha256,
+            create_request_sha256: &row.create_request_sha256,
+        })?;
         validate_digest(&row.delete_request_sha256)?;
-        validate_record_identity(
-            row.checkpoint_uuid,
-            row.create_operation_uuid,
-            &row.name,
-            row.description.as_deref(),
-            row.created_by,
-            &row.create_request_sha256,
-        )?;
         let expected_delete =
             delete_request_digest_values(row.delete_operation_uuid, &row.name, row.deleted_by);
         if row.created_revision == 0
@@ -1308,6 +1300,34 @@ fn validate_registry(registry: &Registry) -> Result<(), GfError> {
         }
     }
     Ok(())
+}
+
+struct CheckpointContentRef<'a> {
+    label: &'static str,
+    checkpoint_uuid: Uuid,
+    create_operation_uuid: Uuid,
+    name: &'a str,
+    description: Option<&'a str>,
+    created_by: Option<Uuid>,
+    generation_manifest_sha256: &'a str,
+    create_request_sha256: &'a str,
+}
+
+fn validate_checkpoint_content(content: &CheckpointContentRef<'_>) -> Result<(), GfError> {
+    validate_name(content.name)
+        .map_err(|_| registry_corrupt(format!("{} name is invalid", content.label)))?;
+    validate_description(content.description)
+        .map_err(|_| registry_corrupt(format!("{} description is invalid", content.label)))?;
+    validate_digest(content.generation_manifest_sha256)?;
+    validate_digest(content.create_request_sha256)?;
+    validate_record_identity(
+        content.checkpoint_uuid,
+        content.create_operation_uuid,
+        content.name,
+        content.description,
+        content.created_by,
+        content.create_request_sha256,
+    )
 }
 
 fn validate_single_link_regular(path: &Path, label: &str) -> Result<(), GfError> {

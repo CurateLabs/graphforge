@@ -1891,6 +1891,130 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_commands_execute_end_to_end_through_the_reusable_cli() {
+        let project = tempdir().unwrap();
+        let path = project.path().join("state");
+        fs::create_dir(&path).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let invoke = |tail: &[&str]| {
+            let mut args = vec![
+                "graphforge".to_owned(),
+                "--json".to_owned(),
+                "--project".to_owned(),
+                path.clone(),
+            ];
+            args.extend(tail.iter().map(|value| (*value).to_owned()));
+            execute(args)
+        };
+        let create_id = Uuid::now_v7().to_string();
+        let create = invoke(&[
+            "checkpoint",
+            "create",
+            "baseline",
+            "--description",
+            "before change",
+            "--idempotency-key",
+            &create_id,
+        ]);
+        assert_eq!(
+            create.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&create.stderr)
+        );
+
+        for command in [
+            vec!["checkpoint", "list", "--limit", "10"],
+            vec!["checkpoint", "show", "baseline"],
+            vec![
+                "checkpoint",
+                "open",
+                "baseline",
+                "--",
+                "RETURN",
+                "1",
+                "AS",
+                "value",
+            ],
+            vec![
+                "checkpoint",
+                "diff",
+                "--from",
+                "baseline",
+                "--to-current",
+                "--scope",
+                "summary",
+                "--detail",
+                "summary",
+            ],
+            vec!["checkpoint", "revert", "baseline", "--preview"],
+        ] {
+            let result = invoke(&command);
+            assert_eq!(
+                result.exit_code,
+                0,
+                "command={command:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(!result.stdout.is_empty());
+        }
+
+        let envelope = project.path().join("baseline.gfportable");
+        let envelope_text = envelope.to_string_lossy().into_owned();
+        let export = invoke(&[
+            "export",
+            "--checkpoint",
+            "baseline",
+            "--output",
+            &envelope_text,
+        ]);
+        assert_eq!(
+            export.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&export.stderr)
+        );
+        assert!(envelope.is_file());
+
+        let imported_path = project.path().join("imported");
+        fs::create_dir(&imported_path).unwrap();
+        let imported = imported_path.to_string_lossy().into_owned();
+        let import_id = Uuid::now_v7().to_string();
+        let import = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project".to_owned(),
+            imported,
+            "import".to_owned(),
+            "--input".to_owned(),
+            envelope_text,
+            "--idempotency-key".to_owned(),
+            import_id,
+        ]);
+        assert_eq!(
+            import.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&import.stderr)
+        );
+
+        let delete_id = Uuid::now_v7().to_string();
+        let delete = invoke(&[
+            "checkpoint",
+            "delete",
+            "baseline",
+            "--idempotency-key",
+            &delete_id,
+        ]);
+        assert_eq!(
+            delete.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&delete.stderr)
+        );
+    }
+
+    #[test]
     fn clap_error_vocabulary_is_total_and_stable() {
         let cases = [
             (ErrorKind::InvalidValue, "invalid_value"),

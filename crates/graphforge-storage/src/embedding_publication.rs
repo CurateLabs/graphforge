@@ -1542,4 +1542,29 @@ mod tests {
             Err(SearchArtifactError::CorruptPrimaryVectors { .. })
         ));
     }
+
+    #[test]
+    fn publication_dimension_mismatch_fails_before_creating_storage() {
+        let project = tempfile::tempdir().unwrap();
+        let descriptor = descriptor("model-a", 3);
+        let vectors = batch(&[1.0, 2.0]);
+
+        let error = publish_embedding_generation(
+            project.path(),
+            request(&descriptor, source(1), &vectors, 20),
+            VectorStoreLimits::default(),
+            SearchCoordinationLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SearchArtifactError::InvalidSelector {
+                field: "embedding batch",
+                ..
+            }
+        ));
+        assert!(!project.path().join("embeddings").exists());
+    }
 }
