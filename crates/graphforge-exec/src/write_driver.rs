@@ -3656,8 +3656,12 @@ mod tests {
         let committed = [8_u8; 16];
         apply_map_updates(&mut ctx, false, &committed, "Person", updates);
         remove_map_complement(&mut ctx, false, &committed, "Person", &removals);
-        assert!(!ctx.set_acc.nodes.is_empty());
-        assert!(!ctx.remove_acc.nodes.is_empty());
+        let set_nodes = &ctx.set_acc.nodes["Person"];
+        let remove_nodes = &ctx.remove_acc.nodes["Person"];
+        assert!(set_nodes.contains_key(&committed));
+        assert!(!set_nodes.contains_key(&node));
+        assert!(remove_nodes.contains_key(&committed));
+        assert!(!remove_nodes.contains_key(&node));
     }
 
     #[test]

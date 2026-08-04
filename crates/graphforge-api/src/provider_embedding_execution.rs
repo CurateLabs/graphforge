@@ -708,23 +708,24 @@ mod tests {
             assert_eq!(artifact_outcome(&input), expected);
         }
 
-        for input in [
-            GfError::Plan("plan".into()),
-            GfError::Api {
-                code: graphforge_core::ApiErrorCode::UnknownArgument,
-                message: "api".into(),
-            },
-            GfError::Provider {
-                class: "timeout".into(),
-                provider: "vendor".into(),
-                model: "model".into(),
-            },
+        for (input, expected) in [
+            (GfError::Plan("plan".into()), Refresh::Validation),
+            (
+                GfError::Api {
+                    code: graphforge_core::ApiErrorCode::UnknownArgument,
+                    message: "api".into(),
+                },
+                Refresh::Validation,
+            ),
+            (
+                GfError::Provider {
+                    class: "timeout".into(),
+                    provider: "vendor".into(),
+                    model: "model".into(),
+                },
+                Refresh::Provider,
+            ),
         ] {
-            let expected = if matches!(&input, GfError::Provider { .. }) {
-                Refresh::Provider
-            } else {
-                Refresh::Validation
-            };
             assert_eq!(api_outcome(&input), Failed(expected));
         }
     }
@@ -787,33 +788,49 @@ mod tests {
                 if error.class() == ProviderFailureClass::Timeout
         ));
 
-        for error in [
-            ProviderEmbeddingPlanError::Artifact(SearchArtifactError::Cancelled),
-            ProviderEmbeddingPlanError::Provider(ProviderError::new(
-                &contract,
-                ProviderFailureClass::Authentication,
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Artifact(
+            SearchArtifactError::Cancelled,
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Artifact(SearchArtifactError::Cancelled)
+        ));
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Provider(
+            ProviderError::new(&contract, ProviderFailureClass::Authentication),
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Provider(ref error)
+                if error.class() == ProviderFailureClass::Authentication
+        ));
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Api(
+            GfError::Validation("invalid".into()),
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Artifact(SearchArtifactError::Build(ref message))
+                if message.contains("invalid")
+        ));
+
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Artifact(
+                SearchArtifactError::Cancelled
             )),
-            ProviderEmbeddingPlanError::Api(GfError::Validation("invalid".into())),
-        ] {
-            let publication = publication_plan_error(error);
-            assert!(matches!(
-                publication,
-                ProviderPublicationError::Artifact(_) | ProviderPublicationError::Provider(_)
-            ));
-        }
-        for error in [
-            ProviderEmbeddingPlanError::Artifact(SearchArtifactError::Cancelled),
-            ProviderEmbeddingPlanError::Provider(ProviderError::new(
+            SearchArtifactError::Cancelled
+        ));
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Provider(ProviderError::new(
                 &contract,
                 ProviderFailureClass::Transport,
-            )),
-            ProviderEmbeddingPlanError::Api(GfError::Validation("invalid".into())),
-        ] {
-            assert!(matches!(
-                plan_artifact_error(error),
-                SearchArtifactError::Cancelled | SearchArtifactError::Build(_)
-            ));
-        }
+            ))),
+            SearchArtifactError::Build(ref message) if !message.is_empty()
+        ));
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Api(GfError::Validation(
+                "invalid".into()
+            ))),
+            SearchArtifactError::Build(ref message) if message.contains("invalid")
+        ));
         assert!(transaction_time_micros() > 0);
     }
 

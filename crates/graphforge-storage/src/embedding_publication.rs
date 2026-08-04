@@ -1662,11 +1662,7 @@ mod tests {
             ));
         }
         assert!(matches!(
-            io(
-                "test operation",
-                &tree,
-                std::io::Error::new(std::io::ErrorKind::Other, "failure")
-            ),
+            io("test operation", &tree, std::io::Error::other("failure")),
             SearchArtifactError::Io { .. }
         ));
     }

@@ -1271,17 +1271,23 @@ fn validate_registry(registry: &Registry) -> Result<(), GfError> {
         }
     }
     for row in &registry.tombstones {
-        validate_checkpoint_content(&CheckpointContentRef {
-            label: "checkpoint tombstone",
-            checkpoint_uuid: row.checkpoint_uuid,
-            create_operation_uuid: row.create_operation_uuid,
-            name: &row.name,
-            description: row.description.as_deref(),
-            created_by: row.created_by,
-            generation_manifest_sha256: &row.generation_manifest_sha256,
-            create_request_sha256: &row.create_request_sha256,
-        })?;
+        // Preserve pre-consolidation order: content fields, then delete digest,
+        // then deterministic create-request identity (error precedence).
+        validate_name(&row.name)
+            .map_err(|_| registry_corrupt("checkpoint tombstone name is invalid"))?;
+        validate_description(row.description.as_deref())
+            .map_err(|_| registry_corrupt("checkpoint tombstone description is invalid"))?;
+        validate_digest(&row.generation_manifest_sha256)?;
+        validate_digest(&row.create_request_sha256)?;
         validate_digest(&row.delete_request_sha256)?;
+        validate_record_identity(
+            row.checkpoint_uuid,
+            row.create_operation_uuid,
+            &row.name,
+            row.description.as_deref(),
+            row.created_by,
+            &row.create_request_sha256,
+        )?;
         let expected_delete =
             delete_request_digest_values(row.delete_operation_uuid, &row.name, row.deleted_by);
         if row.created_revision == 0

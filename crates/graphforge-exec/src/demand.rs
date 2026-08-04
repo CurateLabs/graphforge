@@ -811,6 +811,12 @@ mod tests {
             FilteredReadObserver, FilteredReadPruning, FilteredReadStrategy, FilteredReadTable,
         };
 
+        // Process-global capture must not interleave with other capture users.
+        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         reset();
         record_input(12, 3);
         record_candidates(12, 7);

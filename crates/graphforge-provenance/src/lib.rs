@@ -1403,6 +1403,10 @@ mod tests {
             (ProvenanceError::Dangling("id"), "GF_PROVENANCE_DANGLING"),
             (ProvenanceError::Conflict("id"), "GF_IDEMPOTENCY_CONFLICT"),
             (
+                ProvenanceError::Canonical(CanonicalError::Malformed("bad")),
+                "GF_CANONICAL_INVALID",
+            ),
+            (
                 ProvenanceError::Arrow(arrow::error::ArrowError::SchemaError("bad".into())),
                 "GF_SCHEMA_MISMATCH",
             ),

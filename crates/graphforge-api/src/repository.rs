@@ -2613,12 +2613,28 @@ mod tests {
 
     #[test]
     fn relative_discovery_and_source_digest_conversion_preserve_inputs() {
-        let current = std::env::current_dir().unwrap();
-        let relative = tempfile::tempdir_in(&current).unwrap();
-        let name = relative.path().file_name().unwrap();
-        let context = RepositoryContext::discover(name).unwrap();
-        assert!(context.git);
-        assert!(relative.path().starts_with(&context.root));
+        let root = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(root.path()).unwrap();
+        let relative = tempfile::tempdir_in(".").unwrap();
+        let name = relative.path().file_name().unwrap().to_os_string();
+        let discovery = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let context = RepositoryContext::discover(&name).unwrap();
+            assert!(context.git);
+            assert!(relative.path().starts_with(&context.root));
+            context
+        }));
+        std::env::set_current_dir(&previous).unwrap();
+        discovery.unwrap();
         let converted =
             RepositorySourceDigest::from(graphforge_storage::WorkspaceRepositorySourceDigest {
                 source_id: "catalog".into(),

@@ -7076,7 +7076,11 @@ mod tests {
             session.execute_remove(&plan).await,
             session.execute_remove_with_params(&plan, &params).await,
         ] {
-            assert!(result.is_err());
+            let error = result.expect_err("write wrappers require a write target");
+            assert!(
+                error.to_string().contains("write target"),
+                "unexpected error: {error}"
+            );
         }
     }
 

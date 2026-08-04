@@ -8941,27 +8941,41 @@ mod tests {
     #[test]
     fn binder_exercises_fragmented_clause_and_expression_error_paths() {
         let cases = [
-            "MATCH (n) WHERE n.active = true RETURN n",
-            "MATCH (n) SET missing.value = 1 RETURN n",
-            "MATCH (n) REMOVE missing.value RETURN n",
-            "MATCH (n) DELETE n.name",
-            "MATCH (n) WITH n.name RETURN n",
-            "MATCH (n) WITH count(*) AS total RETURN total",
-            "MATCH (n) RETURN n ORDER BY n.name DESC SKIP (1 + 2) LIMIT toInteger(3.5)",
-            "MATCH (n) RETURN percentileCont(n.value)",
-            "MATCH (n) RETURN percentileCont(DISTINCT n.value, 0.5)",
-            "MATCH (n) RETURN 'a' + 'b'",
-            "MATCH (n) RETURN NOT (n.value IN [1, 2])",
-            "MATCH (n) WHERE exists { (n)-->(m) WHERE count(*) > 0 } RETURN n",
-            "MATCH (n) RETURN [(n)-->(m) WHERE count(*) > 0 | m]",
-            "MATCH (n) WHERE (n)-->(m) OR (n)-->(x) RETURN n",
-            "MATCH (n) WHERE n.active OR (n)-->(m) RETURN n",
-            "UNWIND [1, 2] AS x RETURN x",
+            ("MATCH (n) WHERE n.active = true RETURN n", true),
+            ("MATCH (n) SET missing.value = 1 RETURN n", false),
+            ("MATCH (n) REMOVE missing.value RETURN n", false),
+            ("MATCH (n) DELETE n.name", true),
+            ("MATCH (n) WITH n.name RETURN n", false),
+            ("MATCH (n) WITH count(*) AS total RETURN total", true),
+            (
+                "MATCH (n) RETURN n ORDER BY n.name DESC SKIP (1 + 2) LIMIT toInteger(3.5)",
+                true,
+            ),
+            ("MATCH (n) RETURN percentileCont(n.value)", false),
+            (
+                "MATCH (n) RETURN percentileCont(DISTINCT n.value, 0.5)",
+                false,
+            ),
+            ("MATCH (n) RETURN 'a' + 'b'", true),
+            ("MATCH (n) RETURN NOT (n.value IN [1, 2])", true),
+            (
+                "MATCH (n) WHERE exists { (n)-->(m) WHERE count(*) > 0 } RETURN n",
+                false,
+            ),
+            ("MATCH (n) RETURN [(n)-->(m) WHERE count(*) > 0 | m]", false),
+            ("MATCH (n) WHERE (n)-->(m) OR (n)-->(x) RETURN n", false),
+            ("MATCH (n) WHERE n.active OR (n)-->(m) RETURN n", false),
+            ("UNWIND [1, 2] AS x RETURN x", true),
         ];
-        for query in cases {
+        for (query, should_bind) in cases {
             let ast = parse(query).unwrap_or_else(|error| panic!("query={query}: {error}"));
             let (binder, _) = make_binder(OntologyMode::Exploratory);
-            let _ = binder.bind(&ast);
+            let result = binder.bind(&ast);
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
         }
     }
 

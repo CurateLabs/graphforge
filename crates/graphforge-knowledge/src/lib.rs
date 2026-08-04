@@ -3162,6 +3162,10 @@ mod tests {
                 "GF_TRANSACTION_CONFLICT",
             ),
             (
+                KnowledgeError::Canonical(CanonicalError::Malformed("bad")),
+                "GF_CANONICAL_INVALID",
+            ),
+            (
                 KnowledgeError::Arrow(arrow::error::ArrowError::SchemaError("bad".into())),
                 "GF_SCHEMA_MISMATCH",
             ),
