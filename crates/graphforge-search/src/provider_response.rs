@@ -697,17 +697,8 @@ mod tests {
         }];
         let mut limits = ProviderRequestLimits::default();
         limits.output_values = 0;
-        let request = RerankRequest::new(&contract, "query", 1, &candidates, limits).unwrap();
-        let result = validate_rerank_response(
-            &request,
-            vec![RerankOutput {
-                node_uuid: [1; 16],
-                score: 1.0,
-            }],
-            &mut || Ok(()),
-        );
-        let Err(error) = result else {
-            panic!("over-limit rerank output must fail")
+        let Err(error) = RerankRequest::new(&contract, "query", 1, &candidates, limits) else {
+            panic!("zero output_values must fail closed before response validation")
         };
         assert_eq!(error.class(), ProviderFailureClass::ResourceExhausted);
     }

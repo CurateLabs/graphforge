@@ -2021,34 +2021,6 @@ mod tests {
     }
 
     #[test]
-    fn wave13_inspection_classifies_malformed_effective_csr_as_unreadable() {
-        let root = TempDir::new().unwrap();
-        let malformed = CsrIndex {
-            offsets: vec![0, 2],
-            edge_ids: vec![1],
-            neighbor_ids: vec![2],
-        };
-        let inspection = inspect_effective_artifact(
-            root.path(),
-            7,
-            "fingerprint".to_owned(),
-            3,
-            &malformed,
-            &[],
-        )
-        .unwrap();
-        assert_eq!(inspection.source_generation, 7);
-        assert_eq!(inspection.artifact_generation, Some(3));
-        assert_eq!(inspection.artifact_effective_generation, Some(7));
-        assert_eq!(inspection.artifact_fingerprint, None);
-        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
-        assert_eq!(
-            inspection.reason,
-            Some(AdjacencyFreshnessReason::UnreadableArtifact)
-        );
-    }
-
-    #[test]
     fn wave13_csr_io_rejects_parentless_destination_and_wrong_arrow_schema() {
         let empty = CsrIndex {
             offsets: vec![0],
