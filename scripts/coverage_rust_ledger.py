@@ -299,9 +299,7 @@ def cfg_test_lines(source: str, path: str) -> set[int]:
     return _cfg_test_analysis(source, path)[0]
 
 
-def production_records(
-    records: dict[str, dict[int, int]], root: Path
-) -> dict[str, dict[int, int]]:
+def production_records(records: dict[str, dict[int, int]], root: Path) -> dict[str, dict[int, int]]:
     """Filter test-only Rust code from production coverage records."""
     production: dict[str, dict[int, int]] = {}
     analyses: dict[str, tuple[set[int], set[str]]] = {}
@@ -326,11 +324,16 @@ def production_records(
             test_module_paths.add((module_parent / module).as_posix() + "/")
     for path, lines in records.items():
         parts = Path(path).parts
-        if len(parts) >= 3 and parts[0] == "crates" and parts[2] in {
-            "tests",
-            "benches",
-            "examples",
-        }:
+        if (
+            len(parts) >= 3
+            and parts[0] == "crates"
+            and parts[2]
+            in {
+                "tests",
+                "benches",
+                "examples",
+            }
+        ):
             continue
         if path in test_module_paths or any(
             marker.endswith("/") and path.startswith(marker) for marker in test_module_paths

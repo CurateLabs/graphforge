@@ -3547,13 +3547,16 @@ mod tests {
         let add = frontier
             .add_node_labels(VarId(0), &[1], &[true])
             .unwrap_err();
-        assert!(add
-            .to_string()
-            .contains("MERGE label target has no type_ids column"));
+        assert!(
+            add.to_string()
+                .contains("MERGE label target has no type_ids column")
+        );
         let remove = frontier.remove_node_labels(VarId(0), &[1]).unwrap_err();
-        assert!(remove
-            .to_string()
-            .contains("REMOVE label target has no type_ids column"));
+        assert!(
+            remove
+                .to_string()
+                .contains("REMOVE label target has no type_ids column")
+        );
     }
 
     #[test]
