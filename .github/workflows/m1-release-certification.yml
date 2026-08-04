@@ -112,7 +112,7 @@ jobs:
         run: |
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v9.0.0
