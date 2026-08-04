@@ -475,6 +475,21 @@ mod tests {
     }
 
     #[test]
+    fn standard_runtime_zero_wait_and_default_constructor_are_checkpointed() {
+        let mut runtime = StandardProviderExecutionRuntime::default();
+        let before = runtime.elapsed();
+        let checkpoints = Cell::new(0_usize);
+        runtime
+            .wait(Duration::ZERO, &mut || {
+                checkpoints.set(checkpoints.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(checkpoints.get(), 1);
+        assert!(runtime.elapsed() >= before);
+    }
+
+    #[test]
     fn success_records_only_content_free_counters() {
         let contract = contract();
         let mut runtime = FakeRuntime::new();

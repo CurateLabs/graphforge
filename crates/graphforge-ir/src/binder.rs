@@ -8975,6 +8975,26 @@ mod tests {
             ),
             ("MATCH (n) RETURN n:Person", true),
             ("WITH 1 AS x RETURN x:Person", false),
+            (
+                "MATCH (a)-[r:KNOWS*1..2 {since: 2020, active: true}]->(b) RETURN r",
+                true,
+            ),
+            (
+                "MERGE (n:Person) ON CREATE SET missing += {score: 1} RETURN n",
+                false,
+            ),
+            (
+                "MERGE (n:Person) ON MATCH SET missing:Employee RETURN n",
+                false,
+            ),
+            ("MATCH (n) SET missing += {score: 1} RETURN n", false),
+            ("MATCH (n) SET missing:Person RETURN n", false),
+            ("MATCH (n) REMOVE missing:Person RETURN n", false),
+            ("MATCH (n) DELETE [n]", false),
+            ("MATCH (n) RETURN NOT (n.score IN [1, 2])", true),
+            ("MATCH (n) RETURN missing:Person", false),
+            ("MATCH (n) CALL missing.procedure() RETURN n", false),
+            ("MATCH (n) RETURN exists { (n)-->(m) }", false),
         ];
 
         for (query, should_bind) in cases {
@@ -8987,5 +9007,16 @@ mod tests {
                 "query={query}, result={result:?}"
             );
         }
+    }
+
+    #[test]
+    fn strict_without_ontology_rejects_property_resolution() {
+        let (binder, _) = make_binder(OntologyMode::Strict);
+        let ast = parse("MATCH (n:Person) RETURN n.unknown").unwrap();
+        let errors = binder.bind(&ast).unwrap_err();
+        assert!(errors.iter().any(|error| {
+            error.kind == BindErrorKind::UnknownProperty
+                && error.message == "unknown property `unknown` (strict mode has no ontology)"
+        }));
     }
 }

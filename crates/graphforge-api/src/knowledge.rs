@@ -2865,15 +2865,9 @@ fn match_requested_node_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    for batch in graphforge_storage::read_nodes(&graph.dir)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        match_requested_uuid_column(&batch, "node_uuid", pending)?;
-        if pending.is_empty() {
-            break;
-        }
-    }
-    Ok(())
+    let batches = graphforge_storage::read_nodes(&graph.dir)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    match_requested_uuids(batches, "node_uuid", pending)
 }
 
 fn match_requested_edge_uuids(
@@ -2883,10 +2877,18 @@ fn match_requested_edge_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    for batch in graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        match_requested_uuid_column(&batch, "edge_uuid", pending)?;
+    let batches = graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    match_requested_uuids(batches, "edge_uuid", pending)
+}
+
+fn match_requested_uuids(
+    batches: Vec<RecordBatch>,
+    name: &'static str,
+    pending: &mut HashSet<Uuid>,
+) -> Result<(), GfError> {
+    for batch in batches {
+        match_requested_uuid_column(&batch, name, pending)?;
         if pending.is_empty() {
             break;
         }
@@ -3656,6 +3658,15 @@ mod tests {
 
         let created = graph.create_assertion(request.clone()).unwrap();
         assert_eq!(created.stats.rows_produced, 1);
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .assertion(assertion_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
@@ -3699,6 +3710,9 @@ mod tests {
         graph.set_clock_for_test(|| Ok(999));
         enable(&graph, CapabilityId::Provenance, 10);
         let node = graph.add_node("Person", &HashMap::new()).unwrap();
+        let edge = graph
+            .add_edge(&node, "SELF", &node, &HashMap::new())
+            .unwrap();
         enable(&graph, CapabilityId::Knowledge, 11);
         let before = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
@@ -3726,6 +3740,54 @@ mod tests {
                 .generation_uuid(),
             before
         );
+
+        let empty = graph
+            .create_assertion(CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(17)),
+                    actor_uuid: None,
+                },
+                assertion_uuid: uuid7(18),
+                claim: "unanchored".into(),
+                graph_refs: vec![],
+            })
+            .unwrap_err();
+        assert_eq!(
+            empty.to_string(),
+            "validation error: assertion requires at least one graph reference"
+        );
+
+        let edge_assertion_uuid = uuid7(19);
+        graph
+            .create_assertion(CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(20)),
+                    actor_uuid: None,
+                },
+                assertion_uuid: edge_assertion_uuid,
+                claim: "edge-backed".into(),
+                graph_refs: vec![AssertionGraphRefInput {
+                    graph_uuid: edge.uuid,
+                    graph_kind: GraphObjectKind::Edge,
+                    role: AssertionGraphRole::Subject,
+                    ordinal: 0,
+                }],
+            })
+            .unwrap();
+        graph
+            .attach_evidence(AttachEvidenceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(21)),
+                    actor_uuid: None,
+                },
+                evidence_uuid: uuid7(22),
+                assertion_uuid: edge_assertion_uuid,
+                source_uuid: edge.uuid,
+                source_kind: EvidenceSourceKind::GraphEdge,
+                role: EvidenceRole::Supports,
+                weight: None,
+            })
+            .unwrap();
 
         let assertion_uuid = uuid7(15);
         let mut request = CreateAssertionRequest {
@@ -3915,12 +3977,27 @@ mod tests {
             policy: ConfidencePolicyRequest::Explicit { value: 0.8 },
         };
         let created = graph.assess_confidence(explicit.clone()).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .confidence_assessment(explicit_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
         assert_eq!(
-            graph.assess_confidence(explicit).unwrap().batches[0],
+            graph.assess_confidence(explicit.clone()).unwrap().batches[0],
             created.batches[0]
+        );
+        let mut conflict = explicit;
+        conflict.policy = ConfidencePolicyRequest::Explicit { value: 0.7 };
+        assert_eq!(
+            graph.assess_confidence(conflict).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())
@@ -4051,12 +4128,27 @@ mod tests {
             weight: Some(0.9),
         };
         let created = graph.attach_evidence(request.clone()).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .evidence_link(evidence_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
         assert_eq!(
-            graph.attach_evidence(request).unwrap().batches[0],
+            graph.attach_evidence(request.clone()).unwrap().batches[0],
             created.batches[0]
+        );
+        let mut conflict = request;
+        conflict.role = EvidenceRole::Contradicts;
+        assert_eq!(
+            graph.attach_evidence(conflict).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())
@@ -4170,10 +4262,19 @@ mod tests {
             .generation_uuid();
         assert_eq!(
             graph
-                .create_assertion_with_evidence(request)
+                .create_assertion_with_evidence(request.clone())
                 .unwrap()
                 .batches[0],
             created.batches[0]
+        );
+        let mut conflict = request;
+        conflict.assertion.claim = "changed bundle".into();
+        assert_eq!(
+            graph
+                .create_assertion_with_evidence(conflict)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())

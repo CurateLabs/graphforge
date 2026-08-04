@@ -768,6 +768,35 @@ mod tests {
     }
 
     #[test]
+    fn fixed_endpoints_and_bounded_serialization_are_pure_and_exact() {
+        assert_eq!(
+            OpenRouterEndpoint::Embeddings.path(),
+            OPENROUTER_EMBEDDINGS_PATH
+        );
+        assert_eq!(OpenRouterEndpoint::Rerank.path(), OPENROUTER_RERANK_PATH);
+        let contract = contract();
+        assert_eq!(
+            serialize_bounded(&contract, &json!({"value": 1}), 64).unwrap(),
+            br#"{"value":1}"#
+        );
+        assert_eq!(
+            serialize_bounded(&contract, &json!({"value": 1}), 2)
+                .unwrap_err()
+                .class(),
+            ProviderFailureClass::ResourceExhausted
+        );
+        let mut body = BoundedBody {
+            bytes: Vec::new(),
+            limit: 2,
+            exhausted: false,
+        };
+        assert_eq!(body.write(b"ok").unwrap(), 2);
+        assert!(body.write(b"!").is_err());
+        assert!(body.exhausted);
+        body.flush().unwrap();
+    }
+
+    #[test]
     fn three_capabilities_use_fixed_strict_wire_contracts_and_canonical_identity() {
         let contract = contract();
         let credential = "private-token";

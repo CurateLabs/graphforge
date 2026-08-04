@@ -1716,6 +1716,18 @@ impl GraphForge {
             )
             .into());
         };
+        if !matches!(
+            by,
+            AnalyzeAlgorithm::Node2Vec
+                | AnalyzeAlgorithm::GraphSage
+                | AnalyzeAlgorithm::FastRandomProjection
+                | AnalyzeAlgorithm::HashGnn
+        ) {
+            return Err(InvocationDescriptorError::Invalid(
+                "descriptor is not an embedding algorithm".into(),
+            )
+            .into());
+        }
         let parameters = descriptor.parameters();
         let usize_value = |name| {
             usize::try_from(invocation_descriptor::required_u64(parameters, name)?)
@@ -1821,12 +1833,7 @@ impl GraphForge {
                 },
                 seed,
             }),
-            _ => {
-                return Err(InvocationDescriptorError::Invalid(
-                    "descriptor is not an embedding algorithm".into(),
-                )
-                .into());
-            }
+            _ => unreachable!("non-embedding analyze algorithms were rejected above"),
         };
         let empty_to_none = |value: &str| (!value.is_empty()).then(|| value.to_owned());
         let label = invocation_descriptor::required_utf8(parameters, "label")?;
@@ -9122,6 +9129,21 @@ mod tests {
                 &bfs_options(true, Some("KNOWS")),
             )
             .unwrap();
+
+        let wrong_rank = graph.invoke_rank_descriptor(&cluster).unwrap_err();
+        assert_eq!(wrong_rank.code(), "GF_DESCRIPTOR_INVALID");
+        assert!(
+            wrong_rank
+                .to_string()
+                .contains("rank dispatch requires a rank descriptor")
+        );
+        let wrong_embedding = graph.invoke_embedding_descriptor(&analyze).unwrap_err();
+        assert_eq!(wrong_embedding.code(), "GF_DESCRIPTOR_INVALID");
+        assert!(
+            wrong_embedding
+                .to_string()
+                .contains("descriptor is not an embedding algorithm")
+        );
 
         graph.add_node("Person", &HashMap::new()).unwrap();
         for error in [

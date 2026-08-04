@@ -526,6 +526,34 @@ mod tests {
     }
 
     #[test]
+    fn constructor_rejects_each_public_zero_or_insufficient_limit() {
+        let valid = EmbeddingSchedulerLimits::default();
+        for limits in [
+            EmbeddingSchedulerLimits {
+                queued_lineages: 0,
+                ..valid
+            },
+            EmbeddingSchedulerLimits {
+                in_flight_lineages: 0,
+                ..valid
+            },
+            EmbeddingSchedulerLimits {
+                debounce: Duration::ZERO,
+                ..valid
+            },
+            EmbeddingSchedulerLimits {
+                inspected_entries: valid.queued_lineages + valid.in_flight_lineages - 1,
+                ..valid
+            },
+        ] {
+            assert!(matches!(
+                EmbeddingRefreshScheduler::new(limits),
+                Err(SearchArtifactError::InvalidSelector { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn same_lineage_notices_coalesce_to_newest_debounced_source() {
         let mut scheduler = new_scheduler();
         scheduler

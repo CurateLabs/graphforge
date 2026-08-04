@@ -1162,6 +1162,51 @@ mod tests {
     }
 
     #[test]
+    fn empty_artifact_and_source_corruption_boundaries_are_exact() {
+        let dir = TempDir::new().unwrap();
+        let artifact = dir.path().join("empty-artifact");
+        std::fs::create_dir(&artifact).unwrap();
+        write_empty_marker(&artifact).unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Ok(TextArtifactKind::Empty)
+        ));
+        std::fs::write(artifact.join("unexpected"), b"owned").unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+        std::fs::remove_file(artifact.join("unexpected")).unwrap();
+        std::fs::write(artifact.join(EMPTY_MARKER_FILE), b"wrong").unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+
+        let project = dir.path().join("source-project");
+        std::fs::create_dir_all(project.join("topology/nodes.parquet")).unwrap();
+        assert!(matches!(
+            capture_text_snapshot(&project, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
+    }
+
+    #[test]
     fn empty_label_marker_is_published_reused_and_searched_as_empty() {
         let dir = TempDir::new().unwrap();
         let first = prepare(dir.path());

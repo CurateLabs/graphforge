@@ -3789,6 +3789,67 @@ mod tests {
             "GF_VALIDATION"
         );
 
+        let base: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
+        let base_target = base.targets["local"].clone();
+        let semantics_error = |target: Target, expected: &str| {
+            assert_validation_message(target.validate_semantics(), expected);
+        };
+
+        let mut target = base_target.clone();
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Process),
+            scheduling: Some(SchedulingKind::OnDemand),
+            replicas: Some(1),
+        });
+        semantics_error(
+            target,
+            "embedded targets require one long-running process, local storage, and no network exposure",
+        );
+
+        let mut target = base_target.clone();
+        target.kind = TargetKind::Host;
+        target.ownership = Some(TargetOwnership::External);
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Process),
+            scheduling: Some(SchedulingKind::LongRunning),
+            replicas: Some(1),
+        });
+        semantics_error(target, "host targets require host execution");
+
+        let mut target = base_target.clone();
+        target.kind = TargetKind::Service;
+        target.ownership = Some(TargetOwnership::External);
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Host),
+            scheduling: Some(SchedulingKind::LongRunning),
+            replicas: Some(1),
+        });
+        semantics_error(target, "host execution requires a host target");
+
+        let mut target = base_target.clone();
+        target.kind = TargetKind::Job;
+        target.ownership = Some(TargetOwnership::External);
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Process),
+            scheduling: Some(SchedulingKind::LongRunning),
+            replicas: Some(1),
+        });
+        semantics_error(
+            target,
+            "job targets are on-demand and other targets are long-running",
+        );
+
+        let mut target = base_target;
+        target.kind = TargetKind::Service;
+        target.ownership = Some(TargetOwnership::External);
+        target.topology = Some(Topology {
+            execution: Some(ExecutionKind::Process),
+            scheduling: Some(SchedulingKind::LongRunning),
+            replicas: Some(1),
+        });
+        target.network = None;
+        semantics_error(target, "service targets require a network port");
+
         let mut config: ProjectConfig = serde_yaml::from_str(DEFAULT_CONFIG).unwrap();
         config
             .targets
@@ -3846,6 +3907,16 @@ mod tests {
         config.targets.clear();
         invalid(config);
         let mut config = base.clone();
+        config.sources = (0..257)
+            .map(|index| Source {
+                id: format!("source-{index}"),
+                uri: format!("https://example.invalid/{index}"),
+                sha256: "a".repeat(64),
+                media_type: None,
+            })
+            .collect();
+        invalid(config);
+        let mut config = base.clone();
         config.project.ontology = "ontology\\schema.yaml".into();
         invalid(config);
         let mut config = base.clone();
@@ -3901,6 +3972,18 @@ mod tests {
             id: "search".into(),
             version: 0,
         }];
+        invalid(config);
+        let mut config = base.clone();
+        config.targets.get_mut("local").unwrap().source_ids =
+            (0..257).map(|index| format!("source-{index}")).collect();
+        invalid(config);
+        let mut config = base.clone();
+        config.targets.get_mut("local").unwrap().capabilities = (0..65)
+            .map(|index| CapabilityRequirement {
+                id: format!("capability-{index}"),
+                version: 1,
+            })
+            .collect();
         invalid(config);
 
         let mut config = base.clone();

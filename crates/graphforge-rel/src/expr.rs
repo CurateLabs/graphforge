@@ -12918,6 +12918,112 @@ mod tests {
         );
     }
 
+    #[test]
+    fn public_map_and_value_access_error_null_and_success_matrix() {
+        use datafusion::arrow::array::{Array, ListArray};
+
+        let null_keys = invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Null]).unwrap();
+        let null_keys = null_keys
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("List");
+        assert!(null_keys.is_null(0));
+
+        let keys_error =
+            invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Int64(Some(1))]).unwrap_err();
+        assert_eq!(
+            keys_error.to_string(),
+            "Execution error: keys() requires a map, node, relationship, or null, got Int64"
+        );
+
+        let map = const_map_scalar(&[
+            ("answer".into(), ScalarValue::Int64(Some(42))),
+            ("empty".into(), ScalarValue::Null),
+        ])
+        .expect("map scalar");
+        let keys = invoke_test_udf(&CypherMapKeys::new(), vec![map.clone()]).unwrap();
+        let keys = keys.as_any().downcast_ref::<ListArray>().expect("List");
+        assert_eq!(keys.value(0).len(), 2);
+
+        let answer = invoke_test_udf(
+            &CypherStaticValueAccess::new("answer".into()),
+            vec![map.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&answer, 0).unwrap(),
+            ScalarValue::Int64(Some(42))
+        );
+        let missing =
+            invoke_test_udf(&CypherStaticValueAccess::new("missing".into()), vec![map]).unwrap();
+        assert!(ScalarValue::try_from_array(&missing, 0).unwrap().is_null());
+
+        let static_error = invoke_test_udf(
+            &CypherStaticValueAccess::new("answer".into()),
+            vec![ScalarValue::Int64(Some(1))],
+        )
+        .unwrap_err();
+        assert_eq!(
+            static_error.to_string(),
+            "Execution error: InvalidArgumentValue: property access requires a map or graph element"
+        );
+
+        let dynamic_error = invoke_test_udf(
+            &CypherValueAccess::new(),
+            vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Utf8(Some("answer".into())),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            dynamic_error.to_string(),
+            "Execution error: dynamic subscript requires a list or map/entity struct, got Int64"
+        );
+    }
+
+    #[test]
+    fn entity_properties_and_percentile_state_validation_errors_are_exact() {
+        use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array};
+        use datafusion::logical_expr::Accumulator;
+
+        let arity_error = invoke_test_udf(&CypherEntityProperties::new(0), vec![]).unwrap_err();
+        assert_eq!(
+            arity_error.to_string(),
+            "Error during planning: properties() entity map expects present plus key/value pairs"
+        );
+        let presence_error = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Utf8(Some("name".into())),
+                ScalarValue::Utf8(Some("Ada".into())),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            presence_error.to_string(),
+            "Execution error: properties() entity presence must be boolean, got Int64(1)"
+        );
+
+        let mut accumulator = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: vec![],
+            percentile: None,
+        };
+        let wrong_values: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let percentile: ArrayRef = Arc::new(Float64Array::from(vec![0.5]));
+        assert_eq!(
+            accumulator
+                .merge_batch(&[wrong_values, percentile])
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: percentile state values must be a list"
+        );
+    }
+
     /// Invoke a `cypher_quantifier` UDF (no outer columns) over a single list
     /// column and return the per-row boolean verdicts.
     fn invoke_cypher_quantifier(

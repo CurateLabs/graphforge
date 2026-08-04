@@ -380,6 +380,43 @@ mod tests {
     }
 
     #[test]
+    fn property_normalization_and_source_byte_accounting_are_exact() {
+        assert_eq!(
+            normalize_properties(
+                &[" title ".into(), "body".into(), "title".into()],
+                TextSearchLimits::default()
+            )
+            .unwrap(),
+            ["body", "title"]
+        );
+        for invalid_name in ["", "node_uuid", "line\nbreak"] {
+            assert!(matches!(
+                normalize_properties(&[invalid_name.into()], TextSearchLimits::default()),
+                Err(SearchArtifactError::InvalidSelector { .. })
+            ));
+        }
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.parquet");
+        let mut total = 7;
+        add_source_bytes(&missing, &mut total, TextSearchLimits::default()).unwrap();
+        assert_eq!(total, 7);
+        let source = dir.path().join("source.parquet");
+        std::fs::write(&source, b"four").unwrap();
+        add_source_bytes(&source, &mut total, TextSearchLimits::default()).unwrap();
+        assert_eq!(total, 11);
+        let mut constrained = TextSearchLimits::default();
+        constrained.source_bytes = 3;
+        assert!(matches!(
+            add_source_bytes(&source, &mut 0, constrained),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn projection_honors_secondary_labels_and_primary_property_stems() {
         let dir = TempDir::new().unwrap();
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
