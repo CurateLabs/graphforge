@@ -1,6 +1,6 @@
 {
   "name": "@curatelabs/graphforge",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Native Node.js bindings for the GraphForge embedded graph engine",
   "license": "Apache-2.0",
   "homepage": "https://docs.graphforge.sh/",

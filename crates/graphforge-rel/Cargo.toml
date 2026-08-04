@@ -8,11 +8,11 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.1", path = "../graphforge-core" }
-graphforge-ir = { version = "0.5.1", path = "../graphforge-ir" }
-graphforge-ontology = { version = "0.5.1", path = "../graphforge-ontology" }
-graphforge-plan = { version = "0.5.1", path = "../graphforge-plan" }
-graphforge-storage = { version = "0.5.1", path = "../graphforge-storage" }
+graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
+graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
+graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
+graphforge-plan = { version = "0.5.2", path = "../graphforge-plan" }
+graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 datafusion = { workspace = true }
 arrow-data = { workspace = true }
 datafusion-functions-aggregate = "53"
