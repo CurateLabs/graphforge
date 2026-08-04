@@ -402,6 +402,32 @@ pub(crate) struct Frontier {
     pub batches: Vec<RecordBatch>,
 }
 
+#[derive(Clone, Copy)]
+enum LabelRewrite {
+    Add,
+    Remove,
+}
+
+impl LabelRewrite {
+    const fn missing_column_error(self) -> &'static str {
+        match self {
+            Self::Add => "MERGE label target has no type_ids column",
+            Self::Remove => "REMOVE label target has no type_ids column",
+        }
+    }
+
+    fn apply(self, current: &mut Vec<u32>, labels: &[u32]) {
+        match self {
+            Self::Add => {
+                current.extend_from_slice(labels);
+                current.sort_unstable();
+                current.dedup();
+            }
+            Self::Remove => current.retain(|label| !labels.contains(label)),
+        }
+    }
+}
+
 impl Frontier {
     /// Total rows across the frontier's batches.
     pub(crate) fn num_rows(&self) -> usize {
@@ -951,60 +977,26 @@ impl Frontier {
                 "MERGE label mask does not match frontier rows".into(),
             ));
         }
-        let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
-        let index = self
-            .df_schema
-            .index_of_column_by_name(Some(&qualifier), "type_ids")
-            .ok_or_else(|| GfError::Plan("MERGE label target has no type_ids column".into()))?;
-        let mut rebuilt = Vec::with_capacity(self.batches.len());
-        let mut offset = 0usize;
-        for batch in &self.batches {
-            let current = batch
-                .column(index)
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| GfError::Execution("node type_ids are not a list".into()))?;
-            let mut rows = Vec::with_capacity(batch.num_rows());
-            for row in 0..batch.num_rows() {
-                let values = current.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut merged = values.values().to_vec();
-                if mask[offset + row] {
-                    merged.extend_from_slice(labels);
-                    merged.sort_unstable();
-                    merged.dedup();
-                }
-                rows.push(Some(merged.into_iter().map(Some).collect::<Vec<_>>()));
-            }
-            let nullable = ListArray::from_iter_primitive::<UInt32Type, _, _>(rows);
-            let list = ListArray::new(
-                Arc::new(Field::new("item", DataType::UInt32, false)),
-                nullable.offsets().clone(),
-                nullable.values().clone(),
-                nullable.nulls().cloned(),
-            );
-            let mut columns = batch.columns().to_vec();
-            columns[index] = Arc::new(list);
-            rebuilt.push(
-                RecordBatch::try_new(batch.schema(), columns)
-                    .map_err(|e| GfError::Execution(e.to_string()))?,
-            );
-            offset += batch.num_rows();
-        }
-        self.batches = rebuilt;
-        Ok(())
+        self.rewrite_node_labels(var, labels, mask, LabelRewrite::Add)
     }
 
     fn remove_node_labels(&mut self, var: VarId, labels: &[u32]) -> Result<(), GfError> {
         let mask = vec![true; self.num_rows()];
+        self.rewrite_node_labels(var, labels, &mask, LabelRewrite::Remove)
+    }
+
+    fn rewrite_node_labels(
+        &mut self,
+        var: VarId,
+        labels: &[u32],
+        mask: &[bool],
+        rewrite: LabelRewrite,
+    ) -> Result<(), GfError> {
         let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
         let index = self
             .df_schema
             .index_of_column_by_name(Some(&qualifier), "type_ids")
-            .ok_or_else(|| GfError::Plan("REMOVE label target has no type_ids column".into()))?;
+            .ok_or_else(|| GfError::Plan(rewrite.missing_column_error().into()))?;
         let mut rebuilt = Vec::with_capacity(self.batches.len());
         let mut offset = 0usize;
         for batch in &self.batches {
@@ -1020,11 +1012,11 @@ impl Frontier {
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut retained = values.values().to_vec();
+                let mut rewritten = values.values().to_vec();
                 if mask[offset + row] {
-                    retained.retain(|label| !labels.contains(label));
+                    rewrite.apply(&mut rewritten, labels);
                 }
-                rows.push(Some(retained.into_iter().map(Some).collect::<Vec<_>>()));
+                rows.push(Some(rewritten.into_iter().map(Some).collect::<Vec<_>>()));
             }
             let nullable = ListArray::from_iter_primitive::<UInt32Type, _, _>(rows);
             let list = ListArray::new(
@@ -3530,11 +3522,158 @@ mod tests {
     use arrow::array::{Array, FixedSizeBinaryBuilder, Int64Array, StringArray, UInt32Array};
     use datafusion::common::TableReference;
     use graphforge_ir::{
-        CreateEdgeSpec, CreateNodeSpec, CreatePattern, IrLiteral, PropId, RemovePropItem,
-        SetPropItem, VarId,
+        BinaryOpKind, CaseArm, CreateEdgeSpec, CreateNodeSpec, CreatePattern, IrLiteral, PropId,
+        RemovePropItem, SetPropItem, UnaryOpKind, VarId,
     };
 
     use super::*;
+
+    #[test]
+    fn label_rewrite_reports_missing_type_ids_column_for_add_and_remove() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "seed",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        let mut frontier = Frontier {
+            df_schema: DFSchema::try_from(schema.as_ref().clone()).unwrap(),
+            batches: vec![batch],
+        };
+        let add = frontier
+            .add_node_labels(VarId(0), &[1], &[true])
+            .unwrap_err();
+        assert!(
+            add.to_string()
+                .contains("MERGE label target has no type_ids column")
+        );
+        let remove = frontier.remove_node_labels(VarId(0), &[1]).unwrap_err();
+        assert!(
+            remove
+                .to_string()
+                .contains("REMOVE label target has no type_ids column")
+        );
+    }
+
+    #[test]
+    fn computed_columns_report_missing_and_misaligned_results() {
+        let empty: Vec<crate::CreateComputed> = Vec::new();
+        assert_eq!(computed_type(&empty, 3, "score"), DataType::Null);
+        let error = computed_array(&empty, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("was not evaluated"));
+
+        let missing = vec![HashMap::from([(3, Vec::new())])];
+        assert_eq!(computed_type(&missing, 3, "score"), DataType::Null);
+        let error = computed_array(&missing, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("was not evaluated"));
+
+        let values = Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef;
+        let computed = vec![HashMap::from([(3, vec![("score".into(), values)])])];
+        assert_eq!(computed_type(&computed, 3, "score"), DataType::Int64);
+        let error = computed_array(&computed, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("2 rows, expected 1"));
+        assert_eq!(
+            computed_array(&computed, 0, 3, "score", 2).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn create_recorder_exposes_node_identity_slices() {
+        let mut recorder = CreateRecorder::default();
+        assert!(recorder.node_identities(8).is_none());
+        recorder.record_node(8, [1; 16], 9, 10);
+        recorder.record_node(8, [2; 16], 11, 12);
+        let (uuids, node_ids, type_ids) = recorder.node_identities(8).unwrap();
+        assert_eq!(uuids, &[[1; 16], [2; 16]]);
+        assert_eq!(node_ids, &[9, 11]);
+        assert_eq!(type_ids, &[10, 12]);
+    }
+
+    #[test]
+    fn frontier_property_overlay_validates_batch_alignment() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "seed",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let mut frontier = Frontier {
+            df_schema: DFSchema::try_from(schema.as_ref().clone()).unwrap(),
+            batches: vec![batch],
+        };
+        let error = frontier
+            .overlay_property(VarId(1), "score", vec![])
+            .unwrap_err();
+        assert!(error.to_string().contains("batch count"));
+        let error = frontier
+            .overlay_property(VarId(1), "score", vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap_err();
+        assert!(error.to_string().contains("1 rows, expected 2"));
+        frontier
+            .overlay_property(
+                VarId(1),
+                "score",
+                vec![Arc::new(Int64Array::from(vec![3, 4]))],
+            )
+            .unwrap();
+        assert_eq!(frontier.batches[0].num_columns(), 2);
+        frontier.take_rows(&[1]).unwrap();
+        assert_eq!(frontier.num_rows(), 1);
+    }
+
+    #[test]
+    fn map_replacement_math_and_pending_routing_are_exact() {
+        let present = HashSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        let updates = HashMap::from([
+            ("a".to_owned(), IrLiteral::Int(1)),
+            ("d".to_owned(), IrLiteral::Int(4)),
+        ]);
+        let nulls = HashSet::from(["b".to_owned(), "z".to_owned()]);
+        let (removals, replaced) = map_removals(false, &present, &updates, &nulls);
+        assert_eq!(removals, HashSet::from(["b".to_owned()]));
+        assert_eq!(replaced, 2);
+        let (removals, replaced) = map_removals(true, &present, &updates, &nulls);
+        assert_eq!(removals, HashSet::from(["b".to_owned(), "c".to_owned()]));
+        assert_eq!(replaced, 3);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        let node = [7_u8; 16];
+        let uuid = graphforge_core::uuid::from_bytes(&node);
+        ctx.writer.create_node_with_labels(uuid, &[]).unwrap();
+        apply_map_updates(&mut ctx, false, &node, "Person", updates.clone());
+        remove_map_complement(&mut ctx, false, &node, "Person", &removals);
+
+        let committed = [8_u8; 16];
+        apply_map_updates(&mut ctx, false, &committed, "Person", updates);
+        remove_map_complement(&mut ctx, false, &committed, "Person", &removals);
+        let set_nodes = &ctx.set_acc.nodes["Person"];
+        let remove_nodes = &ctx.remove_acc.nodes["Person"];
+        assert!(set_nodes.contains_key(&committed));
+        assert!(!set_nodes.contains_key(&node));
+        assert!(remove_nodes.contains_key(&committed));
+        assert!(!remove_nodes.contains_key(&node));
+    }
+
+    #[test]
+    fn delete_scalar_accepts_null_and_rejects_scalar_values() {
+        let mut nodes = HashSet::new();
+        let mut edges = HashSet::new();
+        collect_delete_scalar(&ScalarValue::Null, &mut nodes, &mut edges).unwrap();
+        assert!(nodes.is_empty() && edges.is_empty());
+        let error = collect_delete_scalar(&ScalarValue::Int64(Some(1)), &mut nodes, &mut edges)
+            .unwrap_err();
+        assert!(error.to_string().contains("node, relationship, or path"));
+    }
 
     #[test]
     fn recreating_a_removed_label_token_cancels_its_removal() {
@@ -3547,6 +3686,61 @@ mod tests {
 
         assert_eq!(ctx.counters.labels_removed, 0);
         assert_eq!(ctx.counters.labels_added, 0);
+    }
+
+    #[test]
+    fn expression_variable_collection_walks_every_composite_shape_once() {
+        let mut arena = ExprArena::default();
+        let var0 = arena.push(IrExpr::VarRef(VarId(0)));
+        let var1 = arena.push(IrExpr::VarRef(VarId(1)));
+        let var2 = arena.push(IrExpr::VarRef(VarId(2)));
+        let property = arena.push(IrExpr::PropertyAccess {
+            base: var0,
+            prop: PropId(7),
+        });
+        let unary = arena.push(IrExpr::UnaryOp {
+            op: UnaryOpKind::Neg,
+            expr: var1,
+        });
+        let binary = arena.push(IrExpr::BinaryOp {
+            op: BinaryOpKind::Add,
+            left: property,
+            right: unary,
+        });
+        let function = arena.push(IrExpr::FunctionCall {
+            name: "coalesce".into(),
+            args: vec![binary, var2, var2],
+        });
+        let list = arena.push(IrExpr::ListLiteral(vec![function, var0]));
+        let map = arena.push(IrExpr::MapLiteral(vec![
+            ("items".into(), list),
+            ("fallback".into(), var1),
+        ]));
+        let case = arena.push(IrExpr::Case {
+            operand: Some(var0),
+            arms: vec![CaseArm {
+                when: var1,
+                then: map,
+            }],
+            else_expr: Some(var2),
+        });
+        let comprehension = arena.push(IrExpr::ListComprehension {
+            loop_var: VarId(9),
+            list,
+            filter: Some(binary),
+            projection: Some(case),
+        });
+
+        let mut collected = HashSet::new();
+        collect_expr_vars(&arena, comprehension, &mut collected, &mut HashSet::new());
+        assert_eq!(collected, HashSet::from([VarId(0), VarId(1), VarId(2)]));
+
+        collect_expr_vars(&arena, comprehension, &mut collected, &mut HashSet::new());
+        assert_eq!(
+            collected.len(),
+            3,
+            "revisiting expressions does not duplicate vars"
+        );
     }
 
     fn create_op() -> GraphOp {
@@ -3800,6 +3994,77 @@ mod tests {
         assert_eq!(input_schema, schema);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn terminal_global_count_handles_nullable_columns_aliases_and_fallthrough() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion::logical_expr::{EmptyRelation, LogicalPlan, LogicalPlanBuilder, col, lit};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let df_schema = Arc::new(DFSchema::try_from(schema.as_ref().clone()).unwrap());
+        let frontier = Frontier {
+            df_schema: df_schema.as_ref().clone(),
+            batches: vec![
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(StringArray::from(vec![
+                        Some("a"),
+                        None,
+                        Some("b"),
+                    ]))],
+                )
+                .unwrap(),
+            ],
+        };
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let aggregate = LogicalPlanBuilder::from(input)
+            .aggregate(
+                Vec::<DfExpr>::new(),
+                vec![count(col("x")).alias("present"), count(lit(1_i64))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = terminal_global_count(&aggregate, &frontier)
+            .unwrap()
+            .unwrap();
+        let present = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let all = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!((present.value(0), all.value(0)), (2, 3));
+
+        let grouped = LogicalPlanBuilder::from(LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(schema.as_ref().clone()).unwrap()),
+        }))
+        .aggregate(vec![col("x")], vec![count(lit(1_i64))])
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            terminal_global_count(&grouped, &frontier)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            terminal_global_count(
+                &LogicalPlanBuilder::empty(false).build().unwrap(),
+                &frontier
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     fn nullable_uuids(values: &[Option<[u8; 16]>]) -> ArrayRef {
@@ -4069,5 +4334,176 @@ mod tests {
             "execution error: rel_type_name is not a string column"
         );
         assert_eq!(pending_ctx.counters, WriteCounters::default());
+    }
+
+    #[test]
+    fn write_kind_and_pending_remove_paths_fail_closed_and_route_exactly() {
+        let qualifier = TableReference::bare("var_1");
+        let unknown = DFSchema::empty();
+        let error = resolve_kind(&unknown, VarId(1), "SET").unwrap_err();
+        assert!(error.to_string().contains("must be bound"));
+        let untyped_edge = DFSchema::new_with_metadata(
+            vec![(
+                Some(qualifier),
+                Arc::new(Field::new(
+                    "edge_uuid",
+                    DataType::FixedSizeBinary(16),
+                    false,
+                )),
+            )],
+            HashMap::new(),
+        )
+        .unwrap();
+        let error = resolve_kind(&untyped_edge, VarId(1), "REMOVE").unwrap_err();
+        assert!(error.to_string().contains("known relation type"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let lowerer =
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+        let exprs = ExprArena::new();
+        let params = HashMap::new();
+        let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+        for is_edge in [false, true] {
+            let mut frontier = write_frontier(is_edge);
+            let mut ctx =
+                StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+            if is_edge {
+                let src = graphforge_core::uuid::new_v7();
+                let dst = graphforge_core::uuid::new_v7();
+                ctx.writer
+                    .create_node(src, graphforge_core::TypeId(1))
+                    .unwrap();
+                ctx.writer
+                    .create_node(dst, graphforge_core::TypeId(1))
+                    .unwrap();
+                ctx.writer
+                    .create_edge(
+                        graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                        "KNOWS",
+                        &src,
+                        &dst,
+                    )
+                    .unwrap();
+                ctx.writer.merge_pending_edge_props(
+                    &[7; 16],
+                    Some("KNOWS"),
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                );
+            } else {
+                ctx.writer
+                    .create_node(
+                        graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                        graphforge_core::TypeId(1),
+                    )
+                    .unwrap();
+                ctx.writer.merge_pending_node_props(
+                    &[7; 16],
+                    None,
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                );
+            }
+            run_remove_phase(
+                &env,
+                &[RemovePropItem {
+                    target: VarId(1),
+                    prop: PropId(9),
+                    prop_name: "score".into(),
+                }],
+                &mut frontier,
+                &mut ctx,
+            )
+            .unwrap();
+            assert_eq!(ctx.counters.properties_removed, 2);
+        }
+    }
+
+    #[test]
+    fn label_phase_routes_pending_cancellation_and_deleted_entities() {
+        let make_frontier = || {
+            let fields = vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(
+                    "type_ids",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+            ];
+            let schema = Arc::new(Schema::new(fields.clone()));
+            let labels = ListArray::from_iter_primitive::<UInt32Type, _, _>([
+                Some(vec![Some(1)]),
+                Some(vec![Some(1)]),
+            ]);
+            let labels = ListArray::new(
+                Arc::new(Field::new("item", DataType::UInt32, false)),
+                labels.offsets().clone(),
+                labels.values().clone(),
+                labels.nulls().cloned(),
+            );
+            let qualifier = TableReference::bare("var_1");
+            Frontier {
+                df_schema: DFSchema::new_with_metadata(
+                    fields
+                        .into_iter()
+                        .map(|field| (Some(qualifier.clone()), Arc::new(field)))
+                        .collect(),
+                    HashMap::new(),
+                )
+                .unwrap(),
+                batches: vec![
+                    RecordBatch::try_new(
+                        schema,
+                        vec![
+                            nullable_uuids(&[Some([7; 16]), Some([7; 16])]),
+                            Arc::new(labels),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let add = graphforge_ir::LabelItem {
+            target: VarId(1),
+            labels: vec![graphforge_core::TypeId(2)],
+        };
+        let remove = graphforge_ir::LabelItem {
+            target: VarId(1),
+            labels: vec![graphforge_core::TypeId(1)],
+        };
+
+        let mut pending =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        pending
+            .writer
+            .create_node(
+                graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                graphforge_core::TypeId(1),
+            )
+            .unwrap();
+        run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut pending).unwrap();
+        run_label_phase(&[remove.clone()], false, &mut make_frontier(), &mut pending).unwrap();
+
+        let mut persisted =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        persisted.label_removals.insert([7; 16], HashSet::from([2]));
+        run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut persisted).unwrap();
+        assert!(persisted.label_removals[&[7; 16]].is_empty());
+        persisted
+            .label_additions
+            .insert([7; 16], HashSet::from([1]));
+        run_label_phase(
+            &[remove.clone()],
+            false,
+            &mut make_frontier(),
+            &mut persisted,
+        )
+        .unwrap();
+        assert!(persisted.label_additions[&[7; 16]].is_empty());
+
+        let mut deleted =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        deleted.deleted.insert([7; 16]);
+        let error = run_label_phase(&[add], true, &mut make_frontier(), &mut deleted).unwrap_err();
+        assert!(error.to_string().contains("deleted in this statement"));
     }
 }

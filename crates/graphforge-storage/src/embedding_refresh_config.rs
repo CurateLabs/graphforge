@@ -1608,4 +1608,332 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         sync_directory(directory.path()).unwrap();
     }
+
+    #[test]
+    fn limits_and_cleanup_bounds_are_exact_and_side_effect_free() {
+        for limits in [
+            EmbeddingRefreshConfigLimits {
+                metadata_bytes: 0,
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+            EmbeddingRefreshConfigLimits {
+                entries: 0,
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+            EmbeddingRefreshConfigLimits {
+                coordination: SearchCoordinationLimits {
+                    cleanup_entries: 0,
+                    ..SearchCoordinationLimits::default()
+                },
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+        ] {
+            assert!(validate_limits(limits).is_err());
+        }
+
+        let config = EmbeddingRefreshConfig::default();
+        assert!(matches!(
+            config.to_canonical_json(EmbeddingRefreshConfigLimits {
+                metadata_bytes: 1,
+                ..EmbeddingRefreshConfigLimits::default()
+            }),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_bytes",
+                ..
+            })
+        ));
+
+        let cleanup = tempfile::tempdir().unwrap();
+        std::fs::write(cleanup.path().join("caller"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_temps(cleanup.path(), 0),
+            Err(SearchArtifactError::InvalidSelector { .. })
+        ));
+        assert!(matches!(cleanup_abandoned_temps(cleanup.path(), 1), Ok(0)));
+        std::fs::write(cleanup.path().join("caller-two"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_temps(cleanup.path(), 1),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_cleanup_entries",
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(cleanup.path().join("caller")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
+    fn policy_and_wire_validation_matrix_is_exact_and_side_effect_free() {
+        for debounce in [
+            Duration::ZERO,
+            MAX_DEBOUNCE + Duration::from_millis(1),
+            Duration::from_nanos(1_500_000),
+        ] {
+            assert!(matches!(
+                validate_debounce(debounce),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding refresh debounce",
+                    ..
+                })
+            ));
+        }
+        assert!(validate_debounce(Duration::from_millis(1)).is_ok());
+        for max_concurrent_jobs in [0, MAX_EMBEDDING_REFRESH_JOBS + 1] {
+            assert!(
+                validate_project_policy(EmbeddingRefreshProjectPolicy {
+                    max_concurrent_jobs,
+                    ..EmbeddingRefreshProjectPolicy::default()
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            validate_space_policy(EmbeddingRefreshSpacePolicy {
+                proactive: None,
+                debounce: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_outcome(EmbeddingRefreshOutcomeRecord {
+                status: EmbeddingRefreshOutcomeStatus::Cancelled,
+                graph_generation: 0,
+                source_fingerprint: fingerprint(1),
+                completed_at_micros: -1,
+            })
+            .is_err()
+        );
+
+        let prior = outcome(3, 3, 30);
+        for next in [outcome(3, 3, 29), outcome(2, 2, 30), outcome(3, 4, 30)] {
+            assert!(validate_outcome_progress(prior, next).is_err());
+        }
+        assert!(validate_outcome_progress(prior, prior).is_ok());
+
+        let classes = [
+            EmbeddingRefreshFailureClass::Provider,
+            EmbeddingRefreshFailureClass::Validation,
+            EmbeddingRefreshFailureClass::ResourceExhausted,
+            EmbeddingRefreshFailureClass::Storage,
+            EmbeddingRefreshFailureClass::ConcurrentMutation,
+            EmbeddingRefreshFailureClass::Incompatible,
+            EmbeddingRefreshFailureClass::Corrupt,
+            EmbeddingRefreshFailureClass::Unavailable,
+        ];
+        for class in classes {
+            let token = failure_token(class);
+            assert_eq!(parse_failure_class(token).unwrap(), class);
+            assert_eq!(
+                outcome_tokens(EmbeddingRefreshOutcomeStatus::Failed(class)),
+                ("failed", Some(token))
+            );
+        }
+        assert!(parse_failure_class("unknown").is_err());
+        assert_eq!(
+            outcome_tokens(EmbeddingRefreshOutcomeStatus::Succeeded),
+            ("succeeded", None)
+        );
+        assert_eq!(
+            outcome_tokens(EmbeddingRefreshOutcomeStatus::Cancelled),
+            ("cancelled", None)
+        );
+    }
+
+    #[test]
+    fn direct_update_matrix_covers_idempotence_cleanup_capacity_and_policy_resolution() {
+        let limits = EmbeddingRefreshConfigLimits {
+            entries: 1,
+            ..EmbeddingRefreshConfigLimits::default()
+        };
+        let mut config = EmbeddingRefreshConfig::default();
+        assert!(config.is_empty());
+        assert_eq!(config.len(), 0);
+        let project_policy = config.project_policy();
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetProjectPolicy(project_policy),
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: None,
+                },
+                limits,
+            )
+            .unwrap()
+        );
+
+        let policy = EmbeddingRefreshSpacePolicy {
+            proactive: Some(false),
+            debounce: Some(Duration::from_millis(25)),
+        };
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: Some(policy),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert_eq!(config.len(), 1);
+        assert_eq!(config.spaces()[0].policy, Some(policy));
+        let resolved = config.resolved_policy(id(1));
+        assert!(!resolved.proactive);
+        assert_eq!(resolved.debounce, Duration::from_millis(25));
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: Some(policy),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(matches!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(2),
+                    policy: Some(policy),
+                },
+                limits,
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_entries",
+                ..
+            })
+        ));
+
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RecordOutcome {
+                    compatibility_id: id(1),
+                    outcome: outcome(1, 1, 10),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: None,
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            config.len(),
+            1,
+            "outcome retains the lineage after policy removal"
+        );
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RemoveSpace {
+                    compatibility_id: id(1),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RemoveSpace {
+                    compatibility_id: id(1),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(config.is_empty());
+
+        let invalid_state = EmbeddingRefreshConfig {
+            project: EmbeddingRefreshProjectPolicy::default(),
+            spaces: BTreeMap::from([(id(1), StoredSpaceState::default())]),
+        };
+        assert!(invalid_state.to_canonical_json(limits).is_err());
+        let too_many = EmbeddingRefreshConfig {
+            project: EmbeddingRefreshProjectPolicy::default(),
+            spaces: BTreeMap::from([
+                (
+                    id(1),
+                    StoredSpaceState {
+                        policy: Some(policy),
+                        last_outcome: None,
+                    },
+                ),
+                (
+                    id(2),
+                    StoredSpaceState {
+                        policy: Some(policy),
+                        last_outcome: None,
+                    },
+                ),
+            ]),
+        };
+        assert!(matches!(
+            too_many.to_canonical_json(limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_entries",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn wave10_raw_space_and_outcome_corruption_matrix_is_total() {
+        let empty = RawSpace {
+            compatibility_id: id(1).to_hex(),
+            policy: None,
+            last_outcome: None,
+        };
+        assert!(matches!(
+            parse_space(empty),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "embedding refresh space state",
+                ..
+            })
+        ));
+
+        for (status, failure_class) in [
+            ("succeeded", Some("provider")),
+            ("cancelled", Some("storage")),
+            ("failed", None),
+            ("unknown", None),
+        ] {
+            let raw = RawOutcome {
+                status: status.into(),
+                failure_class: failure_class.map(str::to_owned),
+                graph_generation: 1,
+                source_fingerprint: fingerprint(1).to_hex(),
+                completed_at_micros: 1,
+            };
+            assert!(matches!(
+                parse_outcome(&raw),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding refresh outcome status",
+                    ..
+                })
+            ));
+        }
+    }
 }

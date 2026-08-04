@@ -733,4 +733,307 @@ mod tests {
             Err(SearchArtifactError::Cancelled)
         ));
     }
+
+    #[test]
+    fn build_rejects_duplicate_identities_and_unselected_fields_before_writing() {
+        let dir = TempDir::new().unwrap();
+        let duplicate = projection(vec![
+            document(1, "Alpha", "one"),
+            document(1, "Beta", "two"),
+        ]);
+        let duplicate_dir = dir.path().join("duplicate");
+        assert!(matches!(
+            build_text_index(
+                &duplicate_dir,
+                &duplicate,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert!(!duplicate_dir.exists());
+
+        let mut unselected = projection(vec![document(2, "Gamma", "three")]);
+        unselected.documents[0]
+            .fields
+            .insert("private".to_owned(), "must not index".to_owned());
+        let unselected_dir = dir.path().join("unselected");
+        assert!(matches!(
+            build_text_index(
+                &unselected_dir,
+                &unselected,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert!(!unselected_dir.exists());
+    }
+
+    #[test]
+    fn search_validates_result_bounds_query_and_document_budget() {
+        let dir = TempDir::new().unwrap();
+        let index_dir = dir.path().join("index");
+        let source = projection(vec![document(1, "Alpha", "body")]);
+        build_text_index(&index_dir, &source, TextSearchLimits::default(), || Ok(())).unwrap();
+
+        assert!(matches!(
+            search_text_index(
+                &index_dir,
+                &source.properties,
+                "alpha",
+                0,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::InvalidSelector { field: "limit", .. })
+        ));
+        let mut limits = TextSearchLimits::default();
+        limits.results = 1;
+        assert!(matches!(
+            search_text_index(
+                &index_dir,
+                &source.properties,
+                "alpha",
+                2,
+                limits,
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_results",
+                limit: 1,
+            })
+        ));
+        assert!(matches!(
+            search_text_index(
+                &index_dir,
+                &source.properties,
+                "!!!",
+                1,
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::InvalidSelector { field: "query", .. })
+        ));
+
+        limits = TextSearchLimits::default();
+        limits.documents = 0;
+        assert!(matches!(
+            validate_text_index(&index_dir, &source.properties, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_documents",
+                limit: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn stored_uuid_requires_one_exact_sixteen_byte_value() {
+        let dir = TempDir::new().unwrap();
+        let mut builder = Schema::builder();
+        let uuid_field =
+            builder.add_bytes_field(NODE_UUID_FIELD, BytesOptions::default().set_stored());
+
+        let omitted = TantivyDocument::new();
+        assert!(matches!(
+            stored_uuid(dir.path(), &omitted, uuid_field),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+
+        let mut short = TantivyDocument::new();
+        short.add_bytes(uuid_field, &[1_u8; 15]);
+        assert!(matches!(
+            stored_uuid(dir.path(), &short, uuid_field),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+
+        let mut repeated = TantivyDocument::new();
+        repeated.add_bytes(uuid_field, &[1_u8; 16]);
+        repeated.add_bytes(uuid_field, &[2_u8; 16]);
+        assert!(matches!(
+            stored_uuid(dir.path(), &repeated, uuid_field),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_index_directory_preserves_build_vs_corruption_error_boundary() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing");
+        for corrupt_on_io in [false, true] {
+            let error = bounded_directory_bytes(
+                &missing,
+                TextSearchLimits::default(),
+                &mut || Ok(()),
+                corrupt_on_io,
+            )
+            .unwrap_err();
+            if corrupt_on_io {
+                assert!(matches!(
+                    error,
+                    SearchArtifactError::CorruptDerivedIndex { .. }
+                ));
+            } else {
+                assert!(matches!(error, SearchArtifactError::Io { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn index_directory_measurement_is_recursive_bounded_and_non_mutating() {
+        let root = TempDir::new().unwrap();
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("a"), b"12").unwrap();
+        std::fs::write(nested.join("b"), b"345").unwrap();
+        assert_eq!(
+            bounded_directory_bytes(
+                root.path(),
+                TextSearchLimits::default(),
+                &mut || Ok(()),
+                false,
+            )
+            .unwrap(),
+            5
+        );
+        let mut limits = TextSearchLimits::default();
+        limits.index_bytes = 4;
+        assert!(matches!(
+            bounded_directory_bytes(root.path(), limits, &mut || Ok(()), false),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_index_bytes",
+                limit: 4,
+            })
+        ));
+        assert_eq!(std::fs::read(nested.join("b")).unwrap(), b"345");
+        assert!(matches!(
+            bounded_directory_bytes(
+                root.path(),
+                TextSearchLimits::default(),
+                &mut || Err(SearchArtifactError::Cancelled),
+                false,
+            ),
+            Err(SearchArtifactError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn build_directory_and_symlink_entries_fail_closed_without_cleanup() {
+        let root = TempDir::new().unwrap();
+        let nonempty = root.path().join("nonempty");
+        std::fs::create_dir(&nonempty).unwrap();
+        std::fs::write(nonempty.join("keep"), b"caller").unwrap();
+        assert!(matches!(
+            prepare_empty_directory(&nonempty),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert_eq!(std::fs::read(nonempty.join("keep")).unwrap(), b"caller");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let linked = root.path().join("linked");
+            std::fs::create_dir(&linked).unwrap();
+            symlink(root.path(), linked.join("escape")).unwrap();
+            for corrupt_on_io in [false, true] {
+                assert!(matches!(
+                    bounded_directory_bytes(
+                        &linked,
+                        TextSearchLimits::default(),
+                        &mut || Ok(()),
+                        corrupt_on_io,
+                    ),
+                    Err(SearchArtifactError::CorruptDerivedIndex { .. })
+                ));
+                assert!(
+                    linked
+                        .join("escape")
+                        .symlink_metadata()
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_zero_build_limits_and_empty_schema_validation_are_fail_closed() {
+        let root = TempDir::new().unwrap();
+        let mut limits = TextSearchLimits::default();
+        limits.documents = 0;
+        let document_limit = build_text_index(
+            &root.path().join("documents"),
+            &projection(vec![document(1, "title", "body")]),
+            limits,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            document_limit,
+            SearchArtifactError::ResourceExhausted {
+                resource: "text_documents",
+                limit: 0
+            }
+        ));
+
+        let no_properties = TextSourceProjection {
+            properties: Vec::new(),
+            documents: vec![document(1, "title", "body")],
+            source_bytes: 0,
+        };
+        assert_eq!(
+            build_text_index(
+                &root.path().join("no-properties"),
+                &no_properties,
+                TextSearchLimits::default(),
+                || Ok(())
+            )
+            .unwrap(),
+            TextIndexBuildOutcome::Empty
+        );
+
+        let empty_index = root.path().join("empty-index");
+        std::fs::create_dir(&empty_index).unwrap();
+        let (schema, _, _) =
+            text_schema(&["title".to_owned()], TextSearchLimits::default()).unwrap();
+        Index::create_in_dir(&empty_index, schema).unwrap();
+        let empty_error = validate_text_index(
+            &empty_index,
+            &["title".to_owned()],
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            empty_error,
+            SearchArtifactError::CorruptDerivedIndex { .. }
+        ));
+    }
+
+    #[test]
+    fn exact_zero_directory_io_classification_distinguishes_build_and_validation() {
+        let root = TempDir::new().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(matches!(
+            prepare_empty_directory(&file),
+            Err(SearchArtifactError::Io {
+                operation: "create text index directory",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            bounded_directory_bytes(&file, TextSearchLimits::default(), &mut || Ok(()), false,),
+            Err(SearchArtifactError::Io {
+                operation: "measure text index",
+                ..
+            })
+        ));
+        assert!(matches!(
+            bounded_directory_bytes(&file, TextSearchLimits::default(), &mut || Ok(()), true,),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+    }
 }

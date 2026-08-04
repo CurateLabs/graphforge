@@ -6527,19 +6527,35 @@ impl ScalarUDFImpl for CypherReverse {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
-        use datafusion::arrow::array::{Array, ListArray, StringArray, UInt32Array};
+        use datafusion::arrow::array::{
+            Array, LargeStringArray, ListArray, StringArray, UInt32Array,
+        };
         use datafusion::common::cast::as_list_array;
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
         let array = args.args[0].to_array(args.number_rows)?;
         match array.data_type() {
-            DataType::Utf8 | DataType::LargeUtf8 => {
-                let s = datafusion::arrow::compute::cast(&array, &DataType::Utf8)?;
-                let s = s.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                    DataFusionError::Internal("cypher_reverse: not a string array".into())
-                })?;
+            DataType::Utf8 => {
+                let s = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("cypher_reverse: not a string array".into())
+                    })?;
                 let out: StringArray = (0..s.len())
+                    .map(|i| (!s.is_null(i)).then(|| s.value(i).chars().rev().collect::<String>()))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(out)))
+            }
+            DataType::LargeUtf8 => {
+                let s = array
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("cypher_reverse: not a large string array".into())
+                    })?;
+                let out: LargeStringArray = (0..s.len())
                     .map(|i| (!s.is_null(i)).then(|| s.value(i).chars().rev().collect::<String>()))
                     .collect();
                 Ok(ColumnarValue::Array(Arc::new(out)))
@@ -8775,11 +8791,7 @@ impl ScalarUDFImpl for CypherDurationBetween {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let mode_arr = cast(&cols[2], &DataType::Utf8).map_err(DataFusionError::from)?;
         let modes = mode_arr.as_any().downcast_ref::<StringArray>();
 
@@ -8869,11 +8881,7 @@ impl ScalarUDFImpl for CypherTemporalArith {
         use datafusion::arrow::datatypes::TimeUnit;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let temporal = &cols[0];
         let dur = cols[1].as_any().downcast_ref::<StructArray>();
         let signs = cols[2].as_any().downcast_ref::<Int64Array>();
@@ -9089,11 +9097,7 @@ impl ScalarUDFImpl for CypherDurationAdd {
         use datafusion::arrow::array::{Array, Int64Array, StructArray};
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let a = cols[0].as_any().downcast_ref::<StructArray>();
         let b = cols[1].as_any().downcast_ref::<StructArray>();
         let signs = cols[2].as_any().downcast_ref::<Int64Array>();
@@ -9172,11 +9176,7 @@ impl ScalarUDFImpl for CypherDurationScale {
         use datafusion::arrow::compute::cast;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let dur = cols[0].as_any().downcast_ref::<StructArray>();
         // The numeric factor may arrive as any int/float width — cast to f64.
         let num = cast(&cols[1], &DataType::Float64)?;
@@ -9836,6 +9836,25 @@ impl ScalarUDFImpl for CypherListComp {
 // cypher_date_project UDF
 // ---------------------------------------------------------------------------
 
+fn udf_argument_arrays(
+    args: &ScalarFunctionArgs,
+) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
+    args.args
+        .iter()
+        .map(|value| value.to_array(args.number_rows))
+        .collect()
+}
+
+fn cast_argument_arrays(
+    arrays: &[datafusion::arrow::array::ArrayRef],
+    data_type: &DataType,
+) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
+    arrays
+        .iter()
+        .map(|array| datafusion::arrow::compute::cast(array, data_type).map_err(Into::into))
+        .collect()
+}
+
 /// `date`-from-value projection (`Temporal3`): `date(base)` / `date({date: base,
 /// …overrides})`. Args are `[base, year, month, day, week, dayOfWeek,
 /// ordinalDay, quarter, dayOfQuarter]` — `base` is a `Date32` or an ISO date/
@@ -9881,15 +9900,11 @@ impl ScalarUDFImpl for CypherDateProject {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use crate::temporal::{DateOverrides, parse_date_or_datetime_prefix};
-        use datafusion::arrow::array::{Array, Int64Array, StringArray, StructArray};
+        use datafusion::arrow::array::{Array, StringArray, StructArray};
         use datafusion::arrow::compute::cast;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // A typed temporal-struct base (date / localdatetime / time / datetime) is
         // read directly; a string base is cast to `Utf8` (handling `Utf8View`).
         let base = if is_date_struct(cols[0].data_type())
@@ -9928,22 +9943,18 @@ impl ScalarUDFImpl for CypherDateProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Vec<Option<i64>> = (0..rows)
             .map(|i| {
                 let overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 crate::temporal::project_date(base_date(i)?, &overrides)
             })
@@ -10005,18 +10016,14 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
     ) -> datafusion::error::Result<ColumnarValue> {
         use crate::temporal::{LocalTimeOverrides, project_localtime, time_of_day_nanos_any};
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // A `Time64(Nanosecond)` or `localdatetime`-struct base is read directly;
         // any other (string) base is cast to `Utf8` (handling `Utf8View`).
         let base: ArrayRef =
@@ -10029,11 +10036,7 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
             } else {
                 cast(&cols[0], &DataType::Utf8).map_err(DataFusionError::from)?
             };
-        let ov: Vec<_> = cols[1..7]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[1..7], &DataType::Int64)?;
 
         let base_nanos = |i: usize| -> Option<i64> {
             if base.is_null(i) {
@@ -10060,20 +10063,16 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Time64NanosecondArray = (0..rows)
             .map(|i| {
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 project_localtime(base_nanos(i)?, &overrides)
             })
@@ -10134,18 +10133,14 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
             LocalTimeOverrides, project_localtime, time_of_day_nanos_any, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_localdatetime_struct(cols[0].data_type())
@@ -10158,11 +10153,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..8]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..8], &DataType::Int64)?;
 
         let base_nanos = |i: usize| -> Option<i64> {
             if base.is_null(i) {
@@ -10188,10 +10179,6 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Time64NanosecondArray = (0..rows)
             .map(|i| {
@@ -10201,12 +10188,12 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
                 }
                 let truncated = truncate_time_nanos(base_nanos(i)?, u.value(i))?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 project_localtime(truncated, &overrides)
             })
@@ -10263,6 +10250,16 @@ fn date_struct_value(arr: &datafusion::arrow::array::StructArray, i: usize) -> O
     }
     let days = arr.column(0).as_any().downcast_ref::<Int64Array>()?;
     days.is_valid(i).then(|| days.value(i))
+}
+
+/// Read one nullable Int64 override from an already-normalized Arrow column.
+/// Temporal projectors cast override columns once before their row loop, so a
+/// failed physical downcast or a null row has the same absent-override meaning.
+fn optional_i64_at(array: &datafusion::arrow::array::ArrayRef, row: usize) -> Option<i64> {
+    use datafusion::arrow::array::{Array, Int64Array};
+
+    let values = array.as_any().downcast_ref::<Int64Array>()?;
+    (!values.is_null(row)).then(|| values.value(row))
 }
 
 /// The Arrow fields of a `localdatetime` value — `Struct{date: Int64, time:
@@ -10499,18 +10496,14 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
             project_localtime, time_of_day_nanos_any,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // Typed sources (`date`/`localdatetime`/`time`/`datetime` struct or
         // `Time64`) are read directly; a string source is cast to `Utf8`
         // (handling `Utf8View`).
@@ -10528,11 +10521,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
         };
         let date_src = typed_or_utf8(&cols[0])?;
         let time_src = typed_or_utf8(&cols[1])?;
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if date_src.is_null(i) {
@@ -10585,30 +10574,26 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i64)>> = (0..rows)
             .map(|i| {
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(base_date(i)?, &date_overrides)?;
                 let time = project_localtime(base_time(i)?, &time_overrides)?;
@@ -10679,18 +10664,14 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
             project_localtime, time_of_day_nanos_any, truncate_date, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
         let value: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
@@ -10705,11 +10686,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if value.is_null(i) {
@@ -10757,10 +10734,6 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i64)>> = (0..rows)
             .map(|i| {
@@ -10778,22 +10751,22 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
                     ),
                 };
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(date, &date_overrides)?;
                 let time = project_localtime(time, &time_overrides)?;
@@ -10912,18 +10885,14 @@ impl ScalarUDFImpl for CypherTimeProject {
             time_of_day_with_offset,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_time_struct(cols[0].data_type())
@@ -10934,11 +10903,7 @@ impl ScalarUDFImpl for CypherTimeProject {
             } else {
                 cast(&cols[0], &DataType::Utf8).map_err(DataFusionError::from)?
             };
-        let ov: Vec<_> = cols[1..7]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[1..7], &DataType::Int64)?;
         let tz_arr = cast(&cols[7], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -10976,21 +10941,17 @@ impl ScalarUDFImpl for CypherTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i32)>> = (0..rows)
             .map(|i| {
                 let (base_nanos, base_offset) = base_parts(i)?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 let nanos = project_localtime(base_nanos, &overrides)?;
                 // A `timezone` override (offset string) re-zones the value.
@@ -11057,18 +11018,14 @@ impl ScalarUDFImpl for CypherTimeTruncate {
             time_of_day_with_offset, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_time_struct(cols[0].data_type())
@@ -11081,11 +11038,7 @@ impl ScalarUDFImpl for CypherTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..8]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..8], &DataType::Int64)?;
         let tz_arr = cast(&cols[8], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11118,10 +11071,6 @@ impl ScalarUDFImpl for CypherTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i32)>> = (0..rows)
             .map(|i| {
@@ -11132,12 +11081,12 @@ impl ScalarUDFImpl for CypherTimeTruncate {
                 let (base_nanos, base_offset) = base_parts(i)?;
                 let truncated = truncate_time_nanos(base_nanos, u.value(i))?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 let nanos = project_localtime(truncated, &overrides)?;
                 let new_offset = match tz {
@@ -11302,18 +11251,14 @@ impl ScalarUDFImpl for CypherDateTimeProject {
             project_datetime, project_localtime, time_offset_zone,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let typed_or_utf8 = |a: &ArrayRef| -> datafusion::error::Result<ArrayRef> {
             if matches!(a.data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_date_struct(a.data_type())
@@ -11328,11 +11273,7 @@ impl ScalarUDFImpl for CypherDateTimeProject {
         };
         let date_src = typed_or_utf8(&cols[0])?;
         let time_src = typed_or_utf8(&cols[1])?;
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
         let tz_arr = cast(&cols[16], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11393,30 +11334,26 @@ impl ScalarUDFImpl for CypherDateTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<DateTimeRow> = (0..rows)
             .map(|i| {
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let (base_nanos, src_offset, src_zone) = base_time(i)?;
                 let date = project_date(base_date(i)?, &date_overrides)?;
@@ -11491,18 +11428,14 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
             truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
         let value: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
@@ -11517,11 +11450,7 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
         let tz_arr = cast(&cols[16], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11580,10 +11509,6 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<DateTimeRow> = (0..rows)
             .map(|i| {
@@ -11599,22 +11524,22 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
                     None => (base_date(i)?, truncate_time_nanos(bt_nanos, u.value(i))?),
                 };
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(date0, &date_overrides)?;
                 let nanos = project_localtime(nanos0, &time_overrides)?;
@@ -11891,16 +11816,12 @@ impl ScalarUDFImpl for CypherDateTruncate {
         use crate::temporal::{
             DateOverrides, parse_date_or_datetime_prefix, project_date, truncate_date,
         };
-        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+        use datafusion::arrow::array::{Array, ArrayRef, StringArray, StructArray};
         use datafusion::arrow::compute::cast;
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // DataFusion emits `Utf8View` for string *columns* by default (string
         // literals stay `Utf8`), and our downcasts target `StringArray` — cast
         // string inputs to `Utf8` so a column-typed value/unit isn't silently
@@ -11916,11 +11837,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
         };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..10]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..10], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if value.is_null(i) {
@@ -11942,10 +11859,6 @@ impl ScalarUDFImpl for CypherDateTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Vec<Option<i64>> = (0..rows)
             .map(|i| {
@@ -11955,14 +11868,14 @@ impl ScalarUDFImpl for CypherDateTruncate {
                 }
                 let truncated = truncate_date(base_date(i)?, u.value(i))?;
                 let overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 project_date(truncated, &overrides)
             })
@@ -12361,6 +12274,66 @@ mod tests {
     static VOLATILE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static VOLATILE_ROWS: AtomicUsize = AtomicUsize::new(0);
 
+    fn invoke_test_udf<U: ScalarUDFImpl>(
+        udf: &U,
+        values: Vec<ScalarValue>,
+    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let types = values
+            .iter()
+            .map(ScalarValue::data_type)
+            .collect::<Vec<_>>();
+        let return_type = udf.return_type(&types)?;
+        let result = udf.invoke_with_args(ScalarFunctionArgs {
+            args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+            arg_fields: types
+                .iter()
+                .enumerate()
+                .map(|(index, data_type)| {
+                    Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                })
+                .collect(),
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", return_type.clone(), true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })?;
+        let array = match result {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1)?,
+        };
+        assert_eq!(array.data_type(), &return_type);
+        Ok(array)
+    }
+
+    fn invoke_test_udf_with_return_type<U: ScalarUDFImpl>(
+        udf: &U,
+        values: Vec<ScalarValue>,
+        return_type: DataType,
+    ) -> datafusion::error::Result<ColumnarValue> {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let types = values
+            .iter()
+            .map(ScalarValue::data_type)
+            .collect::<Vec<_>>();
+        udf.invoke_with_args(ScalarFunctionArgs {
+            args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+            arg_fields: types
+                .iter()
+                .enumerate()
+                .map(|(index, data_type)| {
+                    Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                })
+                .collect(),
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", return_type, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+    }
+
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct CountingVolatilePredicate {
         signature: Signature,
@@ -12434,6 +12407,194 @@ mod tests {
             temporal_null_scalar("datetime.realtime").data_type(),
             datetime_scalar(None).data_type()
         );
+        assert_eq!(temporal_null_scalar("unknown"), ScalarValue::Null);
+    }
+
+    #[test]
+    fn temporal_struct_builders_and_extractors_preserve_values_and_nulls() {
+        use crate::temporal::DurationValue;
+        use datafusion::arrow::array::{ArrayRef, Int32Array, StructArray};
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let dates = build_date_struct(&[Some(19_723), None]);
+        assert_eq!(date_struct_value(&dates, 0), Some(19_723));
+        assert_eq!(date_struct_value(&dates, 1), None);
+
+        let local = build_localdatetime_struct(&[(Some((19_723, 45_000))), None]);
+        assert_eq!(
+            localdatetime_struct_parts(&local, 0),
+            Some((19_723, 45_000))
+        );
+        assert_eq!(localdatetime_struct_parts(&local, 1), None);
+
+        let duration = DurationValue {
+            months: 14,
+            days: -2,
+            seconds: 90,
+            nanos: 123,
+        };
+        let durations = build_duration_struct(&[Some(duration), None]);
+        assert_eq!(duration_struct_parts(&durations, 0), Some(duration));
+        assert_eq!(duration_struct_parts(&durations, 1), None);
+        assert_eq!(
+            dur_secs_nanos(-3, 7),
+            DurationValue {
+                months: 0,
+                days: 0,
+                seconds: -3,
+                nanos: 7,
+            }
+        );
+        assert_eq!(
+            duration_value_to_ir(duration),
+            IrLiteral::Duration {
+                months: 14,
+                days: -2,
+                seconds: 90,
+                nanos: 123,
+            }
+        );
+
+        let times = build_time_struct(&[Some((86_399_000_000_000, -25_200)), None]);
+        assert_eq!(
+            time_struct_parts(&times, 0),
+            Some((86_399_000_000_000, -25_200))
+        );
+        assert_eq!(time_struct_parts(&times, 1), None);
+
+        let datetimes = build_datetime_struct(&[
+            Some((19_723, 45_000, 3_600, Some("Europe/Paris".into()))),
+            Some((19_724, 46_000, 0, None)),
+            None,
+        ]);
+        assert_eq!(
+            datetime_struct_parts(&datetimes, 0),
+            Some((19_723, 45_000, 3_600, Some("Europe/Paris".into())))
+        );
+        assert_eq!(
+            datetime_struct_parts(&datetimes, 1),
+            Some((19_724, 46_000, 0, None))
+        );
+        assert_eq!(datetime_struct_parts(&datetimes, 2), None);
+
+        // Extractors reject a structurally wrong child type without fabricating
+        // a value. This exercises the defensive downcast path with valid Arrow.
+        let wrong_fields = Fields::from(vec![Field::new("epoch_day", DataType::Int32, true)]);
+        let wrong_children: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![Some(1)]))];
+        let wrong_date = StructArray::new(wrong_fields, wrong_children, None);
+        assert_eq!(date_struct_value(&wrong_date, 0), None);
+
+        let overrides: ArrayRef = Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+            Some(8),
+            None,
+        ]));
+        assert_eq!(optional_i64_at(&overrides, 0), Some(8));
+        assert_eq!(optional_i64_at(&overrides, 1), None);
+        let wrong_override: ArrayRef = Arc::new(Int32Array::from(vec![Some(8)]));
+        assert_eq!(optional_i64_at(&wrong_override, 0), None);
+    }
+
+    #[test]
+    fn temporal_project_and_truncate_udfs_execute_all_typed_families() {
+        use datafusion::arrow::array::Array;
+
+        let null_ints = |count| vec![ScalarValue::Int64(None); count];
+        let assert_value = |array: datafusion::arrow::array::ArrayRef| {
+            assert_eq!(array.len(), 1);
+            assert!(!array.is_null(0));
+        };
+
+        let mut args = vec![ScalarValue::Utf8(Some("2024-02-29".into()))];
+        args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateProject::new(), args).unwrap());
+        let mut null_args = vec![ScalarValue::Utf8(None)];
+        null_args.extend(null_ints(8));
+        let null_date = invoke_test_udf(&CypherDateProject::new(), null_args).unwrap();
+        assert!(null_date.is_null(0));
+        let mut typed_args = vec![date_scalar(Some(19_782))];
+        typed_args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateProject::new(), typed_args).unwrap());
+
+        let mut args = vec![ScalarValue::Utf8(Some("12:34:56.123".into()))];
+        args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![ScalarValue::Time64Nanosecond(Some(45_296_123_000_000))];
+        typed_args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("12:34:56.123".into())),
+            ScalarValue::Utf8(Some("second".into())),
+        ];
+        args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("12:34:56.123".into())),
+        ];
+        args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![
+            date_scalar(Some(19_782)),
+            ScalarValue::Time64Nanosecond(Some(45_296_123_000_000)),
+        ];
+        typed_args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29T12:34:56.123".into())),
+            ScalarValue::Utf8(Some("day".into())),
+        ];
+        args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![ScalarValue::Utf8(Some("12:34:56+01:00".into()))];
+        args.extend(null_ints(6));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![time_scalar(Some((45_296_000_000_000, 3_600)))];
+        typed_args.extend(null_ints(6));
+        typed_args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("12:34:56+01:00".into())),
+            ScalarValue::Utf8(Some("minute".into())),
+        ];
+        args.extend(null_ints(6));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("12:34:56+01:00".into())),
+        ];
+        args.extend(null_ints(14));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![
+            date_scalar(Some(19_782)),
+            time_scalar(Some((45_296_000_000_000, 3_600))),
+        ];
+        typed_args.extend(null_ints(14));
+        typed_args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29T12:34:56+01:00".into())),
+            ScalarValue::Utf8(Some("hour".into())),
+        ];
+        args.extend(null_ints(14));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("month".into())),
+        ];
+        args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateTruncate::new(), args).unwrap());
     }
 
     #[test]
@@ -12645,6 +12806,265 @@ mod tests {
         assert_eq!(output.value(3).len(), 1);
         assert_eq!(VOLATILE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(VOLATILE_ROWS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn correlated_list_comprehension_filters_and_projects_with_outer_value() {
+        use datafusion::arrow::array::{Array, ListArray};
+        use datafusion::logical_expr::{col, lit};
+
+        let input = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(3)),
+                ScalarValue::Int64(Some(5)),
+            ],
+            &DataType::Int64,
+            true,
+        ));
+        let udf = CypherListComp::new(
+            Some(col("__gf_elem").gt(col("threshold"))),
+            Some(col("__gf_elem") + col("threshold") + lit(0_i64)),
+            "__gf_elem".into(),
+            vec!["threshold".into()],
+        );
+        let output = invoke_test_udf(&udf, vec![input, ScalarValue::Int64(Some(2))]).unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().expect("List");
+        assert!(!output.is_null(0));
+        let values = output.value(0);
+        assert_eq!(
+            (0..values.len())
+                .map(|row| ScalarValue::try_from_array(&values, row).unwrap())
+                .collect::<Vec<_>>(),
+            vec![ScalarValue::Int64(Some(5)), ScalarValue::Int64(Some(7))]
+        );
+    }
+
+    #[test]
+    fn percentile_and_comparison_error_contract_matrix_is_exact() {
+        use datafusion::logical_expr::AggregateUDFImpl;
+
+        let continuous = CypherPercentile::new(true);
+        assert_eq!(
+            continuous.return_type(&[]).unwrap_err().to_string(),
+            "Error during planning: percentile aggregate requires value and percentile arguments"
+        );
+        assert_eq!(
+            continuous
+                .return_type(&[DataType::Utf8, DataType::Float64])
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: percentile value expression must be numeric, got Utf8"
+        );
+        assert_eq!(
+            continuous
+                .return_type(&[DataType::Int32, DataType::Float64])
+                .unwrap(),
+            DataType::Float64
+        );
+        assert_eq!(
+            CypherPercentile::new(false)
+                .return_type(&[DataType::Int32, DataType::Float64])
+                .unwrap(),
+            DataType::Int32
+        );
+
+        let mut accumulator = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: vec![],
+            percentile: None,
+        };
+        accumulator.push_value(ScalarValue::Null).unwrap();
+        assert_eq!(
+            accumulator
+                .push_value(ScalarValue::Utf8(Some("bad".into())))
+                .unwrap_err()
+                .to_string(),
+            "Execution error: percentile value expression must be numeric, got Utf8"
+        );
+        for invalid in [f64::NAN, -0.1, 1.1] {
+            assert!(
+                accumulator
+                    .observe_percentile(Some(invalid))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finite number between 0.0 and 1.0")
+            );
+        }
+        accumulator.observe_percentile(Some(0.25)).unwrap();
+        assert_eq!(
+            accumulator
+                .observe_percentile(Some(0.75))
+                .unwrap_err()
+                .to_string(),
+            "Execution error: percentile argument must be constant within an aggregate group"
+        );
+
+        assert_eq!(scalar_as_i8(&ScalarValue::Int8(Some(-7))).unwrap(), -7);
+        assert_eq!(scalar_as_i8(&ScalarValue::Int64(Some(7))).unwrap(), 7);
+        assert!(
+            scalar_as_i8(&ScalarValue::Int64(Some(128)))
+                .unwrap_err()
+                .to_string()
+                .contains("outside i8 range")
+        );
+        assert_eq!(
+            scalar_as_i8(&ScalarValue::Utf8(Some("1".into())))
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: comparison opcode must be an integer, got Utf8(\"1\")"
+        );
+    }
+
+    #[test]
+    fn shared_temporal_cast_helper_preserves_arrow_values_nulls_and_error() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int32Array, Int64Array};
+
+        let integers: ArrayRef = Arc::new(Int32Array::from(vec![Some(7), None]));
+        let casted = cast_argument_arrays(&[integers], &DataType::Int64).unwrap();
+        let casted = casted[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Int64");
+        assert_eq!(casted.value(0), 7);
+        assert!(casted.is_null(1));
+
+        let invalid = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        let direct_error = datafusion::arrow::compute::cast(&invalid, &DataType::Int64)
+            .map_err(datafusion::error::DataFusionError::from)
+            .unwrap_err()
+            .to_string();
+        let helper_error = cast_argument_arrays(&[invalid], &DataType::Int64)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(helper_error, direct_error);
+    }
+
+    #[test]
+    fn list_comprehension_rejects_non_list_input_through_public_udf_contract() {
+        let udf = CypherListComp::new(None, None, "__gf_elem".into(), vec![]);
+        let error = invoke_test_udf(&udf, vec![ScalarValue::Int64(Some(1))]).unwrap_err();
+        let datafusion::error::DataFusionError::Internal(message) = error else {
+            panic!("expected DataFusion internal contract error")
+        };
+        assert_eq!(
+            message,
+            "cypher_list_comprehension: first argument is not a list"
+        );
+    }
+
+    #[test]
+    fn public_map_and_value_access_error_null_and_success_matrix() {
+        use datafusion::arrow::array::{Array, ListArray};
+
+        let null_keys = invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Null]).unwrap();
+        let null_keys = null_keys
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("List");
+        assert!(null_keys.is_null(0));
+
+        let keys_error =
+            invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Int64(Some(1))]).unwrap_err();
+        assert_eq!(
+            keys_error.to_string(),
+            "Execution error: keys() requires a map, node, relationship, or null, got Int64"
+        );
+
+        let map = const_map_scalar(&[
+            ("answer".into(), ScalarValue::Int64(Some(42))),
+            ("empty".into(), ScalarValue::Null),
+        ])
+        .expect("map scalar");
+        let keys = invoke_test_udf(&CypherMapKeys::new(), vec![map.clone()]).unwrap();
+        let keys = keys.as_any().downcast_ref::<ListArray>().expect("List");
+        assert_eq!(keys.value(0).len(), 2);
+
+        let answer = invoke_test_udf(
+            &CypherStaticValueAccess::new("answer".into()),
+            vec![map.clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&answer, 0).unwrap(),
+            ScalarValue::Int64(Some(42))
+        );
+        let missing =
+            invoke_test_udf(&CypherStaticValueAccess::new("missing".into()), vec![map]).unwrap();
+        assert!(ScalarValue::try_from_array(&missing, 0).unwrap().is_null());
+
+        let static_error = invoke_test_udf(
+            &CypherStaticValueAccess::new("answer".into()),
+            vec![ScalarValue::Int64(Some(1))],
+        )
+        .unwrap_err();
+        assert_eq!(
+            static_error.to_string(),
+            "Execution error: InvalidArgumentValue: property access requires a map or graph element"
+        );
+
+        let dynamic_error = invoke_test_udf(
+            &CypherValueAccess::new(),
+            vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Utf8(Some("answer".into())),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            dynamic_error.to_string(),
+            "Execution error: dynamic subscript requires a list or map/entity struct, got Int64"
+        );
+    }
+
+    #[test]
+    fn entity_properties_and_percentile_state_validation_errors_are_exact() {
+        use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array};
+        use datafusion::logical_expr::Accumulator;
+
+        let arity_error = invoke_test_udf(&CypherEntityProperties::new(0), vec![]).unwrap_err();
+        assert_eq!(
+            arity_error.to_string(),
+            "Error during planning: properties() entity map expects present plus key/value pairs"
+        );
+        let presence_error = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Utf8(Some("name".into())),
+                ScalarValue::Utf8(Some("Ada".into())),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            presence_error.to_string(),
+            "Execution error: properties() entity presence must be boolean, got Int64(1)"
+        );
+
+        let mut accumulator = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: vec![],
+            percentile: None,
+        };
+        let wrong_values: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let percentile: ArrayRef = Arc::new(Float64Array::from(vec![0.5]));
+        assert_eq!(
+            accumulator
+                .merge_batch(&[wrong_values, percentile])
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: percentile state values must be a list"
+        );
     }
 
     /// Invoke a `cypher_quantifier` UDF (no outer columns) over a single list
@@ -14928,5 +15348,1838 @@ mod tests {
         assert_eq!(decode_het(&second), Some(number));
         assert!(cypher_order_key(&first).starts_with("20:node"));
         assert!(cypher_order_key(&second).starts_with("80:num"));
+    }
+
+    #[test]
+    fn cypher_reverse_runtime_dispatches_strings_lists_and_type_errors() {
+        use datafusion::arrow::array::{Array, LargeStringArray, ListArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let invoke = |value: ScalarValue| {
+            let data_type = value.data_type();
+            CypherReverse::new().invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Scalar(value)],
+                arg_fields: vec![Arc::new(Field::new("value", data_type.clone(), true))],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", data_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        };
+
+        let text = invoke(ScalarValue::LargeUtf8(Some("Áda".into()))).unwrap();
+        let text = match text {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let text = text.as_any().downcast_ref::<LargeStringArray>().unwrap();
+        assert_eq!(text.value(0), "ad́A");
+
+        use datafusion::arrow::array::StringArray;
+        let utf8 = invoke(ScalarValue::Utf8(Some("Graph".into()))).unwrap();
+        let utf8 = match utf8 {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let utf8 = utf8.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(utf8.value(0), "hparG");
+
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(3)),
+            ],
+            &DataType::Int64,
+            true,
+        ));
+        let reversed = invoke(list).unwrap();
+        let reversed = match reversed {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let reversed = reversed.as_any().downcast_ref::<ListArray>().unwrap();
+        let values = reversed.value(0);
+        assert_eq!(
+            (0..values.len())
+                .map(|row| ScalarValue::try_from_array(&values, row).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                ScalarValue::Int64(Some(3)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(1)),
+            ]
+        );
+
+        let error = invoke(ScalarValue::Int64(Some(7))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Error during planning: reverse() expects a string or list, got Int64"
+        );
+    }
+
+    #[test]
+    fn cypher_list_plus_runtime_covers_each_operand_shape() {
+        use datafusion::arrow::array::{Array, ListArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let list = |values: &[i64]| {
+            ScalarValue::List(ScalarValue::new_list(
+                &values
+                    .iter()
+                    .copied()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>(),
+                &DataType::Int64,
+                true,
+            ))
+        };
+        let invoke = |left: ScalarValue, right: ScalarValue| {
+            let udf = CypherListPlus::new();
+            let types = [left.data_type(), right.data_type()];
+            let return_type = udf.return_type(&types).unwrap();
+            udf.invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Scalar(left), ColumnarValue::Scalar(right)],
+                arg_fields: types
+                    .iter()
+                    .enumerate()
+                    .map(|(index, data_type)| {
+                        Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                    })
+                    .collect(),
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        };
+        let values = |result: ColumnarValue| {
+            let array = match result {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = list.value(0);
+            (0..values.len())
+                .map(|row| {
+                    let value = ScalarValue::try_from_array(&values, row).unwrap();
+                    decode_het(&value).unwrap_or(value)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            values(invoke(list(&[1, 2]), list(&[3, 4])).unwrap()),
+            [1, 2, 3, 4]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        assert_eq!(
+            values(invoke(list(&[1, 2]), ScalarValue::Int64(Some(3))).unwrap()),
+            [1, 2, 3]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        assert_eq!(
+            values(invoke(ScalarValue::Int64(Some(1)), list(&[2, 3])).unwrap()),
+            [1, 2, 3]
+                .map(|value| ScalarValue::Int64(Some(value)))
+                .to_vec()
+        );
+        let error = invoke(ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Execution error: list + requires at least one list operand"
+        );
+    }
+
+    #[test]
+    fn cypher_list_plus_executes_large_list_operands_and_null_rows() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, LargeListArray, ListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+        use datafusion::arrow::datatypes::Field;
+
+        let large = |values: &[i64], valid: bool| {
+            let values: ArrayRef = Arc::new(Int64Array::from(values.to_vec()));
+            ScalarValue::LargeList(Arc::new(LargeListArray::new(
+                Arc::new(Field::new("item", DataType::Int64, true)),
+                OffsetBuffer::new(ScalarBuffer::from(vec![
+                    0_i64,
+                    i64::try_from(values.len()).unwrap(),
+                ])),
+                values,
+                Some(NullBuffer::from(vec![valid])),
+            )))
+        };
+        let values = |array: ArrayRef| {
+            let list = array.as_any().downcast_ref::<ListArray>().expect("List");
+            if list.is_null(0) {
+                return None;
+            }
+            let values = list.value(0);
+            Some(
+                (0..values.len())
+                    .map(|row| {
+                        let value = ScalarValue::try_from_array(&values, row).unwrap();
+                        decode_het(&value).unwrap_or(value)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![large(&[1, 2], true), ScalarValue::Int64(Some(3))],
+                )
+                .unwrap()
+            ),
+            Some(vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(3)),
+            ])
+        );
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![ScalarValue::Int64(Some(0)), large(&[1, 2], true)],
+                )
+                .unwrap()
+            ),
+            Some(vec![
+                ScalarValue::Int64(Some(0)),
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+            ])
+        );
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![large(&[1], false), large(&[2], true)],
+                )
+                .unwrap()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn scalar_udf_runtime_truth_tables_strings_and_ranges() {
+        use datafusion::arrow::array::{Array, BooleanArray, ListArray};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        fn invoke<U: ScalarUDFImpl>(
+            udf: &U,
+            values: Vec<ScalarValue>,
+            return_type: DataType,
+        ) -> datafusion::error::Result<ColumnarValue> {
+            let fields = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    Arc::new(Field::new(format!("arg_{index}"), value.data_type(), true))
+                })
+                .collect();
+            udf.invoke_with_args(ScalarFunctionArgs {
+                args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+                arg_fields: fields,
+                number_rows: 1,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+        }
+
+        let booleans = [None, Some(false), Some(true)];
+        for kind in [
+            CypherBoolOpKind::And,
+            CypherBoolOpKind::Or,
+            CypherBoolOpKind::Xor,
+        ] {
+            for left in booleans {
+                for right in booleans {
+                    let output = invoke(
+                        &CypherBoolOp::new(kind),
+                        vec![ScalarValue::Boolean(left), ScalarValue::Boolean(right)],
+                        DataType::Boolean,
+                    )
+                    .unwrap();
+                    let output = match output {
+                        ColumnarValue::Array(array) => array,
+                        ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+                    };
+                    let output = output.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    let actual = (!output.is_null(0)).then(|| output.value(0));
+                    let expected = match kind {
+                        CypherBoolOpKind::And => match (left, right) {
+                            (Some(false), _) | (_, Some(false)) => Some(false),
+                            (Some(true), Some(true)) => Some(true),
+                            _ => None,
+                        },
+                        CypherBoolOpKind::Or => match (left, right) {
+                            (Some(true), _) | (_, Some(true)) => Some(true),
+                            (Some(false), Some(false)) => Some(false),
+                            _ => None,
+                        },
+                        CypherBoolOpKind::Xor => left.zip(right).map(|(l, r)| l ^ r),
+                    };
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        assert!(
+            invoke(
+                &CypherBoolOp::new(CypherBoolOpKind::And),
+                vec![
+                    ScalarValue::Int64(Some(1)),
+                    ScalarValue::Boolean(Some(true))
+                ],
+                DataType::Boolean,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("expected boolean operand")
+        );
+
+        for (kind, expected) in [
+            (StringPredicate::Starts, true),
+            (StringPredicate::Ends, false),
+            (StringPredicate::Contains, true),
+        ] {
+            let output = invoke(
+                &CypherStringPredicate::new(kind),
+                vec![
+                    ScalarValue::LargeUtf8(Some("GraphForge".into())),
+                    ScalarValue::Utf8(Some("Graph".into())),
+                ],
+                DataType::Boolean,
+            )
+            .unwrap();
+            let output = match output {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            assert_eq!(
+                output
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .unwrap()
+                    .value(0),
+                expected
+            );
+        }
+
+        let range_type = DataType::new_list(DataType::Int64, true);
+        for (start, end, step, expected) in [(1, 5, 2, vec![1, 3, 5]), (5, 1, -2, vec![5, 3, 1])] {
+            let output = invoke(
+                &CypherRange::new(),
+                vec![
+                    ScalarValue::Int64(Some(start)),
+                    ScalarValue::Int64(Some(end)),
+                    ScalarValue::Int64(Some(step)),
+                ],
+                range_type.clone(),
+            )
+            .unwrap();
+            let output = match output {
+                ColumnarValue::Array(array) => array,
+                ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+            };
+            let list = output
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap()
+                .value(0);
+            assert_eq!(
+                (0..list.len())
+                    .map(|row| ScalarValue::try_from_array(&list, row).unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>()
+            );
+        }
+        for (step, fragment) in [(0, "must not be zero"), (2, "overflowed i64")] {
+            let start = if step == 0 { 1 } else { i64::MAX - 1 };
+            let end = if step == 0 { 2 } else { i64::MAX };
+            let error = invoke(
+                &CypherRange::new(),
+                vec![
+                    ScalarValue::Int64(Some(start)),
+                    ScalarValue::Int64(Some(end)),
+                    ScalarValue::Int64(Some(step)),
+                ],
+                range_type.clone(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(fragment));
+        }
+    }
+
+    #[test]
+    fn scalar_conversion_helpers_exhaust_every_numeric_width_null_and_error_contract() {
+        let integers = [
+            (ScalarValue::Int8(Some(-8)), -8_i64),
+            (ScalarValue::Int16(Some(-16)), -16),
+            (ScalarValue::Int32(Some(-32)), -32),
+            (ScalarValue::Int64(Some(-64)), -64),
+            (ScalarValue::UInt8(Some(8)), 8),
+            (ScalarValue::UInt16(Some(16)), 16),
+            (ScalarValue::UInt32(Some(32)), 32),
+            (ScalarValue::UInt64(Some(64)), 64),
+        ];
+        for (value, expected) in &integers {
+            assert_eq!(scalar_as_i128(value), Some(i128::from(*expected)));
+            assert_eq!(scalar_as_f64(value), Some(*expected as f64));
+            assert_eq!(to_cypher_integer(value).unwrap(), Some(*expected));
+            assert_eq!(to_cypher_float(value).unwrap(), Some(*expected as f64));
+            assert_eq!(to_cypher_string(value).unwrap(), Some(expected.to_string()));
+        }
+
+        for (value, integer, float, text) in [
+            (
+                ScalarValue::Float32(Some(12.75)),
+                Some(12),
+                Some(12.75),
+                Some("12.75".to_owned()),
+            ),
+            (
+                ScalarValue::Float64(Some(-12.75)),
+                Some(-12),
+                Some(-12.75),
+                Some("-12.75".to_owned()),
+            ),
+            (
+                ScalarValue::Utf8(Some("42.9".into())),
+                Some(42),
+                Some(42.9),
+                Some("42.9".to_owned()),
+            ),
+            (
+                ScalarValue::LargeUtf8(Some("-3".into())),
+                Some(-3),
+                Some(-3.0),
+                Some("-3".to_owned()),
+            ),
+        ] {
+            assert_eq!(to_cypher_integer(&value).unwrap(), integer);
+            assert_eq!(to_cypher_float(&value).unwrap(), float);
+            assert_eq!(to_cypher_string(&value).unwrap(), text);
+        }
+
+        for null in [
+            ScalarValue::Null,
+            ScalarValue::Int64(None),
+            ScalarValue::Float64(None),
+            ScalarValue::Utf8(None),
+            ScalarValue::Boolean(None),
+        ] {
+            assert_eq!(to_cypher_integer(&null).unwrap(), None);
+            assert_eq!(to_cypher_float(&null).unwrap(), None);
+            assert_eq!(to_cypher_boolean(&null).unwrap(), None);
+            assert_eq!(to_cypher_string(&null).unwrap(), None);
+        }
+
+        for invalid_float in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            assert_eq!(trunc_float_to_i64(invalid_float), None);
+        }
+        assert_eq!(trunc_float_to_i64(-9.99), Some(-9));
+        for invalid_text in ["", "not-a-number", "NaN", "inf"] {
+            let value = ScalarValue::Utf8(Some(invalid_text.into()));
+            assert_eq!(to_cypher_integer(&value).unwrap(), None);
+            assert_eq!(to_cypher_float(&value).unwrap(), None);
+        }
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Boolean(Some(true))).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Utf8(Some("true".into()))).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::LargeUtf8(Some("false".into()))).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            to_cypher_boolean(&ScalarValue::Utf8(Some("TRUE".into()))).unwrap(),
+            None
+        );
+
+        for invalid in [
+            ScalarValue::Boolean(Some(true)),
+            ScalarValue::Binary(Some(vec![1])),
+        ] {
+            assert!(to_cypher_integer(&invalid).is_err());
+            assert!(to_cypher_float(&invalid).is_err());
+        }
+        assert!(to_cypher_boolean(&ScalarValue::Int64(Some(1))).is_err());
+        assert!(to_cypher_string(&ScalarValue::Binary(Some(vec![1]))).is_err());
+        assert!(to_cypher_integer(&ScalarValue::UInt64(Some(u64::MAX))).is_err());
+    }
+
+    #[test]
+    fn canonical_float_strings_and_scalar_range_arguments_cover_boundaries() {
+        for (value, expected) in [
+            (0.0, "0.0"),
+            (-0.0, "0.0"),
+            (f64::NAN, "NaN"),
+            (f64::INFINITY, "Infinity"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (1e20, "100000000000000000000.0"),
+        ] {
+            assert_eq!(cypher_float_string(value), expected);
+        }
+
+        for (value, expected) in [
+            (ScalarValue::Int8(Some(-1)), -1),
+            (ScalarValue::Int16(Some(-2)), -2),
+            (ScalarValue::Int32(Some(-3)), -3),
+            (ScalarValue::Int64(Some(-4)), -4),
+            (ScalarValue::UInt8(Some(1)), 1),
+            (ScalarValue::UInt16(Some(2)), 2),
+            (ScalarValue::UInt32(Some(3)), 3),
+            (ScalarValue::UInt64(Some(4)), 4),
+        ] {
+            assert_eq!(scalar_as_i64_arg(&value, "bound").unwrap(), expected);
+        }
+        assert!(
+            scalar_as_i64_arg(&ScalarValue::UInt64(Some(u64::MAX)), "bound")
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds i64::MAX")
+        );
+        assert!(
+            scalar_as_i64_arg(&ScalarValue::Utf8(Some("1".into())), "bound")
+                .unwrap_err()
+                .to_string()
+                .contains("must be an integer")
+        );
+    }
+
+    #[test]
+    fn temporal_literal_render_dispatch_and_ir_scalar_round_trip_matrix() {
+        for (name, input) in [
+            ("date", "2024-02-29"),
+            ("localtime", "12:34:56"),
+            ("time", "12:34:56+01:00"),
+            ("localdatetime", "2024-02-29T12:34:56"),
+            ("datetime", "2024-02-29T12:34:56Z"),
+            ("duration", "P1M2DT3S"),
+        ] {
+            assert!(render_temporal(name, input).is_some(), "{name}({input})");
+        }
+        assert_eq!(render_temporal("unknown", "2024-01-01"), None);
+        assert_eq!(render_temporal("date", "not-a-date"), None);
+
+        let literals = [
+            IrLiteral::Null,
+            IrLiteral::Bool(true),
+            IrLiteral::Int(-7),
+            IrLiteral::Float(1.25),
+            IrLiteral::Str("value".into()),
+            IrLiteral::Duration {
+                months: 1,
+                days: 2,
+                seconds: 3,
+                nanos: 4,
+            },
+            IrLiteral::DateTime(123),
+            IrLiteral::Date(20_000),
+            IrLiteral::LocalDateTime {
+                days: 20_000,
+                nanos: 123,
+            },
+            IrLiteral::Time(456),
+            IrLiteral::ZonedTime {
+                nanos: 789,
+                offset: 3_600,
+            },
+            IrLiteral::ZonedDateTime {
+                days: 20_000,
+                nanos: 999,
+                offset: -3_600,
+                zone: Some("America/Denver".into()),
+            },
+            IrLiteral::List(vec![IrLiteral::Int(1), IrLiteral::Null]),
+            IrLiteral::Map(vec![("answer".into(), IrLiteral::Int(42))]),
+        ];
+        for literal in literals {
+            let scalar = ir_literal_to_scalar(&literal);
+            if !matches!(literal, IrLiteral::Map(_)) {
+                assert_eq!(scalar_to_ir_literal(&scalar).unwrap(), literal);
+            }
+        }
+
+        for (scalar, expected) in [
+            (
+                ScalarValue::DurationSecond(Some(-2)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -2,
+                    nanos: 0,
+                },
+            ),
+            (
+                ScalarValue::DurationMillisecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_000_000,
+                },
+            ),
+            (
+                ScalarValue::DurationMicrosecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_999_000,
+                },
+            ),
+            (
+                ScalarValue::DurationNanosecond(Some(-1)),
+                IrLiteral::Duration {
+                    months: 0,
+                    days: 0,
+                    seconds: -1,
+                    nanos: 999_999_999,
+                },
+            ),
+        ] {
+            assert_eq!(scalar_to_ir_literal(&scalar).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn temporal_truncate_lowering_covers_arity_default_literal_override_and_rejection_paths() {
+        for name in [
+            "date.truncate",
+            "localtime.truncate",
+            "localdatetime.truncate",
+            "time.truncate",
+            "datetime.truncate",
+        ] {
+            let mut missing = ExprArena::new();
+            let call = missing.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![],
+            });
+            assert!(matches!(
+                make_lowerer(&missing, &VarMap::new()).lower(call),
+                Err(LoweringError::UnknownFunction(function)) if function == name
+            ));
+
+            let mut defaults = ExprArena::new();
+            let unit = defaults.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = defaults.push(IrExpr::Literal(IrLiteral::Null));
+            let call = defaults.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value],
+            });
+            let lowered = make_lowerer(&defaults, &VarMap::new()).lower(call).unwrap();
+            assert!(format!("{lowered}").contains("truncate"));
+
+            let mut overrides = ExprArena::new();
+            let unit = overrides.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = overrides.push(IrExpr::Literal(IrLiteral::Null));
+            let one = overrides.push(IrExpr::Literal(IrLiteral::Int(1)));
+            let zone = overrides.push(IrExpr::Literal(IrLiteral::Str("UTC".into())));
+            let map = overrides.push(IrExpr::MapLiteral(vec![
+                ("year".into(), one),
+                ("month".into(), one),
+                ("day".into(), one),
+                ("week".into(), one),
+                ("dayOfWeek".into(), one),
+                ("ordinalDay".into(), one),
+                ("quarter".into(), one),
+                ("dayOfQuarter".into(), one),
+                ("hour".into(), one),
+                ("minute".into(), one),
+                ("second".into(), one),
+                ("millisecond".into(), one),
+                ("microsecond".into(), one),
+                ("nanosecond".into(), one),
+                ("timezone".into(), zone),
+            ]));
+            let call = overrides.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value, map],
+            });
+            assert!(make_lowerer(&overrides, &VarMap::new()).lower(call).is_ok());
+
+            let mut dynamic = ExprArena::new();
+            let unit = dynamic.push(IrExpr::Literal(IrLiteral::Str("day".into())));
+            let value = dynamic.push(IrExpr::Literal(IrLiteral::Null));
+            let parameter = dynamic.push(IrExpr::Parameter("overrides".into()));
+            let call = dynamic.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![unit, value, parameter],
+            });
+            assert!(
+                make_lowerer(&dynamic, &VarMap::new())
+                    .lower(call)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("override map must be a literal map")
+            );
+        }
+
+        for name in [
+            "duration.between",
+            "duration.inmonths",
+            "duration.indays",
+            "duration.inseconds",
+        ] {
+            let mut arena = ExprArena::new();
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![],
+            });
+            assert!(matches!(
+                make_lowerer(&arena, &VarMap::new()).lower(call),
+                Err(LoweringError::UnknownFunction(function)) if function == name
+            ));
+
+            let left = arena.push(IrExpr::Literal(IrLiteral::Null));
+            let right = arena.push(IrExpr::Literal(IrLiteral::Null));
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args: vec![left, right],
+            });
+            assert!(make_lowerer(&arena, &VarMap::new()).lower(call).is_ok());
+        }
+    }
+
+    #[test]
+    fn cypher_value_comparison_and_order_helpers_cover_cross_type_edges() {
+        use datafusion::scalar::ScalarValue as S;
+
+        for value in [
+            S::Int8(Some(1)),
+            S::Int16(Some(1)),
+            S::Int32(Some(1)),
+            S::Int64(Some(1)),
+            S::UInt8(Some(1)),
+            S::UInt16(Some(1)),
+            S::UInt32(Some(1)),
+            S::UInt64(Some(1)),
+            S::Float32(Some(1.0)),
+            S::Float64(Some(1.0)),
+        ] {
+            assert_eq!(scalar_as_f64(&value), Some(1.0));
+        }
+        assert_eq!(scalar_as_i128(&S::Float64(Some(1.0))), None);
+        assert_eq!(scalar_as_f64(&S::Boolean(Some(true))), None);
+
+        let one = S::List(S::new_list(&[S::Int64(Some(1))], &DataType::Int64, true));
+        let one_null = S::List(S::new_list(
+            &[S::Int64(Some(1)), S::Int64(None)],
+            &DataType::Int64,
+            true,
+        ));
+        let two = S::List(S::new_list(
+            &[S::Int64(Some(1)), S::Int64(Some(2))],
+            &DataType::Int64,
+            true,
+        ));
+        assert_eq!(cypher_value_eq(&one, &one), Some(true));
+        assert_eq!(cypher_value_eq(&one, &two), Some(false));
+        assert_eq!(cypher_value_eq(&one_null, &one_null), None);
+        assert_eq!(cypher_value_eq(&S::Null, &S::Int64(Some(1))), None);
+        assert_eq!(
+            cypher_value_eq(&S::Int64(Some(1)), &S::Float64(Some(1.0))),
+            Some(true)
+        );
+        assert_eq!(
+            cypher_value_eq(&S::Utf8(Some("a".into())), &S::Utf8(Some("b".into()))),
+            Some(false)
+        );
+
+        assert!(cypher_order_key(&S::Null).starts_with("99:null"));
+        assert!(cypher_order_key(&S::Utf8(Some("a".into()))).starts_with("60:str"));
+        assert!(cypher_order_key(&S::Boolean(Some(true))).starts_with("70:bool"));
+        assert!(cypher_order_key(&S::Float64(Some(f64::NAN))).starts_with("90:nan"));
+        assert!(cypher_order_key(&S::Binary(Some(vec![1]))).starts_with("98:other"));
+        assert!(cypher_order_key(&one).starts_with("40:list"));
+    }
+
+    #[test]
+    fn expression_lowering_error_and_static_access_matrix_reaches_contract_branches() {
+        let lower_call = |name: &str, args: Vec<IrExpr>| {
+            let mut arena = ExprArena::new();
+            let args = args
+                .into_iter()
+                .map(|expr| arena.push(expr))
+                .collect::<Vec<_>>();
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args,
+            });
+            make_lowerer(&arena, &VarMap::new()).lower(call)
+        };
+
+        for (name, expected) in [
+            ("_subscript", "expects two arguments"),
+            ("_node_struct", "expects at least one argument"),
+            (
+                "_node_struct_list",
+                "expects two nodes and one relationship",
+            ),
+            ("_rel_struct", "expects an edge variable"),
+            ("_rel_struct_list", "expects an edge variable"),
+            ("keys", "expects one argument"),
+            ("properties", "expects one argument"),
+            ("labels", "expects one argument"),
+        ] {
+            assert!(
+                lower_call(name, vec![])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected),
+                "{name}"
+            );
+        }
+        for name in ["nodes", "relationships"] {
+            assert!(
+                lower_call(name, vec![])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expects one path argument")
+            );
+        }
+
+        assert!(
+            lower_call("_node_struct", vec![IrExpr::Literal(IrLiteral::Int(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("must be a node variable")
+        );
+        assert!(
+            lower_call("_rel_struct", vec![IrExpr::Literal(IrLiteral::Int(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("must be a relationship variable")
+        );
+        assert!(
+            lower_call(
+                "_node_struct_list",
+                vec![
+                    IrExpr::Literal(IrLiteral::Int(1)),
+                    IrExpr::Literal(IrLiteral::Int(2)),
+                    IrExpr::Literal(IrLiteral::Null),
+                ],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("node arguments must be variables")
+        );
+
+        for name in ["keys", "properties"] {
+            assert!(
+                lower_call(name, vec![IrExpr::ListLiteral(vec![])],)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires a map, node, relationship, or null")
+            );
+            assert!(lower_call(name, vec![IrExpr::Literal(IrLiteral::Null)]).is_ok());
+            assert!(lower_call(name, vec![IrExpr::MapLiteral(vec![])],).is_ok());
+        }
+        assert!(lower_call("labels", vec![IrExpr::Literal(IrLiteral::Null)]).is_ok());
+
+        let mut arena = ExprArena::new();
+        let null = arena.push(IrExpr::Literal(IrLiteral::Null));
+        let null_key = arena.push(IrExpr::Literal(IrLiteral::Null));
+        let access = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![null, null_key],
+        });
+        let null_access = make_lowerer(&arena, &VarMap::new()).lower(access).unwrap();
+        assert!(format!("{null_access}").contains("cypher_value_access"));
+
+        let mut arena = ExprArena::new();
+        let answer = arena.push(IrExpr::Literal(IrLiteral::Int(42)));
+        let map = arena.push(IrExpr::MapLiteral(vec![("answer".into(), answer)]));
+        let key = arena.push(IrExpr::Literal(IrLiteral::Str("answer".into())));
+        let missing = arena.push(IrExpr::Literal(IrLiteral::Str("missing".into())));
+        let found = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![map, key],
+        });
+        let absent = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![map, missing],
+        });
+        assert_eq!(
+            format!(
+                "{}",
+                make_lowerer(&arena, &VarMap::new()).lower(found).unwrap()
+            ),
+            "Int64(42)"
+        );
+        assert!(matches!(
+            make_lowerer(&arena, &VarMap::new()).lower(absent).unwrap(),
+            DfExpr::Literal(ScalarValue::Null, _)
+        ));
+
+        let mut arena = ExprArena::new();
+        let scalar = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let index = arena.push(IrExpr::Literal(IrLiteral::Int(0)));
+        let invalid = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![scalar, index],
+        });
+        assert!(
+            make_lowerer(&arena, &VarMap::new())
+                .lower(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("subscript requires a list")
+        );
+
+        for argument in [
+            IrExpr::Literal(IrLiteral::Str("abc".into())),
+            IrExpr::ListLiteral(vec![]),
+            IrExpr::Parameter("value".into()),
+        ] {
+            assert!(lower_call("reverse", vec![argument]).is_ok());
+        }
+    }
+
+    #[test]
+    fn static_nested_list_map_access_handles_negative_oob_and_nonliteral_indices() {
+        let mut arena = ExprArena::new();
+        let one = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let two = arena.push(IrExpr::Literal(IrLiteral::Int(2)));
+        let first_map = arena.push(IrExpr::MapLiteral(vec![("value".into(), one)]));
+        let second_map = arena.push(IrExpr::MapLiteral(vec![("value".into(), two)]));
+        let list = arena.push(IrExpr::ListLiteral(vec![first_map, second_map]));
+        let negative = arena.push(IrExpr::Literal(IrLiteral::Int(-1)));
+        let oob = arena.push(IrExpr::Literal(IrLiteral::Int(9)));
+        let dynamic = arena.push(IrExpr::Parameter("index".into()));
+        let key = arena.push(IrExpr::Literal(IrLiteral::Str("value".into())));
+
+        for (index, expected) in [(negative, Some("Int64(2)")), (oob, None)] {
+            let indexed = arena.push(IrExpr::FunctionCall {
+                name: "_subscript".into(),
+                args: vec![list, index],
+            });
+            let field = arena.push(IrExpr::FunctionCall {
+                name: "_subscript".into(),
+                args: vec![indexed, key],
+            });
+            let lowered = make_lowerer(&arena, &VarMap::new()).lower(field).unwrap();
+            match expected {
+                Some(expected) => assert_eq!(format!("{lowered}"), expected),
+                None => assert!(matches!(lowered, DfExpr::Literal(ScalarValue::Null, _))),
+            }
+        }
+
+        let indexed = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![list, dynamic],
+        });
+        let field = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![indexed, key],
+        });
+        assert!(
+            format!(
+                "{}",
+                make_lowerer(&arena, &VarMap::new()).lower(field).unwrap()
+            )
+            .contains("cypher_value_access")
+        );
+    }
+
+    #[test]
+    fn aggregate_accumulators_cover_update_merge_state_and_empty_contracts() {
+        use datafusion::arrow::array::{
+            ArrayRef, Float64Array, Int64Array, ListArray, StringArray,
+        };
+        use datafusion::logical_expr::Accumulator;
+
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(4), None, Some(-2), Some(9)]));
+        for (is_max, expected) in [(true, 9), (false, -2)] {
+            let mut acc = ExtremeAcc {
+                is_max,
+                dtype: DataType::Int64,
+                best: None,
+            };
+            assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(None));
+            acc.update_batch(std::slice::from_ref(&ints)).unwrap();
+            assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(expected)));
+            assert_eq!(
+                acc.state().unwrap(),
+                vec![ScalarValue::Int64(Some(expected))]
+            );
+            assert!(acc.size() >= std::mem::size_of::<ExtremeAcc>());
+            let merged: ArrayRef =
+                Arc::new(Int64Array::from(vec![Some(if is_max { 12 } else { -7 })]));
+            acc.merge_batch(&[merged]).unwrap();
+            assert_eq!(
+                acc.evaluate().unwrap(),
+                ScalarValue::Int64(Some(if is_max { 12 } else { -7 }))
+            );
+        }
+
+        for distinct in [false, true] {
+            let mut acc = CollectAcc {
+                distinct,
+                elem_type: DataType::Int64,
+                values: Vec::new(),
+            };
+            acc.update_batch(std::slice::from_ref(&ints)).unwrap();
+            let merge: ArrayRef = Arc::new(ListArray::from_iter_primitive::<
+                datafusion::arrow::datatypes::Int64Type,
+                _,
+                _,
+            >([Some(vec![Some(4), Some(11)])]));
+            acc.merge_batch(&[merge]).unwrap();
+            let ScalarValue::List(values) = acc.evaluate().unwrap() else {
+                panic!("collect must return a list")
+            };
+            let expected_len = if distinct { 4 } else { 5 };
+            assert_eq!(values.value(0).len(), expected_len);
+            assert_eq!(acc.state().unwrap().len(), 1);
+            assert!(acc.size() >= std::mem::size_of::<CollectAcc>());
+            let bad: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+            assert!(
+                acc.merge_batch(&[bad])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be a list")
+            );
+        }
+
+        for continuous in [false, true] {
+            let mut acc = PercentileAcc {
+                continuous,
+                value_type: DataType::Int64,
+                result_type: if continuous {
+                    DataType::Float64
+                } else {
+                    DataType::Int64
+                },
+                values: Vec::new(),
+                percentile: None,
+            };
+            assert!(acc.evaluate().unwrap().is_null());
+            let p: ArrayRef = Arc::new(Float64Array::from(vec![Some(0.5); 4]));
+            acc.update_batch(&[Arc::clone(&ints), p]).unwrap();
+            assert_eq!(
+                acc.evaluate().unwrap(),
+                if continuous {
+                    ScalarValue::Float64(Some(4.0))
+                } else {
+                    ScalarValue::Int64(Some(4))
+                }
+            );
+            assert_eq!(acc.state().unwrap().len(), 2);
+            assert!(acc.size() >= std::mem::size_of::<PercentileAcc>());
+            assert!(acc.observe_percentile(Some(f64::NAN)).is_err());
+            assert!(acc.observe_percentile(Some(0.75)).is_err());
+            let bad_values: ArrayRef = Arc::new(StringArray::from(vec!["not-list"]));
+            let good_p: ArrayRef = Arc::new(Float64Array::from(vec![0.5]));
+            assert!(
+                acc.merge_batch(&[bad_values, good_p])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be a list")
+            );
+        }
+    }
+
+    #[test]
+    fn duration_and_temporal_runtime_udfs_cover_each_value_family_and_nulls() {
+        let d1 = crate::temporal::DurationValue {
+            months: 1,
+            days: 2,
+            seconds: 3,
+            nanos: 750_000_000,
+        };
+        let d2 = crate::temporal::DurationValue {
+            months: 2,
+            days: 3,
+            seconds: 4,
+            nanos: 500_000_000,
+        };
+        let d1 = duration_scalar(Some(d1));
+        let d2 = duration_scalar(Some(d2));
+
+        let parsed = invoke_test_udf(
+            &CypherDurationParse::new(),
+            vec![ScalarValue::Utf8(Some("P1M2DT3.5S".into()))],
+        )
+        .unwrap();
+        assert!(duration_struct_parts(parsed.as_any().downcast_ref().unwrap(), 0).is_some());
+        let invalid = invoke_test_udf(
+            &CypherDurationParse::new(),
+            vec![ScalarValue::Utf8(Some("invalid".into()))],
+        )
+        .unwrap();
+        assert!(duration_struct_parts(invalid.as_any().downcast_ref().unwrap(), 0).is_none());
+
+        for sign in [1, -1] {
+            let out = invoke_test_udf(
+                &CypherDurationAdd::new(),
+                vec![d1.clone(), d2.clone(), ScalarValue::Int64(Some(sign))],
+            )
+            .unwrap();
+            assert!(duration_struct_parts(out.as_any().downcast_ref().unwrap(), 0).is_some());
+        }
+        for (factor, divide) in [(2.0, false), (2.0, true)] {
+            let out = invoke_test_udf(
+                &CypherDurationScale::new(),
+                vec![
+                    d1.clone(),
+                    ScalarValue::Float64(Some(factor)),
+                    ScalarValue::Boolean(Some(divide)),
+                ],
+            )
+            .unwrap();
+            assert!(duration_struct_parts(out.as_any().downcast_ref().unwrap(), 0).is_some());
+        }
+
+        let temporal_values = [
+            date_scalar(Some(20_000)),
+            ScalarValue::Time64Nanosecond(Some(10)),
+            time_scalar(Some((10, 3_600))),
+            localdatetime_scalar(Some((20_000, 10))),
+            datetime_scalar(Some((20_000, 10, 0, Some("UTC".into())))),
+        ];
+        for temporal in temporal_values {
+            for sign in [1, -1] {
+                let out = invoke_test_udf(
+                    &CypherTemporalArith::new(),
+                    vec![temporal.clone(), d1.clone(), ScalarValue::Int64(Some(sign))],
+                )
+                .unwrap();
+                assert_eq!(out.data_type(), &temporal.data_type());
+                assert!(!out.is_null(0));
+            }
+        }
+        assert!(
+            invoke_test_udf(
+                &CypherTemporalArith::new(),
+                vec![ScalarValue::Int64(Some(1)), d1, ScalarValue::Int64(Some(1))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not a temporal value")
+        );
+    }
+
+    #[test]
+    fn exact_zero_large_list_legacy_variant_order_and_percentile_branches() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, LargeListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+        use datafusion::arrow::datatypes::{Field, Fields};
+        use datafusion::logical_expr::Accumulator;
+
+        let large = |values: Vec<i64>, valid: bool| {
+            let len = i64::try_from(values.len()).unwrap();
+            ScalarValue::LargeList(Arc::new(LargeListArray::new(
+                Arc::new(Field::new("item", DataType::Int64, true)),
+                OffsetBuffer::new(ScalarBuffer::from(vec![0, len])),
+                Arc::new(Int64Array::from(values)) as ArrayRef,
+                Some(NullBuffer::from(vec![valid])),
+            )))
+        };
+        assert_eq!(
+            scalar_list_elements(&large(vec![1, 2], true)).unwrap(),
+            Some(vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2))
+            ])
+        );
+        assert_eq!(scalar_list_elements(&large(vec![], false)).unwrap(), None);
+
+        let size = invoke_test_udf(&CypherSize::new(), vec![large(vec![1, 2, 3], true)]).unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&size, 0).unwrap(),
+            ScalarValue::Int64(Some(3))
+        );
+        let null_size = invoke_test_udf(&CypherSize::new(), vec![large(vec![], false)]).unwrap();
+        assert!(null_size.is_null(0));
+
+        let reversed = invoke_test_udf(
+            &CypherReverse::new(),
+            vec![ScalarValue::LargeUtf8(Some("a😀b".into()))],
+        )
+        .unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&reversed, 0).unwrap(),
+            ScalarValue::LargeUtf8(Some("b😀a".into()))
+        );
+
+        let shorter: ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
+        let longer: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let different: ArrayRef = Arc::new(Int64Array::from(vec![1, 9]));
+        assert_eq!(
+            cypher_seq_order(&shorter, &longer),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cypher_seq_order(&different, &shorter),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            cypher_seq_order(&shorter, &shorter),
+            std::cmp::Ordering::Equal
+        );
+
+        let legacy = DataType::Struct(Fields::from(vec![
+            Field::new("__het_tag", DataType::Int8, false),
+            Field::new("__het_int", DataType::Int64, true),
+            Field::new("__het_float", DataType::Float64, true),
+            Field::new("__het_str", DataType::Utf8, true),
+            Field::new("__het_bool", DataType::Boolean, true),
+        ]));
+        let return_type = list_plus_return_type(&[
+            DataType::new_list(legacy, true),
+            DataType::new_list(DataType::Int64, true),
+        ]);
+        let DataType::List(item) = return_type else {
+            panic!("list return")
+        };
+        let DataType::Struct(variants) = item.data_type() else {
+            panic!("variant struct")
+        };
+        assert!(
+            variants
+                .iter()
+                .any(|field| field.data_type() == &DataType::Int64)
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|field| field.data_type() == &DataType::Utf8)
+        );
+
+        let mut percentile = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: Vec::new(),
+            percentile: None,
+        };
+        let values: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let bad_percentile: ArrayRef =
+            Arc::new(datafusion::arrow::array::StringArray::from(vec!["half"]));
+        assert!(
+            percentile
+                .update_batch(&[values, bad_percentile])
+                .unwrap_err()
+                .to_string()
+                .contains("must be numeric")
+        );
+    }
+
+    #[test]
+    fn exact_zero_temporal_udf_metadata_contracts_are_total() {
+        fn check<U: ScalarUDFImpl + 'static>(udf: U) {
+            assert!(udf.as_any().is::<U>());
+            assert!(!udf.name().is_empty());
+            let _ = udf.signature();
+            assert!(udf.return_type(&[DataType::Null]).is_ok());
+        }
+
+        check(CypherDurationBetween::new());
+        check(CypherTemporalArith::new());
+        check(CypherDurationParse::new());
+        check(CypherDurationAdd::new());
+        check(CypherDurationScale::new());
+        check(CypherDateProject::new());
+        check(CypherLocalTimeProject::new());
+        check(CypherLocalTimeTruncate::new());
+        check(CypherLocalDateTimeProject::new());
+        check(CypherLocalDateTimeTruncate::new());
+        check(CypherTimeProject::new());
+        check(CypherTimeTruncate::new());
+        check(CypherDateTimeProject::new());
+        check(CypherDateTimeTruncate::new());
+        check(CypherToString::new());
+        check(CypherDateTruncate::new());
+    }
+
+    #[test]
+    fn exact_zero_access_map_metadata_and_type_helpers() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let map = const_map_scalar(&[
+            ("k".into(), ScalarValue::Int64(Some(7))),
+            ("other".into(), ScalarValue::Int64(None)),
+        ])
+        .unwrap();
+        let accessed =
+            invoke_test_udf(&CypherStaticValueAccess::new("k".into()), vec![map.clone()]).unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&accessed, 0).unwrap(),
+            ScalarValue::Int64(Some(7))
+        );
+        let missing = invoke_test_udf(
+            &CypherStaticValueAccess::new("missing".into()),
+            vec![map.clone()],
+        )
+        .unwrap();
+        assert!(ScalarValue::try_from_array(&missing, 0).unwrap().is_null());
+
+        let keys = invoke_test_udf(&CypherMapKeys::new(), vec![map]).unwrap();
+        let ScalarValue::List(keys) = ScalarValue::try_from_array(&keys, 0).unwrap() else {
+            panic!("keys must return a list")
+        };
+        assert_eq!(keys.value(0).len(), 2);
+
+        let props = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Boolean(Some(true)),
+                ScalarValue::Utf8(Some("k".into())),
+                ScalarValue::Int64(Some(7)),
+            ],
+        )
+        .unwrap();
+        assert!(!props.is_null(0));
+        let absent = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Boolean(Some(false)),
+                ScalarValue::Utf8(Some("k".into())),
+                ScalarValue::Int64(Some(7)),
+            ],
+        )
+        .unwrap();
+        assert!(absent.is_null(0));
+
+        let null_access = invoke_test_udf(
+            &CypherValueAccess::new(),
+            vec![ScalarValue::Null, ScalarValue::Utf8(Some("k".into()))],
+        )
+        .unwrap();
+        assert!(
+            ScalarValue::try_from_array(&null_access, 0)
+                .unwrap()
+                .is_null()
+        );
+
+        for (value, expected) in [
+            (ScalarValue::Int8(Some(-1)), Some(-1)),
+            (ScalarValue::Int16(Some(-2)), Some(-2)),
+            (ScalarValue::Int32(Some(-3)), Some(-3)),
+            (ScalarValue::Int64(Some(-4)), Some(-4)),
+            (ScalarValue::UInt8(Some(1)), Some(1)),
+            (ScalarValue::UInt16(Some(2)), Some(2)),
+            (ScalarValue::UInt32(Some(3)), Some(3)),
+            (ScalarValue::UInt64(Some(4)), Some(4)),
+            (ScalarValue::Int64(None), None),
+        ] {
+            assert_eq!(scalar_list_index(&value).unwrap(), expected);
+        }
+        assert!(scalar_list_index(&ScalarValue::UInt64(Some(u64::MAX))).is_err());
+        assert!(scalar_list_index(&ScalarValue::Utf8(Some("0".into()))).is_err());
+
+        let nested_a = DataType::Struct(Fields::from(vec![
+            Field::new("value", DataType::Int64, false),
+            Field::new("items", DataType::new_list(DataType::Utf8, true), true),
+        ]));
+        let nested_b = DataType::Struct(Fields::from(vec![
+            Field::new("value", DataType::Int64, true),
+            Field::new("items", DataType::new_list(DataType::Utf8, true), false),
+        ]));
+        assert!(graph_value_types_compatible(&nested_a, &nested_b));
+        assert!(!graph_value_types_compatible(&nested_a, &DataType::Int64));
+        assert!(!graph_value_types_compatible(
+            &nested_a,
+            &DataType::Struct(Fields::from(vec![Field::new(
+                "other",
+                DataType::Int64,
+                true
+            )]))
+        ));
+
+        for (name, value) in [
+            ("date", "2020-01-02"),
+            ("localtime", "12:34:56"),
+            ("time", "12:34:56Z"),
+            ("localdatetime", "2020-01-02T12:34:56"),
+            ("datetime", "2020-01-02T12:34:56Z"),
+            ("duration", "P1D"),
+        ] {
+            assert!(render_temporal(name, value).is_some());
+        }
+        assert_eq!(render_temporal("unknown", "P1D"), None);
+    }
+
+    #[test]
+    fn exact_zero_dynamic_heterogeneous_list_builds_row_aligned_variants() {
+        use datafusion::arrow::array::{Array, ListArray, StructArray};
+
+        let output = invoke_test_udf(
+            &CypherDynamicHetList::new(),
+            vec![
+                ScalarValue::Int64(Some(7)),
+                ScalarValue::Utf8(Some("seven".into())),
+                ScalarValue::Boolean(None),
+            ],
+        )
+        .unwrap();
+        let lists = output.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists.value_length(0), 3);
+        let values = lists.value(0);
+        let variants = values.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(variants.len(), 3);
+        assert!(!variants.is_null(0));
+        assert!(!variants.is_null(1));
+        assert!(variants.is_null(2));
+    }
+
+    #[test]
+    fn exact_zero_list_plus_handles_each_operand_shape_and_null_propagation() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, ListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+
+        let list = |values: &[i64]| {
+            ScalarValue::List(ScalarValue::new_list(
+                &values
+                    .iter()
+                    .copied()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>(),
+                &DataType::Int64,
+                true,
+            ))
+        };
+        for (left, right, expected) in [
+            (list(&[1, 2]), list(&[3, 4]), vec![1, 2, 3, 4]),
+            (list(&[1, 2]), ScalarValue::Int64(Some(3)), vec![1, 2, 3]),
+            (ScalarValue::Int64(Some(1)), list(&[2, 3]), vec![1, 2, 3]),
+        ] {
+            let output = invoke_test_udf(&CypherListPlus::new(), vec![left, right]).unwrap();
+            let lists = output.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = lists.value(0);
+            assert_eq!(
+                (0..values.len())
+                    .map(|row| { unwrap_het(ScalarValue::try_from_array(&values, row).unwrap()) })
+                    .collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let null_list = ScalarValue::List(Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Int64, true)),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 0])),
+            Arc::new(Int64Array::from(Vec::<i64>::new())) as ArrayRef,
+            Some(NullBuffer::from(vec![false])),
+        )));
+        let output = invoke_test_udf(
+            &CypherListPlus::new(),
+            vec![null_list, ScalarValue::Int64(Some(1))],
+        )
+        .unwrap();
+        assert!(output.is_null(0));
+
+        assert!(
+            invoke_test_udf(
+                &CypherListPlus::new(),
+                vec![ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("at least one list operand")
+        );
+    }
+
+    #[test]
+    fn exact_zero_total_order_keys_distinguish_core_cypher_value_domains() {
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))],
+            &DataType::Int64,
+            true,
+        ));
+        let values = [
+            ScalarValue::Null,
+            list,
+            ScalarValue::Utf8(Some("text".into())),
+            ScalarValue::Boolean(Some(true)),
+            ScalarValue::Int64(Some(-2)),
+            ScalarValue::Float64(Some(2.5)),
+            ScalarValue::Float64(Some(f64::NAN)),
+        ];
+        let keys = values.iter().map(cypher_order_key).collect::<Vec<_>>();
+        assert!(keys[0].starts_with("99:null"));
+        assert!(keys[1].starts_with("40:list"));
+        assert!(keys[2].starts_with("60:str"));
+        assert!(keys[3].starts_with("70:bool"));
+        assert!(keys[4].starts_with("80:num"));
+        assert!(keys[5].starts_with("80:num"));
+        assert!(keys[6].starts_with("90:nan"));
+        assert_eq!(
+            cypher_order(
+                &ScalarValue::Utf8(Some("a".into())),
+                &ScalarValue::Boolean(Some(false))
+            ),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn exact_zero_dynamic_list_access_supports_negative_null_and_missing_indexes() {
+        let values = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Utf8(Some("first".into())),
+                ScalarValue::Utf8(Some("second".into())),
+            ],
+            &DataType::Utf8,
+            true,
+        ));
+        for (index, expected) in [
+            (ScalarValue::Int64(Some(0)), Some("first")),
+            (ScalarValue::Int64(Some(-1)), Some("second")),
+            (ScalarValue::Int64(Some(9)), None),
+            (ScalarValue::Int64(Some(-9)), None),
+            (ScalarValue::Int64(None), None),
+        ] {
+            let output =
+                invoke_test_udf(&CypherValueAccess::new(), vec![values.clone(), index]).unwrap();
+            assert_eq!(
+                ScalarValue::try_from_array(&output, 0).unwrap(),
+                ScalarValue::Utf8(expected.map(str::to_owned))
+            );
+        }
+        assert!(
+            invoke_test_udf(
+                &CypherValueAccess::new(),
+                vec![values, ScalarValue::Utf8(Some("not-an-index".into())),],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("index must be an integer")
+        );
+    }
+
+    #[test]
+    fn exact_zero_udf_return_shape_guards_report_contract_errors() {
+        let too_wide = (0..128)
+            .map(|value| ScalarValue::Int64(Some(value)))
+            .collect::<Vec<_>>();
+        assert!(
+            invoke_test_udf(&CypherDynamicHetList::new(), too_wide)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 127 elements")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherDynamicHetList::new(),
+                vec![ScalarValue::Int64(Some(1))],
+                DataType::Int64,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("non-list return type")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherDynamicHetList::new(),
+                vec![ScalarValue::Int64(Some(1))],
+                DataType::new_list(DataType::Int64, true),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("non-struct element type")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherListPlus::new(),
+                vec![
+                    ScalarValue::List(ScalarValue::new_list(
+                        &[ScalarValue::Int64(Some(1))],
+                        &DataType::Int64,
+                        true,
+                    )),
+                    ScalarValue::Int64(Some(2)),
+                ],
+                DataType::Int64,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("return type is not a list")
+        );
+    }
+
+    #[test]
+    fn exact_zero_tagged_append_rejects_incompatible_arrow_shapes() {
+        use datafusion::arrow::array::{ArrayRef, Int64Array};
+
+        let scalar: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        assert!(
+            invoke_tagged_list_element_plus(&scalar, &scalar, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        assert!(
+            invoke_tagged_list_element_plus(&list, &scalar, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+
+        let map = const_map_scalar(&[("value".into(), ScalarValue::Int64(Some(1)))])
+            .unwrap()
+            .to_array_of_size(1)
+            .unwrap();
+        assert!(
+            invoke_tagged_list_element_plus(&list, &map, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            invoke_tagged_list_element_plus(
+                &list,
+                &map,
+                &DataType::new_list(map.data_type().clone(), true),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_zero_heterogeneous_depth_and_builder_type_matrix_is_total() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let primitives = [
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+        ];
+        for data_type in primitives {
+            assert_eq!(het_depth_for_data_type(&data_type), Some(0));
+        }
+        assert_eq!(
+            het_depth_for_data_type(&DataType::new_list(
+                DataType::new_list(DataType::Int64, true),
+                true,
+            )),
+            Some(2)
+        );
+        assert_eq!(het_depth_for_data_type(&DataType::Binary), None);
+
+        let map_type = DataType::Struct(Fields::from(vec![Field::new(
+            "value",
+            DataType::new_list(DataType::Int64, true),
+            true,
+        )]));
+        assert_eq!(het_depth_for_data_type(&map_type), Some(2));
+        assert!(build_het_struct(&[ScalarValue::Binary(Some(vec![1]))], 0).is_none());
+
+        let nested_list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ));
+        assert!(build_het_struct(std::slice::from_ref(&nested_list), 0).is_none());
+        assert!(build_het_struct(&[const_map_scalar(&[]).unwrap()], 0).is_none());
+        let built = build_het_struct(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Float64(Some(2.0)),
+                ScalarValue::LargeUtf8(Some("three".into())),
+                ScalarValue::Boolean(Some(true)),
+                nested_list,
+                const_map_scalar(&[("k".into(), ScalarValue::Int64(Some(4)))]).unwrap(),
+                ScalarValue::Null,
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(built.len(), 7);
+        assert!(built.is_null(6));
+    }
+
+    #[test]
+    fn exact_zero_map_union_rejects_non_maps_and_conflicting_key_types() {
+        assert!(all_map_union_list(&[ScalarValue::Int64(Some(1))]).is_none());
+        let int_map = const_map_scalar(&[("key".into(), ScalarValue::Int64(Some(1)))]).unwrap();
+        let text_map =
+            const_map_scalar(&[("key".into(), ScalarValue::Utf8(Some("one".into())))]).unwrap();
+        assert!(all_map_union_list(&[int_map, text_map]).is_none());
+
+        let left = const_map_scalar(&[("left".into(), ScalarValue::Int64(Some(1)))]).unwrap();
+        let right =
+            const_map_scalar(&[("right".into(), ScalarValue::Utf8(Some("r".into())))]).unwrap();
+        let union = all_map_union_list(&[left, ScalarValue::Null, right]).unwrap();
+        let DfExpr::Literal(ScalarValue::List(values), None) = union else {
+            panic!("map union must const-fold to a list")
+        };
+        assert_eq!(values.value(0).len(), 3);
+        assert!(values.value(0).is_null(1));
+    }
+
+    #[test]
+    fn exact_zero_map_and_subscript_error_guards_are_precise() {
+        let null_keys = invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Null]).unwrap();
+        assert!(null_keys.is_null(0));
+        assert!(
+            invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Int64(Some(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("keys() requires a map")
+        );
+        assert!(
+            invoke_test_udf(
+                &CypherStaticValueAccess::new("key".into()),
+                vec![ScalarValue::Int64(Some(1))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("property access requires a map")
+        );
+        assert!(
+            invoke_test_udf(
+                &CypherValueAccess::new(),
+                vec![ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(0)),],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires a list or map")
+        );
+
+        let map = const_map_scalar(&[("key".into(), ScalarValue::Int64(Some(7)))]).unwrap();
+        let mismatch = invoke_test_udf_with_return_type(
+            &CypherStaticValueAccess::new("key".into()),
+            vec![map],
+            DataType::Utf8,
+        )
+        .unwrap_err();
+        assert!(mismatch.to_string().contains("incompatible runtime type"));
+
+        assert_eq!(value_access_return_type(None).unwrap(), DataType::Null);
+        assert_eq!(
+            value_access_return_type(Some(&DataType::Null)).unwrap(),
+            DataType::Null
+        );
+        assert_eq!(
+            value_access_return_type(Some(&DataType::new_list(DataType::Int64, true))).unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            static_value_access_return_type(None, "key").unwrap(),
+            DataType::Null
+        );
+    }
+
+    #[test]
+    fn exact_zero_heterogeneous_promotion_preserves_struct_and_list_validity() {
+        use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray};
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let source_map = const_map_scalar(&[("present".into(), ScalarValue::Int64(Some(7)))])
+            .unwrap()
+            .to_array_of_size(1)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &source_map,
+            &promote_het_array(&source_map, source_map.data_type()).unwrap()
+        ));
+        let target = DataType::Struct(Fields::from(vec![
+            Field::new("present", DataType::Float64, true),
+            Field::new("missing", DataType::Utf8, true),
+        ]));
+        let promoted = promote_het_array(&source_map, &target).unwrap();
+        let promoted = promoted.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(promoted.num_columns(), 2);
+        assert_eq!(
+            promoted
+                .column_by_name("present")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            7.0
+        );
+        assert!(promoted.column_by_name("missing").unwrap().is_null(0));
+
+        let source_list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1)), ScalarValue::Int64(None)],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        let target_list = DataType::new_list(DataType::Float64, true);
+        let promoted = promote_het_array(&source_list, &target_list).unwrap();
+        let promoted = promoted.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(promoted.value_length(0), 2);
+        assert!(promoted.value(0).is_null(1));
+    }
+
+    #[test]
+    fn exact_zero_uncorrelated_list_comprehension_preserves_null_and_empty_rows() {
+        use datafusion::arrow::array::{Array, Int64Builder, ListArray, ListBuilder};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let mut builder = ListBuilder::new(Int64Builder::new());
+        builder.append_null();
+        builder.append(true);
+        builder.values().append_value(1);
+        builder.values().append_value(2);
+        builder.append(true);
+        let input = Arc::new(builder.finish()) as datafusion::arrow::array::ArrayRef;
+        let udf = CypherListComp::new(None, None, "__gf_elem".into(), vec![]);
+        let return_type = udf.return_type(&[input.data_type().clone()]).unwrap();
+        let output = udf
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(input)],
+                arg_fields: vec![Arc::new(Field::new(
+                    "list",
+                    DataType::new_list(DataType::Int64, true),
+                    true,
+                ))],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+            .unwrap()
+            .into_array(3)
+            .unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().unwrap();
+        assert!(output.is_null(0));
+        assert_eq!(output.value_length(1), 0);
+        assert_eq!(output.value_length(2), 2);
     }
 }

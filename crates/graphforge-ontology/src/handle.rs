@@ -504,7 +504,8 @@ mod tests {
     use super::*;
     use crate::compiler::OntologyCompiler;
     use crate::ontology::{
-        EntityTypeDef, OntologyDoc, PropertyDef, PropertyValueType, RelationTypeDef, SemanticFlags,
+        EntityTypeDef, MigrationDef, OntologyDoc, PropertyDef, PropertyValueType, RelationTypeDef,
+        SemanticFlags,
     };
 
     fn sample_doc() -> OntologyDoc {
@@ -713,5 +714,35 @@ mod tests {
         let managed_by = h.relation_type_id("MANAGED_BY").unwrap();
         let flags = h.semantic_flags(managed_by);
         assert!(!flags.transitive, "MANAGED_BY should not be transitive");
+    }
+
+    #[test]
+    fn handle_migration_enforces_source_version_and_reopens_transformed_runtime() {
+        let mut doc = sample_doc();
+        doc.migrations = vec![MigrationDef {
+            from_version: "1.0".into(),
+            to_version: "2.0".into(),
+            transform_kind: "rename_type:Person->Human".into(),
+            script_ref: None,
+            checksum: None,
+        }];
+        let original = OntologyHandle::new(OntologyCompiler::compile(&doc).unwrap());
+        let migrated = original.migrate_to("2.0", doc.clone()).unwrap();
+        assert_eq!(migrated.version(), "2.0");
+        assert_eq!(migrated.entity_type_id("Person"), None);
+        let human = migrated.entity_type_id("Human").unwrap();
+        assert!(migrated.property_type_id(human, "name").is_some());
+
+        let mut wrong = doc.clone();
+        wrong.version = "0.9".into();
+        assert!(matches!(
+            original.migrate_to("2.0", wrong),
+            Err(crate::error::OntologyError::NoMigrationPath { .. })
+        ));
+        assert!(matches!(
+            original.migrate_to("3.0", doc),
+            Err(crate::error::OntologyError::NoMigrationPath { .. })
+        ));
+        assert_eq!(original.version(), "1.0");
     }
 }

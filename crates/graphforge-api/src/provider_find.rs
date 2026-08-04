@@ -690,6 +690,109 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn provider_find_error_preserves_display_source_and_conversion_domains() {
+        let api = ProviderFindError::from(GfError::Validation("bad query".into()));
+        assert_eq!(api.to_string(), "validation error: bad query");
+        assert!(api.source().is_some());
+        assert_eq!(GfError::from(api).code(), "GF_VALIDATION");
+
+        let artifact = ProviderFindError::from(SearchArtifactError::Cancelled);
+        assert_eq!(artifact.to_string(), "search operation cancelled");
+        assert!(artifact.source().is_some());
+        assert_eq!(GfError::from(artifact).code(), "GF_EXECUTION");
+
+        let provider = ProviderFindError::from(ProviderError::new(
+            &contract("error-model"),
+            graphforge_search::ProviderFailureClass::Timeout,
+        ));
+        assert!(provider.to_string().contains("error-model"));
+        assert!(provider.source().is_some());
+        assert_eq!(GfError::from(provider).code(), "GF_EXECUTION");
+    }
+
+    #[test]
+    fn provider_failure_mapping_is_closed_and_payload_free() {
+        let expected = [
+            (ProviderFailureClass::InvalidRequest, "invalid_request"),
+            (
+                ProviderFailureClass::UnsupportedCapability,
+                "unsupported_capability",
+            ),
+            (ProviderFailureClass::Cancelled, "cancelled"),
+            (ProviderFailureClass::Authentication, "authentication"),
+            (
+                ProviderFailureClass::ResourceExhausted,
+                "resource_exhausted",
+            ),
+            (ProviderFailureClass::Timeout, "timeout"),
+            (ProviderFailureClass::Transport, "transport"),
+            (
+                ProviderFailureClass::MalformedResponse,
+                "malformed_response",
+            ),
+            (ProviderFailureClass::ProviderRejected, "provider_rejected"),
+        ];
+        let contract = contract("safe-model");
+        for (failure, class) in expected {
+            let mapped = provider_gf_error(&ProviderError::new(&contract, failure));
+            assert!(matches!(
+                mapped,
+                GfError::Provider {
+                    class: ref actual,
+                    provider: ref actual_provider,
+                    model: ref actual_model,
+                } if actual == class
+                    && actual_provider == "openrouter"
+                    && actual_model == "safe-model"
+            ));
+        }
+    }
+
+    #[test]
+    fn provider_find_options_reject_each_ambiguous_or_unbounded_shape() {
+        let mut cases = Vec::new();
+        let mut missing_label = options();
+        missing_label.label = None;
+        cases.push(missing_label);
+        let mut missing_space = options();
+        missing_space.space = None;
+        cases.push(missing_space);
+        let mut vector = options();
+        vector.vector = Some(vec![1.0, 0.0]);
+        cases.push(vector);
+        let mut similar = options();
+        similar.similar_to = Some(NodeSelector::Uuid(uuid::Uuid::nil()));
+        cases.push(similar);
+        let mut missing_query = options();
+        missing_query.semantic_query = None;
+        cases.push(missing_query);
+        let mut empty_query = options();
+        empty_query.semantic_query = Some(String::new());
+        cases.push(empty_query);
+        let mut zero_limit = options();
+        zero_limit.limit = 0;
+        cases.push(zero_limit);
+        let mut excessive_limit = options();
+        excessive_limit.limit = 10_001;
+        cases.push(excessive_limit);
+
+        for invalid in cases {
+            assert!(matches!(
+                validate_options(&invalid),
+                Err(ProviderFindError::Api(GfError::Validation(_)))
+            ));
+        }
+        let valid = options();
+        validate_options(&valid).unwrap();
+        let shape = ProviderQueryWorkShape {
+            input_bytes: 11,
+            input_tokens: 3,
+        };
+        assert_eq!(shape.input_bytes(), 11);
+        assert_eq!(shape.input_tokens(), 3);
+    }
+
     fn provider(model: &str, query_vector: Vec<f32>) -> FakeProvider {
         FakeProvider {
             contract: contract(model),

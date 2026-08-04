@@ -24,7 +24,7 @@ def load_module():
 
 
 mod = load_module()
-assert mod.VERSION == "0.5.1"
+assert mod.VERSION == "0.5.2"
 v = mod.VERSION
 
 assert mod.normalize_registry_token("  abc\n") == "abc"
@@ -98,7 +98,7 @@ finally:
     os.environ.update(original_environ)
 
 RATE_BODY = (
-    "error: failed to publish graphforge-plan v0.5.1 to registry at https://crates.io\n"
+    f"error: failed to publish graphforge-plan v{v} to registry at https://crates.io\n"
     "Caused by:\n"
     "  the remote server responded with an error (status 429 Too Many Requests): "
     "You have published too many new crates in a short period of time. "

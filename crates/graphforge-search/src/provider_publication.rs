@@ -514,6 +514,29 @@ mod tests {
     }
 
     #[test]
+    fn typed_publication_errors_and_request_accessors_preserve_their_domains() {
+        let contract = contract("typed-errors");
+        let descriptor = descriptor(&contract, 2, EmbeddingNormalization::L2);
+        let request = request(&descriptor, &contract);
+        assert_eq!(request.descriptor(), &descriptor);
+        assert_eq!(request.contract(), &contract);
+        assert_eq!(request.options(), options());
+
+        let provider = ProviderError::new(&contract, ProviderFailureClass::Timeout);
+        let provider_text = provider.to_string();
+        let wrapped = ProviderPublicationError::from(provider);
+        assert_eq!(wrapped.to_string(), provider_text);
+        assert!(wrapped.source().is_some());
+
+        let artifact = ProviderPublicationError::from(SearchArtifactError::ConcurrentMutation);
+        assert_eq!(
+            artifact.to_string(),
+            "graph changed during both search publication attempts"
+        );
+        assert!(artifact.source().is_some());
+    }
+
+    #[test]
     fn complete_provider_batches_publish_atomically_without_source_text() {
         let dir = tempfile::tempdir().unwrap();
         let contract = contract("vendor/model");

@@ -46,8 +46,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
+      - name: Classify Repository Policy suites
+        id: policy-suites
+        shell: bash
+        run: |
+          scripts/ci/classify-policy-suites.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
       - name: Test changed-path classifier
         run: scripts/ci/test-classify-changes.sh
+
+      - name: Test Repository Policy suite classifier
+        run: scripts/ci/test-classify-policy-suites.sh
 
       - name: Test text checkout byte policy
         run: python3 scripts/ci/test-text-checkout-policy.py
@@ -56,81 +67,108 @@ jobs:
         run: scripts/ci/test-require-gates.sh
 
       - name: Test M20 contract ledger
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-m20-contract-gate.py
 
       - name: Test M21 contract ledger
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-m21-contract-gate.py
 
       - name: Test checkpoint recovery ledger
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-checkpoint-recovery-gate.py
 
       - name: Test concurrency and recovery ledger
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-concurrency-recovery-gate.py
 
       - name: Test concurrency short matrix gate
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: |
           python3 scripts/ci/concurrency-short-gate.py validate
           python3 scripts/ci/test-concurrency-short-gate.py
 
       - name: Test concurrency stress gate config
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: |
           python3 scripts/ci/concurrency-stress-gate.py validate
           python3 scripts/ci/test-concurrency-stress-gate.py
 
       - name: Test Rust non-Cypher surface inventory
+        if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-non-cypher-surface-gate.py
 
       - name: Test Rust coverage ledger failure modes
+        if: steps.policy-suites.outputs.coverage_ledger == 'true'
         run: python3 scripts/ci/test-rust-coverage-ledger.py
 
       - name: Test Python and Node non-Cypher parity policy
+        if: steps.policy-suites.outputs.binding_parity == 'true'
         run: python3 scripts/ci/check-binding-parity-policy.py
 
       - name: Validate fail-closed public API BDD policy
+        if: steps.policy-suites.outputs.api_bdd == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/ci/api-bdd-policy.py --check-issues
           python3 scripts/ci/test-api-bdd-policy.py
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
+        if: >-
+          steps.policy-suites.outputs.release == 'true' ||
+          steps.policy-suites.outputs.cli_publish == 'true'
         with:
           node-version: "20"
 
       - uses: pnpm/action-setup@v4
+        if: >-
+          steps.policy-suites.outputs.release == 'true' ||
+          steps.policy-suites.outputs.cli_publish == 'true'
 
       - name: Install pinned napi CLI
+        if: >-
+          steps.policy-suites.outputs.release == 'true' ||
+          steps.policy-suites.outputs.cli_publish == 'true'
         run: pnpm install --frozen-lockfile --filter @curatelabs/graphforge...
 
       - name: Test binding release-candidate evidence validator
+        if: steps.policy-suites.outputs.release == 'true'
         run: python3 scripts/ci/test-binding-release-candidate.py
 
       - name: Test standardized release load matrix
+        if: steps.policy-suites.outputs.release == 'true'
         run: |
           python3 scripts/ci/test-release-load-matrix.py
           python3 scripts/ci/test-release-load-executor.py
 
       - name: Test final M1 release certification gate
+        if: steps.policy-suites.outputs.release == 'true'
         run: python3 scripts/ci/test-m1-release-certification.py
 
       - name: Test clean-environment verification harness
+        if: steps.policy-suites.outputs.clean_env == 'true'
         run: python3 scripts/ci/test-clean-env-verify.py
 
       - name: Test GraphForge CLI publication contract
+        if: steps.policy-suites.outputs.cli_publish == 'true'
         run: python3 scripts/ci/test-publish-cli-contract.py
 
       - name: Enforce domain dependency directions
+        if: steps.policy-suites.outputs.domain_dependencies == 'true'
         run: |
           scripts/ci/check-domain-dependencies.py
           scripts/ci/test-domain-dependencies.py
 
       - name: Test crates.io publish plan helper
+        if: steps.policy-suites.outputs.crate_publish == 'true'
         run: |
           python3 scripts/ci/test-crate-publish-plan.py
           python3 scripts/ci/test-crate-authorize-refresh-nodes.py
           python3 scripts/ci/test-publish-crates.py
 
       - name: Test release publication preflight
+        if: steps.policy-suites.outputs.release == 'true'
         run: |
           python3 scripts/ci/test-release-publish-preflight.py
           python3 scripts/ci/test-release-candidate.py
@@ -139,6 +177,7 @@ jobs:
           python3 scripts/ci/test-amend-npm-main-artifact.py
 
       - name: Test CI storage policy
+        if: steps.policy-suites.outputs.storage == 'true'
         run: python3 scripts/ci/test-ci-storage-policy.py
 
       - name: Validate GitHub Actions workflows
@@ -189,7 +228,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -223,7 +262,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -263,7 +302,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -288,7 +327,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -307,7 +346,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -337,7 +376,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: "1.25.x"
           cache-dependency-path: iac/terraform/provider/go.sum
@@ -441,7 +480,9 @@ jobs:
     name: Python Binding
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.bindings == 'true'
+    if: >-
+      needs.changes.outputs.bindings == 'true' ||
+      needs.changes.outputs.rust == 'true'
     timeout-minutes: 30
     steps:
       - name: Checkout code
@@ -453,7 +494,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -461,7 +502,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node for cross-package publication tests
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -520,12 +561,26 @@ jobs:
           uv sync --all-extras
           uv pip install dist/*.whl
 
-      - name: Run Python unit, integration, and BDD tests
+      - name: Restore SNAP ego-Facebook fixture
+        id: snap-fixture
+        uses: actions/cache@v6
+        with:
+          path: ~/.graphforge/datasets/snap-ego-facebook.txt.gz
+          key: ${{ runner.os }}-snap-ego-facebook-v1
+
+      - name: Download SNAP ego-Facebook fixture
+        if: steps.snap-fixture.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p ~/.graphforge/datasets
-          curl -L -o ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
+          curl --fail --location \
+            --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
             https://snap.stanford.edu/data/facebook_combined.txt.gz
+
+      - name: Run Python unit, integration, and BDD tests
+        shell: bash
+        run: |
+          test -s ~/.graphforge/datasets/snap-ego-facebook.txt.gz
           uv run --no-sync pytest tests/unit tests/integration tests/features \
             -n auto --tb=short
 
@@ -566,11 +621,21 @@ jobs:
             --case check_m20_m21_native_projection \
             --output dist/python-binding-parity-evidence.json
 
+      - name: Upload same-SHA wheel for concurrency matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-python-wheel-${{ github.sha }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
   node-binding:
     name: Node Binding
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.bindings == 'true'
+    if: >-
+      needs.changes.outputs.bindings == 'true' ||
+      needs.changes.outputs.rust == 'true'
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
@@ -583,7 +648,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -653,13 +718,27 @@ jobs:
             --case "a future project format fails structurally without mutating the project" \
             --output crates/graphforge-bindings-node/node-binding-parity-evidence.json
 
+      - name: Upload same-SHA addon for concurrency matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-node-addon-${{ github.sha }}
+          path: |
+            crates/graphforge-bindings-node/*.node
+            crates/graphforge-bindings-node/index.js
+            crates/graphforge-bindings-node/index.d.ts
+          if-no-files-found: error
+          retention-days: 1
+
   concurrency-matrix:
     name: Concurrency Matrix
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: changes
+    needs: [changes, python-binding, node-binding]
     if: >-
-      needs.changes.outputs.rust == 'true' ||
-      needs.changes.outputs.bindings == 'true'
+      always() &&
+      (needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.bindings == 'true') &&
+      needs.python-binding.result == 'success' &&
+      needs.node-binding.result == 'success'
     timeout-minutes: 25
     env:
       CARGO_INCREMENTAL: 0
@@ -680,7 +759,7 @@ jobs:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
@@ -688,7 +767,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -708,17 +787,28 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
-      - name: Build Python wheel and Node addon
+      - name: Download same-SHA Python wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: pr-python-wheel-${{ github.sha }}
+          path: dist
+
+      - name: Download same-SHA Node addon
+        uses: actions/download-artifact@v8
+        with:
+          name: pr-node-addon-${{ github.sha }}
+          path: crates/graphforge-bindings-node
+
+      - name: Install shared native artifacts
         shell: bash
         run: |
-          uvx maturin build \
-            --manifest-path crates/graphforge-bindings-py/Cargo.toml \
-            --profile dev \
-            --out dist
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          addons=(crates/graphforge-bindings-node/*.node)
+          test "${#addons[@]}" -eq 1
           uv venv /tmp/gf-concurrency --python 3.13
-          uv pip install --python /tmp/gf-concurrency/bin/python dist/*.whl
+          uv pip install --python /tmp/gf-concurrency/bin/python "${wheels[0]}"
           pnpm install --frozen-lockfile
-          pnpm --filter @curatelabs/graphforge exec napi build --platform
 
       - name: Run required short concurrency matrix
         shell: bash

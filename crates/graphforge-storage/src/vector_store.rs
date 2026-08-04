@@ -1225,4 +1225,262 @@ mod tests {
         );
         assert!(matches!(result, Err(SearchArtifactError::Cancelled)));
     }
+
+    #[test]
+    fn every_vector_row_search_and_persistence_limit_is_named_and_atomic() {
+        let base = VectorStoreLimits::default();
+        let rows = vec![row(1, &[1.0, 0.0], 1), row(2, &[0.0, 1.0], 2)];
+        let eligible = BTreeSet::from([uuid(1), uuid(2)]);
+
+        for (limits, resource) in [
+            (
+                VectorStoreLimits {
+                    stored_vectors: 1,
+                    ..base
+                },
+                "stored_vectors",
+            ),
+            (
+                VectorStoreLimits {
+                    vector_cells: 3,
+                    ..base
+                },
+                "vector_cells",
+            ),
+        ] {
+            assert!(matches!(
+                validate_rows(&rows, Some(2), limits, Path::new("<memory>")),
+                Err(SearchArtifactError::ResourceExhausted { resource: actual, .. }) if actual == resource
+            ));
+        }
+        assert!(matches!(
+            exact_cosine_search(&rows, &[1.0, 0.0], &eligible, 0, base, || Ok(())),
+            Err(SearchArtifactError::InvalidSelector { field: "limit", .. })
+        ));
+        assert!(matches!(
+            exact_cosine_search(
+                &rows,
+                &[1.0, 0.0],
+                &eligible,
+                2,
+                VectorStoreLimits {
+                    eligible_nodes: 1,
+                    ..base
+                },
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "eligible_nodes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            exact_cosine_search(
+                &rows,
+                &[1.0, 0.0],
+                &eligible,
+                2,
+                VectorStoreLimits { results: 1, ..base },
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "search_results",
+                ..
+            })
+        ));
+
+        let mut at_limit = vec![row(1, &[1.0], 1)];
+        let before = at_limit.clone();
+        assert!(matches!(
+            apply_vector_upsert(
+                &mut at_limit,
+                uuid(2),
+                &[1.0],
+                2,
+                VectorStoreLimits {
+                    stored_vectors: 1,
+                    ..base
+                }
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "stored_vectors",
+                ..
+            })
+        ));
+        assert_eq!(at_limit, before);
+    }
+
+    #[test]
+    fn vector_row_validation_rejects_dimension_order_duplicate_and_zero_norm() {
+        let limits = VectorStoreLimits::default();
+        for (rows, fragment) in [
+            (vec![row(1, &[1.0, 0.0], 1), row(2, &[1.0], 2)], "dimension"),
+            (vec![row(2, &[1.0], 1), row(1, &[1.0], 2)], "not sorted"),
+            (
+                vec![row(1, &[1.0], 1), row(1, &[1.0], 2)],
+                "duplicate node_uuid",
+            ),
+            (vec![row(1, &[0.0], 1)], "zero"),
+        ] {
+            let error = validate_rows(&rows, None, limits, Path::new("fixture")).unwrap_err();
+            assert!(error.to_string().contains(fragment), "{error}");
+        }
+        assert!(validate_rows(&[], None, limits, Path::new("fixture")).is_ok());
+        assert!(matches!(
+            vector_schema(0, limits),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "vector",
+                ..
+            })
+        ));
+        assert!(matches!(
+            vector_schema(
+                2,
+                VectorStoreLimits {
+                    dimensions: 1,
+                    ..limits
+                }
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_dimensions",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn snapshot_read_write_failures_preserve_structured_error_kinds() {
+        let missing = TempDir::new().unwrap();
+        assert!(matches!(
+            read_vector_snapshot(missing.path(), 1, VectorStoreLimits::default(), || Ok(())),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+
+        let cancelled_write = TempDir::new().unwrap();
+        assert!(matches!(
+            write_vector_snapshot(
+                cancelled_write.path(),
+                &[row(1, &[1.0], 1)],
+                1,
+                VectorStoreLimits::default(),
+                || Err(SearchArtifactError::Cancelled)
+            ),
+            Err(SearchArtifactError::Cancelled)
+        ));
+        assert!(!cancelled_write.path().join(VECTOR_DATA_FILE).exists());
+
+        let dir = TempDir::new().unwrap();
+        write_vector_snapshot(
+            dir.path(),
+            &[row(1, &[1.0], 1)],
+            1,
+            VectorStoreLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_vector_snapshot(
+                dir.path(),
+                1,
+                VectorStoreLimits {
+                    parquet_bytes: 1,
+                    ..VectorStoreLimits::default()
+                },
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_parquet_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn wave10_private_vector_error_contracts_are_structured() {
+        let limits = VectorStoreLimits::default();
+        assert!(matches!(
+            dot_and_norm(&[1.0], &[0.0]),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            validate_rows(
+                &[row(1, &[1.0, 0.0], 1), row(2, &[1.0], 2)],
+                Some(2),
+                limits,
+                Path::new("fixture")
+            ),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            checked_cells(
+                2,
+                2,
+                VectorStoreLimits {
+                    vector_cells: 3,
+                    ..limits
+                }
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_cells",
+                ..
+            })
+        ));
+        assert!(matches!(build("failed"), SearchArtifactError::Build(_)));
+        assert!(matches!(
+            io(
+                "read",
+                Path::new("fixture"),
+                std::io::Error::other("failed")
+            ),
+            SearchArtifactError::Io { .. }
+        ));
+    }
+
+    #[test]
+    fn wave12_snapshot_reader_rejects_schema_row_and_query_dimension_mismatches() {
+        let dir = TempDir::new().unwrap();
+        let limits = VectorStoreLimits::default();
+        write_vector_snapshot(dir.path(), &[row(1, &[1.0, 0.0], 1)], 2, limits, || Ok(())).unwrap();
+
+        assert!(matches!(
+            read_vector_snapshot(dir.path(), 1, limits, || Ok(())),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            read_vector_snapshot(
+                dir.path(),
+                2,
+                VectorStoreLimits {
+                    stored_vectors: 0,
+                    ..limits
+                },
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "stored_vectors",
+                ..
+            })
+        ));
+
+        let key = SearchArtifactKey::vector("Person", "semantic").unwrap();
+        let artifact = PublishedSearchArtifact {
+            path: dir.path().to_path_buf(),
+            manifest: SearchManifest::for_key(
+                &key,
+                VECTOR_BACKEND_VERSION,
+                VECTOR_CONTRACT_VERSION,
+                Some(2),
+                &source_snapshot().unwrap(),
+                true,
+            )
+            .unwrap(),
+        };
+        assert!(matches!(
+            search_published_vectors(&artifact, &[1.0], &BTreeSet::new(), 1, limits, || Ok(())),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "vector",
+                ..
+            })
+        ));
+    }
 }

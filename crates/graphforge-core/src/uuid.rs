@@ -90,6 +90,15 @@ mod tests {
     }
 
     #[test]
+    fn v5_is_namespace_and_name_deterministic() {
+        let namespace = Uuid::from_bytes([7; 16]);
+        let first = new_v5(&namespace, b"graphforge");
+        assert_eq!(first, new_v5(&namespace, b"graphforge"));
+        assert_ne!(first, new_v5(&namespace, b"GraphForge"));
+        assert_eq!(first.get_version_num(), 5);
+    }
+
+    #[test]
     fn string_matches_rfc_format() {
         let s = to_string(&new_v7());
         // 8-4-4-4-12 hyphenated form, 36 chars total.

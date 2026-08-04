@@ -585,4 +585,115 @@ mod tests {
             .unwrap();
         assert_eq!(versions.value(0), "v3");
     }
+
+    #[test]
+    fn transform_parser_and_apply_cover_every_closed_operation_and_unknown_noop() {
+        let definitions = vec![
+            make_def("v1", "v2", "rename_type:Person->Human"),
+            make_def("v2", "v3", "rename_property:Human|name->display_name"),
+            make_def("v3", "v4", "add_property:Human|age|int64|false"),
+            make_def("v4", "v5", "remove_property:Human|display_name"),
+            make_def("v5", "v6", "add_type:Company"),
+            make_def("v6", "v7", "remove_type:Company"),
+            make_def("v7", "v8", "future_transform:payload"),
+        ];
+        let steps = MigrationEngine::plan("v1", "v8", &definitions).unwrap();
+        assert_eq!(steps.len(), definitions.len());
+        assert!(matches!(
+            steps[0].transform_kind,
+            TransformKind::RenameType { .. }
+        ));
+        assert!(matches!(
+            steps[1].transform_kind,
+            TransformKind::RenameProperty { .. }
+        ));
+        assert!(matches!(
+            steps[2].transform_kind,
+            TransformKind::AddProperty { .. }
+        ));
+        assert!(matches!(
+            steps[3].transform_kind,
+            TransformKind::RemoveProperty { .. }
+        ));
+        assert!(matches!(
+            steps[4].transform_kind,
+            TransformKind::AddType { .. }
+        ));
+        assert!(matches!(
+            steps[5].transform_kind,
+            TransformKind::RemoveType { .. }
+        ));
+        assert!(matches!(
+            steps[6].transform_kind,
+            TransformKind::Unknown { .. }
+        ));
+
+        let runtime = MigrationEngine::apply(base_doc(), &steps).unwrap();
+        assert!(runtime.entity_name_to_id.contains_key("Human"));
+        assert!(!runtime.entity_name_to_id.contains_key("Person"));
+        assert!(!runtime.entity_name_to_id.contains_key("Company"));
+    }
+
+    #[test]
+    fn malformed_transform_payloads_are_unknown_and_value_types_are_total() {
+        for raw in [
+            "rename_type",
+            "rename_property:Person",
+            "add_property:Person|name",
+            "remove_property:Person",
+            "add_type:",
+            "remove_type:",
+            "unknown:anything",
+        ] {
+            assert!(matches!(
+                parse_transform_kind(raw),
+                TransformKind::Unknown { .. }
+            ));
+        }
+        for (raw, expected) in [
+            ("int64", PropertyValueType::Int64),
+            ("FLOAT64", PropertyValueType::Float64),
+            ("bool", PropertyValueType::Bool),
+            ("duration", PropertyValueType::Duration),
+            ("datetime", PropertyValueType::DateTime),
+            ("list", PropertyValueType::List),
+            ("map", PropertyValueType::Map),
+            ("unknown", PropertyValueType::Utf8),
+        ] {
+            assert_eq!(parse_value_type(raw), expected);
+        }
+    }
+
+    #[test]
+    fn apply_rejects_wrong_start_and_noncontiguous_steps_without_mutating_input() {
+        let doc = base_doc();
+        let wrong_start = [MigrationStep {
+            from_version: "v0".into(),
+            to_version: "v2".into(),
+            transform_kind: TransformKind::AddType { name: "X".into() },
+        }];
+        assert!(matches!(
+            MigrationEngine::apply(doc.clone(), &wrong_start),
+            Err(OntologyError::NoMigrationPath { .. })
+        ));
+        assert_eq!(doc.version, "v1");
+        assert!(!doc.entity_types.iter().any(|item| item.name == "X"));
+
+        let gap = [
+            MigrationStep {
+                from_version: "v1".into(),
+                to_version: "v2".into(),
+                transform_kind: TransformKind::Unknown { raw: "noop".into() },
+            },
+            MigrationStep {
+                from_version: "v3".into(),
+                to_version: "v4".into(),
+                transform_kind: TransformKind::Unknown { raw: "noop".into() },
+            },
+        ];
+        assert!(matches!(
+            MigrationEngine::apply(doc, &gap),
+            Err(OntologyError::NoMigrationPath { .. })
+        ));
+    }
 }

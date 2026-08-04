@@ -1040,9 +1040,8 @@ fn logical_records(
             }
             let snapshot = generation
                 .participant_snapshot(&descriptor.capability_id, &descriptor.record_family_id)?
-                .ok_or_else(|| GfError::Api {
-                    code: ApiErrorCode::SchemaMismatch,
-                    message: "workspace participant disappeared during checkpoint diff".into(),
+                .ok_or_else(|| {
+                    schema_mismatch("workspace participant disappeared during checkpoint diff")
                 })?;
             match descriptor.record_family_id.as_str() {
                 graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY => {
@@ -1059,10 +1058,9 @@ fn logical_records(
                     )?;
                 }
                 _ => {
-                    return Err(GfError::Api {
-                        code: ApiErrorCode::SchemaMismatch,
-                        message: "unregistered workspace checkpoint diff participant".into(),
-                    });
+                    return Err(schema_mismatch(
+                        "unregistered workspace checkpoint diff participant",
+                    ));
                 }
             }
             let identity: [u8; 32] =
@@ -1082,12 +1080,11 @@ fn logical_records(
             descriptor.capability_id.as_str(),
             descriptor.record_family_id.as_str(),
         );
-        let adapter = adapters.get(&key).ok_or_else(|| GfError::Api {
-            code: ApiErrorCode::SchemaMismatch,
-            message: format!(
+        let adapter = adapters.get(&key).ok_or_else(|| {
+            schema_mismatch(format!(
                 "no logical checkpoint diff adapter for {}@{}",
                 descriptor.capability_id, descriptor.record_family_id
-            ),
+            ))
         })?;
         if descriptor.encoding != adapter.encoding
             || descriptor.capability_version != adapter.capability_version
@@ -1095,38 +1092,31 @@ fn logical_records(
             || descriptor.schema_fingerprint != adapter.schema_fingerprint
             || descriptor.row_count > adapter.max_rows as u64
         {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: format!(
-                    "checkpoint diff contract mismatch for {}@{}",
-                    descriptor.capability_id, descriptor.record_family_id
-                ),
-            });
+            return Err(schema_mismatch(format!(
+                "checkpoint diff contract mismatch for {}@{}",
+                descriptor.capability_id, descriptor.record_family_id
+            )));
         }
         let snapshot = generation
             .participant_snapshot(&descriptor.capability_id, &descriptor.record_family_id)?
-            .ok_or_else(|| GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "manifest participant disappeared during checkpoint diff".into(),
+            .ok_or_else(|| {
+                schema_mismatch("manifest participant disappeared during checkpoint diff")
             })?;
         let batches = read_parquet(&snapshot.bytes, page)?;
         let decoded_rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-        let expected_rows = usize::try_from(descriptor.row_count).map_err(|_| GfError::Api {
-            code: ApiErrorCode::SchemaMismatch,
-            message: "checkpoint participant row count exceeds this platform".into(),
+        let expected_rows = usize::try_from(descriptor.row_count).map_err(|_| {
+            schema_mismatch("checkpoint participant row count exceeds this platform")
         })?;
         if decoded_rows != expected_rows {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint participant row count does not match its manifest".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint participant row count does not match its manifest",
+            ));
         }
         for batch in batches {
             if batch.schema().fields() != adapter.schema.fields() {
-                return Err(GfError::Api {
-                    code: ApiErrorCode::SchemaMismatch,
-                    message: "checkpoint participant Arrow schema is incompatible".into(),
-                });
+                return Err(schema_mismatch(
+                    "checkpoint participant Arrow schema is incompatible",
+                ));
             }
             for row in 0..batch.num_rows() {
                 if row % 4096 == 0 {
@@ -1165,10 +1155,9 @@ fn logical_records(
                     )
                     .is_some()
                 {
-                    return Err(GfError::Api {
-                        code: ApiErrorCode::SchemaMismatch,
-                        message: "checkpoint participant has duplicate logical identity".into(),
-                    });
+                    return Err(schema_mismatch(
+                        "checkpoint participant has duplicate logical identity",
+                    ));
                 }
             }
         }
@@ -1180,10 +1169,9 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
     let mut out = BTreeMap::new();
     for entry in graphforge_knowledge::schema_registry() {
         if entry.diff_identity_fields.is_empty() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint diff adapter has no identity fields".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint diff adapter has no identity fields",
+            ));
         }
         let prior = out.insert(
             (entry.capability_id, entry.record_family),
@@ -1201,18 +1189,16 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
             },
         );
         if prior.is_some() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "duplicate checkpoint diff adapter registration".into(),
-            });
+            return Err(schema_mismatch(
+                "duplicate checkpoint diff adapter registration",
+            ));
         }
     }
     for entry in graphforge_provenance::schema_registry() {
         if entry.diff_identity_fields.is_empty() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "checkpoint diff adapter has no identity fields".into(),
-            });
+            return Err(schema_mismatch(
+                "checkpoint diff adapter has no identity fields",
+            ));
         }
         let prior = out.insert(
             (entry.capability_id, entry.record_family),
@@ -1230,10 +1216,9 @@ fn record_adapters() -> Result<BTreeMap<(&'static str, &'static str), RecordAdap
             },
         );
         if prior.is_some() {
-            return Err(GfError::Api {
-                code: ApiErrorCode::SchemaMismatch,
-                message: "duplicate checkpoint diff adapter registration".into(),
-            });
+            return Err(schema_mismatch(
+                "duplicate checkpoint diff adapter registration",
+            ));
         }
     }
     Ok(out)
@@ -1592,6 +1577,21 @@ fn scope_matches(requested: CheckpointDiffScope, actual: &str) -> bool {
     )
 }
 
+fn checkpoint_api_error(code: ApiErrorCode, message: impl Into<String>) -> GfError {
+    GfError::Api {
+        code,
+        message: message.into(),
+    }
+}
+
+fn schema_mismatch(message: impl Into<String>) -> GfError {
+    checkpoint_api_error(ApiErrorCode::SchemaMismatch, message)
+}
+
+fn page_invalid(message: impl Into<String>) -> GfError {
+    checkpoint_api_error(ApiErrorCode::PageInvalid, message)
+}
+
 fn checkpoint_list_snapshot(rows: &[graphforge_storage::CheckpointRecord]) -> Uuid {
     let mut h = Sha256::new();
     h.update(b"graphforge-checkpoint-list-page/1");
@@ -1672,10 +1672,9 @@ fn page_bounds(
         Some(token) => {
             let (offset, cursor) = token.decode_bound(method, binding, snapshot, page.limit)?;
             if offset == 0 || cursors.get(offset - 1) != Some(&cursor) {
-                return Err(GfError::Api {
-                    code: ApiErrorCode::PageInvalid,
-                    message: "page token cursor is not the last complete sort tuple".into(),
-                });
+                return Err(page_invalid(
+                    "page token cursor is not the last complete sort tuple",
+                ));
             }
             offset
         }
@@ -1683,10 +1682,7 @@ fn page_bounds(
     };
     let count = cursors.len();
     if start > count {
-        return Err(GfError::Api {
-            code: graphforge_core::ApiErrorCode::PageInvalid,
-            message: "page token offset exceeds result rows".into(),
-        });
+        return Err(page_invalid("page token offset exceeds result rows"));
     }
     Ok((start, start.saturating_add(page.limit as usize).min(count)))
 }
@@ -2097,6 +2093,235 @@ mod tests {
         OperationId(Uuid::from_u128(value))
     }
 
+    #[test]
+    fn checkpoint_digest_and_scope_helpers_are_closed_and_exact() {
+        for (error, code, display) in [
+            (
+                schema_mismatch("schema detail"),
+                "GF_SCHEMA_MISMATCH",
+                "GF_SCHEMA_MISMATCH: schema detail",
+            ),
+            (
+                page_invalid("page detail"),
+                "GF_PAGE_INVALID",
+                "GF_PAGE_INVALID: page detail",
+            ),
+            (
+                checkpoint_api_error(ApiErrorCode::NotFound, "missing detail"),
+                "GF_NOT_FOUND",
+                "GF_NOT_FOUND: missing detail",
+            ),
+        ] {
+            assert_eq!(error.code(), code);
+            assert_eq!(error.to_string(), display);
+        }
+        assert_eq!(decode_hex(&"ab".repeat(32)).unwrap(), [0xab; 32]);
+        for invalid in ["", "ab", &"gg".repeat(32)] {
+            let error = decode_hex(invalid).unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(
+                error.to_string(),
+                "validation error: invalid checkpoint digest"
+            );
+        }
+        for (capability, family, expected) in [
+            ("graph", "snapshot", "graph"),
+            ("ontology", "snapshot", "ontology"),
+            ("provenance", "events", "provenance"),
+            ("knowledge", "assertions", "knowledge"),
+            ("epistemic", "status", "epistemic"),
+            ("valid_time", "validity", "epistemic"),
+            ("workspace", "ontology", "ontology"),
+            ("workspace", "configuration", "configuration"),
+            ("search", "index", "capabilities"),
+        ] {
+            assert_eq!(participant_scope(capability, family), expected);
+        }
+        for scope in [
+            CheckpointDiffScope::Summary,
+            CheckpointDiffScope::All,
+            CheckpointDiffScope::Graph,
+            CheckpointDiffScope::Ontology,
+            CheckpointDiffScope::Configuration,
+            CheckpointDiffScope::Capabilities,
+            CheckpointDiffScope::Provenance,
+            CheckpointDiffScope::Knowledge,
+            CheckpointDiffScope::Epistemic,
+        ] {
+            let actual = match scope {
+                CheckpointDiffScope::Summary | CheckpointDiffScope::All => "anything",
+                CheckpointDiffScope::Graph => "graph",
+                CheckpointDiffScope::Ontology => "ontology",
+                CheckpointDiffScope::Configuration => "configuration",
+                CheckpointDiffScope::Capabilities => "capabilities",
+                CheckpointDiffScope::Provenance => "provenance",
+                CheckpointDiffScope::Knowledge => "knowledge",
+                CheckpointDiffScope::Epistemic => "epistemic",
+            };
+            assert!(scope_matches(scope, actual));
+        }
+        assert!(!scope_matches(CheckpointDiffScope::Graph, "knowledge"));
+    }
+
+    #[test]
+    fn checkpoint_diff_batches_preserve_change_kinds_and_nullable_sides() {
+        fn participant(
+            rows: u64,
+            schema: u8,
+            content: u8,
+        ) -> graphforge_storage::ProjectParticipantDescriptor {
+            graphforge_storage::ProjectParticipantDescriptor {
+                capability_id: "graph".into(),
+                capability_version: 1,
+                record_family_id: "snapshot".into(),
+                record_version: 1,
+                encoding: "arrow-ipc".into(),
+                schema_fingerprint: [schema; 32],
+                row_count: rows,
+                content_sha256: [content; 32],
+            }
+        }
+
+        let added = ("graph".into(), "added".into(), "snapshot".into());
+        let removed = ("graph".into(), "removed".into(), "snapshot".into());
+        let unchanged = ("graph".into(), "same".into(), "snapshot".into());
+        let modified = ("graph".into(), "changed".into(), "snapshot".into());
+        let keys = vec![
+            added.clone(),
+            removed.clone(),
+            unchanged.clone(),
+            modified.clone(),
+        ];
+        let left = Inventory::from([
+            (removed, participant(1, 1, 1)),
+            (unchanged.clone(), participant(2, 2, 2)),
+            (modified.clone(), participant(3, 3, 3)),
+        ]);
+        let right = Inventory::from([
+            (added, participant(4, 4, 4)),
+            (unchanged, participant(2, 2, 2)),
+            (modified, participant(5, 3, 9)),
+        ]);
+        let summary = summary_batch(Uuid::nil(), Uuid::max(), &keys, &left, &right, None).unwrap();
+        let batch = &summary.batches[0];
+        let kinds = batch
+            .column_by_name("change_kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            (0..kinds.len()).map(|i| kinds.value(i)).collect::<Vec<_>>(),
+            vec!["added", "removed", "unchanged", "modified"]
+        );
+        let from_rows = batch.column_by_name("from_row_count").unwrap();
+        let to_rows = batch.column_by_name("to_row_count").unwrap();
+        assert!(from_rows.is_null(0));
+        assert!(to_rows.is_null(1));
+
+        let record_uuid = Uuid::from_u128(42);
+        let records = vec![
+            RecordChange {
+                scope: "graph".into(),
+                family: "nodes".into(),
+                record_uuid: Some(record_uuid),
+                identity: [7; 32],
+                kind: "modified",
+                from: Some([8; 32]),
+                to: Some([9; 32]),
+            },
+            RecordChange {
+                scope: "graph".into(),
+                family: "edges".into(),
+                record_uuid: None,
+                identity: [10; 32],
+                kind: "added",
+                from: None,
+                to: Some([11; 32]),
+            },
+        ];
+        let records = record_batch(Uuid::nil(), Uuid::max(), &records, None).unwrap();
+        let batch = &records.batches[0];
+        let uuids = batch
+            .column_by_name("record_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(uuids.value(0), record_uuid.as_bytes());
+        assert!(uuids.is_null(1));
+        assert!(
+            batch
+                .column_by_name("from_record_fingerprint")
+                .unwrap()
+                .is_null(1)
+        );
+    }
+
+    #[test]
+    fn checkpoint_row_projection_uuid_and_parquet_failures_are_structured() {
+        let uuid = {
+            let mut bytes = [41_u8; 16];
+            bytes[6] = (bytes[6] & 0x0f) | 0x70;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            Uuid::from_bytes(bytes)
+        };
+        let uuids =
+            FixedSizeBinaryArray::try_from_iter([uuid.as_bytes().as_slice()].into_iter()).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::FixedSizeBinary(16),
+                false,
+            )])),
+            vec![Arc::new(uuids)],
+        )
+        .unwrap();
+        let projected = project_row(&batch, 0, &["record_uuid"]).unwrap();
+        assert_eq!(projected.num_rows(), 1);
+        assert_eq!(record_uuid(&batch, 0, "record_uuid").unwrap(), uuid);
+        assert_eq!(
+            project_row(&batch, 0, &["missing"]).unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+
+        let strings = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["not-a-uuid"]))],
+        )
+        .unwrap();
+        assert_eq!(
+            record_uuid(&strings, 0, "record_uuid").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        let nulls = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "record_uuid",
+                DataType::FixedSizeBinary(16),
+                true,
+            )])),
+            vec![Arc::new(FixedSizeBinaryArray::new_null(16, 1))],
+        )
+        .unwrap();
+        assert_eq!(
+            record_uuid(&nulls, 0, "record_uuid").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        assert_eq!(
+            read_parquet(b"not parquet", &PageRequest::default())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let adapters = record_adapters().unwrap();
+        assert!(adapters.contains_key(&("knowledge", "assertions")));
+        assert!(adapters.contains_key(&("provenance", "events")));
+    }
+
     fn enable(graph: &GraphForge, capability_id: crate::CapabilityId, seed: u128) {
         graph
             .enable_capability(crate::EnableCapabilityRequest {
@@ -2163,6 +2388,225 @@ mod tests {
 
         assert_eq!(error.code(), "GF_VALIDATION");
         assert!(error.to_string().contains("dangling confidence assertion"));
+    }
+
+    #[test]
+    fn wave8_composite_reference_validation_identifies_every_knowledge_link_kind() {
+        use graphforge_knowledge::{
+            Assertion, AssertionGraphRef, AssertionLedger, AssertionStatusEvent,
+            AssertionStatusLedger, AssertionSupersession, AssertionSupersessionLedger,
+            ConfidenceLedger, EvidenceLedger, EvidenceLink, EvidenceRole, EvidenceSourceKind,
+            ReasoningContentFormat, ReasoningKind, ReasoningLedger, ReasoningRecord,
+        };
+
+        let event = graphforge_provenance::ProvenanceEvent::new(
+            Uuid::from_u128(10),
+            graphforge_provenance::EventKind::CreateAssertion,
+            None,
+            1,
+        )
+        .unwrap();
+        let provenance =
+            graphforge_provenance::ProvenanceLedger::new(vec![event.clone()], vec![]).unwrap();
+        let a1 = uuid7(41);
+        let a2 = uuid7(42);
+        let missing = uuid7(99);
+        let knowledge = AssertionLedger::new(
+            vec![
+                Assertion::new(a1, "first".into(), event.provenance_uuid, 1).unwrap(),
+                Assertion::new(a2, "second".into(), event.provenance_uuid, 1).unwrap(),
+            ],
+            vec![
+                AssertionGraphRef::new(
+                    a1,
+                    Uuid::from_u128(101),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+                AssertionGraphRef::new(
+                    a2,
+                    Uuid::from_u128(102),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let reasoning_id = uuid7(43);
+        let reasoning = ReasoningLedger::new(vec![
+            ReasoningRecord::new(
+                reasoning_id,
+                a1,
+                ReasoningKind::DecisionRationale,
+                ReasoningContentFormat::TextPlain,
+                b"because".to_vec(),
+                None,
+                event.provenance_uuid,
+                1,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let confidence_id = uuid7(44);
+        let confidence =
+            ConfidenceLedger::explicit(confidence_id, a1, 0.5, event.provenance_uuid, 1).unwrap();
+        let status_id = uuid7(45);
+        let statuses = AssertionStatusLedger::new(vec![
+            AssertionStatusEvent::new(
+                status_id,
+                a1,
+                AssertionStatus::Hypothesis,
+                Some(confidence_id),
+                Some(reasoning_id),
+                event.provenance_uuid,
+                1,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        for (assertion, provenance_uuid, expected) in [
+            (missing, event.provenance_uuid, "evidence assertion"),
+            (a1, Uuid::from_u128(999), "provenance"),
+        ] {
+            let evidence = EvidenceLedger::new(vec![
+                EvidenceLink::new(
+                    uuid7(46),
+                    assertion,
+                    Uuid::from_u128(7),
+                    EvidenceSourceKind::Document,
+                    EvidenceRole::Supports,
+                    None,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: None,
+                evidence: Some(&evidence),
+                reasoning: None,
+                statuses: None,
+                supersessions: None,
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for (assertion, provenance_uuid, expected) in [
+            (missing, event.provenance_uuid, "reasoning assertion"),
+            (a1, Uuid::from_u128(999), "provenance"),
+        ] {
+            let records = ReasoningLedger::new(vec![
+                ReasoningRecord::new(
+                    uuid7(47),
+                    assertion,
+                    ReasoningKind::DecisionRationale,
+                    ReasoningContentFormat::TextPlain,
+                    b"because".to_vec(),
+                    None,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: None,
+                evidence: None,
+                reasoning: Some(&records),
+                statuses: None,
+                supersessions: None,
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for (prior, replacement, status, rationale, provenance_uuid, expected) in [
+            (
+                missing,
+                a2,
+                status_id,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession assertion",
+            ),
+            (
+                a1,
+                missing,
+                status_id,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession assertion",
+            ),
+            (
+                a1,
+                a2,
+                missing,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession status",
+            ),
+            (
+                a1,
+                a2,
+                status_id,
+                missing,
+                event.provenance_uuid,
+                "supersession reasoning",
+            ),
+            (
+                a1,
+                a2,
+                status_id,
+                reasoning_id,
+                Uuid::from_u128(999),
+                "provenance",
+            ),
+        ] {
+            let relation = AssertionSupersessionLedger::new(vec![
+                AssertionSupersession::new(
+                    uuid7(48),
+                    prior,
+                    replacement,
+                    status,
+                    rationale,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: Some(&confidence),
+                evidence: None,
+                reasoning: Some(&reasoning),
+                statuses: Some(&statuses),
+                supersessions: Some(&relation),
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
@@ -2461,13 +2905,65 @@ mod tests {
                     }],
                 };
                 if shape == "m21" {
-                    graph
+                    let assertion_result = graph
                         .create_assertion_with_status(crate::CreateAssertionWithStatusRequest {
                             assertion,
                             first_status: crate::FirstAssertionStatusInput {
                                 status_event_uuid: uuid7(111),
                                 status: AssertionStatus::Hypothesis,
                             },
+                        })
+                        .unwrap();
+                    let provenance_uuid = Uuid::from_slice(
+                        assertion_result.batches[0]
+                            .column_by_name("provenance_uuid")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap()
+                            .value(0),
+                    )
+                    .unwrap();
+                    let confidence_uuid = uuid7(112);
+                    graph
+                        .assess_confidence(crate::AssessConfidenceRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_112),
+                                actor_uuid: None,
+                            },
+                            confidence_uuid,
+                            assertion_uuid: uuid7(110),
+                            policy: crate::ConfidencePolicyRequest::Explicit { value: 0.8 },
+                        })
+                        .unwrap();
+                    let reasoning_uuid = uuid7(113);
+                    graph
+                        .record_reasoning(crate::RecordReasoningRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_113),
+                                actor_uuid: None,
+                            },
+                            reasoning_uuid,
+                            assertion_uuid: uuid7(110),
+                            kind: graphforge_knowledge::ReasoningKind::EvidenceInterpretation,
+                            content_format: graphforge_knowledge::ReasoningContentFormat::TextPlain,
+                            content: b"checkpoint rationale".to_vec(),
+                            supersedes_reasoning_uuid: None,
+                            provenance_uuid,
+                        })
+                        .unwrap();
+                    graph
+                        .record_assertion_status(crate::RecordAssertionStatusRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_114),
+                                actor_uuid: None,
+                            },
+                            status_event_uuid: uuid7(114),
+                            assertion_uuid: uuid7(110),
+                            status: AssertionStatus::Supported,
+                            confidence_uuid: Some(confidence_uuid),
+                            reasoning_uuid: Some(reasoning_uuid),
+                            provenance_uuid,
                         })
                         .unwrap();
                 } else {
@@ -2518,6 +3014,22 @@ mod tests {
                         .rows_produced,
                     1
                 );
+                assert_eq!(
+                    reopened
+                        .confidence_assessment(uuid7(112), None)
+                        .unwrap()
+                        .stats
+                        .rows_produced,
+                    1
+                );
+                assert_eq!(
+                    reopened
+                        .reasoning(uuid7(113), None)
+                        .unwrap()
+                        .stats
+                        .rows_produced,
+                    1
+                );
             }
         }
     }
@@ -2526,6 +3038,8 @@ mod tests {
     fn checkpoint_view_stays_pinned_and_rejects_writes() {
         let directory = tempdir().unwrap();
         let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let source = graph.add_node("Endpoint", &HashMap::new()).unwrap();
+        let target = graph.add_node("Endpoint", &HashMap::new()).unwrap();
         graph.execute("CREATE (:Person {name: 'before'})").unwrap();
         graph
             .checkpoint(CheckpointRequest {
@@ -2537,7 +3051,7 @@ mod tests {
             .unwrap();
         graph.execute("CREATE (:Person {name: 'after'})").unwrap();
 
-        let view = graph.open_checkpoint("Before").unwrap();
+        let mut view = graph.open_checkpoint("Before").unwrap();
         let result = view
             .execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
             .unwrap();
@@ -2589,9 +3103,228 @@ mod tests {
             "GF_READ_ONLY_VIEW"
         );
         assert_eq!(
+            view.add_edge(&source, "LINK", &target, &HashMap::new())
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
             view.index_adjacency().unwrap_err().code(),
             "GF_READ_ONLY_VIEW"
         );
+        assert_eq!(
+            view.index_search(
+                "Person",
+                crate::SearchIndexOptions::Text {
+                    properties: Some(vec!["name".into()]),
+                    rebuild: false,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        for error in [
+            view.checkpoint(CheckpointRequest {
+                name: "Nested".into(),
+                description: None,
+                idempotency_key: operation(4),
+                actor_uuid: None,
+            })
+            .unwrap_err(),
+            view.delete_checkpoint(DeleteCheckpointRequest {
+                name: "Missing".into(),
+                idempotency_key: operation(5),
+                actor_uuid: None,
+            })
+            .unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "GF_READ_ONLY_VIEW");
+        }
+        assert_eq!(
+            view.bind_embedding_space_alias("alias", "space", false)
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.remove_embedding_space_alias("alias")
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.delete_embedding_space(Some("space"))
+                .unwrap_err()
+                .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.set_default_embedding_space(None).unwrap_err().code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.adopt_ontology(crate::AdoptOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: operation(6),
+                    actor_uuid: None,
+                },
+                path: directory.path().join("unused.yaml"),
+                mode: OntologyMode::Strict,
+            })
+            .unwrap_err()
+            .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        assert_eq!(
+            view.clear_ontology(crate::ClearOntologyRequest {
+                context: crate::WriteContext {
+                    operation_uuid: operation(7),
+                    actor_uuid: None,
+                },
+            })
+            .unwrap_err()
+            .code(),
+            "GF_READ_ONLY_VIEW"
+        );
+        let context = |seed| crate::WriteContext {
+            operation_uuid: operation(seed),
+            actor_uuid: None,
+        };
+        let assertion = |seed| crate::CreateAssertionRequest {
+            context: context(seed),
+            assertion_uuid: uuid7(seed as u8),
+            claim: format!("checkpoint view assertion {seed}"),
+            graph_refs: Vec::new(),
+        };
+        let assertion_uuid = uuid7(20);
+        let provenance_uuid = uuid7(21);
+        let reasoning_uuid = uuid7(22);
+        let group_uuid = uuid7(23);
+        let knowledge_errors = [
+            view.create_assertion(assertion(20)).unwrap_err(),
+            view.create_assertion_with_status(crate::CreateAssertionWithStatusRequest {
+                assertion: assertion(21),
+                first_status: crate::FirstAssertionStatusInput {
+                    status_event_uuid: uuid7(24),
+                    status: graphforge_knowledge::AssertionStatus::Hypothesis,
+                },
+            })
+            .unwrap_err(),
+            view.create_assertion_with_evidence(crate::CreateAssertionWithEvidenceRequest {
+                assertion: assertion(22),
+                evidence: vec![crate::EvidenceInput {
+                    evidence_uuid: uuid7(25),
+                    source_uuid: uuid7(26),
+                    source_kind: graphforge_knowledge::EvidenceSourceKind::Document,
+                    role: graphforge_knowledge::EvidenceRole::Context,
+                    weight: None,
+                }],
+            })
+            .unwrap_err(),
+            view.assess_confidence(crate::AssessConfidenceRequest {
+                context: context(23),
+                confidence_uuid: uuid7(27),
+                assertion_uuid,
+                policy: crate::ConfidencePolicyRequest::Explicit { value: 0.5 },
+            })
+            .unwrap_err(),
+            view.attach_evidence(crate::AttachEvidenceRequest {
+                context: context(24),
+                evidence_uuid: uuid7(28),
+                assertion_uuid,
+                source_uuid: uuid7(29),
+                source_kind: graphforge_knowledge::EvidenceSourceKind::Observation,
+                role: graphforge_knowledge::EvidenceRole::Supports,
+                weight: Some(0.75),
+            })
+            .unwrap_err(),
+            view.record_reasoning(crate::RecordReasoningRequest {
+                context: context(25),
+                reasoning_uuid,
+                assertion_uuid,
+                kind: graphforge_knowledge::ReasoningKind::DecisionRationale,
+                content_format: graphforge_knowledge::ReasoningContentFormat::TextPlain,
+                content: b"immutable checkpoint".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_assertion_status(crate::RecordAssertionStatusRequest {
+                context: context(26),
+                status_event_uuid: uuid7(30),
+                assertion_uuid,
+                status: graphforge_knowledge::AssertionStatus::Supported,
+                confidence_uuid: None,
+                reasoning_uuid: Some(reasoning_uuid),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.supersede_assertion(crate::SupersedeAssertionRequest {
+                context: context(27),
+                supersession_uuid: uuid7(31),
+                prior_assertion_uuid: assertion_uuid,
+                replacement_assertion_uuid: uuid7(32),
+                status_event_uuid: uuid7(33),
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.create_hypothesis_group(crate::CreateHypothesisGroupRequest {
+                context: context(28),
+                group_uuid,
+                question_key: "checkpoint.view.v1".into(),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_hypothesis_membership(&crate::RecordHypothesisMembershipRequest {
+                context: context(29),
+                membership_event_uuid: uuid7(34),
+                group_uuid,
+                assertion_uuid,
+                action: graphforge_knowledge::HypothesisMembershipAction::Added,
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_hypothesis_selection(&crate::RecordHypothesisSelectionRequest {
+                context: context(30),
+                selection_event_uuid: uuid7(35),
+                group_uuid,
+                selected_assertion_uuid: Some(assertion_uuid),
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.remove_hypothesis_member(&crate::RemoveHypothesisMemberRequest {
+                context: context(31),
+                membership_event_uuid: uuid7(36),
+                selection_event_uuid: uuid7(37),
+                group_uuid,
+                assertion_uuid,
+                selected_assertion_uuid: None,
+                reasoning_uuid,
+                provenance_uuid,
+            })
+            .unwrap_err(),
+            view.record_assertion_validity(crate::RecordAssertionValidityRequest {
+                context: context(32),
+                validity_event_uuid: uuid7(38),
+                assertion_uuid,
+                valid_from_micros: Some(100),
+                valid_to_micros: Some(200),
+                reasoning_uuid: Some(reasoning_uuid),
+                provenance_uuid,
+            })
+            .unwrap_err(),
+        ];
+        for error in knowledge_errors {
+            assert_eq!(error.code(), "GF_READ_ONLY_VIEW");
+            assert_eq!(
+                error.to_string(),
+                "GF_READ_ONLY_VIEW: checkpoint views are read-only"
+            );
+        }
         assert_eq!(
             view.execute("MATCH (n) RETURN count(n) AS total")
                 .unwrap()

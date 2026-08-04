@@ -150,7 +150,6 @@ impl RustAlgorithm for CountAutomorphisms {
             dependency: BUILTIN_REVIEW,
         }
     }
-
     fn execute(
         &self,
         graph: &AdjacencyGraph,
@@ -2868,6 +2867,244 @@ fn bridge_node_uuid(graph: &AdjacencyGraph, node: u64) -> Result<[u8; 16], Algor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linear_analyzers_checkpoint_on_large_deterministic_projection() {
+        let graph = AdjacencyGraph::from_resolved_projection(
+            crate::algorithm_graph::ResolvedGraphProjection {
+                directed: true,
+                nodes: (0_u32..4_097)
+                    .map(|value| {
+                        let mut uuid = [0_u8; 16];
+                        uuid[12..].copy_from_slice(&value.to_be_bytes());
+                        uuid
+                    })
+                    .collect(),
+                edges: Vec::new(),
+            },
+        )
+        .unwrap();
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let analyzers: Vec<Box<dyn RustAlgorithm>> = vec![
+            Box::new(TriangleCount),
+            Box::new(Transitivity),
+            Box::new(IsPlanar),
+            Box::new(TriadCensus),
+            Box::new(DyadCensus),
+            Box::new(ArticulationPoints),
+            Box::new(Bridges),
+            Box::new(TopologicalSort),
+            Box::new(IsDag { directed: true }),
+            Box::new(FindCycles { directed: true }),
+            Box::new(HasEulerCircuit { directed: true }),
+            Box::new(HasEulerPath { directed: true }),
+            Box::new(DagLongestPath),
+        ];
+        for analyzer in analyzers {
+            analyzer.execute(&graph, &control).unwrap_or_else(|error| {
+                panic!(
+                    "{:?} failed on an edgeless projection: {error}",
+                    analyzer.capability().algorithm
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn malformed_adjacency_is_rejected_by_every_analysis_projection_adapter() {
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let missing = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0, 1],
+            HashMap::from([(0, [1; 16]), (1, [2; 16])]),
+            HashMap::from([(
+                0,
+                vec![crate::algorithm_graph::AlgorithmEdge {
+                    edge_id: 1,
+                    edge_uuid: [9; 16],
+                    neighbor_id: 2,
+                    weight: 1.0,
+                }],
+            )]),
+        );
+        let empty_partitions = ResolvedPartitionMap::try_new(
+            [[1; 16]],
+            [(
+                [1; 16],
+                crate::algorithm_partition::PartitionValue::String("a".into()),
+            )],
+        )
+        .unwrap();
+        let adapters: Vec<Box<dyn RustAlgorithm>> = vec![
+            Box::new(CountAutomorphisms { directed: true }),
+            Box::new(Conductance {
+                partitions: empty_partitions.clone(),
+            }),
+            Box::new(Modularity {
+                partitions: empty_partitions.clone(),
+            }),
+            Box::new(MaxBipartiteMatching {
+                partitions: Some(empty_partitions),
+            }),
+            Box::new(TriangleCount),
+            Box::new(Transitivity),
+            Box::new(IsPlanar),
+            Box::new(TriadCensus),
+            Box::new(DyadCensus),
+        ];
+        for adapter in adapters {
+            assert!(
+                adapter.execute(&missing, &control).is_err(),
+                "{:?}",
+                adapter.capability().algorithm
+            );
+        }
+
+        let edge = |neighbor_id| crate::algorithm_graph::AlgorithmEdge {
+            edge_id: neighbor_id,
+            edge_uuid: [7; 16],
+            neighbor_id,
+            weight: 1.0,
+        };
+        let inconsistent = AdjacencyGraph::malformed_for_defensive_tests(
+            false,
+            vec![0, 1],
+            HashMap::from([(0, [1; 16]), (1, [2; 16])]),
+            HashMap::from([(0, vec![edge(0), edge(1)])]),
+        );
+        let partitions = ResolvedPartitionMap::try_new(
+            [[1; 16], [2; 16]],
+            [
+                (
+                    [1; 16],
+                    crate::algorithm_partition::PartitionValue::String("a".into()),
+                ),
+                (
+                    [2; 16],
+                    crate::algorithm_partition::PartitionValue::String("b".into()),
+                ),
+            ],
+        )
+        .unwrap();
+        for adapter in [
+            Box::new(CountAutomorphisms { directed: false }) as Box<dyn RustAlgorithm>,
+            Box::new(Conductance {
+                partitions: partitions.clone(),
+            }),
+            Box::new(Modularity {
+                partitions: partitions.clone(),
+            }),
+            Box::new(MaxBipartiteMatching {
+                partitions: Some(partitions),
+            }),
+        ] {
+            assert!(
+                adapter.execute(&inconsistent, &control).is_err(),
+                "{:?}",
+                adapter.capability().algorithm
+            );
+        }
+        assert!(
+            automorphism_allocation("test")
+                .to_string()
+                .contains("test allocation failed")
+        );
+    }
+
+    #[test]
+    fn missing_uuid_helpers_preserve_algorithm_specific_errors() {
+        let graph = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let errors = [
+            spanning_node_uuid(&graph, 0, AnalyzeAlgorithm::MinimumSpanningTree).unwrap_err(),
+            bipartite_node_uuid(&graph, 0).unwrap_err(),
+            matching_node_uuid(&graph, 0).unwrap_err(),
+            cardinality_matching_node_uuid(&graph, 0).unwrap_err(),
+            conductance_node_uuid(&graph, 0).unwrap_err(),
+            node_coloring_node_uuid(&graph, 0).unwrap_err(),
+            k1_coloring_node_uuid(&graph, 0).unwrap_err(),
+            chromatic_number_node_uuid(&graph, 0).unwrap_err(),
+            topological_node_uuid(&graph, 0).unwrap_err(),
+            find_cycles_node_uuid(&graph, 0).unwrap_err(),
+            dag_longest_path_node_uuid(&graph, 0).unwrap_err(),
+            weighted_dag_longest_path_node_uuid(&graph, 0).unwrap_err(),
+            edge_coloring_node_uuid(&graph, 0).unwrap_err(),
+            euler_circuit_node_uuid(&graph, 0).unwrap_err(),
+            euler_path_node_uuid(&graph, 0).unwrap_err(),
+            bridge_node_uuid(&graph, 0).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.to_string().contains("UUID identity"));
+        }
+    }
+
+    #[test]
+    fn graphsage_and_dag_adapters_reject_incomplete_projection_identity() {
+        let mut missing_uuid = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::new(),
+            HashMap::new(),
+        );
+        missing_uuid
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap();
+        assert!(
+            graphsage_projection(&missing_uuid)
+                .unwrap_err()
+                .to_string()
+                .contains("selected node has no UUID identity")
+        );
+
+        let missing_vector = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::from([(0, [1; 16])]),
+            HashMap::new(),
+        );
+        assert!(
+            graphsage_projection(&missing_vector)
+                .unwrap_err()
+                .to_string()
+                .contains("no resolved feature vector")
+        );
+
+        let edge = crate::algorithm_graph::AlgorithmEdge {
+            edge_id: 1,
+            edge_uuid: [9; 16],
+            neighbor_id: 1,
+            weight: 1.0,
+        };
+        let mut missing_neighbor = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::from([(0, [1; 16])]),
+            HashMap::from([(0, vec![edge])]),
+        );
+        missing_neighbor
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap();
+        assert!(
+            graphsage_projection(&missing_neighbor)
+                .unwrap_err()
+                .to_string()
+                .contains("selected neighbor has no UUID identity")
+        );
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        assert!(
+            directed_is_dag(&missing_neighbor, &control)
+                .unwrap_err()
+                .to_string()
+                .contains("unselected node")
+        );
+    }
     use crate::algorithm_partition::PartitionValue;
 
     fn node2vec_invocation(
@@ -2987,6 +3224,29 @@ mod tests {
         assert_eq!(stored, second.descriptor.canonical_bytes());
         assert_eq!(first.descriptor, second.descriptor);
         assert_eq!(first.result, second.result);
+    }
+
+    #[test]
+    fn public_embedding_facade_executes_an_empty_persisted_projection() {
+        let project = tempfile::tempdir().unwrap();
+        let provider = crate::adjacency::ScanBuildAdjacencyProvider::new(
+            project.path().to_path_buf(),
+            OntologyMode::Exploratory,
+        );
+        let invocation =
+            node2vec_invocation(graphforge_core::embedding_options::Node2VecOptions::default());
+
+        let result = embedding_algorithm(
+            &provider,
+            project.path(),
+            OntologyMode::Exploratory,
+            None,
+            &invocation,
+        )
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.num_columns(), 2);
     }
 
     #[test]
@@ -4044,6 +4304,39 @@ mod tests {
             Err(GfError::Validation(message))
                 if message == "conductance requires directed=false"
         ));
+    }
+
+    #[test]
+    fn public_projection_fingerprint_is_stable_across_provider_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = AnalyzeOptions {
+            by: AnalyzeAlgorithm::IsDag,
+            directed: true,
+            ..AnalyzeOptions::default()
+        };
+        let first_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let first = analyze_projection_fingerprint(
+            &first_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            None,
+            &options,
+        )
+        .unwrap();
+        drop(first_provider);
+        let reopened_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let reopened = analyze_projection_fingerprint(
+            &reopened_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(first, reopened);
+        assert_ne!(first, [0; 32]);
     }
 
     #[test]
@@ -6585,5 +6878,56 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn graphsage_source_resource_contract_validates_feature_matrix() {
+        let empty = AdjacencyGraph::with_test_counts(0, 0);
+        assert!(graphsage_source_resources(&empty).is_err());
+
+        let mut graph = AdjacencyGraph::with_test_directed_edges(2, &[(0, 1)]);
+        assert_eq!(
+            graphsage_source_resources(&graph).unwrap_err().to_string(),
+            "validation error: graphsage selected node has no resolved feature vector"
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![]), (1, vec![])]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0, 2.0]), (1, vec![3.0])]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("inconsistent shape")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([
+                (0, vec![1.0, 2.0]),
+                (1, vec![f64::NAN, 4.0]),
+            ]))
+            .unwrap();
+        assert!(
+            graphsage_source_resources(&graph)
+                .unwrap_err()
+                .to_string()
+                .contains("must be finite")
+        );
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0, 2.0]), (1, vec![3.0, 4.0])]))
+            .unwrap();
+        let (width, retained) = graphsage_source_resources(&graph).unwrap();
+        assert_eq!(width, 2);
+        assert!(retained >= 96);
+        let projection = graphsage_projection(&graph).expect("valid GraphSAGE projection");
+        assert_eq!(projection.nodes().len(), 2);
+        assert_eq!(projection.feature_width(), 2);
     }
 }

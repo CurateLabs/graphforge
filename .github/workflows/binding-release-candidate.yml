@@ -49,11 +49,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu }
-          - { os: blacksmith-6vcpu-macos-15, target: python-macos }
-          - { os: blacksmith-4vcpu-windows-2025, target: python-windows }
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu, sticky_target: "true" }
+          - { os: blacksmith-12vcpu-macos-15, target: python-macos, sticky_target: "false" }
+          - { os: blacksmith-8vcpu-windows-2025, target: python-windows, sticky_target: "false" }
     env:
       CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
     steps:
       - uses: actions/checkout@v7
@@ -66,11 +67,27 @@ jobs:
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - uses: astral-sh/setup-uv@v9.0.0
+
+      - name: Mount shared Linux Cargo build disk
+        if: matrix.sticky_target == 'true'
+        uses: useblacksmith/stickydisk@v1
+        with:
+          # Python Ubuntu and Linux Node targets share compatible release products.
+          key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Build native abi3 wheel
         uses: PyO3/maturin-action@v1
@@ -79,6 +96,18 @@ jobs:
           args: --release --manifest-path crates/graphforge-bindings-py/Cargo.toml --out dist
           manylinux: auto
           sccache: "false"
+
+      # manylinux maturin writes into the mounted target as root; reclaim it
+      # before the native contracts can launch Cargo on the host runner.
+      - name: Reclaim sticky-disk ownership after maturin
+        if: matrix.sticky_target == 'true'
+        shell: bash
+        run: |
+          test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
+          sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"
+          mkdir -p "$CARGO_TARGET_DIR/release"
+          touch "$CARGO_TARGET_DIR/release/.cargo-build-lock"
+          rm -f "$CARGO_TARGET_DIR/release/.cargo-build-lock"
 
       # The maturin action owns its build wrapper. Later Python contracts may
       # launch Cargo after that wrapper has left PATH, especially on containerized
@@ -90,18 +119,17 @@ jobs:
             --platform "${{ matrix.target }}" \
             --contract python-native-contracts
 
-      - name: Prepare writable Cargo target for native contracts
+      - name: Verify writable Cargo target for native contracts
         shell: bash
         run: |
-          cargo_target_dir="$RUNNER_TEMP/graphforge-python-native-target"
-          if ! mkdir -p "$cargo_target_dir" || \
-             ! touch "$cargo_target_dir/.graphforge-write-probe" || \
-             ! rm "$cargo_target_dir/.graphforge-write-probe"; then
-            printf 'cargo_target_state=unwritable target=runner-temp/graphforge-python-native-target\n' >&2
+          test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
+          if ! mkdir -p "$CARGO_TARGET_DIR" || \
+             ! touch "$CARGO_TARGET_DIR/.graphforge-write-probe" || \
+             ! rm "$CARGO_TARGET_DIR/.graphforge-write-probe"; then
+            printf 'cargo_target_state=unwritable target=workspace/target\n' >&2
             exit 1
           fi
-          printf 'CARGO_TARGET_DIR=%s\n' "$cargo_target_dir" >> "$GITHUB_ENV"
-          printf 'cargo_target_state=ready target=runner-temp/graphforge-python-native-target\n'
+          printf 'cargo_target_state=ready target=workspace/target\n'
 
       - name: Prepare writable Python RC evidence directory
         shell: bash
@@ -123,8 +151,13 @@ jobs:
         run: |
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
+          test -f crates/graphforge-bindings-py/tests/smoke.py
           test -f crates/graphforge-bindings-py/tests/gil_release.py
-          for test_file in crates/graphforge-bindings-py/tests/*.py; do
+          # Broad Python acceptance belongs to PR CI. RC retains the installed
+          # package smoke, GIL, and non-Cypher contracts required before publish.
+          for test_file in \
+            crates/graphforge-bindings-py/tests/smoke.py \
+            crates/graphforge-bindings-py/tests/gil_release.py; do
             uv run --isolated --no-project --with "${wheels[0]}" python "$test_file"
           done
           GRAPHFORGE_PYTHON_PARITY_REPORT="$PYTHON_RC_EVIDENCE_DIR/python-classification.json" \
@@ -185,24 +218,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: blacksmith-6vcpu-macos-15
+          - os: blacksmith-12vcpu-macos-15
             target: x86_64-apple-darwin
             report_target: node-x86_64-apple-darwin
             execution_mode: native
             cross_args: ""
             node_arch: x64
-          - os: blacksmith-6vcpu-macos-15
+            sticky_target: "false"
+          - os: blacksmith-12vcpu-macos-15
             target: aarch64-apple-darwin
             report_target: node-aarch64-apple-darwin
             execution_mode: native
             cross_args: ""
             node_arch: arm64
+            sticky_target: "false"
           - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
             report_target: node-x86_64-unknown-linux-gnu
             execution_mode: native
             cross_args: ""
             node_arch: x64
+            sticky_target: "true"
           - os: blacksmith-4vcpu-ubuntu-2404
             target: aarch64-unknown-linux-gnu
             report_target: node-aarch64-unknown-linux-gnu
@@ -210,15 +246,18 @@ jobs:
             cross_args: --use-napi-cross
             arm_cflags: -D__ARM_ARCH=8
             node_arch: x64
-          - os: blacksmith-4vcpu-windows-2025
+            sticky_target: "true"
+          - os: blacksmith-8vcpu-windows-2025
             target: x86_64-pc-windows-msvc
             report_target: node-x86_64-pc-windows-msvc
             execution_mode: native
             cross_args: ""
             node_arch: x64
+            sticky_target: "false"
             timeout_minutes: 90
     env:
       CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
     steps:
       - uses: actions/checkout@v7
@@ -231,7 +270,7 @@ jobs:
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
           architecture: ${{ matrix.node_arch }}
@@ -242,6 +281,22 @@ jobs:
         with:
           toolchain: "1.96.0"
           targets: ${{ matrix.target }}
+
+      - name: Mount shared Linux Cargo build disk
+        if: matrix.sticky_target == 'true'
+        uses: useblacksmith/stickydisk@v1
+        with:
+          # Python Ubuntu and Linux Node targets share compatible release products.
+          key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install workspace dependencies
         run: pnpm install
@@ -399,7 +454,7 @@ jobs:
     env:
       EVIDENCE_SHA: ${{ needs.validate_source.outputs.evidence_sha }}
       CARGO_INCREMENTAL: 0
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target/release-candidate
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v7
         with:
@@ -430,13 +485,13 @@ jobs:
           esac
           printf 'RELEASE_VERSION=%s\n' "$release_version" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
       - uses: astral-sh/setup-uv@v9.0.0
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
@@ -445,6 +500,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.96.0"
+
+      - name: Mount release assembly Cargo build disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: ${{ github.repository }}-release_candidate-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
+          path: target
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Download exact-run tested wheels
         uses: actions/download-artifact@v8
@@ -496,6 +565,14 @@ jobs:
           pnpm exec napi pre-publish -t npm --skip-optional-publish --no-gh-release
           python3 "$GITHUB_WORKSPACE/scripts/ci/prepare-napi-packages.py" \
             --npm-dir npm --legal-dir .
+          # CLI and agent-skills packs have no dependency on NAPI package
+          # generation, so overlap them with the package loop below.
+          pnpm --dir "$GITHUB_WORKSPACE/packages/cli" pack \
+            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm" &
+          cli_pack_pid=$!
+          pnpm --dir "$GITHUB_WORKSPACE/packages/agent-skills" pack \
+            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm" &
+          agent_skills_pack_pid=$!
           for package_dir in npm/*; do
             npm pack "./$package_dir" --ignore-scripts \
               --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
@@ -518,10 +595,8 @@ jobs:
           assert not missing, f"{packs[0].name} missing {sorted(missing)}"
           PY
           popd
-          pnpm --dir packages/cli pack \
-            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
-          pnpm --dir packages/agent-skills pack \
-            --pack-destination "$GITHUB_WORKSPACE/candidate/release-artifacts/npm"
+          wait "$cli_pack_pid"
+          wait "$agent_skills_pack_pid"
 
       - name: Package the complete Rust surface
         shell: bash
@@ -536,7 +611,7 @@ jobs:
           done < <(python3 scripts/ci/crate-publish-plan.py list)
           cargo package "${package_args[@]}" --allow-dirty --no-verify
           for crate in "${crates[@]}"; do
-            cp "target/release-candidate/package/${crate}-${RELEASE_VERSION}.crate" \
+            cp "target/package/${crate}-${RELEASE_VERSION}.crate" \
               candidate/release-artifacts/crates/
           done
 

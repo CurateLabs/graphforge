@@ -571,6 +571,66 @@ mod tests {
     }
 
     #[test]
+    fn exact_zero_option_and_storage_error_classes_are_total() {
+        let contract = test_contract("vendor/model");
+        let mut invalid_options = options();
+        invalid_options.dimension = 0;
+        assert!(matches!(
+            validate_options(&contract, 1, invalid_options),
+            Err(error) if error.class() == ProviderFailureClass::InvalidRequest
+        ));
+
+        let mut exhausted_options = options();
+        exhausted_options.vector_limits.vector_cells = 1;
+        assert!(matches!(
+            validate_options(&contract, 1, exhausted_options),
+            Err(error) if error.class() == ProviderFailureClass::ResourceExhausted
+        ));
+
+        for (source, expected) in [
+            (
+                SearchArtifactError::ResourceExhausted {
+                    resource: "vectors",
+                    limit: 0,
+                },
+                ProviderFailureClass::ResourceExhausted,
+            ),
+            (
+                SearchArtifactError::Cancelled,
+                ProviderFailureClass::Cancelled,
+            ),
+            (
+                SearchArtifactError::CorruptDerivedIndex {
+                    path: std::path::PathBuf::from("redacted"),
+                    reason: "invalid".into(),
+                },
+                ProviderFailureClass::MalformedResponse,
+            ),
+        ] {
+            assert_eq!(storage_failure(&contract, &source).class(), expected);
+        }
+    }
+
+    #[test]
+    fn exact_zero_complete_batch_preserves_provider_cancellation() {
+        let contract = test_contract("vendor/model");
+        let inputs = test_inputs();
+        let plan =
+            DocumentEmbeddingBatchPlan::new(&contract, &inputs, options(), &mut || Ok(())).unwrap();
+        assert_eq!(plan.contract(), &contract);
+        assert_eq!(plan.input_count(), inputs.len());
+        assert_eq!(plan.batches().len(), 2);
+        assert_eq!(plan.dimension(), 2);
+        assert_eq!(plan.normalization(), EmbeddingNormalization::L2);
+        let cancelled = ProviderError::new(&contract, ProviderFailureClass::Cancelled);
+        let result = validate_complete_batch(&plan, Vec::new(), &mut || Err(cancelled.clone()));
+        assert!(matches!(
+            result,
+            Err(error) if error.class() == ProviderFailureClass::Cancelled
+        ));
+    }
+
+    #[test]
     fn single_item_and_final_vector_limits_fail_before_provider_work() {
         let contract = test_contract("vendor/model");
         let inputs = test_inputs();

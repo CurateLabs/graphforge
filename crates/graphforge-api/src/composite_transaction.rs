@@ -1951,6 +1951,55 @@ pub(crate) mod tests {
             non_v7.canonical_fingerprint().unwrap_err().code(),
             "GF_VALIDATION"
         );
+
+        for mutate in [
+            |request: &mut CompositeTransactionRequest| {
+                request.knowledge.assertion_graph_refs[0].contract_version = u32::MAX;
+            },
+            |request: &mut CompositeTransactionRequest| {
+                request.knowledge.confidence_inputs[0].contract_version = u32::MAX;
+            },
+            |request: &mut CompositeTransactionRequest| {
+                request.knowledge.hypothesis_membership[0].contract_version = u32::MAX;
+            },
+            |request: &mut CompositeTransactionRequest| {
+                request.knowledge.hypothesis_selection[0].contract_version = u32::MAX;
+            },
+        ] {
+            let mut malformed = existing_owner_request();
+            mutate(&mut malformed);
+            assert_eq!(
+                malformed.canonical_fingerprint().unwrap_err().code(),
+                "GF_VALIDATION"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_composite_bounds_and_uuid_guards_are_fail_closed() {
+        let lineage =
+            vec![
+                LineageRecord::new(uuid7(1), uuid7(2), SubjectKind::Node, LineageRole::Input, 0,)
+                    .unwrap();
+                MAX_PROVENANCE_ROWS + 1
+            ];
+        assert_eq!(
+            composite_lineage(&lineage, &HashSet::new())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let reasoning = vec![full_knowledge_fixture().reasoning[0].clone(); MAX_KNOWLEDGE_ROWS + 1];
+        assert_eq!(
+            composite_reasoning(reasoning).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            require_composite_uuid(Uuid::nil(), "test_uuid")
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
     }
 
     #[test]

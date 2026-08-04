@@ -724,4 +724,28 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn reasoning_registry_values_round_trip_and_reject_unknown_tokens() {
+        for kind in [
+            ReasoningKind::EvidenceInterpretation,
+            ReasoningKind::LogicalInference,
+            ReasoningKind::MethodologicalNote,
+            ReasoningKind::DecisionRationale,
+        ] {
+            assert_eq!(ReasoningKind::parse(kind.as_str()).unwrap(), kind);
+        }
+        assert!(ReasoningKind::parse("guess").is_err());
+        for format in [
+            ReasoningContentFormat::TextPlain,
+            ReasoningContentFormat::TextMarkdown,
+            ReasoningContentFormat::ApplicationJson,
+        ] {
+            assert_eq!(
+                ReasoningContentFormat::parse(format.as_str()).unwrap(),
+                format
+            );
+        }
+        assert!(ReasoningContentFormat::parse("text/html").is_err());
+    }
 }

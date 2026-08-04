@@ -66,7 +66,7 @@ test-tck:  ## Run TCK compliance tests via Rust BDD runner
 	cargo test -p graphforge-core --test bdd
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
-COVERAGE_FAIL_UNDER_RUST ?= 93.5
+COVERAGE_FAIL_UNDER_RUST ?= 95
 COVERAGE_FAIL_UNDER_RUST_CRATE ?= 80
 COVERAGE_FAIL_UNDER_RUST_PATCH ?= 90
 COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER ?= 80
@@ -84,6 +84,10 @@ _ensure-graphforge:  ## Fail fast unless the native graphforge package is import
 		 echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \
 		 exit 1)
 
+# Default maintainer loop: make pre-push-fast (~30s). Use this full coverage
+# gate for coverage-sensitive changes or floor claims.
+# Rust adapter acceptance is not pytest-cov/c8 evidence, so wrapper reports
+# remain separate fail-closed measurements rather than being silently skipped.
 coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Rust coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage-rust
@@ -92,7 +96,7 @@ coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Node JS surface coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage-node
 	@echo "━━━ Coverage complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "Rust:   build/coverage-rust/ (ledger + merged lcov + core HTML + summary)"
+	@echo "Rust:   build/coverage-rust/ (ledger + merged lcov + summary; set COVERAGE_RUST_HTML=1 for core HTML)"
 	@echo "Python: coverage.xml + htmlcov/"
 	@echo "Node:   crates/graphforge-bindings-node/coverage/"
 	@echo "✅ All surfaces collected; thresholds enforced per surface"
@@ -141,7 +145,7 @@ check-coverage-python:  ## Validate Python wrapper coverage (≥85% default)
 		(echo "❌ Python wrapper coverage below $(COVERAGE_FAIL_UNDER_PYTHON)%" && exit 1)
 	@echo "✅ Python wrapper coverage meets threshold"
 
-check-coverage-rust:  ## Validate core (≥93.5%), crates (≥80%), patch (≥90%), adapters (≥80%)
+check-coverage-rust:  ## Validate core (≥95%), crates (≥80%), patch (≥90%), adapters (≥80%)
 	@test -f build/coverage-rust/ledger.json || \
 		(echo "❌ Missing build/coverage-rust/ledger.json — run make coverage-rust first"; exit 1)
 	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \
@@ -252,6 +256,8 @@ cargo-test:  ## Run all Rust workspace tests
 #   cargo install cargo-llvm-cov
 #   rustup component add llvm-tools-preview
 # Prefer an isolated CARGO_TARGET_DIR when other builds are running (AGENTS.md).
+# Set COVERAGE_RUST_HTML=1 to write the optional core HTML report. Set
+# COVERAGE_RUST_RESUME=1 only to reuse same-SHA phase stamps and valid outputs.
 coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
 	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \
 		COVERAGE_FAIL_UNDER_RUST_CRATE=$(COVERAGE_FAIL_UNDER_RUST_CRATE) \

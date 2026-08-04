@@ -1162,6 +1162,51 @@ mod tests {
     }
 
     #[test]
+    fn empty_artifact_and_source_corruption_boundaries_are_exact() {
+        let dir = TempDir::new().unwrap();
+        let artifact = dir.path().join("empty-artifact");
+        std::fs::create_dir(&artifact).unwrap();
+        write_empty_marker(&artifact).unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Ok(TextArtifactKind::Empty)
+        ));
+        std::fs::write(artifact.join("unexpected"), b"owned").unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+        std::fs::remove_file(artifact.join("unexpected")).unwrap();
+        std::fs::write(artifact.join(EMPTY_MARKER_FILE), b"wrong").unwrap();
+        assert!(matches!(
+            inspect_text_path(
+                &artifact,
+                &properties(),
+                TextSearchLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+
+        let project = dir.path().join("source-project");
+        std::fs::create_dir_all(project.join("topology/nodes.parquet")).unwrap();
+        assert!(matches!(
+            capture_text_snapshot(&project, TextSearchLimits::default(), || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
+    }
+
+    #[test]
     fn empty_label_marker_is_published_reused_and_searched_as_empty() {
         let dir = TempDir::new().unwrap();
         let first = prepare(dir.path());
@@ -1445,5 +1490,293 @@ mod tests {
             result,
             Err(SearchArtifactError::ConcurrentMutation)
         ));
+    }
+
+    #[test]
+    fn public_freshness_vocabulary_and_request_bounds_are_total() {
+        assert_eq!(TextIndexFreshnessState::Missing.as_str(), "missing");
+        assert_eq!(TextIndexFreshnessState::Current.as_str(), "current");
+        assert_eq!(TextIndexFreshnessState::Stale.as_str(), "stale");
+        assert_eq!(
+            TextIndexFreshnessState::Incompatible.as_str(),
+            "incompatible"
+        );
+        let reasons = [
+            (
+                TextIndexFreshnessReason::NoTextProperties,
+                "no_text_properties",
+            ),
+            (TextIndexFreshnessReason::NotBuilt, "not_built"),
+            (
+                TextIndexFreshnessReason::SourceGenerationChanged,
+                "source_generation_changed",
+            ),
+            (
+                TextIndexFreshnessReason::SourceFingerprintChanged,
+                "source_fingerprint_changed",
+            ),
+            (
+                TextIndexFreshnessReason::ManifestVersion,
+                "manifest_version",
+            ),
+            (TextIndexFreshnessReason::BackendVersion, "backend_version"),
+            (
+                TextIndexFreshnessReason::ContractVersion,
+                "contract_version",
+            ),
+            (
+                TextIndexFreshnessReason::ArtifactSelector,
+                "artifact_selector",
+            ),
+        ];
+        for (reason, token) in reasons {
+            assert_eq!(reason.as_str(), token);
+        }
+
+        let limits = TextSearchLimits::default();
+        assert!(matches!(
+            validate_search_request("valid", 0, limits),
+            Err(SearchArtifactError::InvalidSelector { field: "limit", .. })
+        ));
+        assert!(matches!(
+            validate_search_request("valid", limits.results + 1, limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_results",
+                ..
+            })
+        ));
+        let retry = Cell::new(true);
+        assert!(consume_retry(Some(&retry)).is_ok());
+        assert!(matches!(
+            consume_retry(Some(&retry)),
+            Err(SearchArtifactError::ConcurrentMutation)
+        ));
+        assert!(consume_retry(None).is_ok());
+    }
+
+    #[test]
+    fn inspection_reports_no_properties_missing_current_and_stale_without_building() {
+        let empty = TempDir::new().unwrap();
+        let no_properties = inspect_text_index_freshness(
+            empty.path(),
+            lazy_request(),
+            None,
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(no_properties.state, TextIndexFreshnessState::Missing);
+        assert_eq!(
+            no_properties.reason,
+            Some(TextIndexFreshnessReason::NoTextProperties)
+        );
+        assert!(no_properties.properties.is_empty());
+        assert!(!empty.path().join("indexes").exists());
+
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let missing = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(missing.state, TextIndexFreshnessState::Missing);
+        assert_eq!(missing.reason, Some(TextIndexFreshnessReason::NotBuilt));
+        assert_eq!(missing.artifact_generation, None);
+
+        let published = prepare(project.path());
+        let current = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(current.state, TextIndexFreshnessState::Current);
+        assert_eq!(current.reason, None);
+        assert_eq!(
+            current.artifact_generation.as_deref(),
+            published
+                .artifact()
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+        );
+        assert_eq!(
+            current.artifact_source_fingerprint.as_deref(),
+            Some(current.source_fingerprint.as_str())
+        );
+
+        bump_search_generation(project.path()).unwrap();
+        let stale = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(stale.state, TextIndexFreshnessState::Stale);
+        assert_eq!(
+            stale.reason,
+            Some(TextIndexFreshnessReason::SourceGenerationChanged)
+        );
+        assert_eq!(stale.artifact_generation, current.artifact_generation);
+    }
+
+    #[test]
+    fn inspection_classifies_every_persisted_manifest_drift_without_rebuilding() {
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let published = prepare(project.path());
+        let manifest_path = published.artifact().path.join(MANIFEST_FILE);
+        let original = std::fs::read(&manifest_path).unwrap();
+
+        let cases = [
+            (
+                "backend_version",
+                serde_json::json!("future-backend"),
+                TextIndexFreshnessReason::BackendVersion,
+            ),
+            (
+                "contract_version",
+                serde_json::json!("future-contract"),
+                TextIndexFreshnessReason::ContractVersion,
+            ),
+            (
+                "source_fingerprint",
+                serde_json::json!(format!("gf-fnv1a256:{}", "0".repeat(64))),
+                TextIndexFreshnessReason::SourceFingerprintChanged,
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            manifest[field] = value;
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let inspection = inspect_text_index_freshness(
+                project.path(),
+                lazy_request(),
+                Some(&properties()),
+                TextLifecycleLimits::default(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(inspection.reason, Some(expected), "field={field}");
+            assert!(matches!(
+                inspection.state,
+                TextIndexFreshnessState::Incompatible | TextIndexFreshnessState::Stale
+            ));
+            std::fs::write(&manifest_path, &original).unwrap();
+        }
+
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        manifest["manifest_version"] = serde_json::json!(u32::MAX);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let inspection = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(inspection.state, TextIndexFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(TextIndexFreshnessReason::ManifestVersion)
+        );
+    }
+
+    #[test]
+    fn snapshot_rejects_nonregular_source_entries_without_reading_or_replacing_them() {
+        for relative in ["topology/nodes.parquet", "properties/Person.parquet"] {
+            let project = TempDir::new().unwrap();
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let result =
+                capture_text_snapshot(project.path(), TextSearchLimits::default(), || Ok(()));
+            assert!(matches!(
+                result,
+                Err(SearchArtifactError::SourceSnapshot { .. })
+            ));
+            assert!(path.is_dir());
+        }
+    }
+
+    #[test]
+    fn exact_zero_lifecycle_filesystem_failures_remain_structured() {
+        let marker_root = TempDir::new().unwrap();
+        std::fs::create_dir(marker_root.path().join(EMPTY_MARKER_FILE)).unwrap();
+        let marker_error = inspect_text_path(
+            marker_root.path(),
+            &properties(),
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            marker_error,
+            SearchArtifactError::Io {
+                operation: "read empty text marker",
+                ..
+            }
+        ));
+
+        let missing_parent = marker_root.path().join("missing").join("artifact");
+        let write_error = write_empty_marker(&missing_parent).unwrap_err();
+        assert!(matches!(
+            write_error,
+            SearchArtifactError::Io {
+                operation: "write empty text marker",
+                ..
+            }
+        ));
+
+        let bad_properties = TempDir::new().unwrap();
+        std::fs::write(bad_properties.path().join("properties"), b"not a directory").unwrap();
+        assert!(matches!(
+            property_source_paths(bad_properties.path(), &mut || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
+
+        let ignored = TempDir::new().unwrap();
+        std::fs::create_dir(ignored.path().join("properties")).unwrap();
+        std::fs::write(ignored.path().join("properties/notes.txt"), b"ignored").unwrap();
+        assert!(
+            property_source_paths(ignored.path(), &mut || Ok(()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_zero_freshness_inspection_bounds_repeated_mutation() {
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let error = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || {
+                bump_search_generation(project.path()).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SearchArtifactError::ConcurrentMutation));
     }
 }

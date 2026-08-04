@@ -8,8 +8,8 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.1", path = "../graphforge-core" }
-graphforge-ir = { version = "0.5.1", path = "../graphforge-ir" }
+graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
+graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 datafusion = { workspace = true }
 thiserror = { workspace = true }
 

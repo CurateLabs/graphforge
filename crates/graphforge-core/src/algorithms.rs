@@ -632,6 +632,34 @@ mod tests {
     }
 
     #[test]
+    fn concrete_catalog_accessors_display_and_direction_policy_are_total() {
+        for value in RankAlgorithm::ALL {
+            assert_eq!(value.verb(), AlgorithmVerb::Rank);
+            assert_eq!(value.to_string(), value.as_str());
+        }
+        for value in SimilarAlgorithm::ALL {
+            assert_eq!(value.verb(), AlgorithmVerb::Similar);
+            assert_eq!(value.to_string(), value.as_str());
+        }
+        for value in PathAlgorithm::ALL {
+            assert_eq!(value.verb(), AlgorithmVerb::Paths);
+            assert_eq!(value.to_string(), value.as_str());
+        }
+        for value in AnalyzeAlgorithm::ALL {
+            assert_eq!(value.verb(), AlgorithmVerb::Analyze);
+            assert_eq!(value.to_string(), value.as_str());
+        }
+        for value in ClusterAlgorithm::ALL {
+            assert_eq!(value.verb(), AlgorithmVerb::Cluster);
+            assert_eq!(value.to_string(), value.as_str());
+        }
+        assert!(ClusterAlgorithm::InfoMap.respects_direction());
+        assert!(ClusterAlgorithm::StronglyConnected.respects_direction());
+        assert!(!ClusterAlgorithm::Louvain.respects_direction());
+        assert!(!ClusterAlgorithm::Hdbscan.respects_direction());
+    }
+
+    #[test]
     fn rank_alias_has_one_canonical_owner() {
         let alias: RankAlgorithm = "local_clustering_coefficient".parse().unwrap();
         assert_eq!(alias, RankAlgorithm::ClusteringCoefficient);

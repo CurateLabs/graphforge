@@ -2865,15 +2865,9 @@ fn match_requested_node_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    for batch in graphforge_storage::read_nodes(&graph.dir)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        match_requested_uuid_column(&batch, "node_uuid", pending)?;
-        if pending.is_empty() {
-            break;
-        }
-    }
-    Ok(())
+    let batches = graphforge_storage::read_nodes(&graph.dir)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    match_requested_uuids(batches, "node_uuid", pending)
 }
 
 fn match_requested_edge_uuids(
@@ -2883,10 +2877,18 @@ fn match_requested_edge_uuids(
     if pending.is_empty() {
         return Ok(());
     }
-    for batch in graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
-        .map_err(|error| GfError::Storage(error.to_string()))?
-    {
-        match_requested_uuid_column(&batch, "edge_uuid", pending)?;
+    let batches = graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode)
+        .map_err(|error| GfError::Storage(error.to_string()))?;
+    match_requested_uuids(batches, "edge_uuid", pending)
+}
+
+fn match_requested_uuids(
+    batches: Vec<RecordBatch>,
+    name: &'static str,
+    pending: &mut HashSet<Uuid>,
+) -> Result<(), GfError> {
+    for batch in batches {
+        match_requested_uuid_column(&batch, name, pending)?;
         if pending.is_empty() {
             break;
         }
@@ -3220,6 +3222,293 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
+    #[test]
+    fn domain_error_mapping_preserves_public_fault_domains() {
+        use graphforge_knowledge::KnowledgeError;
+        for (error, code) in [
+            (
+                KnowledgeError::Conflict("identity"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                KnowledgeError::TransactionConflict("transaction"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                KnowledgeError::Limit {
+                    participant: "assertions",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (KnowledgeError::Dangling("assertion"), "GF_NOT_FOUND"),
+            (
+                KnowledgeError::Invalid {
+                    field: "claim",
+                    message: "empty",
+                },
+                "GF_VALIDATION",
+            ),
+            (KnowledgeError::Duplicate("assertion_uuid"), "GF_VALIDATION"),
+            (
+                KnowledgeError::Canonical(graphforge_core::canonical::CanonicalError::Malformed(
+                    "payload",
+                )),
+                "GF_VALIDATION",
+            ),
+            (
+                KnowledgeError::Arrow(arrow::error::ArrowError::SchemaError("schema".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+        ] {
+            assert_eq!(knowledge_error(error).code(), code);
+        }
+
+        use graphforge_provenance::ProvenanceError;
+        for (error, code) in [
+            (
+                ProvenanceError::Conflict("identity"),
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (
+                ProvenanceError::Limit {
+                    participant: "events",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (
+                ProvenanceError::Invalid {
+                    field: "event",
+                    message: "invalid",
+                },
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Duplicate("event_uuid"),
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Dangling("event_uuid"),
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Arrow(arrow::error::ArrowError::SchemaError("schema".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Canonical(graphforge_core::canonical::CanonicalError::Malformed(
+                    "payload",
+                )),
+                "GF_VALIDATION",
+            ),
+        ] {
+            assert_eq!(provenance_error(error).code(), code);
+        }
+        assert_eq!(
+            transaction_conflict("changed").code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert_eq!(
+            not_found_kind("evidence").to_string(),
+            "GF_NOT_FOUND: evidence was not found"
+        );
+        assert_eq!(
+            not_found().to_string(),
+            "GF_NOT_FOUND: assertion was not found"
+        );
+    }
+
+    #[test]
+    fn empty_ledger_codecs_and_participant_contracts_are_exact() {
+        let assertion = AssertionLedger::default();
+        let confidence = ConfidenceLedger::default();
+        let evidence = EvidenceLedger::default();
+        let reasoning = ReasoningLedger::default();
+        let status = AssertionStatusLedger::default();
+        let supersession = AssertionSupersessionLedger::default();
+        for participants in [
+            encode_ledger(&assertion).unwrap(),
+            encode_confidence_ledger(&confidence).unwrap(),
+            encode_evidence_ledger(&evidence).unwrap(),
+            encode_reasoning_ledger(&reasoning).unwrap(),
+            encode_status_ledger(&status).unwrap(),
+            encode_supersession_ledger(&supersession).unwrap(),
+        ] {
+            assert!(!participants.is_empty());
+            assert!(participants.iter().all(|participant| {
+                participant.encoding == ProjectParticipantEncoding::Parquet
+                    && participant.row_count == 0
+                    && !participant.bytes.is_empty()
+            }));
+            for participant in participants {
+                assert!(read_parquet(&participant.bytes).unwrap().is_empty());
+            }
+        }
+
+        let registry = schema_registry();
+        let entry = registry
+            .iter()
+            .find(|entry| entry.record_family == "assertions")
+            .unwrap();
+        let snapshot = graphforge_storage::ProjectParticipantSnapshot {
+            capability_id: entry.capability_id.into(),
+            capability_version: entry.capability_version,
+            record_family_id: entry.record_family.into(),
+            record_version: entry.record_version,
+            encoding: "parquet".into(),
+            schema_fingerprint: entry.schema_fingerprint,
+            row_count: 0,
+            bytes: Vec::new(),
+        };
+        require_participant_contract(&snapshot, "assertions").unwrap();
+        assert_eq!(read_or_empty(&snapshot, true).unwrap()[0].num_rows(), 0);
+        assert_eq!(read_or_empty(&snapshot, false).unwrap()[0].num_rows(), 0);
+        let mut incompatible = snapshot.clone();
+        incompatible.encoding = "json".into();
+        assert_eq!(
+            require_participant_contract(&incompatible, "assertions")
+                .unwrap_err()
+                .code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        assert_eq!(
+            snapshot_to_participant(incompatible).unwrap().encoding,
+            ProjectParticipantEncoding::Json
+        );
+        let mut unsupported = snapshot;
+        unsupported.encoding = "sqlite".into();
+        assert_eq!(
+            snapshot_to_participant(unsupported).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn knowledge_arrow_and_write_context_helpers_cover_empty_and_invalid_boundaries() {
+        let schema = AssertionLedger::default()
+            .assertion_batch()
+            .unwrap()
+            .schema();
+        let empty = concat_or_empty(&[], &schema).unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        let combined = concat_or_empty(&[empty.clone(), empty.clone()], &schema).unwrap();
+        assert_eq!(combined.num_rows(), 0);
+        let token = PageToken::new(uuid7(91), 4);
+        let paged = with_next_token(&empty, Some(&token)).unwrap();
+        assert_eq!(
+            paged.schema().metadata()["graphforge.next_page_token"],
+            token.as_str()
+        );
+        let unpaged = with_next_token(&empty, None).unwrap();
+        assert!(
+            !unpaged
+                .schema()
+                .metadata()
+                .contains_key("graphforge.next_page_token")
+        );
+        let result = assertion_result(empty);
+        assert_eq!(result.stats.rows_produced, 0);
+        assert_eq!(result.batches.len(), 1);
+
+        assert_eq!(
+            require_uuid(Uuid::nil(), "record_uuid").unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(Uuid::nil()),
+            actor_uuid: None,
+        };
+        assert_eq!(
+            validate_write_context(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(uuid7(92)),
+            actor_uuid: Some(Uuid::nil()),
+        };
+        assert_eq!(
+            validate_write_context(&context).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let context = WriteContext {
+            operation_uuid: OperationId(uuid7(92)),
+            actor_uuid: Some(uuid7(93)),
+        };
+        validate_write_context(&context).unwrap();
+        assert_eq!(not_found().code(), "GF_NOT_FOUND");
+    }
+
+    fn generation_without_family(
+        graph: &GraphForge,
+        omitted_family: &str,
+        transaction_uuid: Uuid,
+        generation_uuid: Uuid,
+    ) -> graphforge_storage::ResolvedProjectGeneration {
+        let parent = graphforge_storage::resolve_project_generation(
+            graph.resolved_generation.container_root(),
+        )
+        .unwrap();
+        let participants = parent
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.record_family_id != omitted_family)
+            .map(snapshot_to_participant)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let request = ProjectGenerationRequest {
+            transaction_uuid,
+            generation_uuid,
+            capabilities: parent
+                .capabilities()
+                .into_iter()
+                .map(|capability| ProjectCapability {
+                    capability_id: capability.capability_id,
+                    capability_version: capability.capability_version,
+                })
+                .collect(),
+            participants,
+        };
+        match graphforge_storage::stage_project_generation(
+            graph.resolved_generation.container_root(),
+            &request,
+        )
+        .unwrap()
+        {
+            ProjectStageOutcome::Staged(staged) => staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish()
+                .unwrap(),
+            ProjectStageOutcome::AlreadyPublished(_) => panic!("fresh generation expected"),
+        };
+        graphforge_storage::resolve_project_generation(graph.resolved_generation.container_root())
+            .unwrap()
+    }
+
+    #[test]
+    fn incomplete_paired_knowledge_participants_fail_with_schema_mismatch() {
+        for (omitted, confidence, seed) in [
+            ("assertion_graph_refs", false, 120_u8),
+            ("confidence_inputs", true, 130_u8),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let graph = GraphForge::new(root.path().to_str()).unwrap();
+            enable(&graph, CapabilityId::Knowledge, seed);
+            let generation =
+                generation_without_family(&graph, omitted, uuid7(seed + 1), uuid7(seed + 2));
+            let error = if confidence {
+                read_confidence_ledger(&generation).unwrap_err()
+            } else {
+                read_ledger(&generation).unwrap_err()
+            };
+            assert_eq!(error.code(), "GF_SCHEMA_MISMATCH");
+        }
+    }
+
     fn enable(graph: &GraphForge, capability_id: CapabilityId, seed: u8) {
         graph
             .enable_capability(EnableCapabilityRequest {
@@ -3437,6 +3726,15 @@ mod tests {
 
         let created = graph.create_assertion(request.clone()).unwrap();
         assert_eq!(created.stats.rows_produced, 1);
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .assertion(assertion_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
@@ -3480,6 +3778,9 @@ mod tests {
         graph.set_clock_for_test(|| Ok(999));
         enable(&graph, CapabilityId::Provenance, 10);
         let node = graph.add_node("Person", &HashMap::new()).unwrap();
+        let edge = graph
+            .add_edge(&node, "SELF", &node, &HashMap::new())
+            .unwrap();
         enable(&graph, CapabilityId::Knowledge, 11);
         let before = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
@@ -3507,6 +3808,54 @@ mod tests {
                 .generation_uuid(),
             before
         );
+
+        let empty = graph
+            .create_assertion(CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(17)),
+                    actor_uuid: None,
+                },
+                assertion_uuid: uuid7(18),
+                claim: "unanchored".into(),
+                graph_refs: vec![],
+            })
+            .unwrap_err();
+        assert_eq!(
+            empty.to_string(),
+            "validation error: assertion requires at least one graph reference"
+        );
+
+        let edge_assertion_uuid = uuid7(19);
+        graph
+            .create_assertion(CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(20)),
+                    actor_uuid: None,
+                },
+                assertion_uuid: edge_assertion_uuid,
+                claim: "edge-backed".into(),
+                graph_refs: vec![AssertionGraphRefInput {
+                    graph_uuid: edge.uuid,
+                    graph_kind: GraphObjectKind::Edge,
+                    role: AssertionGraphRole::Subject,
+                    ordinal: 0,
+                }],
+            })
+            .unwrap();
+        graph
+            .attach_evidence(AttachEvidenceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(21)),
+                    actor_uuid: None,
+                },
+                evidence_uuid: uuid7(22),
+                assertion_uuid: edge_assertion_uuid,
+                source_uuid: edge.uuid,
+                source_kind: EvidenceSourceKind::GraphEdge,
+                role: EvidenceRole::Supports,
+                weight: None,
+            })
+            .unwrap();
 
         let assertion_uuid = uuid7(15);
         let mut request = CreateAssertionRequest {
@@ -3696,12 +4045,27 @@ mod tests {
             policy: ConfidencePolicyRequest::Explicit { value: 0.8 },
         };
         let created = graph.assess_confidence(explicit.clone()).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .confidence_assessment(explicit_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
         assert_eq!(
-            graph.assess_confidence(explicit).unwrap().batches[0],
+            graph.assess_confidence(explicit.clone()).unwrap().batches[0],
             created.batches[0]
+        );
+        let mut conflict = explicit;
+        conflict.policy = ConfidencePolicyRequest::Explicit { value: 0.7 };
+        assert_eq!(
+            graph.assess_confidence(conflict).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())
@@ -3832,12 +4196,27 @@ mod tests {
             weight: Some(0.9),
         };
         let created = graph.attach_evidence(request.clone()).unwrap();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            graph
+                .evidence_link(evidence_uuid, Some(cancelled))
+                .unwrap_err()
+                .code(),
+            "GF_CANCELLED"
+        );
         let generation = graphforge_storage::resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
         assert_eq!(
-            graph.attach_evidence(request).unwrap().batches[0],
+            graph.attach_evidence(request.clone()).unwrap().batches[0],
             created.batches[0]
+        );
+        let mut conflict = request;
+        conflict.role = EvidenceRole::Contradicts;
+        assert_eq!(
+            graph.attach_evidence(conflict).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())
@@ -3951,10 +4330,19 @@ mod tests {
             .generation_uuid();
         assert_eq!(
             graph
-                .create_assertion_with_evidence(request)
+                .create_assertion_with_evidence(request.clone())
                 .unwrap()
                 .batches[0],
             created.batches[0]
+        );
+        let mut conflict = request;
+        conflict.assertion.claim = "changed bundle".into();
+        assert_eq!(
+            graph
+                .create_assertion_with_evidence(conflict)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
         assert_eq!(
             graphforge_storage::resolve_project_generation(root.path())
@@ -4240,6 +4628,146 @@ mod tests {
     }
 
     #[test]
+    fn wave8_public_knowledge_bundle_and_reference_errors_are_exact() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(30));
+        enable(&graph, CapabilityId::Provenance, 150);
+        enable(&graph, CapabilityId::Knowledge, 151);
+        enable(&graph, CapabilityId::Epistemic, 152);
+        let node = graph.add_node("BoundarySubject", &HashMap::new()).unwrap();
+        let assertion_uuid = uuid7(153);
+        let request = CreateAssertionWithStatusRequest {
+            assertion: CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(154)),
+                    actor_uuid: None,
+                },
+                assertion_uuid,
+                claim: "bundle boundary".into(),
+                graph_refs: vec![AssertionGraphRefInput {
+                    graph_uuid: node.uuid,
+                    graph_kind: GraphObjectKind::Node,
+                    role: AssertionGraphRole::Subject,
+                    ordinal: 0,
+                }],
+            },
+            first_status: FirstAssertionStatusInput {
+                status_event_uuid: uuid7(155),
+                status: AssertionStatus::Hypothesis,
+            },
+        };
+        graph.create_assertion_with_status(request.clone()).unwrap();
+        let mut partial_replay = request.clone();
+        partial_replay.first_status.status_event_uuid = uuid7(156);
+        assert_eq!(
+            graph
+                .create_assertion_with_status(partial_replay)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        let mut superseded = request;
+        superseded.assertion.context.operation_uuid = OperationId(uuid7(157));
+        superseded.assertion.assertion_uuid = uuid7(158);
+        superseded.first_status.status_event_uuid = uuid7(159);
+        superseded.first_status.status = AssertionStatus::Superseded;
+        assert_eq!(
+            graph
+                .create_assertion_with_status(superseded)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let provenance_uuid = graph.assertion(assertion_uuid, None).unwrap().batches[0]
+            .column_by_name("provenance_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .and_then(|values| Uuid::from_slice(values.value(0)).ok())
+            .unwrap();
+        let reasoning = |reasoning_uuid, assertion_uuid, provenance_uuid, operation_uuid| {
+            RecordReasoningRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(operation_uuid),
+                    actor_uuid: None,
+                },
+                reasoning_uuid,
+                assertion_uuid,
+                kind: ReasoningKind::DecisionRationale,
+                content_format: ReasoningContentFormat::TextPlain,
+                content: b"boundary".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            }
+        };
+        assert_eq!(
+            graph
+                .record_reasoning(reasoning(
+                    uuid7(160),
+                    uuid7(161),
+                    provenance_uuid,
+                    uuid7(162)
+                ))
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            graph
+                .record_reasoning(reasoning(
+                    uuid7(163),
+                    assertion_uuid,
+                    Uuid::from_u128(999),
+                    uuid7(164)
+                ))
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+
+        let replacement = uuid7(165);
+        let replacement_provenance = assertion_fixture(&graph, replacement, 166);
+        let rationale = reasoning_fixture(&graph, assertion_uuid, provenance_uuid, 167, 168);
+        let base = SupersedeAssertionRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(169)),
+                actor_uuid: None,
+            },
+            supersession_uuid: uuid7(170),
+            prior_assertion_uuid: uuid7(171),
+            replacement_assertion_uuid: replacement,
+            status_event_uuid: uuid7(172),
+            reasoning_uuid: rationale,
+            provenance_uuid,
+        };
+        assert_eq!(
+            graph.supersede_assertion(base).unwrap_err().code(),
+            "GF_NOT_FOUND"
+        );
+        let missing_provenance = SupersedeAssertionRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(173)),
+                actor_uuid: None,
+            },
+            supersession_uuid: uuid7(174),
+            prior_assertion_uuid: assertion_uuid,
+            replacement_assertion_uuid: replacement,
+            status_event_uuid: uuid7(175),
+            reasoning_uuid: rationale,
+            provenance_uuid: Uuid::from_u128(999),
+        };
+        assert_eq!(
+            graph
+                .supersede_assertion(missing_provenance)
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_ne!(replacement_provenance, Uuid::nil());
+    }
+
+    #[test]
     fn supersession_is_atomic_branch_preserving_idempotent_and_reopenable() {
         let root = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(root.path().to_str()).unwrap();
@@ -4436,6 +4964,102 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "GF_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn stale_facade_rejects_each_knowledge_publication_without_partial_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let bootstrap = GraphForge::new(root.path().to_str()).unwrap();
+        bootstrap.set_clock_for_test(|| Ok(100));
+        enable(&bootstrap, CapabilityId::Provenance, 220);
+        enable(&bootstrap, CapabilityId::Knowledge, 221);
+        enable(&bootstrap, CapabilityId::Epistemic, 222);
+        let assertion_uuid = uuid7(223);
+        let provenance_uuid = assertion_fixture(&bootstrap, assertion_uuid, 224);
+        drop(bootstrap);
+
+        let stale = GraphForge::new(root.path().to_str()).unwrap();
+        stale.set_clock_for_test(|| Ok(200));
+        let concurrent = GraphForge::new(root.path().to_str()).unwrap();
+        concurrent.add_node("Concurrent", &HashMap::new()).unwrap();
+        let durable_generation = graphforge_storage::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+
+        let confidence_uuid = uuid7(225);
+        let confidence = stale
+            .assess_confidence(AssessConfidenceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(226)),
+                    actor_uuid: None,
+                },
+                confidence_uuid,
+                assertion_uuid,
+                policy: ConfidencePolicyRequest::Explicit { value: 0.75 },
+            })
+            .unwrap_err();
+        assert_eq!(confidence.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let reasoning_uuid = uuid7(227);
+        let reasoning = stale
+            .record_reasoning(RecordReasoningRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(228)),
+                    actor_uuid: None,
+                },
+                reasoning_uuid,
+                assertion_uuid,
+                kind: ReasoningKind::DecisionRationale,
+                content_format: ReasoningContentFormat::TextPlain,
+                content: b"stale reasoning".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err();
+        assert_eq!(reasoning.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let status = stale
+            .record_assertion_status(RecordAssertionStatusRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(229)),
+                    actor_uuid: None,
+                },
+                status_event_uuid: uuid7(230),
+                assertion_uuid,
+                status: AssertionStatus::Hypothesis,
+                confidence_uuid: None,
+                reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err();
+        assert_eq!(status.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            durable_generation
+        );
+        let reopened = GraphForge::new(root.path().to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .confidence_assessment(confidence_uuid, None)
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            reopened.reasoning(reasoning_uuid, None).unwrap_err().code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            reopened
+                .assertion_status(assertion_uuid)
+                .unwrap()
+                .stats
+                .rows_produced,
+            0
         );
     }
 }

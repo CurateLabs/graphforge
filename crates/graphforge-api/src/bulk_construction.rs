@@ -1465,28 +1465,9 @@ fn uuid_at(
     field: &str,
     operation_uuid: OperationId,
 ) -> Result<Uuid, BulkValidationError> {
-    if values.is_null(row) {
-        return Ok(generated_uuid(operation_uuid, kind, ordinal));
-    }
-    let uuid = Uuid::from_slice(values.value(row)).map_err(|_| {
-        row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "invalid UUID bytes",
-        )
-    })?;
-    if uuid.get_version_num() != 7 {
-        return Err(row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "value must be UUIDv7",
-        ));
-    }
-    Ok(uuid)
+    validated_uuid_at(values, row, kind, ordinal, field, || {
+        Ok(generated_uuid(operation_uuid, kind, ordinal))
+    })
 }
 
 fn explicit_uuid_at(
@@ -1496,34 +1477,48 @@ fn explicit_uuid_at(
     ordinal: u64,
     field: &str,
 ) -> Result<Uuid, BulkValidationError> {
-    if values.is_null(row) {
-        return Err(row_error(
+    validated_uuid_at(values, row, kind, ordinal, field, || {
+        Err(uuid_row_error(
             kind,
-            BulkValidationReason::InvalidUuid,
             ordinal,
             field,
             "endpoint UUID cannot be null",
-        ));
+        ))
+    })
+}
+
+fn validated_uuid_at(
+    values: &FixedSizeBinaryArray,
+    row: usize,
+    kind: BulkInputKind,
+    ordinal: u64,
+    field: &str,
+    on_null: impl FnOnce() -> Result<Uuid, BulkValidationError>,
+) -> Result<Uuid, BulkValidationError> {
+    if values.is_null(row) {
+        return on_null();
     }
-    let uuid = Uuid::from_slice(values.value(row)).map_err(|_| {
-        row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "invalid UUID bytes",
-        )
-    })?;
+    let uuid = Uuid::from_slice(values.value(row))
+        .map_err(|_| uuid_row_error(kind, ordinal, field, "invalid UUID bytes"))?;
     if uuid.get_version_num() != 7 {
-        return Err(row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "value must be UUIDv7",
-        ));
+        return Err(uuid_row_error(kind, ordinal, field, "value must be UUIDv7"));
     }
     Ok(uuid)
+}
+
+fn uuid_row_error(
+    kind: BulkInputKind,
+    ordinal: u64,
+    field: &str,
+    message: &str,
+) -> BulkValidationError {
+    row_error(
+        kind,
+        BulkValidationReason::InvalidUuid,
+        ordinal,
+        field,
+        message,
+    )
 }
 
 fn validate_operation_uuid(
@@ -1558,50 +1553,51 @@ fn generated_uuid(operation_uuid: OperationId, kind: BulkInputKind, ordinal: u64
 }
 
 fn existing_node_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let mut values = BTreeSet::new();
-    for batch in graphforge_storage::read_nodes(&graph.dir).map_err(|error| {
+    let batches = graphforge_storage::read_nodes(&graph.dir).map_err(|error| {
         contract_error(
             BulkInputKind::Node,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
-    })? {
-        let uuids = uuid_column(&batch, BulkInputKind::Node, "node_uuid")?;
-        for row in 0..uuids.len() {
-            if !uuids.is_null(row) {
-                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                    contract_error(
-                        BulkInputKind::Node,
-                        BulkValidationReason::ProjectState,
-                        "persisted node UUID is malformed",
-                    )
-                })?);
-            }
-        }
-    }
-    Ok(values)
+    })?;
+    collect_existing_uuids(
+        batches,
+        BulkInputKind::Node,
+        "node_uuid",
+        "persisted node UUID is malformed",
+    )
 }
 
 fn existing_edge_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let mut values = BTreeSet::new();
-    for batch in
+    let batches =
         graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode).map_err(|error| {
             contract_error(
                 BulkInputKind::Edge,
                 BulkValidationReason::ProjectState,
                 &error.to_string(),
             )
-        })?
-    {
-        let uuids = uuid_column(&batch, BulkInputKind::Edge, "edge_uuid")?;
+        })?;
+    collect_existing_uuids(
+        batches,
+        BulkInputKind::Edge,
+        "edge_uuid",
+        "persisted edge UUID is malformed",
+    )
+}
+
+fn collect_existing_uuids(
+    batches: Vec<RecordBatch>,
+    kind: BulkInputKind,
+    field: &str,
+    malformed_message: &str,
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let mut values = BTreeSet::new();
+    for batch in batches {
+        let uuids = uuid_column(&batch, kind, field)?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
                 values.insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                    contract_error(
-                        BulkInputKind::Edge,
-                        BulkValidationReason::ProjectState,
-                        "persisted edge UUID is malformed",
-                    )
+                    contract_error(kind, BulkValidationReason::ProjectState, malformed_message)
                 })?);
             }
         }
@@ -1692,45 +1688,22 @@ fn node_receipt(
     operation_uuid: OperationId,
     generation_uuid: Uuid,
 ) -> Result<RecordBatch, super::GfError> {
-    if rows.is_empty() {
-        return Ok(RecordBatch::new_empty(bulk_receipt_schema()));
-    }
-    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.row_ordinal));
-    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|_| "node"));
-    let entity_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.node_uuid.as_bytes().as_slice()),
+    receipt(
+        rows.iter().map(|row| {
+            (
+                row.row_ordinal,
+                "node",
+                row.node_uuid,
+                Some(row.label.as_str()),
+                None,
+                None,
+                None,
+            )
+        }),
+        rows.len(),
+        operation_uuid,
+        generation_uuid,
     )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let labels = StringArray::from(
-        rows.iter()
-            .map(|row| Some(row.label.as_str()))
-            .collect::<Vec<_>>(),
-    );
-    let null_strings = StringArray::from(vec![None::<&str>; rows.len()]);
-    let null_uuids = FixedSizeBinaryArray::new_null(16, rows.len());
-    let operation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| operation_uuid.0.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let generation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| generation_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    RecordBatch::try_new(
-        bulk_receipt_schema(),
-        vec![
-            Arc::new(row_ordinals),
-            Arc::new(entity_kinds),
-            Arc::new(entity_uuids),
-            Arc::new(labels),
-            Arc::new(null_strings.clone()),
-            Arc::new(null_uuids.clone()),
-            Arc::new(null_uuids),
-            Arc::new(operation_uuids),
-            Arc::new(generation_uuids),
-        ],
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))
 }
 
 fn edge_receipt(
@@ -1738,46 +1711,76 @@ fn edge_receipt(
     operation_uuid: OperationId,
     generation_uuid: Uuid,
 ) -> Result<RecordBatch, super::GfError> {
-    if rows.is_empty() {
+    receipt(
+        rows.iter().map(|row| {
+            (
+                row.row_ordinal,
+                "edge",
+                row.edge_uuid,
+                None,
+                Some(row.rel_type.as_str()),
+                Some(row.source_uuid),
+                Some(row.target_uuid),
+            )
+        }),
+        rows.len(),
+        operation_uuid,
+        generation_uuid,
+    )
+}
+
+type ReceiptRow<'a> = (
+    u64,
+    &'static str,
+    Uuid,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<Uuid>,
+    Option<Uuid>,
+);
+
+fn receipt<'a>(
+    rows: impl Iterator<Item = ReceiptRow<'a>>,
+    len: usize,
+    operation_uuid: OperationId,
+    generation_uuid: Uuid,
+) -> Result<RecordBatch, super::GfError> {
+    if len == 0 {
         return Ok(RecordBatch::new_empty(bulk_receipt_schema()));
     }
-    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.row_ordinal));
-    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|_| "edge"));
-    let entity_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.edge_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let null_labels = StringArray::from(vec![None::<&str>; rows.len()]);
-    let rel_types = StringArray::from_iter_values(rows.iter().map(|row| row.rel_type.as_str()));
-    let source_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.source_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let target_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.target_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let operation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| operation_uuid.0.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let generation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| generation_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
+    let rows = rows.collect::<Vec<_>>();
+    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.0));
+    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|row| row.1));
+    let entity_uuids = uuid_array(rows.iter().map(|row| Some(row.2)))?;
+    let labels = rows.iter().map(|row| row.3).collect::<StringArray>();
+    let rel_types = rows.iter().map(|row| row.4).collect::<StringArray>();
+    let source_uuids = uuid_array(rows.iter().map(|row| row.5))?;
+    let target_uuids = uuid_array(rows.iter().map(|row| row.6))?;
+    let operation_uuids = uuid_array((0..len).map(|_| Some(operation_uuid.0)))?;
+    let generation_uuids = uuid_array((0..len).map(|_| Some(generation_uuid)))?;
     RecordBatch::try_new(
         bulk_receipt_schema(),
         vec![
             Arc::new(row_ordinals),
             Arc::new(entity_kinds),
             Arc::new(entity_uuids),
-            Arc::new(null_labels),
+            Arc::new(labels),
             Arc::new(rel_types),
             Arc::new(source_uuids),
             Arc::new(target_uuids),
             Arc::new(operation_uuids),
             Arc::new(generation_uuids),
         ],
+    )
+    .map_err(|error| super::GfError::Execution(error.to_string()))
+}
+
+fn uuid_array(
+    values: impl IntoIterator<Item = Option<Uuid>>,
+) -> Result<FixedSizeBinaryArray, super::GfError> {
+    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+        values.into_iter().map(|value| value.map(Uuid::into_bytes)),
+        16,
     )
     .map_err(|error| super::GfError::Execution(error.to_string()))
 }
@@ -1854,6 +1857,433 @@ mod tests {
 
     fn operation(seed: u128) -> OperationId {
         OperationId(uuid(seed))
+    }
+
+    #[test]
+    fn wave13_validation_display_and_disappeared_endpoint_are_structured() {
+        let error = BulkValidationError {
+            kind: BulkInputKind::Edge,
+            reason: BulkValidationReason::MissingEndpoint,
+            batch_index: Some(2),
+            row_ordinal: Some(7),
+            field: Some("src_uuid".into()),
+            message: "endpoint does not exist".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "GF_BULK_VALIDATION(missing_endpoint): bulk edge batch 2 row 7 field \"src_uuid\": endpoint does not exist"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let mut writer = graphforge_storage::GraphWriter::open_at(
+            &graph.dir,
+            graph.ontology_mode,
+            (graph.clock.lock().unwrap())().unwrap(),
+        )
+        .unwrap();
+        let missing = uuid(70_001);
+        let failure =
+            register_existing_endpoints(&mut writer, &graph.dir, &BTreeSet::from([missing]))
+                .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "validation error: bulk edge endpoint disappeared before publication"
+        );
+    }
+
+    #[test]
+    fn strict_ontology_arrow_compatibility_matrix_is_closed() {
+        let list_item = Arc::new(Field::new("item", DataType::Utf8, true));
+        let compatible = [
+            (PropertyValueType::Utf8, DataType::Utf8),
+            (PropertyValueType::Utf8, DataType::LargeUtf8),
+            (PropertyValueType::Int64, DataType::Int8),
+            (PropertyValueType::Int64, DataType::Int16),
+            (PropertyValueType::Int64, DataType::Int32),
+            (PropertyValueType::Int64, DataType::Int64),
+            (PropertyValueType::Int64, DataType::UInt8),
+            (PropertyValueType::Int64, DataType::UInt16),
+            (PropertyValueType::Int64, DataType::UInt32),
+            (PropertyValueType::Float64, DataType::Float32),
+            (PropertyValueType::Float64, DataType::Float64),
+            (PropertyValueType::Bool, DataType::Boolean),
+            (
+                PropertyValueType::List,
+                DataType::List(Arc::clone(&list_item)),
+            ),
+            (
+                PropertyValueType::List,
+                DataType::LargeList(Arc::clone(&list_item)),
+            ),
+        ];
+        for (expected, actual) in compatible {
+            validate_ontology_field(
+                BulkInputKind::Node,
+                7,
+                "property",
+                &Field::new("property", actual, false),
+                &expected,
+                false,
+            )
+            .unwrap();
+        }
+
+        for expected in [
+            PropertyValueType::Duration,
+            PropertyValueType::DateTime,
+            PropertyValueType::Map,
+        ] {
+            let error = validate_ontology_field(
+                BulkInputKind::Edge,
+                9,
+                "property",
+                &Field::new("property", DataType::Utf8, false),
+                &expected,
+                true,
+            )
+            .unwrap_err();
+            assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+            assert_eq!(error.row_ordinal, Some(9));
+        }
+
+        let mismatch = validate_ontology_field(
+            BulkInputKind::Node,
+            11,
+            "property",
+            &Field::new("property", DataType::Boolean, false),
+            &PropertyValueType::Utf8,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(mismatch.reason, BulkValidationReason::PropertyTypeMismatch);
+        let nullable = validate_ontology_field(
+            BulkInputKind::Node,
+            12,
+            "property",
+            &Field::new("property", DataType::Utf8, true),
+            &PropertyValueType::Utf8,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(nullable.reason, BulkValidationReason::NullabilityMismatch);
+
+        for supported in [
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+        ] {
+            validate_property_type(BulkInputKind::Node, "property", &supported).unwrap();
+        }
+        for unsupported in [
+            DataType::UInt64,
+            DataType::Binary,
+            DataType::Date32,
+            DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
+        ] {
+            assert_eq!(
+                validate_property_type(BulkInputKind::Edge, "property", &unsupported)
+                    .unwrap_err()
+                    .reason,
+                BulkValidationReason::UnsupportedPropertyType
+            );
+        }
+    }
+
+    #[test]
+    fn generated_bulk_identities_are_deterministic_typed_and_domain_separated() {
+        let operation_id = operation(42);
+        let node_zero = generated_uuid(operation_id, BulkInputKind::Node, 0);
+        assert_eq!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Node, 0)
+        );
+        assert_ne!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Node, 1)
+        );
+        assert_ne!(
+            node_zero,
+            generated_uuid(operation_id, BulkInputKind::Edge, 0)
+        );
+        assert_eq!(node_zero.get_version_num(), 7);
+        assert!(validate_operation_uuid(BulkInputKind::Node, operation_id).is_ok());
+        let invalid =
+            validate_operation_uuid(BulkInputKind::Edge, OperationId(Uuid::from_u128(42)))
+                .unwrap_err();
+        assert_eq!(invalid.reason, BulkValidationReason::InvalidUuid);
+        assert_eq!(invalid.field.as_deref(), Some("operation_uuid"));
+
+        for valid in ["a", "_a", "alpha_1", "Δelta"] {
+            assert!(validate_property_name(BulkInputKind::Node, valid).is_ok());
+        }
+        for invalid in ["", "1a", "a-b", "a b", "\n"] {
+            assert_eq!(
+                validate_property_name(BulkInputKind::Edge, invalid)
+                    .unwrap_err()
+                    .reason,
+                BulkValidationReason::InvalidIdentifier
+            );
+        }
+
+        let graph = GraphForge::new(None).unwrap();
+        let stale_nodes = ValidatedBulkNodes {
+            rows: Vec::new(),
+            operation_uuid: operation(43),
+            source_generation_uuid: uuid(44),
+        };
+        let error = graph
+            .validate_bulk_edges(operation(45), &[], &stale_nodes)
+            .unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::GenerationMismatch);
+        assert_eq!(error.kind, BulkInputKind::Edge);
+
+        let null_uuid = FixedSizeBinaryArray::new_null(16, 1);
+        assert_eq!(
+            uuid_at(
+                &null_uuid,
+                0,
+                BulkInputKind::Node,
+                3,
+                "node_uuid",
+                operation_id,
+            )
+            .unwrap(),
+            generated_uuid(operation_id, BulkInputKind::Node, 3)
+        );
+        assert_eq!(
+            explicit_uuid_at(&null_uuid, 0, BulkInputKind::Edge, 4, "source_uuid")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        let v4 = FixedSizeBinaryArray::try_from_iter(
+            [Uuid::from_u128(1).as_bytes().as_slice()].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            uuid_at(&v4, 0, BulkInputKind::Node, 5, "node_uuid", operation_id,)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        assert_eq!(
+            explicit_uuid_at(&v4, 0, BulkInputKind::Edge, 6, "target_uuid")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        let short =
+            FixedSizeBinaryArray::try_from_iter([b"12345678".as_slice()].into_iter()).unwrap();
+        assert_eq!(
+            uuid_at(&short, 0, BulkInputKind::Node, 7, "node_uuid", operation_id,)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+    }
+
+    #[test]
+    fn public_error_vocabulary_is_complete_and_stable() {
+        assert_eq!(BulkInputKind::Node.as_str(), "node");
+        assert_eq!(BulkInputKind::Edge.as_str(), "edge");
+
+        let expected = [
+            (BulkValidationReason::SchemaMismatch, "schema_mismatch"),
+            (BulkValidationReason::ReservedField, "reserved_field"),
+            (BulkValidationReason::DuplicateField, "duplicate_field"),
+            (
+                BulkValidationReason::UnsupportedPropertyType,
+                "unsupported_property_type",
+            ),
+            (
+                BulkValidationReason::InvalidIdentifier,
+                "invalid_identifier",
+            ),
+            (BulkValidationReason::InvalidUuid, "invalid_uuid"),
+            (BulkValidationReason::IdentityConflict, "identity_conflict"),
+            (BulkValidationReason::MissingEndpoint, "missing_endpoint"),
+            (
+                BulkValidationReason::UnknownOntologyType,
+                "unknown_ontology_type",
+            ),
+            (
+                BulkValidationReason::UnknownOntologyProperty,
+                "unknown_ontology_property",
+            ),
+            (
+                BulkValidationReason::PropertyTypeMismatch,
+                "property_type_mismatch",
+            ),
+            (
+                BulkValidationReason::NullabilityMismatch,
+                "nullability_mismatch",
+            ),
+            (
+                BulkValidationReason::GenerationMismatch,
+                "generation_mismatch",
+            ),
+            (BulkValidationReason::ProjectState, "project_state"),
+            (BulkValidationReason::OrdinalOverflow, "ordinal_overflow"),
+        ];
+        for (reason, spelling) in expected {
+            assert_eq!(reason.as_str(), spelling);
+        }
+
+        let error = BulkValidationError {
+            kind: BulkInputKind::Edge,
+            reason: BulkValidationReason::MissingEndpoint,
+            batch_index: Some(2),
+            row_ordinal: Some(7),
+            field: Some("source_uuid".into()),
+            message: "endpoint does not exist".into(),
+        };
+        assert_eq!(error.code(), "GF_BULK_VALIDATION");
+        assert_eq!(
+            error.to_string(),
+            "GF_BULK_VALIDATION(missing_endpoint): bulk edge batch 2 row 7 field \"source_uuid\": endpoint does not exist"
+        );
+    }
+
+    #[test]
+    fn property_value_normalization_covers_every_supported_arrow_scalar() {
+        let cases: Vec<(ArrayRef, PropValue)> = vec![
+            (
+                Arc::new(BooleanArray::from(vec![true])),
+                PropValue::Bool(true),
+            ),
+            (Arc::new(Int8Array::from(vec![-8])), PropValue::Int(-8)),
+            (Arc::new(Int16Array::from(vec![-16])), PropValue::Int(-16)),
+            (Arc::new(Int32Array::from(vec![-32])), PropValue::Int(-32)),
+            (Arc::new(Int64Array::from(vec![-64])), PropValue::Int(-64)),
+            (Arc::new(UInt8Array::from(vec![8])), PropValue::Int(8)),
+            (Arc::new(UInt16Array::from(vec![16])), PropValue::Int(16)),
+            (Arc::new(UInt32Array::from(vec![32])), PropValue::Int(32)),
+            (
+                Arc::new(Float32Array::from(vec![1.5])),
+                PropValue::Float(1.5),
+            ),
+            (
+                Arc::new(Float64Array::from(vec![2.5])),
+                PropValue::Float(2.5),
+            ),
+            (
+                Arc::new(StringArray::from(vec!["utf8"])),
+                PropValue::Str("utf8".into()),
+            ),
+            (
+                Arc::new(LargeStringArray::from(vec!["large-utf8"])),
+                PropValue::Str("large-utf8".into()),
+            ),
+        ];
+        for (array, expected) in cases {
+            assert_eq!(property_value_at(array.as_ref(), 0).unwrap(), expected);
+        }
+
+        let nullable = StringArray::from(vec![None::<&str>]);
+        assert_eq!(property_value_at(&nullable, 0).unwrap(), PropValue::Null);
+
+        let unsupported = UInt64Array::from(vec![u64::MAX]);
+        assert_eq!(
+            property_value_at(&unsupported, 0).unwrap_err(),
+            "unsupported property type UInt64"
+        );
+
+        let list =
+            ListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>([Some(vec![
+                Some(1),
+                None,
+                Some(3),
+            ])]);
+        assert_eq!(
+            property_value_at(&list, 0).unwrap(),
+            PropValue::List(vec![PropValue::Int(1), PropValue::Null, PropValue::Int(3)])
+        );
+        let large = LargeListArray::from_iter_primitive::<arrow::datatypes::Int32Type, _, _>([
+            Some(vec![Some(4), Some(5)]),
+        ]);
+        assert_eq!(
+            property_value_at(&large, 0).unwrap(),
+            PropValue::List(vec![PropValue::Int(4), PropValue::Int(5)])
+        );
+    }
+
+    #[test]
+    fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
+        let field = Field::new("when", DataType::Date32, false);
+        let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![1]));
+        let columns = [(&field, &array)];
+        let unsupported =
+            normalize_properties(BulkInputKind::Node, 9, 0, &columns, |_, _| Ok(())).unwrap_err();
+        assert_eq!(
+            unsupported.reason,
+            BulkValidationReason::UnsupportedPropertyType
+        );
+        assert_eq!(unsupported.row_ordinal, Some(9));
+        assert_eq!(unsupported.field.as_deref(), Some("when"));
+
+        let owner_error = normalize_properties(BulkInputKind::Edge, 11, 0, &columns, |name, _| {
+            Err(row_error(
+                BulkInputKind::Edge,
+                BulkValidationReason::UnknownOntologyProperty,
+                11,
+                name,
+                "owner rejected property",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(
+            owner_error.reason,
+            BulkValidationReason::UnknownOntologyProperty
+        );
+
+        let mut graph = GraphForge::new(None).unwrap();
+        graph.ontology_mode = OntologyMode::Strict;
+        graph.ontology = None;
+        for error in [
+            validate_node_owner(&graph, 1, "Person").unwrap_err(),
+            validate_edge_owner(&graph, 2, "KNOWS").unwrap_err(),
+        ] {
+            assert_eq!(error.reason, BulkValidationReason::UnknownOntologyType);
+        }
+        let property_field = Field::new("name", DataType::Utf8, true);
+        for error in [
+            validate_node_property(&graph, 3, "Person", "name", &property_field).unwrap_err(),
+            validate_edge_property(&graph, 4, "KNOWS", "weight", &property_field).unwrap_err(),
+        ] {
+            assert_eq!(error.reason, BulkValidationReason::ProjectState);
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "wrong",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        assert_eq!(
+            uuid_column(&batch, BulkInputKind::Node, "wrong")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::SchemaMismatch
+        );
+        assert_eq!(
+            string_column(&batch, BulkInputKind::Edge, "wrong")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::SchemaMismatch
+        );
     }
 
     fn node_batch(ids: &[Uuid], labels: &[&str], names: &[Option<&str>]) -> RecordBatch {
@@ -1997,6 +2427,109 @@ mod tests {
     }
 
     #[test]
+    fn node_and_edge_receipts_populate_only_kind_applicable_columns() {
+        let operation_uuid = operation(889);
+        let generation_uuid = uuid(888);
+        let node_uuid = uuid(887);
+        let node = node_receipt(
+            &[BulkNodeRow {
+                row_ordinal: 4,
+                node_uuid,
+                label: "Host".into(),
+                properties: BTreeMap::new(),
+            }],
+            operation_uuid,
+            generation_uuid,
+        )
+        .unwrap();
+        assert_eq!(
+            node.column_by_name("row_ordinal")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0),
+            4
+        );
+        assert_eq!(
+            node.column_by_name("entity_kind")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "node"
+        );
+        assert_eq!(
+            node.column_by_name("label")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "Host"
+        );
+        for name in ["rel_type", "source_uuid", "target_uuid"] {
+            assert!(node.column_by_name(name).unwrap().is_null(0), "{name}");
+        }
+
+        let edge_uuid = uuid(886);
+        let source_uuid = uuid(885);
+        let target_uuid = uuid(884);
+        let edge = edge_receipt(
+            &[BulkEdgeRow {
+                row_ordinal: 7,
+                edge_uuid,
+                rel_type: "CONNECTS".into(),
+                source_uuid,
+                target_uuid,
+                properties: BTreeMap::new(),
+            }],
+            operation_uuid,
+            generation_uuid,
+        )
+        .unwrap();
+        assert_eq!(
+            edge.column_by_name("entity_kind")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "edge"
+        );
+        assert!(edge.column_by_name("label").unwrap().is_null(0));
+        assert_eq!(
+            edge.column_by_name("rel_type")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "CONNECTS"
+        );
+        for (name, expected) in [
+            ("entity_uuid", edge_uuid),
+            ("source_uuid", source_uuid),
+            ("target_uuid", target_uuid),
+            ("operation_uuid", operation_uuid.0),
+            ("publication_generation_uuid", generation_uuid),
+        ] {
+            let values = edge
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
+            assert_eq!(
+                Uuid::from_slice(values.value(0)).unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn canonical_schema_order_and_metadata_are_enforced() {
         let graph = GraphForge::new(None).unwrap();
         let missing_metadata = Arc::new(Schema::new(vec![
@@ -2086,6 +2619,180 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, BulkValidationReason::UnsupportedPropertyType);
         assert_eq!(error.field.as_deref(), Some("events"));
+    }
+
+    #[test]
+    fn wave13_public_schema_validation_matrix_preserves_error_kind_field_and_partition() {
+        let reserved =
+            bulk_node_input_schema(vec![Field::new("label", DataType::Utf8, true)]).unwrap_err();
+        assert_eq!(reserved.reason, BulkValidationReason::ReservedField);
+        assert_eq!(reserved.field.as_deref(), Some("label"));
+
+        let duplicate = bulk_edge_input_schema(vec![
+            Field::new("weight", DataType::Float64, true),
+            Field::new("weight", DataType::Float64, false),
+        ])
+        .unwrap_err();
+        assert_eq!(duplicate.reason, BulkValidationReason::DuplicateField);
+        assert_eq!(duplicate.field.as_deref(), Some("weight"));
+
+        let invalid = bulk_node_input_schema(vec![Field::new("not valid", DataType::Utf8, true)])
+            .unwrap_err();
+        assert_eq!(invalid.reason, BulkValidationReason::InvalidIdentifier);
+        assert_eq!(invalid.field.as_deref(), Some("not valid"));
+
+        let unsupported =
+            bulk_edge_input_schema(vec![Field::new("counter", DataType::UInt64, false)])
+                .unwrap_err();
+        assert_eq!(
+            unsupported.reason,
+            BulkValidationReason::UnsupportedPropertyType
+        );
+        assert_eq!(unsupported.field.as_deref(), Some("counter"));
+
+        let graph = GraphForge::new(None).unwrap();
+        let missing = Arc::new(Schema::new_with_metadata(
+            vec![Field::new("node_uuid", DataType::FixedSizeBinary(16), true)],
+            contract_metadata("node"),
+        ));
+        let missing = graph
+            .validate_bulk_nodes(operation(892), &[RecordBatch::new_empty(missing)])
+            .unwrap_err();
+        assert_eq!(missing.reason, BulkValidationReason::SchemaMismatch);
+        assert_eq!(missing.batch_index, Some(0));
+        assert!(missing.message.contains("required topology fields"));
+
+        let first = RecordBatch::new_empty(bulk_node_input_schema(vec![]).unwrap());
+        let second = RecordBatch::new_empty(
+            bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, true)]).unwrap(),
+        );
+        let drift = graph
+            .validate_bulk_nodes(operation(893), &[first, second])
+            .unwrap_err();
+        assert_eq!(drift.reason, BulkValidationReason::SchemaMismatch);
+        assert_eq!(drift.batch_index, Some(1));
+        assert_eq!(drift.message, "schema differs from batch 0");
+
+        let wrong_edge = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("edge_uuid", DataType::FixedSizeBinary(16), true),
+                Field::new("rel_type", DataType::LargeUtf8, false),
+                Field::new("source_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("target_uuid", DataType::FixedSizeBinary(16), false),
+            ],
+            contract_metadata("edge"),
+        ));
+        let source_generation_uuid = *graph.current_generation_uuid.lock().unwrap();
+        let wrong_edge = graph
+            .validate_bulk_edges(
+                operation(894),
+                &[RecordBatch::new_empty(wrong_edge)],
+                &ValidatedBulkNodes {
+                    rows: vec![],
+                    operation_uuid: operation(894),
+                    source_generation_uuid,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(wrong_edge.reason, BulkValidationReason::SchemaMismatch);
+        assert_eq!(wrong_edge.batch_index, Some(0));
+        assert_eq!(wrong_edge.field.as_deref(), Some("rel_type"));
+    }
+
+    #[test]
+    fn property_and_ontology_type_registries_cover_every_supported_family() {
+        let scalar_types = [
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+        ];
+        for data_type in scalar_types {
+            assert!(validate_property_type(BulkInputKind::Node, "value", &data_type).is_ok());
+        }
+        for data_type in [
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+        ] {
+            assert!(validate_property_type(BulkInputKind::Edge, "values", &data_type).is_ok());
+        }
+        let error =
+            validate_property_type(BulkInputKind::Node, "when", &DataType::Date32).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::UnsupportedPropertyType);
+        assert_eq!(error.field.as_deref(), Some("when"));
+
+        for identifier in ["Person", "_private", "Ångström2"] {
+            assert!(validate_identifier(BulkInputKind::Node, 0, "label", identifier).is_ok());
+            assert!(validate_property_name(BulkInputKind::Node, identifier).is_ok());
+        }
+        for identifier in ["", "9name", "has space", "has-dash"] {
+            let row =
+                validate_identifier(BulkInputKind::Edge, 7, "rel_type", identifier).unwrap_err();
+            assert_eq!(row.reason, BulkValidationReason::InvalidIdentifier);
+            assert_eq!(row.row_ordinal, Some(7));
+            let field = validate_property_name(BulkInputKind::Edge, identifier).unwrap_err();
+            assert_eq!(field.reason, BulkValidationReason::InvalidIdentifier);
+            assert_eq!(field.field.as_deref(), Some(identifier));
+        }
+
+        let compatible = [
+            (PropertyValueType::Utf8, DataType::LargeUtf8),
+            (PropertyValueType::Int64, DataType::UInt32),
+            (PropertyValueType::Float64, DataType::Float32),
+            (PropertyValueType::Bool, DataType::Boolean),
+            (
+                PropertyValueType::List,
+                DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+            ),
+        ];
+        for (expected, actual) in compatible {
+            assert!(
+                validate_ontology_field(
+                    BulkInputKind::Node,
+                    3,
+                    "value",
+                    &Field::new("value", actual, false),
+                    &expected,
+                    false,
+                )
+                .is_ok()
+            );
+        }
+        for expected in [
+            PropertyValueType::Duration,
+            PropertyValueType::DateTime,
+            PropertyValueType::Map,
+        ] {
+            let error = validate_ontology_field(
+                BulkInputKind::Node,
+                3,
+                "value",
+                &Field::new("value", DataType::Utf8, false),
+                &expected,
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+        }
+        let error = validate_ontology_field(
+            BulkInputKind::Edge,
+            4,
+            "weight",
+            &Field::new("weight", DataType::Float64, true),
+            &PropertyValueType::Float64,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::NullabilityMismatch);
+        assert_eq!(error.row_ordinal, Some(4));
     }
 
     #[test]
@@ -2378,7 +3085,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_inherited_properties_and_types_are_validated_without_publication() {
+    fn wave13_strict_inherited_properties_and_types_are_validated_without_publication() {
         let dir = tempfile::TempDir::new().unwrap();
         let project_path = dir.path().join("project");
         std::fs::create_dir(&project_path).unwrap();
@@ -2399,6 +3106,48 @@ mod tests {
                 mode: OntologyMode::Strict,
             })
             .unwrap();
+
+        let unknown_owner = graph
+            .validate_bulk_nodes(
+                operation(909),
+                &[node_batch(&[uuid(409)], &["Unknown"], &[None])],
+            )
+            .unwrap_err();
+        assert_eq!(
+            unknown_owner.reason,
+            BulkValidationReason::UnknownOntologyType
+        );
+        assert_eq!(unknown_owner.row_ordinal, Some(0));
+        assert_eq!(unknown_owner.field.as_deref(), Some("label"));
+        assert_eq!(unknown_owner.message, "unknown strict ontology entity type");
+
+        let unknown_property_schema =
+            bulk_node_input_schema(vec![Field::new("alias", DataType::Utf8, true)]).unwrap();
+        let unknown_property_batch = RecordBatch::try_new(
+            unknown_property_schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(410).as_bytes()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Host"])),
+                Arc::new(StringArray::from(vec![Some("gateway")])),
+            ],
+        )
+        .unwrap();
+        let unknown_property = graph
+            .validate_bulk_nodes(operation(909), &[unknown_property_batch])
+            .unwrap_err();
+        assert_eq!(
+            unknown_property.reason,
+            BulkValidationReason::UnknownOntologyProperty
+        );
+        assert_eq!(unknown_property.row_ordinal, Some(0));
+        assert_eq!(unknown_property.field.as_deref(), Some("alias"));
+        assert_eq!(
+            unknown_property.message,
+            "property is not declared for strict entity type"
+        );
 
         let schema = bulk_node_input_schema(vec![
             Field::new("name", DataType::Utf8, true),
@@ -2537,6 +3286,40 @@ mod tests {
             operation_uuid: operation(913),
             source_generation_uuid: *graph.current_generation_uuid.lock().unwrap(),
         };
+
+        let unknown_edge_property_schema =
+            bulk_edge_input_schema(vec![Field::new("alias", DataType::Utf8, true)]).unwrap();
+        let unknown_edge_property = RecordBatch::try_new(
+            unknown_edge_property_schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(44).as_bytes()].into_iter()).unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["CONNECTS"])),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(41).as_bytes()].into_iter()).unwrap(),
+                ),
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(41).as_bytes()].into_iter()).unwrap(),
+                ),
+                Arc::new(StringArray::from(vec![Some("uplink")])),
+            ],
+        )
+        .unwrap();
+        let unknown_edge_property = graph
+            .validate_bulk_edges(operation(913), &[unknown_edge_property], &same_request)
+            .unwrap_err();
+        assert_eq!(
+            unknown_edge_property.reason,
+            BulkValidationReason::UnknownOntologyProperty
+        );
+        assert_eq!(unknown_edge_property.row_ordinal, Some(0));
+        assert_eq!(unknown_edge_property.field.as_deref(), Some("alias"));
+        assert_eq!(
+            unknown_edge_property.message,
+            "property is not declared for strict relationship type"
+        );
+
         assert_eq!(
             graph
                 .validate_bulk_edges(operation(913), &[edge], &same_request)
@@ -2806,6 +3589,85 @@ mod tests {
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
         );
+    }
+
+    #[test]
+    fn wave13_bulk_publication_conflicts_preserve_the_committed_generation_and_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let left = uuid(9_100);
+        let right = uuid(9_101);
+        let node_operation = operation(9_102);
+        let original = node_batch(
+            &[left, right],
+            &["Person", "Person"],
+            &[Some("A"), Some("B")],
+        );
+        graph
+            .publish_bulk_nodes(node_operation, &[original.clone()])
+            .unwrap();
+        let committed = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+
+        let changed = node_batch(
+            &[left, right],
+            &["Person", "Person"],
+            &[Some("A"), Some("changed")],
+        );
+        let error = graph
+            .publish_bulk_nodes(node_operation, &[changed])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GF_IDEMPOTENCY_CONFLICT: bulk-node operation UUID was already used with different input"
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(directory.path())
+                .unwrap()
+                .generation_uuid(),
+            committed
+        );
+        let collision = graph
+            .validate_bulk_nodes(operation(9_103), &[original])
+            .unwrap_err();
+        assert_eq!(collision.reason, BulkValidationReason::IdentityConflict);
+        assert_eq!(collision.row_ordinal, Some(0));
+
+        let edge = uuid(9_104);
+        let edge_operation = operation(9_105);
+        let original_edge = edge_batch(&[edge], &["KNOWS"], &[left], &[right]);
+        graph
+            .publish_bulk_edges(edge_operation, &[original_edge.clone()])
+            .unwrap();
+        let edge_committed = graphforge_storage::resolve_project_generation(directory.path())
+            .unwrap()
+            .generation_uuid();
+        let changed_edge = edge_batch(&[edge], &["LIKES"], &[left], &[right]);
+        let error = graph
+            .publish_bulk_edges(edge_operation, &[changed_edge])
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "GF_IDEMPOTENCY_CONFLICT: bulk-edge operation UUID was already used with different input"
+        );
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(directory.path())
+                .unwrap()
+                .generation_uuid(),
+            edge_committed
+        );
+        let empty_nodes = graph.validate_bulk_nodes(operation(9_106), &[]).unwrap();
+        let collision = graph
+            .validate_bulk_edges(operation(9_107), &[original_edge], &empty_nodes)
+            .unwrap_err();
+        assert_eq!(collision.reason, BulkValidationReason::IdentityConflict);
+        assert_eq!(collision.row_ordinal, Some(0));
+
+        drop(graph);
+        let reopened = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        assert_eq!(reopened.node_count("Person").unwrap(), 2);
+        assert_eq!(reopened.relationship_types().unwrap(), ["KNOWS"]);
     }
 
     #[test]

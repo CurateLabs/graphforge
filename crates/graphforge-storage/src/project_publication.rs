@@ -201,10 +201,8 @@ pub fn stage_project_generation(
     container_root: impl AsRef<Path>,
     request: &ProjectGenerationRequest,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request).map_err(|error| match error {
-        GfError::Storage(message) => publication_error(request, "STAGE", false, &message),
-        other => other,
-    })
+    stage_project_generation_inner(container_root.as_ref(), request)
+        .map_err(|error| map_stage_error(request, error))
 }
 
 /// Stage a complete private generation while allowing other transaction
@@ -228,10 +226,14 @@ pub fn stage_project_generation_optimistic(
         request,
         operation_fingerprint,
     )
-    .map_err(|error| match error {
+    .map_err(|error| map_stage_error(request, error))
+}
+
+fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfError {
+    match error {
         GfError::Storage(message) => publication_error(request, "STAGE", false, &message),
         other => other,
-    })
+    }
 }
 
 fn stage_project_generation_inner(
@@ -1857,6 +1859,8 @@ fn safe_cause(cause: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::open_or_initialize_project;
 
@@ -1983,6 +1987,38 @@ mod tests {
     }
 
     #[test]
+    fn durable_install_io_failure_is_wrapped_before_current_changes() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let request = request(vec![participant("graph", "nodes", b"new")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed")
+        };
+        let validated = staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
+        fs::remove_file(
+            validated
+                .0
+                .generation_root
+                .join(PARTICIPANTS_DIR)
+                .join(&validated.0.participants[0].relative_path),
+        )
+        .unwrap();
+        let error = validated.publish().unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("phase=DURABLE committed=false"));
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[test]
     fn journal_records_each_deterministic_publication_phase() {
         let root = project();
         let request = request(vec![participant("graph", "nodes", b"new")]);
@@ -2067,9 +2103,9 @@ mod tests {
         let parent = resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
-        let request = request(vec![participant("graph", "nodes", b"original")]);
+        let initial_request = request(vec![participant("graph", "nodes", b"original")]);
         let ProjectStageOutcome::Staged(staged) =
-            stage_project_generation(root.path(), &request).unwrap()
+            stage_project_generation(root.path(), &initial_request).unwrap()
         else {
             panic!("new request unexpectedly replayed");
         };
@@ -2092,6 +2128,69 @@ mod tests {
             .expect("tampered bytes must fail validation");
 
         assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+
+        let request = request(vec![participant("graph", "nodes", b"original")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        let path = staged
+            .generation_root
+            .join(PARTICIPANTS_DIR)
+            .join(&staged.participants[0].relative_path);
+        std::fs::write(path, b"short").unwrap();
+        assert_eq!(
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .err()
+                .expect("truncated staged bytes must fail")
+                .code(),
+            "GF_PUBLICATION_FAILED"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_participant_hard_link_fails_before_current_mutation() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let request = request(vec![participant("graph", "nodes", b"stable")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("unexpected replay")
+        };
+        let path = staged
+            .generation_root
+            .join(PARTICIPANTS_DIR)
+            .join(&staged.participants[0].relative_path);
+        let external = root.path().join("external-participant");
+        fs::rename(&path, &external).unwrap();
+        fs::hard_link(&external, &path).unwrap();
+
+        assert_eq!(
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .err()
+                .expect("hard-linked staged bytes must fail")
+                .code(),
+            "GF_PUBLICATION_FAILED"
+        );
         assert_eq!(
             resolve_project_generation(root.path())
                 .unwrap()
@@ -2145,6 +2244,60 @@ mod tests {
             .expect("conflicting replay must fail");
 
         assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+    }
+
+    #[test]
+    fn interrupted_stage_and_tampered_published_replay_are_exactly_classified() {
+        let root = project();
+        let staged_request = request(vec![participant("graph", "nodes", b"staged")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &staged_request).unwrap()
+        else {
+            panic!("fresh transaction unexpectedly replayed")
+        };
+        drop(staged);
+        let interrupted = stage_project_generation(root.path(), &staged_request)
+            .err()
+            .expect("interrupted stage must fail");
+        assert_eq!(interrupted.code(), "GF_PUBLICATION_FAILED");
+        assert!(interrupted.to_string().contains("requires recovery"));
+
+        let published_request = request(vec![participant("graph", "nodes", b"published")]);
+        let receipt = publish(root.path(), published_request.clone());
+        let manifest = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(receipt.generation_uuid.hyphenated().to_string())
+            .join(MANIFEST_FILE);
+        fs::write(&manifest, b"tampered\n").unwrap();
+        assert_eq!(
+            stage_project_generation(root.path(), &published_request)
+                .err()
+                .expect("tampered published replay must fail")
+                .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+    }
+
+    #[test]
+    fn optimistic_promotion_refuses_an_existing_generation_destination() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"optimistic")]);
+        let operation: [u8; 32] = Sha256::digest(b"wave7-existing-destination").into();
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
+        else {
+            panic!("fresh optimistic transaction unexpectedly replayed")
+        };
+        let destination = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(request.generation_uuid.hyphenated().to_string());
+        fs::create_dir(&destination).unwrap();
+        let error = promote_optimistic_generation(&staged).unwrap_err();
+        assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert!(error.to_string().contains("generation_exists"));
+        assert!(staged.generation_root.is_dir());
     }
 
     #[test]
@@ -2280,6 +2433,38 @@ mod tests {
     }
 
     #[test]
+    fn aborted_optimistic_replay_fails_closed_when_generation_cleanup_is_incomplete() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"attempt")]);
+        let operation: [u8; 32] = Sha256::digest(b"aborted-cleanup-contract").into();
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
+        else {
+            panic!("optimistic operation replayed unexpectedly");
+        };
+        abort_stale_generation(&staged).unwrap();
+        drop(staged);
+
+        let leftover = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(request.generation_uuid.hyphenated().to_string());
+        std::fs::create_dir(&leftover).unwrap();
+        let error = stage_project_generation_optimistic(root.path(), &request, operation)
+            .err()
+            .expect("incomplete aborted cleanup must fail closed");
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("cleanup is incomplete"));
+        assert!(leftover.exists());
+        assert_eq!(
+            read_journal(&journal_path(root.path(), request.transaction_uuid))
+                .unwrap()
+                .phase,
+            JournalPhase::Aborted
+        );
+    }
+
+    #[test]
     fn optimistic_promotion_closes_staged_handles_before_directory_rename() {
         let root = project();
         let request = request(vec![participant("graph", "nodes", b"promoted")]);
@@ -2375,5 +2560,408 @@ mod tests {
                 .generation_uuid(),
             parent
         );
+    }
+
+    #[test]
+    fn malformed_generation_contracts_fail_before_staging_or_current_change() {
+        let root = project();
+        let before = fs::read(root.path().join(CURRENT_FILE)).unwrap();
+
+        let mut cases = Vec::new();
+        let mut no_capability = request(vec![]);
+        no_capability.capabilities.clear();
+        cases.push((no_capability, "at least one capability"));
+
+        let mut zero_capability = request(vec![]);
+        zero_capability.capabilities[0].capability_version = 0;
+        cases.push((zero_capability, "capability contract versions"));
+
+        let mut missing_graph = request(vec![]);
+        missing_graph.capabilities[0].capability_id = "knowledge".into();
+        cases.push((missing_graph, "graph capability version 1"));
+
+        let mut duplicate_capability = request(vec![]);
+        duplicate_capability
+            .capabilities
+            .push(duplicate_capability.capabilities[0].clone());
+        cases.push((duplicate_capability, "duplicate capability identity"));
+
+        let mut undeclared = request(vec![participant("knowledge", "events", b"event")]);
+        undeclared
+            .capabilities
+            .retain(|entry| entry.capability_id == "graph");
+        cases.push((undeclared, "participant capability is not declared"));
+
+        let mut version_mismatch = request(vec![participant("knowledge", "events", b"event")]);
+        version_mismatch.participants[0].capability_version = 2;
+        cases.push((version_mismatch, "version conflicts with declaration"));
+
+        let duplicate = participant("graph", "nodes", b"same");
+        cases.push((
+            request(vec![duplicate.clone(), duplicate]),
+            "duplicate participant identity",
+        ));
+
+        let mut zero_record = request(vec![participant("graph", "nodes", b"node")]);
+        zero_record.participants[0].record_version = 0;
+        cases.push((zero_record, "participant contract versions"));
+
+        let mut invalid_id = request(vec![participant("graph", "nodes", b"node")]);
+        invalid_id.participants[0].record_family_id = "../nodes".into();
+        cases.push((invalid_id, "machine ID"));
+
+        for (candidate, expected) in cases {
+            let error = stage_project_generation(root.path(), &candidate)
+                .err()
+                .expect("malformed request must fail");
+            assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(fs::read(root.path().join(CURRENT_FILE)).unwrap(), before);
+            assert!(!journal_path(root.path(), candidate.transaction_uuid).exists());
+        }
+    }
+
+    #[test]
+    fn publication_error_redacts_unsafe_cause_and_digest_parser_is_canonical() {
+        let transaction = Uuid::now_v7();
+        let generation = Uuid::now_v7();
+        let error = publication_error_from_parts(
+            transaction,
+            generation,
+            "STAGED",
+            false,
+            "bad/path:\nsecret=<value>!",
+        );
+        let text = error.to_string();
+        assert!(text.contains("phase=STAGED committed=false cause=badpathsecretvalue"));
+        assert!(!text.contains('/') && !text.contains('<') && !text.contains('!'));
+
+        let bytes = [0xabu8; 32];
+        let canonical = hex_digest(bytes);
+        assert_eq!(parse_digest(&canonical), Some(bytes));
+        for malformed in ["", "ab", &"A".repeat(64), &"g".repeat(64)] {
+            assert_eq!(parse_digest(malformed), None);
+        }
+    }
+
+    #[test]
+    fn published_transaction_probe_verifies_durable_manifest_on_reopen() {
+        let root = project();
+        let input = request(vec![
+            participant("graph", "nodes", b"nodes"),
+            participant("graph", "edges", b"edges"),
+        ]);
+        let receipt = publish(root.path(), input.clone());
+        let probed = published_project_transaction(root.path(), input.transaction_uuid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(probed.transaction_uuid, receipt.transaction_uuid);
+        assert_eq!(probed.generation_uuid, receipt.generation_uuid);
+        assert_eq!(
+            probed.generation_manifest_sha256,
+            receipt.generation_manifest_sha256
+        );
+        assert!(probed.idempotent_replay);
+        assert!(
+            published_project_transaction(root.path(), Uuid::now_v7())
+                .unwrap()
+                .is_none()
+        );
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), receipt.generation_uuid);
+        reopened.validate_complete_participant_inventory().unwrap();
+        drop(reopened);
+
+        let manifest = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(receipt.generation_uuid.hyphenated().to_string())
+            .join(MANIFEST_FILE);
+        fs::write(&manifest, b"tampered\n").unwrap();
+        let error = published_project_transaction(root.path(), input.transaction_uuid).unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
+        assert!(error.to_string().contains("does not match its journal"));
+    }
+
+    #[test]
+    fn staged_participant_file_kind_matrix_fails_before_current_mutation() {
+        for kind in ["missing", "directory", "symlink"] {
+            let root = project();
+            let parent = resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid();
+            let request = request(vec![participant("graph", "nodes", b"stable")]);
+            let ProjectStageOutcome::Staged(staged) =
+                stage_project_generation(root.path(), &request).unwrap()
+            else {
+                panic!("unexpected replay")
+            };
+            let path = staged
+                .generation_root
+                .join(PARTICIPANTS_DIR)
+                .join(&staged.participants.first().unwrap().relative_path);
+            std::fs::remove_file(&path).unwrap();
+            match kind {
+                "missing" => {}
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                "symlink" => {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(root.path().join(CURRENT_FILE), &path).unwrap();
+                    #[cfg(not(unix))]
+                    std::fs::create_dir(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = match staged.validate(|_| Ok(()), |_, _| Ok(())) {
+                Ok(_) => panic!("hostile staged participant must fail"),
+                Err(error) => error,
+            };
+            let expected_code = if kind == "missing" {
+                "GF_IO"
+            } else {
+                "GF_PUBLICATION_FAILED"
+            };
+            assert_eq!(error.code(), expected_code);
+            assert_eq!(
+                resolve_project_generation(root.path())
+                    .unwrap()
+                    .generation_uuid(),
+                parent
+            );
+        }
+    }
+
+    #[test]
+    fn journal_decode_and_atomic_temp_cleanup_matrix_is_fail_closed() {
+        let root = project();
+        let journal = root.path().join(TRANSACTIONS_DIR).join("malformed.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        for bytes in [
+            b"not-json".as_slice(),
+            br#"{"journal_version":999}"#,
+            br#"{"journal_version":1,"transaction_uuid":"bad"}"#,
+        ] {
+            std::fs::write(&journal, bytes).unwrap();
+            assert_eq!(
+                read_journal(&journal).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+            assert_eq!(std::fs::read(&journal).unwrap(), bytes);
+        }
+
+        let unrelated = root.path().join("metadata.json");
+        assert!(!cleanup_atomicwrite_temp(&unrelated).unwrap());
+        let empty = root.path().join(".atomicwriteabc123");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(cleanup_atomicwrite_temp(&empty).unwrap());
+        assert!(!empty.exists());
+
+        let populated = root.path().join(".atomicwritedef456");
+        std::fs::create_dir(&populated).unwrap();
+        std::fs::write(populated.join("tmpfile.tmp"), b"abandoned").unwrap();
+        assert!(cleanup_atomicwrite_temp(&populated).unwrap());
+        assert!(!populated.exists());
+
+        let hostile = root.path().join(".atomicwriteghi789");
+        std::fs::create_dir(&hostile).unwrap();
+        std::fs::write(hostile.join("unexpected"), b"caller bytes").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&hostile).unwrap());
+        assert_eq!(
+            std::fs::read(hostile.join("unexpected")).unwrap(),
+            b"caller bytes"
+        );
+    }
+
+    #[test]
+    fn wave9_journal_metadata_and_lock_aliases_fail_closed() {
+        let root = project();
+        let journal = root.path().join(TRANSACTIONS_DIR).join("hostile.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+
+        std::fs::create_dir(&journal).unwrap();
+        assert_eq!(
+            read_journal(&journal).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        std::fs::remove_dir(&journal).unwrap();
+        std::fs::write(&journal, vec![b'x'; MAX_JOURNAL_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            read_journal(&journal).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            std::fs::remove_file(&journal).unwrap();
+            let target = root.path().join("caller-journal");
+            std::fs::write(&target, b"caller bytes").unwrap();
+            symlink(&target, &journal).unwrap();
+            assert_eq!(
+                read_journal(&journal).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+
+            let owner = root.path().join("lock-owner");
+            let alias = root.path().join("lock-alias");
+            std::fs::write(&owner, b"").unwrap();
+            std::fs::hard_link(&owner, &alias).unwrap();
+            assert_eq!(
+                open_regular_lock(&alias).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+            assert!(owner.exists());
+        }
+    }
+
+    #[test]
+    fn atomic_temp_cleanup_rejects_near_misses_links_and_multiple_entries() {
+        let root = project();
+        for name in [
+            ".atomicwrite",
+            ".atomicwrite12345",
+            ".atomicwrite1234567",
+            ".atomicwrite12-456",
+            "atomicwrite123456",
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&path).unwrap());
+            assert!(path.exists());
+        }
+
+        let regular = root.path().join(".atomicwriteabc001");
+        std::fs::write(&regular, b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&regular).unwrap());
+        assert_eq!(std::fs::read(&regular).unwrap(), b"caller");
+
+        let multiple = root.path().join(".atomicwriteabc002");
+        std::fs::create_dir(&multiple).unwrap();
+        std::fs::write(multiple.join("tmpfile.tmp"), b"temporary").unwrap();
+        std::fs::write(multiple.join("second"), b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&multiple).unwrap());
+        assert_eq!(std::fs::read(multiple.join("second")).unwrap(), b"caller");
+
+        let wrong_entry = root.path().join(".atomicwriteabc003");
+        std::fs::create_dir(&wrong_entry).unwrap();
+        std::fs::write(wrong_entry.join("not-temp"), b"caller").unwrap();
+        assert!(!cleanup_atomicwrite_temp(&wrong_entry).unwrap());
+        assert_eq!(
+            std::fs::read(wrong_entry.join("not-temp")).unwrap(),
+            b"caller"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let linked_dir = root.path().join(".atomicwriteabc004");
+            symlink(root.path(), &linked_dir).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&linked_dir).unwrap());
+            assert!(
+                linked_dir
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+
+            let linked_entry = root.path().join(".atomicwriteabc005");
+            std::fs::create_dir(&linked_entry).unwrap();
+            symlink(
+                root.path().join(CURRENT_FILE),
+                linked_entry.join("tmpfile.tmp"),
+            )
+            .unwrap();
+            assert!(!cleanup_atomicwrite_temp(&linked_entry).unwrap());
+            assert!(
+                linked_entry
+                    .join("tmpfile.tmp")
+                    .symlink_metadata()
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+
+            let hardlinked_entry = root.path().join(".atomicwriteabc006");
+            std::fs::create_dir(&hardlinked_entry).unwrap();
+            let owned = root.path().join("hardlink-owner");
+            std::fs::write(&owned, b"caller").unwrap();
+            std::fs::hard_link(&owned, hardlinked_entry.join("tmpfile.tmp")).unwrap();
+            assert!(!cleanup_atomicwrite_temp(&hardlinked_entry).unwrap());
+            assert_eq!(std::fs::read(&owned).unwrap(), b"caller");
+        }
+    }
+
+    #[test]
+    fn machine_directory_and_lock_reject_hostile_path_components_without_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        for relative in [
+            Path::new("../escape"),
+            Path::new("/absolute"),
+            Path::new("safe/../escape"),
+        ] {
+            assert_eq!(
+                ensure_machine_directory(root.path(), relative)
+                    .unwrap_err()
+                    .code(),
+                "GF_PROJECT_CORRUPT"
+            );
+        }
+        let file = root.path().join("owned");
+        std::fs::write(&file, b"caller bytes").unwrap();
+        assert_eq!(
+            ensure_machine_directory(root.path(), Path::new("owned/child"))
+                .unwrap_err()
+                .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"caller bytes");
+
+        let lock = root.path().join("lock");
+        std::fs::create_dir(&lock).unwrap();
+        assert_eq!(
+            open_regular_lock(&lock).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        assert!(lock.is_dir());
+    }
+
+    #[test]
+    fn public_transaction_probe_distinguishes_absent_staged_and_durable_publication() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"rows")]);
+
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
+        );
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("fresh transaction unexpectedly replayed");
+        };
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
+        );
+        let receipt = staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let reopened = published_project_transaction(root.path(), request.transaction_uuid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.generation_uuid, receipt.generation_uuid);
+        assert_eq!(
+            reopened.generation_manifest_sha256,
+            receipt.generation_manifest_sha256
+        );
+        assert!(reopened.idempotent_replay);
     }
 }

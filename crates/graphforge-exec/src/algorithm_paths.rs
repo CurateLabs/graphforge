@@ -2809,6 +2809,108 @@ mod tests {
     }
 
     #[test]
+    fn min_cost_flow_public_options_require_exact_capacity_and_cost_contract() {
+        for by in [
+            PathAlgorithm::MinCostMaxFlow,
+            PathAlgorithm::MinCostMaxFlowEdges,
+        ] {
+            let validate = |options: PathsOptions| {
+                validate_path_options(Some(uuid(0)), Some(uuid(1)), &options)
+            };
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    weight: Some("weight".into()),
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == format!(
+                        "{by} uses capacity_property and cost_property instead of weight"
+                    )
+            ));
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some("capacity".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == format!("{by} requires a cost_property")
+            ));
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some(" bad".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == "invalid paths capacity property \" bad\""
+            ));
+            assert!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                })
+                .is_ok()
+            );
+        }
+
+        assert!(matches!(
+            validate_path_options(
+                Some(uuid(0)),
+                Some(uuid(1)),
+                &PathsOptions {
+                    by: PathAlgorithm::MaxFlow,
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }
+            ),
+            Err(GfError::Validation(message))
+                if message == "max_flow does not accept min-cost flow properties"
+        ));
+    }
+
+    #[test]
+    fn public_projection_fingerprint_is_stable_across_provider_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = PathsOptions {
+            by: PathAlgorithm::FloydWarshall,
+            ..PathsOptions::default()
+        };
+        let first_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let first = paths_projection_fingerprint(
+            &first_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            Some(uuid(0)),
+            None,
+            &options,
+        )
+        .unwrap();
+        drop(first_provider);
+        let reopened_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let reopened = paths_projection_fingerprint(
+            &reopened_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            Some(uuid(0)),
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(first, reopened);
+        assert_ne!(first, [0; 32]);
+    }
+
+    #[test]
     fn random_walk_options_normalize_defaults_and_preserve_explicit_controls() {
         assert_eq!(
             normalize_random_walk_options(None, 1, None, None).unwrap(),
@@ -2901,6 +3003,29 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn gomory_hu_public_validation_rejects_positional_and_directed_requests() {
+        let positional = PathsOptions {
+            by: PathAlgorithm::GomoryHuTree,
+            ..PathsOptions::default()
+        };
+        assert!(matches!(
+            validate_path_options(Some(uuid(0)), None, &positional),
+            Err(GfError::Validation(message))
+                if message.contains("does not accept positional source or target")
+        ));
+
+        let directed = PathsOptions {
+            by: PathAlgorithm::GomoryHuTree,
+            directed: true,
+            ..PathsOptions::default()
+        };
+        assert!(matches!(
+            validate_path_options(None, None, &directed),
+            Err(GfError::Validation(message)) if message == "gomory_hu_tree requires directed=false"
+        ));
     }
 
     #[test]
@@ -3072,5 +3197,57 @@ mod tests {
             ),
             Err(AlgorithmError::IterationLimit { .. })
         ));
+    }
+
+    #[test]
+    fn numeric_projection_hashes_in_node_order_and_rejects_invalid_values() {
+        use sha2::Digest;
+
+        let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
+        let values = HashMap::from([(0, 1.25), (1, -2.5), (2, 3.75)]);
+        let mut first = Sha256::new();
+        update_node_numeric_projection(&mut first, &graph, "heuristic", "distance", &values)
+            .expect("finite complete numeric projection");
+        let first: [u8; 32] = first.finalize().into();
+
+        let mut reordered = Sha256::new();
+        let reordered_values = HashMap::from([(2, 3.75), (0, 1.25), (1, -2.5)]);
+        update_node_numeric_projection(
+            &mut reordered,
+            &graph,
+            "heuristic",
+            "distance",
+            &reordered_values,
+        )
+        .expect("map insertion order does not affect projection");
+        assert_eq!(first, <[u8; 32]>::from(reordered.finalize()));
+
+        let mut missing = Sha256::new();
+        let error = update_node_numeric_projection(
+            &mut missing,
+            &graph,
+            "prize",
+            "value",
+            &HashMap::from([(0, 1.0), (1, 2.0)]),
+        )
+        .expect_err("every projected node needs a value");
+        assert_eq!(
+            error.to_string(),
+            "execution error: numeric projection node has no property value"
+        );
+
+        let mut non_finite = Sha256::new();
+        let error = update_node_numeric_projection(
+            &mut non_finite,
+            &graph,
+            "prize",
+            "value",
+            &HashMap::from([(0, 1.0), (1, f64::NAN), (2, 3.0)]),
+        )
+        .expect_err("non-finite graph-native values are not fingerprintable");
+        assert_eq!(
+            error.to_string(),
+            "execution error: numeric projection contains a non-finite value"
+        );
     }
 }

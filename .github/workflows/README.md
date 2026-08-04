@@ -2,8 +2,17 @@
 
 GraphForge uses one stable required `CI Gate`. A deterministic classifier runs
 only the policy, language, and binding jobs relevant to the pull request.
-Release certification is manual and SHA-bound; `publish.yaml` consumes its
-retained candidate only after a GitHub Release is published.
+
+**Speed is a first-class value alongside honesty.** Surfaces shed work that is
+not required for their objective. PR CI does **not** run full `llvm-cov`.
+Frequent publishing uses the **publish-track** (Binding RC → tag →
+`publish.yaml` on retained bytes). M1 load, checkpoint, and m20/m21 remain
+**human-close / milestone** evidence and are not publish-track blockers.
+Wall-clock targets and the dual-track table live in
+[`docs/engineering/TESTING.md`](../../docs/engineering/TESTING.md).
+
+`publish.yaml` consumes a retained Binding RC candidate (no rebuild-on-write)
+after a GitHub Release / release identity exists for that SHA.
 
 Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. Native PR
 jobs use Blacksmith sticky disks for job-isolated Cargo `target/` directories,
@@ -12,6 +21,40 @@ while registry and pnpm dependencies use the colocated cache through upstream
 sticky disks; inactive disks expire under Blacksmith's retention policy.
 The M1 host-native release load matrix also mounts a sticky `target/` so maturin, Cargo,
 and napi share one build volume instead of a second root-disk tree.
+Binding RC is expected to use the same Blacksmith-first sticky + colocated-cache
+model (see storage policy tests); put `target/` on sticky disks, not in
+`actions/cache` blobs.
+
+### Blacksmith-first CI storage policy
+
+`scripts/ci/test-ci-storage-policy.py` encodes these rules (not the GitHub
+Actions cache-era bans that blocked RC speed):
+
+| Allowed | Purpose |
+| --- | --- |
+| `useblacksmith/stickydisk` for `target/`, optional `.sccache`, large trees | Persist compile products across RC/publish-track runs (~3s mount) |
+| Upstream `actions/cache@v6` for `~/.cargo/registry` + git (and pnpm/uv) | Colocated Blacksmith cache; exact lockfile keys |
+| Local `sccache` with `SCCACHE_DIR` on a sticky disk | Cross-crate compile cache without GHA-backend maturin sccache |
+| Bigger Blacksmith runners for RC cells | Linux 8/16 vCPU; larger macOS/Windows when needed |
+
+| Still forbidden | Why |
+| --- | --- |
+| Putting `target/` into `actions/cache` blobs | Wrong tool — use sticky disks |
+| Maturin-action `sccache: true` (GHA-integrated) | Prefer sticky `SCCACHE_DIR` / sticky `target/` |
+| Unbounded artifact uploads | Keep consumer-driven retention for candidate partitions |
+
+**Expected Binding RC Linux sticky keys** (release profile; shared across
+Python-ubuntu and Node-linux when safe):
+
+```text
+${{ github.repository }}-binding-rc-linux-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
+${{ github.repository }}-release_candidate-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
+```
+
+PR sticky keys stay job-isolated:
+`${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1`.
+macOS/Windows RC cells use larger Blacksmith runners + colocated registry cache;
+use sticky disks there only when the platform supports them.
 
 ## Pull-request contract
 
@@ -82,6 +125,23 @@ npm, and crates.io surfaces, records four non-overlapping artifact groups, and
 reopens every archive with `graphforge-release-candidate-v2` completeness
 validation. A checksum-valid archive with missing entrypoints, types, native
 modules, dependency metadata, or legal files is rejected.
+Linux Binding RC build cells mount a shared release-profile `target/` sticky
+disk keyed by repository, RC Linux target family, Rust 1.96.0, and `Cargo.lock`;
+the Python Ubuntu and Linux Node cells share it because their Cargo artifacts
+are target-qualified. The release-assembly cell has its own equivalent sticky
+disk. Registry and git dependencies use colocated `actions/cache@v6` on every
+RC OS; no cache action transfers `target/`. macOS and Windows use larger
+Blacksmith runners (12-vCPU macOS, 8-vCPU Windows) rather than sticky disks.
+
+RC is intentionally slimmer than the PR suite: PR CI owns broad Linux binding
+acceptance, while RC runs only clean-install smoke plus publish-critical native
+parity/error contracts on every retained platform, then verifies the exact
+retained partitions offline. This keeps multi-OS native evidence, offline
+rehearsal, and same-SHA fail-closed packing intact. During the first three
+comparable dispatches after this change, record the Actions duration in the PR
+ledger: target p50 is ≤20 minutes warm and ≤35 minutes cold. Treat warm p50
+above 25 minutes as a failed speed acceptance criterion and open a bounded
+follow-up before declaring the change complete.
 After the maturin wheel build, the workflow verifies that any inherited Rust
 compiler wrapper is still executable before Python contracts may launch Cargo;
 an unavailable wrapper is cleared without printing the job environment or PATH.
@@ -145,12 +205,28 @@ The required Rust + Binding RC run IDs are an input contract for this workflow
 only. They do **not** make the cascade a close gate for child implementation or
 construction issues; those close on outcomes (see `AGENTS.md` § Issue close).
 
-### `binding-release-candidate.yml`, `release-credential-preflight.yml`, and `publish.yaml`
+### `binding-release-candidate.yml`, `publish-track.yml`, `release-credential-preflight.yml`, and `publish.yaml`
 
 The exact-SHA Binding RC retains tested release bytes and their partitioned v2
 candidate manifest for 30 days. Credential preflight verifies the npm/crates.io
 secret projections without publishing. The release-event workflow consumes the
 retained candidate; ordinary PRs do not repeat that certification.
+
+**publish-track** (registry-honest publish, scheduled or on-demand): successful
+same-SHA Binding RC → tag / release identity → `publish.yaml` writes retained
+bytes only. Skip re-RC when a complete unexpired candidate for the current
+`main` tip already exists. Target wall-clock: Binding RC ≤20m p50 warm /
+≤35m cold; publish-track ≤35m p50 / ≤50m cold (see TESTING.md). M1,
+checkpoint, and m20/m21 are **not** required on this path.
+
+`publish-track.yml` schedules exact-main Binding RC dispatch every six hours.
+It reassembles and validates every retained partition before deciding a
+candidate is reusable. Schedule runs never tag or publish. A maintainer must
+set both `create_release` and `confirm_registry_publish` and supply the exact
+root-version tag to create a published GitHub Release; that event triggers
+`publish.yaml`. Mixed SHA, incomplete/expired partitions, tag disagreement,
+existing Release identity, and all `publish.yaml` registry conflict checks fail
+closed.
 
 ### `clean-env-verify.yml`
 
@@ -166,6 +242,9 @@ Repository Policy — they never claim clean-env success against missing package
 See [`docs/development/clean-environment-verification.md`](../../docs/development/clean-environment-verification.md).
 
 ## Local equivalents
+
+Default maintainer loop is `make pre-push-fast` (~30s). Run `make coverage-rust`
+when claiming coverage floors; PR CI does not enforce full llvm-cov.
 
 ```bash
 make pre-push-fast

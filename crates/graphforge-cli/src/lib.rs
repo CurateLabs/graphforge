@@ -1314,6 +1314,195 @@ mod tests {
     }
 
     #[test]
+    fn bounded_file_and_skill_entry_validation_fail_before_payload_use() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("skill.md");
+        fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_bounded_file(&file, 4, "bounded").unwrap(), b"abcd");
+        assert!(matches!(
+            read_bounded_file(&file, 3, "bounded"),
+            Err(graphforge_api::GfError::Validation(message)) if message == "bounded"
+        ));
+        assert!(matches!(
+            read_bounded_file(root.path(), 100, "regular"),
+            Err(graphforge_api::GfError::Validation(message)) if message == "regular"
+        ));
+        assert!(matches!(
+            read_bounded_file(&root.path().join("absent"), 100, "missing"),
+            Err(graphforge_api::GfError::Storage(_))
+        ));
+
+        assert!(matches!(
+            load_skill_file(root.path(), &serde_json::json!({})),
+            Err(graphforge_api::GfError::Validation(message))
+                if message == "project skill file path is required"
+        ));
+        for path in ["", "../escape", "/absolute"] {
+            assert!(matches!(
+                load_skill_file(root.path(), &serde_json::json!({"path": path})),
+                Err(graphforge_api::GfError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "missing/skill.md"})
+            ),
+            Err(graphforge_api::GfError::Storage(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave11_skill_bundle_rejects_linked_components_nonfiles_and_entry_overflow() {
+        use std::os::unix::fs::symlink;
+
+        let external = tempdir().unwrap();
+        fs::write(external.path().join("SKILL.md"), b"external").unwrap();
+        let root = tempdir().unwrap();
+        symlink(external.path(), root.path().join("linked")).unwrap();
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "linked/SKILL.md"})
+            ),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("must not contain symlinks")
+        ));
+        assert_eq!(
+            fs::read(external.path().join("SKILL.md")).unwrap(),
+            b"external"
+        );
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("directory.md")).unwrap();
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "directory.md"})
+            ),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("must be a real file")
+        ));
+
+        let root = tempdir().unwrap();
+        let paths = (0..=MAX_SKILL_BUNDLE_FILES)
+            .map(|index| format!("skill-{index}.md"))
+            .collect::<Vec<_>>();
+        write_loader_manifest(root.path(), &paths);
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("exceeds file bound")
+        ));
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("manifest.json")).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("manifest must be a real file")
+        ));
+
+        let root = tempdir().unwrap();
+        fs::File::create(root.path().join("manifest.json"))
+            .unwrap()
+            .set_len(MAX_SKILL_MANIFEST_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("manifest exceeds byte bound")
+        ));
+    }
+
+    #[test]
+    fn wave11_portable_and_preview_output_contracts_cover_plain_json_and_write_failure() {
+        struct FailWrite;
+        impl Write for FailWrite {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("closed output"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let source = Uuid::from_u128(1);
+        let generation = Uuid::from_u128(2);
+        for replay in [false, true] {
+            let result = PortableImportResult {
+                contract: "graphforge-portable-import/1",
+                source_generation_uuid: source,
+                generation_uuid: generation,
+                envelope_sha256: "00".repeat(32),
+                idempotent_replay: replay,
+            };
+            let mut plain = Vec::new();
+            write_import_result(&result, false, &mut plain).unwrap();
+            let text = String::from_utf8(plain).unwrap();
+            assert!(text.starts_with(if replay { "replayed" } else { "imported" }));
+            let mut json = Vec::new();
+            write_import_result(&result, true, &mut json).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&json).unwrap()["idempotent_replay"],
+                replay
+            );
+            assert!(matches!(
+                write_import_result(&result, replay, &mut FailWrite),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+
+        let preview = RevertCheckpointPreview {
+            checkpoint_uuid: Uuid::from_u128(3),
+            source_generation_uuid: source,
+            source_manifest_sha256: "11".repeat(32),
+            current_generation_uuid: generation,
+        };
+        for json in [false, true] {
+            let mut output = Vec::new();
+            write_revert_preview(&preview, json, &mut output).unwrap();
+            assert!(!output.is_empty());
+            assert!(matches!(
+                write_revert_preview(&preview, json, &mut FailWrite),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn wave11_reusable_execution_separates_plain_parse_and_runtime_failures() {
+        let parse = execute(["launcher", "unknown-command"]);
+        assert_eq!(parse.exit_code, 2);
+        assert!(parse.stdout.is_empty());
+        assert!(
+            String::from_utf8(parse.stderr)
+                .unwrap()
+                .contains("unrecognized subcommand")
+        );
+
+        let root = tempdir().unwrap();
+        let runtime = execute([
+            "launcher",
+            "--project",
+            root.path().to_str().unwrap(),
+            "checkpoint",
+            "create",
+            "snapshot",
+            "--idempotency-key",
+            "not-a-uuid",
+        ]);
+        assert_ne!(runtime.exit_code, 0);
+        assert!(runtime.stdout.is_empty());
+        assert!(
+            String::from_utf8(runtime.stderr)
+                .unwrap()
+                .starts_with("GF_")
+        );
+    }
+
+    #[test]
     fn reusable_execution_normalizes_identity_and_captures_structured_errors() {
         let version = execute(["arbitrary-launcher", "--version"]);
         assert_eq!(version.exit_code, 0);
@@ -1676,6 +1865,110 @@ mod tests {
     }
 
     #[test]
+    fn packaged_skill_loader_accepts_exact_manifest_and_rejects_malformed_shapes() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("graphforge-bootstrap")).unwrap();
+        fs::write(root.path().join("graphforge-bootstrap/SKILL.md"), b"skill").unwrap();
+        write_loader_manifest(root.path(), &["graphforge-bootstrap/SKILL.md".into()]);
+        let loaded = load_skill_bundle(root.path()).unwrap();
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].path, "graphforge-bootstrap/SKILL.md");
+        assert_eq!(loaded.files[0].bytes, b"skill");
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), b"not json").unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), br#"{}"#).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), br#"{"files":[{}]}"#).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("manifest.json"),
+            br#"{"files":[{"path":"../escape"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(matches!(
+            load_skill_bundle(file.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+        assert!(matches!(
+            read_bounded_file(root.path(), 10, "not a file"),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn reusable_execution_covers_default_info_and_runtime_error_vocabulary() {
+        let default = execute(std::iter::empty::<&str>());
+        assert_eq!(default.exit_code, 0);
+        assert_eq!(
+            default.stdout,
+            "GraphForge — use --help for options\n".as_bytes()
+        );
+
+        let info = execute(["graphforge", "--info"]);
+        assert_eq!(info.exit_code, 0);
+        assert!(
+            String::from_utf8(info.stdout)
+                .unwrap()
+                .starts_with("graphforge ")
+        );
+
+        let cases = [
+            (
+                graphforge_api::GfError::NotImplemented("test"),
+                "not_implemented",
+            ),
+            (graphforge_api::GfError::Plan("test".into()), "plan"),
+            (
+                graphforge_api::GfError::Execution("test".into()),
+                "execution",
+            ),
+            (
+                graphforge_api::GfError::Provider {
+                    class: "transport".into(),
+                    provider: "provider".into(),
+                    model: "model".into(),
+                },
+                "provider",
+            ),
+            (
+                graphforge_api::GfError::Lifecycle("test".into()),
+                "lifecycle",
+            ),
+            (graphforge_api::GfError::Ontology("test".into()), "ontology"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(runtime_error_kind(&error), expected);
+            assert_eq!(error_exit_code(&error), 1);
+            let mut output = Vec::new();
+            write_error(&error, false, &mut output).unwrap();
+            assert!(!output.is_empty());
+        }
+    }
+
+    #[test]
     fn no_skills_init_does_not_load_the_distribution_bundle() {
         let project = tempdir().unwrap();
         let missing_bundle = project.path().join("missing-bundle");
@@ -1726,5 +2019,303 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&remove.stderr)
         );
+    }
+
+    #[test]
+    fn repository_commands_execute_through_json_and_plain_dispatch() {
+        let project = tempdir().unwrap();
+        let root = project.path().to_string_lossy().into_owned();
+        let init = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project-dir".to_owned(),
+            root.clone(),
+            "init".to_owned(),
+            "--no-skills".to_owned(),
+        ]);
+        assert_eq!(
+            init.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let init_json: serde_json::Value = serde_json::from_slice(&init.stdout).unwrap();
+        assert_eq!(init_json["root"], ".");
+
+        for tail in [
+            vec!["config", "resolve"],
+            vec!["config", "validate"],
+            vec!["sync", "--check"],
+        ] {
+            let mut args = vec![
+                "graphforge".to_owned(),
+                "--json".to_owned(),
+                "--project-dir".to_owned(),
+                root.clone(),
+            ];
+            args.extend(tail.into_iter().map(str::to_owned));
+            let result = execute(args);
+            assert!(
+                result.exit_code == 0 || result.exit_code == OUT_OF_SYNC_EXIT_CODE,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(serde_json::from_slice::<serde_json::Value>(&result.stdout).is_ok());
+        }
+
+        let remove = execute([
+            "graphforge".to_owned(),
+            "--project-dir".to_owned(),
+            root,
+            "remove".to_owned(),
+            "--yes".to_owned(),
+        ]);
+        assert_eq!(
+            remove.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&remove.stderr)
+        );
+        assert_eq!(remove.stdout, b"ok\n");
+    }
+
+    #[test]
+    fn checkpoint_commands_execute_end_to_end_through_the_reusable_cli() {
+        let project = tempdir().unwrap();
+        let path = project.path().join("state");
+        fs::create_dir(&path).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let invoke = |tail: &[&str]| {
+            let mut args = vec![
+                "graphforge".to_owned(),
+                "--json".to_owned(),
+                "--project".to_owned(),
+                path.clone(),
+            ];
+            args.extend(tail.iter().map(|value| (*value).to_owned()));
+            execute(args)
+        };
+        let create_id = Uuid::now_v7().to_string();
+        let create = invoke(&[
+            "checkpoint",
+            "create",
+            "baseline",
+            "--description",
+            "before change",
+            "--idempotency-key",
+            &create_id,
+        ]);
+        assert_eq!(
+            create.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&create.stderr)
+        );
+
+        for command in [
+            vec!["checkpoint", "list", "--limit", "10"],
+            vec!["checkpoint", "show", "baseline"],
+            vec![
+                "checkpoint",
+                "open",
+                "baseline",
+                "--",
+                "RETURN",
+                "1",
+                "AS",
+                "value",
+            ],
+            vec![
+                "checkpoint",
+                "diff",
+                "--from",
+                "baseline",
+                "--to-current",
+                "--scope",
+                "summary",
+                "--detail",
+                "summary",
+            ],
+            vec!["checkpoint", "revert", "baseline", "--preview"],
+        ] {
+            let result = invoke(&command);
+            assert_eq!(
+                result.exit_code,
+                0,
+                "command={command:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(!result.stdout.is_empty());
+        }
+
+        for scope in [
+            "graph",
+            "ontology",
+            "configuration",
+            "capabilities",
+            "provenance",
+            "knowledge",
+            "epistemic",
+            "all",
+        ] {
+            let result = invoke(&[
+                "checkpoint",
+                "diff",
+                "--from",
+                "baseline",
+                "--to-current",
+                "--scope",
+                scope,
+                "--detail",
+                "records",
+            ]);
+            assert_eq!(
+                result.exit_code,
+                0,
+                "scope={scope}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        let revert_id = Uuid::now_v7().to_string();
+        let revert = invoke(&[
+            "checkpoint",
+            "revert",
+            "baseline",
+            "--reason",
+            "coverage contract",
+            "--idempotency-key",
+            &revert_id,
+            "--yes",
+        ]);
+        assert_eq!(
+            revert.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&revert.stderr)
+        );
+
+        let envelope = project.path().join("baseline.gfportable");
+        let envelope_text = envelope.to_string_lossy().into_owned();
+        let export = invoke(&[
+            "export",
+            "--checkpoint",
+            "baseline",
+            "--output",
+            &envelope_text,
+        ]);
+        assert_eq!(
+            export.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&export.stderr)
+        );
+        assert!(envelope.is_file());
+
+        let imported_path = project.path().join("imported");
+        fs::create_dir(&imported_path).unwrap();
+        let imported = imported_path.to_string_lossy().into_owned();
+        let import_id = Uuid::now_v7().to_string();
+        let import = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project".to_owned(),
+            imported,
+            "import".to_owned(),
+            "--input".to_owned(),
+            envelope_text,
+            "--idempotency-key".to_owned(),
+            import_id,
+        ]);
+        assert_eq!(
+            import.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&import.stderr)
+        );
+
+        let delete_id = Uuid::now_v7().to_string();
+        let delete = invoke(&[
+            "checkpoint",
+            "delete",
+            "baseline",
+            "--idempotency-key",
+            &delete_id,
+        ]);
+        assert_eq!(
+            delete.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&delete.stderr)
+        );
+    }
+
+    #[test]
+    fn clap_error_vocabulary_is_total_and_stable() {
+        let cases = [
+            (ErrorKind::InvalidValue, "invalid_value"),
+            (ErrorKind::UnknownArgument, "unknown_argument"),
+            (ErrorKind::InvalidSubcommand, "invalid_subcommand"),
+            (ErrorKind::NoEquals, "missing_equals"),
+            (ErrorKind::ValueValidation, "value_validation"),
+            (ErrorKind::TooManyValues, "too_many_values"),
+            (ErrorKind::TooFewValues, "too_few_values"),
+            (ErrorKind::WrongNumberOfValues, "wrong_number_of_values"),
+            (ErrorKind::ArgumentConflict, "argument_conflict"),
+            (
+                ErrorKind::MissingRequiredArgument,
+                "missing_required_argument",
+            ),
+            (ErrorKind::MissingSubcommand, "missing_subcommand"),
+            (ErrorKind::DisplayHelp, "display_help"),
+            (
+                ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+                "display_help_on_missing_input",
+            ),
+            (ErrorKind::DisplayVersion, "display_version"),
+            (ErrorKind::Io, "io"),
+            (ErrorKind::Format, "format"),
+        ];
+        for (kind, token) in cases {
+            assert_eq!(clap_error_kind(kind), token);
+        }
+    }
+
+    #[test]
+    fn canonical_json_uuid_conversion_is_exact_and_rejects_malformed_hex() {
+        let ty = DataType::FixedSizeBinary(16);
+        assert_eq!(
+            canonical_json_value(
+                serde_json::Value::String("000102030405060708090a0b0c0d0e0f".into()),
+                &ty,
+            )
+            .unwrap(),
+            serde_json::Value::String("00010203-0405-0607-0809-0a0b0c0d0e0f".into())
+        );
+        for value in ["00", "zz0102030405060708090a0b0c0d0e0f"] {
+            assert!(matches!(
+                canonical_json_value(serde_json::Value::String(value.into()), &ty),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+        let ordinary = serde_json::json!({"nested": [true, 1, null]});
+        assert_eq!(
+            canonical_json_value(ordinary.clone(), &DataType::Utf8).unwrap(),
+            ordinary
+        );
+    }
+
+    #[test]
+    fn selector_requires_exactly_one_source_and_preserves_named_current() {
+        assert!(selector(None, false, "from").is_err());
+        assert!(selector(Some("named".into()), true, "from").is_err());
+        assert!(matches!(
+            selector(Some("current".into()), false, "from").unwrap(),
+            CheckpointSelector::Named(value) if value == "current"
+        ));
+        assert!(matches!(
+            selector(None, true, "from").unwrap(),
+            CheckpointSelector::Current
+        ));
     }
 }

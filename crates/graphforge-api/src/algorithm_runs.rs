@@ -749,7 +749,7 @@ fn api_error(code: ApiErrorCode, message: impl Into<String>) -> GfError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
@@ -793,6 +793,102 @@ mod tests {
             )
             .unwrap();
         (graph, descriptor)
+    }
+
+    #[test]
+    fn wave10_request_identity_and_error_translation_guards_are_structured() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, descriptor) = recorded_fixture(&root);
+        let base = RecordedAlgorithmRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(20)),
+                actor_uuid: None,
+            },
+            run_uuid: uuid7(21),
+            descriptor,
+            cancellation: None,
+        };
+
+        let mut request = base.clone();
+        request.context.operation_uuid = OperationId(Uuid::nil());
+        assert_eq!(
+            validate_request(&request).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let mut request = base.clone();
+        request.context.actor_uuid = Some(Uuid::nil());
+        assert_eq!(
+            validate_request(&request).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let mut request = base.clone();
+        request.run_uuid = Uuid::nil();
+        assert_eq!(
+            validate_request(&request).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let mut request = base;
+        request.run_uuid = Uuid::from_u128(1);
+        assert_eq!(
+            validate_request(&request).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+
+        assert_eq!(
+            invocation_error(InvocationError::SchemaMismatch).code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        assert_eq!(
+            invocation_error(InvocationError::ProjectionChanged).code(),
+            "GF_EXECUTION"
+        );
+        assert_eq!(
+            invocation_error(InvocationError::Graph(GfError::Validation("bad".into()))).code(),
+            "GF_VALIDATION"
+        );
+        let descriptor_error = InvocationDescriptor::new(
+            Algorithm::Rank(RankAlgorithm::Degree),
+            [0; 32],
+            BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            invocation_error(InvocationError::Descriptor(descriptor_error)).code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn wave10_existing_run_lifecycle_errors_distinguish_all_terminal_states() {
+        let completed = AlgorithmRunEvent::new(
+            uuid7(30),
+            uuid7(31),
+            AlgorithmRunState::Completed,
+            Some([1; 32]),
+            None,
+            2,
+            uuid7(32),
+        )
+        .unwrap();
+        assert_eq!(
+            existing_lifecycle_error(Some(&completed)).code(),
+            "GF_RESULT_NOT_RETAINED"
+        );
+        let failed = AlgorithmRunEvent::new(
+            uuid7(33),
+            uuid7(31),
+            AlgorithmRunState::Failed,
+            None,
+            Some("GF_TEST".into()),
+            3,
+            uuid7(34),
+        )
+        .unwrap();
+        assert_eq!(
+            existing_lifecycle_error(Some(&failed)).code(),
+            "GF_EXECUTION"
+        );
+        assert_eq!(existing_lifecycle_error(None).code(), "GF_EXECUTION");
     }
 
     #[test]

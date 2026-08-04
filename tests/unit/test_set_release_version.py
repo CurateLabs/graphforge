@@ -72,19 +72,19 @@ def test_check_aligned_rejects_stale_path_pin(
 ) -> None:
     """Stale path+version pins must fail --check before Binding RC rehearsal."""
     current = set_release_version.read_current()
-    assert current["cargo"] == "0.5.1"
+    root = current["cargo"]
+    assert root  # must be the live workspace root version
     pins = set_release_version.path_version_pins()
     assert pins
     path, dependency, _version = pins[0]
+    stale = "0.0.0"
     monkeypatch.setattr(
         set_release_version,
         "path_version_pins",
-        lambda: [(path, dependency, "0.5.0")],
+        lambda: [(path, dependency, stale)],
     )
     errors = set_release_version.check_aligned()
-    assert any(dependency in error and "0.5.0" in error and "0.5.1" in error for error in errors), (
-        errors
-    )
+    assert any(dependency in error and stale in error and root in error for error in errors), errors
 
 
 def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

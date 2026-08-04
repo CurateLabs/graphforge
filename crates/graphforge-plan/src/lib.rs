@@ -2484,6 +2484,89 @@ mod tests {
         assert!(explain(&unwind(lit(1i64), "x")).contains("x"));
     }
 
+    #[test]
+    fn extension_stub_trait_contracts_cover_rebuilds_directions_and_hashing() {
+        use datafusion::logical_expr::lit;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut incoming = var_len("KNOWS", 1, None);
+        incoming.direction = Direction::In;
+        let mut undirected = var_len("KNOWS", 1, None);
+        undirected.direction = Direction::Undirected;
+        struct Explain<'a, T: UserDefinedLogicalNodeCore>(&'a T);
+        impl<T: UserDefinedLogicalNodeCore> fmt::Display for Explain<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt_for_explain(f)
+            }
+        }
+        assert!(Explain(&incoming).to_string().contains("dir=<-"));
+        assert!(Explain(&undirected).to_string().contains("dir=--"));
+
+        let path_unique = PathUniqueNode::new(empty_plan());
+        assert!(
+            UserDefinedLogicalNodeCore::schema(&path_unique)
+                .fields()
+                .is_empty()
+        );
+        assert!(UserDefinedLogicalNodeCore::expressions(&path_unique).is_empty());
+        let rebuilt = path_unique
+            .with_exprs_and_inputs(vec![], vec![empty_plan().as_ref().clone()])
+            .unwrap();
+        assert_eq!(UserDefinedLogicalNodeCore::name(&rebuilt), "PathUnique");
+
+        let merge = GraphMergeNode::default();
+        assert!(
+            UserDefinedLogicalNodeCore::schema(&merge)
+                .fields()
+                .is_empty()
+        );
+        assert!(UserDefinedLogicalNodeCore::expressions(&merge).is_empty());
+        assert_eq!(
+            UserDefinedLogicalNodeCore::name(&merge.with_exprs_and_inputs(vec![], vec![]).unwrap()),
+            "GraphMerge"
+        );
+
+        let create = GraphCreateNode::new(
+            empty_plan(),
+            vec![],
+            vec![],
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Strict,
+        );
+        let delete = GraphDeleteNode::new(
+            empty_plan(),
+            vec![],
+            true,
+            PathBuf::from("/tmp/gf"),
+            OntologyMode::Strict,
+        );
+        let set = set_node(lit(1_i64));
+        let remove = remove_node();
+        for rendered in [
+            Explain(&create).to_string(),
+            Explain(&delete).to_string(),
+            Explain(&set).to_string(),
+            Explain(&remove).to_string(),
+        ] {
+            assert!(!rendered.is_empty());
+        }
+        for hashable in [&create as &dyn HashProbe, &set as &dyn HashProbe] {
+            let mut hasher = DefaultHasher::new();
+            hashable.hash_into(&mut hasher);
+            let _ = hasher.finish();
+        }
+
+        trait HashProbe {
+            fn hash_into(&self, state: &mut DefaultHasher);
+        }
+        impl<T: Hash> HashProbe for T {
+            fn hash_into(&self, state: &mut DefaultHasher) {
+                self.hash(state);
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // ExpandNode (#763)
     // -----------------------------------------------------------------------

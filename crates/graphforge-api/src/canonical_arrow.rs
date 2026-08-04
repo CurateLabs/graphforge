@@ -503,4 +503,181 @@ mod tests {
             Err(CanonicalArrowError::UnknownMetadata(key)) if key == "graphforge.extra"
         ));
     }
+
+    #[test]
+    fn canonical_scalar_temporal_and_schema_boundaries_are_exact() {
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(BooleanArray::from(vec![true])),
+            Arc::new(Int32Array::from(vec![-32])),
+            Arc::new(Int64Array::from(vec![-64])),
+            Arc::new(UInt32Array::from(vec![32])),
+            Arc::new(UInt64Array::from(vec![64])),
+            Arc::new(Float32Array::from(vec![1.5])),
+            Arc::new(Float64Array::from(vec![2.5])),
+            Arc::new(StringArray::from(vec!["utf8"])),
+            Arc::new(LargeStringArray::from(vec!["large"])),
+            Arc::new(BinaryArray::from(vec![b"binary".as_slice()])),
+            Arc::new(LargeBinaryArray::from(vec![b"large-binary".as_slice()])),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_iter([b"0123456789abcdef".as_slice()].into_iter())
+                    .unwrap(),
+            ),
+            Arc::new(arrow::array::TimestampSecondArray::from(vec![2])),
+            Arc::new(arrow::array::TimestampMillisecondArray::from(vec![2_000])),
+            Arc::new(arrow::array::TimestampMicrosecondArray::from(vec![
+                2_000_000,
+            ])),
+            Arc::new(arrow::array::TimestampNanosecondArray::from(vec![
+                2_000_000_000,
+            ])),
+        ];
+        for array in arrays {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "value",
+                    array.data_type().clone(),
+                    false,
+                )])),
+                vec![array],
+            )
+            .unwrap();
+            assert_ne!(result_fingerprint(&[batch]).unwrap(), [0; 32]);
+        }
+
+        for (left, right) in [(0.0, -0.0), (f64::NAN, -f64::NAN)] {
+            let batch = |value| {
+                RecordBatch::try_new(
+                    Arc::new(Schema::new(vec![Field::new(
+                        "value",
+                        DataType::Float64,
+                        false,
+                    )])),
+                    vec![Arc::new(Float64Array::from(vec![value]))],
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                result_fingerprint(&[batch(left)]).unwrap(),
+                result_fingerprint(&[batch(right)]).unwrap()
+            );
+        }
+        assert_eq!(to_microseconds(2, TimeUnit::Second).unwrap(), 2_000_000);
+        assert_eq!(to_microseconds(2, TimeUnit::Millisecond).unwrap(), 2_000);
+        assert_eq!(to_microseconds(2, TimeUnit::Microsecond).unwrap(), 2);
+        assert_eq!(to_microseconds(2_000, TimeUnit::Nanosecond).unwrap(), 2);
+        assert!(matches!(
+            to_microseconds(1, TimeUnit::Nanosecond),
+            Err(CanonicalArrowError::Temporal)
+        ));
+        assert!(matches!(
+            to_microseconds(i64::MAX, TimeUnit::Second),
+            Err(CanonicalArrowError::Temporal)
+        ));
+        assert!(validate_timestamp_timezone(Some("UTC")).is_ok());
+        assert!(validate_timestamp_timezone(Some("America/Denver")).is_err());
+
+        let utf8 = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["a"]))],
+        )
+        .unwrap();
+        let integers = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        assert!(matches!(
+            result_fingerprint(&[utf8, integers]),
+            Err(CanonicalArrowError::Schema(
+                "record batches have different logical schemas"
+            ))
+        ));
+        let mut writer = CanonicalWriter::new();
+        assert!(matches!(
+            encode_type(&mut writer, &DataType::Date32),
+            Err(CanonicalArrowError::Unsupported(DataType::Date32))
+        ));
+    }
+
+    #[test]
+    fn canonical_schema_rejects_invalid_nested_widths_and_preserves_semantic_metadata() {
+        let child = Arc::new(Field::new("item", DataType::UInt64, true));
+        let struct_fields =
+            arrow::datatypes::Fields::from(vec![Field::new("child", DataType::Utf8, false)]);
+        for data_type in [
+            DataType::List(Arc::clone(&child)),
+            DataType::LargeList(Arc::clone(&child)),
+            DataType::FixedSizeList(Arc::clone(&child), 2),
+            DataType::Struct(struct_fields),
+            DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            encode_type(&mut writer, &data_type).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
+
+        for data_type in [
+            DataType::FixedSizeBinary(-1),
+            DataType::FixedSizeList(Arc::clone(&child), -1),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            assert!(matches!(
+                encode_type(&mut writer, &data_type),
+                Err(CanonicalArrowError::Schema(_))
+            ));
+        }
+
+        let metadata = std::collections::HashMap::from([
+            ("graphforge.contract.result".to_owned(), "v1".to_owned()),
+            ("graphforge.seed".to_owned(), "7".to_owned()),
+            ("graphforge.ontology_mode".to_owned(), "strict".to_owned()),
+        ]);
+        let with_metadata =
+            Schema::new_with_metadata(vec![Field::new("value", DataType::Utf8, false)], metadata);
+        assert!(!canonical_schema_bytes(&with_metadata).unwrap().is_empty());
+    }
+
+    #[test]
+    fn canonical_nullability_physical_mismatch_and_float_normalization_are_explicit() {
+        let nulls: ArrayRef = Arc::new(StringArray::from(vec![None::<&str>]));
+        let mut writer = CanonicalWriter::new();
+        assert!(matches!(
+            encode_value(&mut writer, &DataType::Utf8, &nulls, 0, false),
+            Err(CanonicalArrowError::Schema(
+                "non-nullable Arrow field contains null"
+            ))
+        ));
+        let mut writer = CanonicalWriter::new();
+        encode_value(&mut writer, &DataType::Utf8, &nulls, 0, true).unwrap();
+        assert!(!writer.finish().is_empty());
+
+        let integers: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let mut writer = CanonicalWriter::new();
+        assert!(matches!(
+            encode_present_value(&mut writer, &DataType::Utf8, &integers, 0),
+            Err(CanonicalArrowError::Schema("Arrow array/type mismatch"))
+        ));
+
+        assert_eq!(normalize_f32(0.0), normalize_f32(-0.0));
+        assert_eq!(normalize_f32(f32::NAN), normalize_f32(-f32::NAN));
+        assert_ne!(normalize_f32(1.5), 0);
+        assert_ne!(normalize_f64(1.5), 0);
+        for timezone in [
+            None,
+            Some("UTC"),
+            Some("Etc/UTC"),
+            Some("Z"),
+            Some("+00:00"),
+        ] {
+            assert!(validate_timestamp_timezone(timezone).is_ok());
+        }
+    }
 }

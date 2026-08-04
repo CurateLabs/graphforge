@@ -1689,6 +1689,134 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_initialization_rejects_unknown_layout_entries_without_mutation() {
+        fn partial_project() -> (tempfile::TempDir, PathBuf) {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+            let generation = root
+                .path()
+                .join("generations")
+                .join(Uuid::now_v7().hyphenated().to_string());
+            fs::create_dir_all(&generation).unwrap();
+            (root, generation)
+        }
+
+        let (root, _) = partial_project();
+        fs::write(root.path().join("caller-data"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(root.path().join("caller-data")).unwrap(),
+            b"preserve"
+        );
+
+        let (root, generation) = partial_project();
+        fs::write(generation.join("caller-data"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(generation.join("caller-data")).unwrap(),
+            b"preserve"
+        );
+
+        let (root, generation) = partial_project();
+        let participants = generation.join(PARTICIPANTS_DIR);
+        fs::create_dir(&participants).unwrap();
+        fs::write(participants.join("unknown"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(fs::read(participants.join("unknown")).unwrap(), b"preserve");
+
+        let (root, generation) = partial_project();
+        let workspace = generation.join(PARTICIPANTS_DIR).join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("configuration.json"), b"{}").unwrap();
+        fs::write(workspace.join("unknown.json"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(workspace.join("unknown.json")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
+    fn wave9_interrupted_initialization_enforces_bounded_private_generation_layout() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        let generations = root.path().join("generations");
+        fs::create_dir(&generations).unwrap();
+        for _ in 0..17 {
+            fs::create_dir(generations.join(Uuid::now_v7().hyphenated().to_string())).unwrap();
+        }
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        let generation = root
+            .path()
+            .join("generations")
+            .join(Uuid::now_v7().hyphenated().to_string());
+        fs::create_dir_all(&generation).unwrap();
+        for name in [PARTICIPANTS_DIR, LEASE_FILE, MANIFEST_FILE] {
+            let path = generation.join(name);
+            if name == PARTICIPANTS_DIR {
+                fs::create_dir(path).unwrap();
+            } else {
+                fs::write(path, b"partial").unwrap();
+            }
+        }
+        fs::write(generation.join("fourth-entry"), b"caller").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(generation.join("fourth-entry")).unwrap(),
+            b"caller"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave9_participant_inventory_rejects_links_and_special_files() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        for kind in ["link", "socket"] {
+            let root = tempfile::Builder::new()
+                .prefix("gf")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let resolved = open_or_initialize_project(root.path()).unwrap();
+            let participants = resolved.participants_root();
+            let hostile = participants.join(format!("hostile-{kind}"));
+            if kind == "link" {
+                symlink(root.path().join(CURRENT_FILE), &hostile).unwrap();
+            } else {
+                let _listener = UnixListener::bind(&hostile).unwrap();
+            }
+            assert_code(
+                resolved
+                    .validate_complete_participant_inventory()
+                    .unwrap_err(),
+                "GF_TRANSACTION_FAILED",
+            );
+        }
+    }
+
+    #[test]
     fn existing_resolution_remains_pinned_after_current_changes() {
         let (root, first) = project();
         let old_reader = resolve_project_generation(root.path()).unwrap();
@@ -1909,5 +2037,168 @@ mod tests {
         let error = resolve_project_generation(root.path()).unwrap_err();
 
         assert_code(error, "GF_PROJECT_CORRUPT");
+    }
+
+    #[test]
+    fn canonical_identity_and_manifest_validation_matrix_is_total() {
+        let expected = Uuid::now_v7();
+        assert_eq!(
+            parse_canonical_uuid(&expected.hyphenated().to_string()).unwrap(),
+            expected
+        );
+        for value in [
+            "not-a-uuid".to_owned(),
+            expected.simple().to_string(),
+            expected.hyphenated().to_string().to_uppercase(),
+        ] {
+            assert_code(
+                parse_canonical_uuid(&value).unwrap_err(),
+                "GF_PROJECT_CORRUPT",
+            );
+        }
+        assert_eq!(parse_sha256(&"00".repeat(32)).unwrap(), [0; 32]);
+        for value in ["00".to_owned(), "AA".repeat(32), "gg".repeat(32)] {
+            assert_code(parse_sha256(&value).unwrap_err(), "GF_PROJECT_CORRUPT");
+        }
+        for value in ["", "Upper", "has/slash", "has space", ".", ".."] {
+            assert_code(
+                validate_machine_id(value).unwrap_err(),
+                "GF_PROJECT_CORRUPT",
+            );
+        }
+        assert!(validate_machine_id("graph_data-1").is_ok());
+
+        let base = GenerationManifest {
+            format: "graphforge-generation".into(),
+            format_version: 1,
+            generation_uuid: expected.hyphenated().to_string(),
+            parent_generation_uuid: None,
+            transaction_uuid: Uuid::now_v7().hyphenated().to_string(),
+            capabilities: vec![CapabilityDescriptor {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            }],
+            participants: vec![],
+        };
+        assert!(validate_manifest(&base, expected).is_ok());
+        let mutations: Vec<Box<dyn Fn(&mut GenerationManifest)>> = vec![
+            Box::new(|manifest| manifest.format = "future".into()),
+            Box::new(|manifest| manifest.format_version = 2),
+            Box::new(|manifest| manifest.generation_uuid = Uuid::now_v7().to_string()),
+            Box::new(|manifest| manifest.transaction_uuid = "bad".into()),
+            Box::new(|manifest| manifest.capabilities[0].capability_id = "Upper".into()),
+            Box::new(|manifest| manifest.capabilities[0].capability_version = 0),
+            Box::new(|manifest| manifest.capabilities.push(manifest.capabilities[0].clone())),
+        ];
+        for mutate in mutations {
+            let mut manifest = base.clone();
+            mutate(&mut manifest);
+            assert!(validate_manifest(&manifest, expected).is_err());
+        }
+
+        let participant = ParticipantDescriptor {
+            capability_id: "graph".into(),
+            capability_version: 1,
+            record_family_id: "topology".into(),
+            record_version: 1,
+            relative_path: "topology/nodes.parquet".into(),
+            encoding: "parquet".into(),
+            byte_length: 0,
+            row_count: 0,
+            schema_fingerprint: "0".repeat(64),
+            content_sha256: "0".repeat(64),
+        };
+        let participant_mutations: Vec<Box<dyn Fn(&mut ParticipantDescriptor)>> = vec![
+            Box::new(|entry| entry.capability_id = "missing".into()),
+            Box::new(|entry| entry.capability_version = 2),
+            Box::new(|entry| entry.record_family_id = "Upper".into()),
+            Box::new(|entry| entry.record_version = 0),
+            Box::new(|entry| entry.relative_path = "/absolute".into()),
+            Box::new(|entry| entry.relative_path = "../escape".into()),
+            Box::new(|entry| entry.schema_fingerprint = "short".into()),
+            Box::new(|entry| entry.content_sha256 = "GG".repeat(32)),
+        ];
+        for mutate in participant_mutations {
+            let mut manifest = base.clone();
+            let mut entry = participant.clone();
+            mutate(&mut entry);
+            manifest.participants.push(entry);
+            assert!(validate_manifest(&manifest, expected).is_err());
+        }
+
+        let mut valid = base.clone();
+        valid.participants.push(participant.clone());
+        assert!(validate_manifest(&valid, expected).is_ok());
+        valid.participants.push(participant);
+        assert!(validate_manifest(&valid, expected).is_err());
+    }
+
+    #[test]
+    fn bounded_regular_file_rejects_missing_directory_and_oversize_without_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert!(read_bounded_regular_file(&missing, 4).is_err());
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(read_bounded_regular_file(&directory, 4).is_err());
+        let oversized = root.path().join("oversized");
+        std::fs::write(&oversized, b"12345").unwrap();
+        assert!(read_bounded_regular_file(&oversized, 4).is_err());
+        assert_eq!(std::fs::read(&oversized).unwrap(), b"12345");
+        assert_eq!(read_bounded_regular_file(&oversized, 5).unwrap(), b"12345");
+    }
+
+    #[test]
+    fn verified_reopen_rejects_wrong_digest_and_missing_generation_without_current_mutation() {
+        let (root, generation_uuid) = project();
+        let current = resolve_project_generation(root.path()).unwrap();
+        let current_bytes = std::fs::read(root.path().join(CURRENT_FILE)).unwrap();
+
+        assert_code(
+            resolve_verified_generation(root.path(), generation_uuid, [0x55; 32]).unwrap_err(),
+            "GF_PROJECT_CORRUPT",
+        );
+        assert_code(
+            resolve_verified_generation(root.path(), Uuid::now_v7(), current.manifest_sha256())
+                .unwrap_err(),
+            "GF_PROJECT_CORRUPT",
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(CURRENT_FILE)).unwrap(),
+            current_bytes
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            generation_uuid
+        );
+    }
+
+    #[test]
+    fn participant_snapshot_rejects_same_length_content_tampering_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let resolved = open_or_initialize_project(root.path()).unwrap();
+        let generation_uuid = resolved.generation_uuid();
+        let snapshot = resolved
+            .participant_snapshot("workspace", "configuration")
+            .unwrap()
+            .unwrap();
+        let path = resolved
+            .participant_path("workspace", "configuration")
+            .unwrap();
+        let mut tampered = snapshot.bytes.clone();
+        tampered[0] ^= 1;
+        fs::write(&path, tampered).unwrap();
+        drop(resolved);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), generation_uuid);
+        assert_code(
+            reopened
+                .participant_snapshot("workspace", "configuration")
+                .unwrap_err(),
+            "GF_PROJECT_CORRUPT",
+        );
     }
 }

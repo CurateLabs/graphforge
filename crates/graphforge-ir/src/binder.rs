@@ -6563,6 +6563,25 @@ mod tests {
         (binder, catalog)
     }
 
+    fn empty_state(mode: OntologyMode) -> BinderState {
+        BinderState {
+            vars: HashMap::new(),
+            path_vars: HashMap::new(),
+            node_vars: HashMap::new(),
+            edge_vars: HashMap::new(),
+            edge_rel_names: HashMap::new(),
+            scalar_list_edges: HashSet::new(),
+            var_kinds: HashMap::new(),
+            next_var: 0,
+            builder: GraphPlan::builder("openCypher").ontology_mode(mode),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            captured_pattern_comprehensions: None,
+            existential_depth: 0,
+            standalone_call: false,
+        }
+    }
+
     fn parsed_return_expr(source: &str) -> Expr {
         let ast =
             parse(source).unwrap_or_else(|error| panic!("failed to parse {source:?}: {error}"));
@@ -8660,6 +8679,614 @@ mod tests {
                 error.kind == BindErrorKind::InvalidArgument
                     && error.message.starts_with("typed UUID parameter `$id`")
             }));
+        }
+    }
+
+    #[test]
+    fn nested_aggregate_rewrite_covers_scalar_container_shapes() {
+        let cases = [
+            "MATCH (n:Person) RETURN count(*) + 1 AS value",
+            "MATCH (n:Person) RETURN -count(*) AS value",
+            "MATCH (n:Person) RETURN (count(*)) AS value",
+            "MATCH (n:Person) RETURN coalesce(count(*), 0) AS value",
+            "MATCH (n:Person) RETURN [count(*), 1] AS value",
+            "MATCH (n:Person) RETURN {total: count(*), fallback: 0} AS value",
+            "MATCH (n:Person) RETURN CASE count(*) WHEN 0 THEN 1 ELSE count(*) END AS value",
+            "MATCH (n:Person) RETURN count(*) IS NULL AS value",
+            "MATCH (n:Person) RETURN count(*) IN [0, 1] AS value",
+            "MATCH (n:Person) RETURN toString(count(*)) STARTS WITH '1' AS value",
+            "MATCH (n:Person) RETURN toString(count(*)) =~ '.*' AS value",
+            "MATCH (n:Person) RETURN [x IN collect(n.name) | x] AS value",
+            "MATCH (n:Person) RETURN all(x IN collect(n.name) WHERE x IS NOT NULL) AS value",
+        ];
+
+        for query in cases {
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let plan = binder
+                .bind(&parse(query).unwrap())
+                .unwrap_or_else(|errors| panic!("query={query} errors={errors:?}"));
+            let aggregate_count = plan
+                .ops
+                .iter()
+                .filter(|op| matches!(op, GraphOp::Aggregate { .. }))
+                .count();
+            assert_eq!(aggregate_count, 1, "query={query} ops={:?}", plan.ops);
+            assert!(
+                plan.ops
+                    .iter()
+                    .any(|op| matches!(op, GraphOp::Project { .. })),
+                "nested aggregate needs a final projection: query={query} ops={:?}",
+                plan.ops
+            );
+        }
+    }
+
+    #[test]
+    fn typed_uuid_discovery_traverses_every_expression_container() {
+        let params = HashMap::from([("id".into(), IrLiteral::Uuid([0x55; 16]))]);
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let binder = binder.with_parameter_literals(&params);
+        let cases = [
+            "$id",
+            "($id)",
+            "-$id",
+            "[$id]",
+            "{value: $id}",
+            "coalesce(null, $id)",
+            "1 + $id",
+            "CASE $id WHEN null THEN 0 ELSE 1 END",
+            "CASE 1 WHEN $id THEN 0 ELSE 1 END",
+            "CASE 1 WHEN 0 THEN $id ELSE 1 END",
+            "CASE 1 WHEN 0 THEN 1 ELSE $id END",
+            "[x IN [$id] WHERE x IS NOT NULL | x]",
+            "[x IN [1] WHERE $id IS NOT NULL | x]",
+            "[x IN [1] | $id]",
+            "all(x IN [$id] WHERE x IS NOT NULL)",
+            "all(x IN [1] WHERE $id IS NOT NULL)",
+            "[(a)-->(b) WHERE $id IS NOT NULL | a]",
+            "[(a)-->(b) | $id]",
+            "$id IS NULL",
+            "$id IN [1]",
+            "1 IN [$id]",
+            "$id STARTS WITH 'x'",
+            "'x' STARTS WITH $id",
+            "$id =~ 'x'",
+            "'x' =~ $id",
+        ];
+        for source in cases {
+            let expression = parsed_return_expr(&format!("RETURN {source}"));
+            assert_eq!(
+                binder.typed_uuid_param_in(&expression),
+                Some("id"),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            binder.typed_uuid_param_in(&parsed_return_expr("RETURN [1, 2, 3]")),
+            None
+        );
+    }
+
+    #[test]
+    fn expression_shape_comparison_covers_scalar_and_container_variants() {
+        let equal = [
+            ("1", "1"),
+            ("1.5", "1.5"),
+            ("'x'", "'x'"),
+            ("true", "true"),
+            ("null", "null"),
+            ("$value", "$value"),
+            ("a", "a"),
+            ("a.name", "a.name"),
+            ("a + 1", "a + 1"),
+            ("NOT a", "NOT a"),
+            ("coalesce(a, 1)", "COALESCE(a, 1)"),
+        ];
+        for (left, right) in equal {
+            assert!(
+                same_expr_shape(
+                    &parsed_return_expr(&format!("RETURN {left}")),
+                    &parsed_return_expr(&format!("RETURN {right}")),
+                ),
+                "{left} should have the same shape as {right}"
+            );
+        }
+
+        let unequal = [
+            ("1", "2"),
+            ("1.5", "2.5"),
+            ("'x'", "'y'"),
+            ("true", "false"),
+            ("$left", "$right"),
+            ("a", "b"),
+            ("a.name", "a.age"),
+            ("a + 1", "a - 1"),
+            ("NOT a", "-a"),
+            ("coalesce(a, 1)", "coalesce(a, 2)"),
+            ("[a, 1]", "[a]"),
+            ("{a: 1}", "{a: 2}"),
+            ("CASE WHEN true THEN 1 END", "1"),
+        ];
+        for (left, right) in unequal {
+            assert!(
+                !same_expr_shape(
+                    &parsed_return_expr(&format!("RETURN {left}")),
+                    &parsed_return_expr(&format!("RETURN {right}")),
+                ),
+                "{left} should differ from {right}"
+            );
+        }
+
+        assert!(same_grouping_expr(
+            &parsed_return_expr("RETURN [a, 1]"),
+            &parsed_return_expr("RETURN [a, 1]"),
+        ));
+        assert!(!same_grouping_expr(
+            &parsed_return_expr("RETURN [a, 1]"),
+            &parsed_return_expr("RETURN [a]"),
+        ));
+        assert!(same_grouping_expr(
+            &parsed_return_expr("RETURN {a: 1, b: true}"),
+            &parsed_return_expr("RETURN {b: true, a: 1}"),
+        ));
+        assert!(!same_grouping_expr(
+            &parsed_return_expr("RETURN {a: 1}"),
+            &parsed_return_expr("RETURN {a: 2}"),
+        ));
+    }
+
+    #[test]
+    fn row_count_constant_classification_covers_every_ast_shape() {
+        for source in ["1", "(1)", "-1", "$n", "1 + 2", "toInteger(1.5)"] {
+            assert!(
+                row_count_expr_is_integer(&parsed_return_expr(&format!("RETURN {source}"))),
+                "{source}"
+            );
+        }
+        assert!(!row_count_expr_is_integer(&parsed_return_expr(
+            "RETURN 1.5"
+        )));
+
+        for source in ["1.5", "(1.5)", "-1.5"] {
+            assert!(
+                is_float_constant(&parsed_return_expr(&format!("RETURN {source}"))),
+                "{source}"
+            );
+        }
+        assert!(!is_float_constant(&parsed_return_expr("RETURN 1")));
+
+        assert_eq!(
+            extract_parameter_name(&parsed_return_expr("RETURN ($rows)")),
+            Some("rows".into())
+        );
+        assert_eq!(
+            extract_parameter_name(&parsed_return_expr("RETURN 1")),
+            None
+        );
+        assert_eq!(
+            extract_int_constant(&parsed_return_expr("RETURN -(-1)")),
+            Some(1)
+        );
+        assert_eq!(
+            extract_int_constant(&parsed_return_expr("RETURN true")),
+            None
+        );
+        assert_eq!(
+            extract_non_negative_int_constant(&parsed_return_expr("RETURN -1")),
+            None
+        );
+    }
+
+    #[test]
+    fn procedure_literal_type_checks_cover_nullability_and_scalar_domains() {
+        let field = |type_name: &str, nullable| ProcedureField {
+            name: "arg".into(),
+            type_name: type_name.into(),
+            nullable,
+        };
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN null"),
+            &field("STRING", true)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN null"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("NUMBER", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1.5"),
+            &field("FLOAT", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 1.5"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 'x'"),
+            &field("STRING", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN 'x'"),
+            &field("BOOLEAN", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN true"),
+            &field("BOOLEAN", false)
+        ));
+        assert!(!procedure_argument_type_matches(
+            &parsed_return_expr("RETURN true"),
+            &field("STRING", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN (1)"),
+            &field("INTEGER", false)
+        ));
+        assert!(procedure_argument_type_matches(
+            &parsed_return_expr("RETURN a"),
+            &field("ANY", false)
+        ));
+    }
+
+    #[test]
+    fn binder_exercises_fragmented_clause_and_expression_error_paths() {
+        let cases = [
+            ("MATCH (n) WHERE n.active = true RETURN n", true),
+            ("MATCH (n) SET missing.value = 1 RETURN n", false),
+            ("MATCH (n) REMOVE missing.value RETURN n", false),
+            ("MATCH (n) DELETE n.name", true),
+            ("MATCH (n) WITH n.name RETURN n", false),
+            ("MATCH (n) WITH count(*) AS total RETURN total", true),
+            (
+                "MATCH (n) RETURN n ORDER BY n.name DESC SKIP (1 + 2) LIMIT toInteger(3.5)",
+                true,
+            ),
+            ("MATCH (n) RETURN percentileCont(n.value)", false),
+            (
+                "MATCH (n) RETURN percentileCont(DISTINCT n.value, 0.5)",
+                false,
+            ),
+            ("MATCH (n) RETURN 'a' + 'b'", true),
+            ("MATCH (n) RETURN NOT (n.value IN [1, 2])", true),
+            (
+                "MATCH (n) WHERE exists { (n)-->(m) WHERE count(*) > 0 } RETURN n",
+                false,
+            ),
+            ("MATCH (n) RETURN [(n)-->(m) WHERE count(*) > 0 | m]", false),
+            ("MATCH (n) WHERE (n)-->(m) OR (n)-->(x) RETURN n", false),
+            ("MATCH (n) WHERE n.active OR (n)-->(m) RETURN n", false),
+            ("UNWIND [1, 2] AS x RETURN x", true),
+        ];
+        for (query, should_bind) in cases {
+            let ast = parse(query).unwrap_or_else(|error| panic!("query={query}: {error}"));
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let result = binder.bind(&ast);
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn binder_query_matrix_freezes_union_write_and_predicate_boundaries() {
+        let cases = [
+            ("RETURN 1 AS x UNION RETURN 2 AS x", true),
+            ("RETURN 1 AS x UNION ALL RETURN 2 AS x", true),
+            (
+                "RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x",
+                false,
+            ),
+            ("RETURN 1 AS x UNION RETURN 2 AS y", false),
+            (
+                "MERGE (n:Person {id: 1}) ON CREATE SET n.name = 'Ada' ON MATCH SET n.name = 'Grace' RETURN n",
+                true,
+            ),
+            (
+                "MATCH (n:Person) SET n += {score: 1}, n:Employee RETURN n",
+                true,
+            ),
+            ("MATCH (n:Person) SET n = {score: 1} RETURN n", true),
+            ("MATCH (n:Person) REMOVE n.score, n:Employee RETURN n", true),
+            ("MATCH (n:Person) WHERE n:Employee RETURN n", true),
+            ("MATCH (a)-[r:KNOWS]->(b) WHERE r:LIKES RETURN r", true),
+            ("UNWIND [1, 2] AS x RETURN all(y IN [x] WHERE y > 0)", true),
+            (
+                "MATCH (n) RETURN [x IN [1, 2] WHERE x > 1 | x + 1] AS values",
+                true,
+            ),
+            ("MATCH (n) RETURN n:Person", true),
+            ("WITH 1 AS x RETURN x:Person", false),
+            (
+                "MATCH (a)-[r:KNOWS*1..2 {since: 2020, active: true}]->(b) RETURN r",
+                true,
+            ),
+            (
+                "MERGE (n:Person) ON CREATE SET missing += {score: 1} RETURN n",
+                false,
+            ),
+            (
+                "MERGE (n:Person) ON MATCH SET missing:Employee RETURN n",
+                false,
+            ),
+            ("MATCH (n) SET missing += {score: 1} RETURN n", false),
+            ("MATCH (n) SET missing:Person RETURN n", false),
+            ("MATCH (n) REMOVE missing:Person RETURN n", false),
+            ("MATCH (n) DELETE [n]", false),
+            ("MATCH (n) RETURN NOT (n.score IN [1, 2])", true),
+            ("MATCH (n) RETURN missing:Person", false),
+            ("MATCH (n) CALL missing.procedure() RETURN n", false),
+            ("MATCH (n) RETURN exists { (n)-->(m) }", false),
+        ];
+
+        for (query, should_bind) in cases {
+            let ast = parse(query).unwrap_or_else(|error| panic!("query={query}: {error}"));
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let result = binder.bind(&ast);
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_without_ontology_rejects_property_resolution() {
+        let (binder, _) = make_binder(OntologyMode::Strict);
+        let ast = parse("MATCH (n:Person) RETURN n.unknown").unwrap();
+        let errors = binder.bind(&ast).unwrap_err();
+        assert!(errors.iter().any(|error| {
+            error.kind == BindErrorKind::UnknownProperty
+                && error.message == "unknown property `unknown` (strict mode has no ontology)"
+        }));
+    }
+
+    #[test]
+    fn exact_zero_binder_semantic_branches_have_public_query_oracles() {
+        let cases = [
+            ("RETURN 1 + 2 AS value", true),
+            ("RETURN count(*) AS x UNION RETURN count(*) AS x", true),
+            (
+                "MATCH p=(a)-[r]->(b) WITH p, count(*) AS total RETURN p, total",
+                true,
+            ),
+            (
+                "MATCH p=(a)-[r]->(b) WITH p, count(*) + 1 AS total RETURN p, total",
+                true,
+            ),
+            (
+                "MATCH (a)-[r]->(b) WITH r, count(*) + 1 AS total RETURN r, total",
+                true,
+            ),
+            (
+                "WITH 7 AS x RETURN any(x IN [1, 2] WHERE x > 1) AS found, x",
+                true,
+            ),
+        ];
+        for (query, should_bind) in cases {
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let result = binder.bind(&parse(query).unwrap());
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_zero_concat_ast_lowers_to_string_function() {
+        let mut expression = parsed_return_expr("RETURN 'left' + 'right'");
+        let Expr::BinaryOp(binary) = &mut expression else {
+            panic!("expected binary expression")
+        };
+        binary.op = AstBinOp::Concat;
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        let id = binder.lower_expr(&expression, expression.span(), &mut state);
+        assert!(state.errors.is_empty());
+        let plan = state.builder.build();
+        assert!(matches!(
+            plan.exprs.get(id),
+            IrExpr::FunctionCall { name, args } if name == "string.concat" && args.len() == 2
+        ));
+    }
+
+    #[test]
+    fn exact_zero_union_empty_branches_are_reported_without_panicking() {
+        let parsed = parse("RETURN 1 AS x").unwrap();
+        for clauses in [
+            vec![
+                AstClause::Union(graphforge_ast::UnionClause {
+                    all: false,
+                    span: Span::new(0, 5),
+                }),
+                parsed.clauses[0].clone(),
+            ],
+            vec![
+                parsed.clauses[0].clone(),
+                AstClause::Union(graphforge_ast::UnionClause {
+                    all: false,
+                    span: Span::new(10, 15),
+                }),
+            ],
+        ] {
+            let query = AstQuery {
+                dialect: parsed.dialect,
+                clauses,
+                span: Span::new(0, 15),
+            };
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let errors = binder
+                .bind(&query)
+                .expect_err("empty UNION branch must fail");
+            assert!(errors.iter().any(|error| {
+                error.kind == BindErrorKind::InvalidArgument
+                    && error.message == "UNION requires a query on both sides"
+            }));
+        }
+    }
+
+    #[test]
+    fn exact_zero_direct_property_guards_cover_path_identity_and_write_targets() {
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        state.path_vars.insert(
+            "p".into(),
+            PathBinding {
+                nodes: vec![VarId(0)],
+                segments: Vec::new(),
+            },
+        );
+        let path_property = parsed_return_expr("RETURN p.name");
+        binder.lower_expr(&path_property, path_property.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error.message.contains("not valid on a path")
+        }));
+
+        state.vars.insert("r".into(), VarId(1));
+        state.var_kinds.insert(VarId(1), VarKind::Relationship);
+        let wrong_identity = parsed_return_expr("RETURN r.node_uuid");
+        binder.lower_expr(&wrong_identity, wrong_identity.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error.message.contains("valid only on a node")
+        }));
+
+        let malformed = PropertyAccess {
+            object: Box::new(Expr::Literal(Literal::Int(1, Span::new(0, 1)))),
+            key: "name".into(),
+            span: Span::new(0, 6),
+        };
+        assert!(
+            binder
+                .resolve_write_target(&malformed, &mut state)
+                .is_none()
+        );
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidDeleteTarget
+                && error
+                    .message
+                    .contains("write target must be a bound variable")
+        }));
+    }
+
+    #[test]
+    fn exact_zero_embedded_pattern_predicate_shape_is_rejected() {
+        let ast = parse("MATCH (n) WHERE (n)-->(m) RETURN n").unwrap();
+        let AstClause::Match(match_clause) = &ast.clauses[0] else {
+            panic!("expected MATCH clause")
+        };
+        let where_clause = match_clause.where_clause.as_ref().expect("inline WHERE");
+        let predicate = Expr::BinaryOp(graphforge_ast::BinaryOp {
+            op: AstBinOp::Eq,
+            left: Box::new(where_clause.predicate.clone()),
+            right: Box::new(Expr::Literal(Literal::Bool(true, where_clause.span))),
+            span: where_clause.span,
+        });
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        state.vars.insert("n".into(), VarId(0));
+        state.node_vars.insert(VarId(0), None);
+        state.var_kinds.insert(VarId(0), VarKind::Node);
+        binder.lower_where_predicate(&predicate, predicate.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error
+                    .message
+                    .contains("supported only as single-relationship")
+        }));
+    }
+
+    #[test]
+    fn exact_zero_nested_pattern_comprehension_cardinality_is_rejected() {
+        let query = "MATCH (a) RETURN [x IN nodes([(a)-->(b) | a]) | [(x)-->(c) | c] + [(x)-->(d) | d]] AS values";
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let errors = binder
+            .bind(&parse(query).unwrap())
+            .expect_err("one list comprehension cannot capture multiple child patterns");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == BindErrorKind::InvalidArgument
+                    && error
+                        .message
+                        .contains("exactly one nested pattern comprehension")
+            }),
+            "errors={errors:?}"
+        );
+    }
+
+    #[test]
+    fn exact_zero_strict_property_owner_matrix_resolves_declared_properties() {
+        use graphforge_ontology::{
+            EntityTypeDef, OntologyCompiler, OntologyDoc, OntologyHandle, PropertyDef,
+            PropertyValueType, RelationTypeDef, SemanticFlags,
+        };
+
+        let doc = OntologyDoc {
+            ontology_id: "property-owner-test".into(),
+            version: "1.0".into(),
+            entity_types: vec![EntityTypeDef {
+                name: "Person".into(),
+                r#abstract: false,
+                parent: None,
+            }],
+            relation_types: vec![RelationTypeDef {
+                name: "KNOWS".into(),
+                src: "Person".into(),
+                dst: "Person".into(),
+                inverse: None,
+                semantic: SemanticFlags::default(),
+            }],
+            properties: vec![
+                PropertyDef {
+                    owner: "Person".into(),
+                    name: "name".into(),
+                    value_type: PropertyValueType::Utf8,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+                PropertyDef {
+                    owner: "KNOWS".into(),
+                    name: "since".into(),
+                    value_type: PropertyValueType::Int64,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+            ],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let handle = OntologyHandle::new(OntologyCompiler::compile(&doc).unwrap());
+        for query in [
+            "MATCH (n:Person) RETURN n.name",
+            "MATCH (n) RETURN n.name",
+            "MATCH ()-[r:KNOWS]->() RETURN r.since",
+            "MATCH ()-[r]->() RETURN r.since",
+        ] {
+            let binder = Binder::new(
+                Some(handle.clone()),
+                Arc::new(Mutex::new(RuntimeCatalog::new())),
+                OntologyMode::Strict,
+            );
+            binder
+                .bind(&parse(query).unwrap())
+                .unwrap_or_else(|errors| panic!("query={query}, errors={errors:?}"));
         }
     }
 }

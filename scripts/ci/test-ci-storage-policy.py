@@ -1,5 +1,34 @@
 #!/usr/bin/env python3
-"""Enforce bounded, consumer-driven CI transfer storage."""
+"""Enforce Blacksmith-first, consumer-driven CI transfer storage.
+
+Speed and honesty share one storage model on Blacksmith runners:
+
+Allowed
+-------
+- ``useblacksmith/stickydisk`` for ``target/``, optional ``.sccache``, and other
+  large build trees (persist compile products across RC/publish-track runs;
+  ~3s hydrate vs multi-minute cache blobs).
+- Upstream ``actions/cache@v6`` for ``~/.cargo/registry`` + git (and pnpm/uv)
+  with exact lockfile keys — Blacksmith colocates this cache.
+- Local ``sccache`` with ``SCCACHE_DIR`` on a sticky disk (cross-crate compile
+  cache without GitHub-backed maturin sccache).
+- Larger Blacksmith runners for Binding RC cells when wall-clock requires them.
+
+Still forbidden
+---------------
+- Putting ``target/`` (or other large build trees) into ``actions/cache`` blobs —
+  wrong tool; use sticky disks.
+- Maturin-action ``sccache: true`` (GHA-integrated backend) — prefer sticky
+  ``SCCACHE_DIR`` / sticky ``target/`` we control.
+- Unbounded artifact uploads — keep consumer-driven retention for candidate
+  partitions (1-day transfer vs 30-day publication groups).
+
+Expected Binding RC Linux sticky keys use repository + lane + rustc +
+Cargo.lock hash + ``release-target-v1``. PR sticky keys stay job-isolated with
+``${{ github.job }}`` and ``target-v1``.
+
+This module inventories workflow storage steps and fails closed on drift.
+"""
 
 from __future__ import annotations
 
@@ -24,6 +53,8 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "M1-Release-Reconciliation-${{ github.run_id }}": 1,
         "visualization-limits-stress-${{ github.sha }}": 1,
+        "pr-python-wheel-${{ github.sha }}": 1,
+        "pr-node-addon-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -39,17 +70,33 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "M1-Release-Candidate-npm-${{ steps.source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-crates-${{ steps.source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "pr-python-wheel-${{ github.sha }}": 1,
+        "pr-node-addon-${{ github.sha }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 7,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
+        "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
 EXPECTED_STICKY_KEYS = Counter(
     {
         "${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1": 5,
+        (
+            "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+        ): 2,
+        (
+            "${{ github.repository }}-release_candidate-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+        ): 1,
         (
             "${{ github.repository }}-daily-fuzz-"
             "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
@@ -170,6 +217,11 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "binding-rc-reports/${{ matrix.report_target }}.json",
             "dist/*.whl",
             "crates/graphforge-bindings-node/*.node",
+            (
+                "crates/graphforge-bindings-node/*.node\n"
+                "crates/graphforge-bindings-node/index.js\n"
+                "crates/graphforge-bindings-node/index.d.ts"
+            ),
             "non-cypher-evidence/",
             "binding-rc-aggregate/report.json",
             "m1-release-load-evidence",
@@ -201,6 +253,8 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts/npm",
             "candidate/release-artifacts/crates",
             "candidate/release-artifacts",
+            "dist",
+            "crates/graphforge-bindings-node",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
@@ -213,7 +267,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            cross_run = name != "M1-Release-Load-${{ github.run_id }}"
+            cross_run = name != "M1-Release-Load-${{ github.run_id }}" and not name.startswith(
+                "pr-"
+            )
             if cross_run:
                 assert field(step, "github-token") == "${{ github.token }}", (
                     f"cross-run artifact has no token: {name}"
@@ -221,16 +277,31 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 assert field(step, "repository") == "${{ github.repository }}", (
                     f"cross-run artifact repository drift: {name}"
                 )
-                expected_run_id = {
-                    "non-cypher-evidence": "${{ inputs.rust_run_id }}",
-                    "binding-rc-aggregate": "${{ inputs.binding_rc_run_id }}",
-                    "candidate": "${{ steps.candidate.outputs.run_id }}",
-                    "candidate/release-artifacts/python": ("${{ steps.candidate.outputs.run_id }}"),
-                    "candidate/release-artifacts/npm": "${{ steps.candidate.outputs.run_id }}",
-                    "candidate/release-artifacts/crates": ("${{ steps.candidate.outputs.run_id }}"),
-                    "candidate/release-artifacts": "${{ steps.candidate.outputs.run_id }}",
+                expected_run_ids = {
+                    "non-cypher-evidence": {"${{ inputs.rust_run_id }}"},
+                    "binding-rc-aggregate": {"${{ inputs.binding_rc_run_id }}"},
+                    "candidate": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/python": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/npm": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/crates": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
                 }[path]
-                assert field(step, "run-id") == expected_run_id, (
+                assert field(step, "run-id") in expected_run_ids, (
                     f"cross-run artifact run ID drift: {name}"
                 )
             else:
@@ -270,7 +341,9 @@ def dependency_contracts(text: str) -> list[str]:
         key = field(step, "key")
         assert key is not None, "dependency cache has no exact key"
         rendered = "\n".join(step)
-        assert "target" not in rendered, f"large build tree stored in actions/cache: {key}"
+        assert "target" not in rendered, (
+            f"large build tree stored in actions/cache (use stickydisk): {key}"
+        )
         assert "crates/**/*.rs" not in key and "crates/**" not in key, (
             f"dependency cache is keyed by source files: {key}"
         )
@@ -301,7 +374,9 @@ def validate_maturin_storage(text: str) -> None:
         assert field(step, "uses") == "PyO3/maturin-action@v1", "unapproved Maturin action"
         sccache = field(step, "sccache")
         assert sccache is None or sccache.lower() == "false", (
-            f"Maturin sccache uses GitHub storage: {sccache}"
+            "Maturin-action sccache:true uses the GitHub-integrated backend; "
+            "use sticky SCCACHE_DIR / sticky target/ instead "
+            f"(got sccache={sccache!r})"
         )
 
 
