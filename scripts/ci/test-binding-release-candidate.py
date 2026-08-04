@@ -171,11 +171,14 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     assert_active_lines(
         native,
         "PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence",
+        "test -f crates/graphforge-bindings-py/tests/smoke.py",
+        "test -f crates/graphforge-bindings-py/tests/gil_release.py",
         f"GRAPHFORGE_PYTHON_PARITY_REPORT={report} \\",
         'uv run --isolated --no-project --with "${wheels[0]}" \\',
         "python crates/graphforge-bindings-py/tests/non_cypher_release.py \\",
         "--classification-only",
     )
+    assert "crates/graphforge-bindings-py/tests/*.py" not in native
     assert "GRAPHFORGE_PYTHON_PARITY_REPORT=dist/" not in native
     write = required_section(
         post_maturin, f"- name: {write_step}", "- name: Stage Python report for aggregate job"
@@ -200,7 +203,7 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
         "if-no-files-found: error",
         "retention-days: 1",
     )
-    for forbidden in ("chmod", "chown", "continue-on-error", "|| true", "retry"):
+    for forbidden in ("chmod", "continue-on-error", "|| true", "retry"):
         assert forbidden not in post_maturin.lower()
     assert not re.search(r"(?mi)^\s*if:\s*(?:false|\$\{\{\s*false\s*\}\})\s*$", post_maturin)
 
@@ -231,7 +234,7 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(node_job, "timeout-minutes: ${{ matrix.timeout_minutes || 60 }}")
 
-    assert "actions/cache@v6" not in node_job
+    assert node_job.count("actions/cache@v6") == 1
     assert "actions/cache/restore@v6" not in node_job
     assert "actions/cache/save@v6" not in node_job
     assert node_job.count("actions/upload-artifact@v7") == 2
@@ -249,7 +252,8 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
         "if-no-files-found: error",
         "retention-days: 1",
     )
-    assert "Restore Windows Node Cargo build state" not in node_job
+    assert "path: target" not in workflow_step(node_job, "name: Cache Cargo registry")
+    assert "key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}" in node_job
     assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(
         "Build declared publish target"
     )
@@ -510,7 +514,7 @@ def main() -> None:
     ):
         rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
     wrapper_step = "Prepare Rust compiler wrapper for native contracts"
-    target_step = "Prepare writable Cargo target for native contracts"
+    target_step = "Verify writable Cargo target for native contracts"
     native_step = "Clean-install and execute native contract"
     assert rc_workflow_text.count(wrapper_step) == 1
     assert rc_workflow_text.count(target_step) == 1
@@ -523,12 +527,12 @@ def main() -> None:
     post_maturin_python = rc_workflow_text.split("uses: PyO3/maturin-action@v1", 1)[1].split(
         "  node:", 1
     )[0]
-    assert 'cargo_target_dir="$RUNNER_TEMP/graphforge-python-native-target"' in post_maturin_python
-    assert "printf 'CARGO_TARGET_DIR=%s\\n'" in post_maturin_python
+    assert "CARGO_TARGET_DIR: ${{ github.workspace }}/target" in rc_workflow_text
+    assert 'test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"' in post_maturin_python
     assert "cargo_target_state=unwritable" in post_maturin_python
     assert "cargo_target_state=ready" in post_maturin_python
     assert "chmod" not in post_maturin_python
-    assert "chown" not in post_maturin_python
+    assert post_maturin_python.count('sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"') == 1
     assert "continue-on-error" not in post_maturin_python
     assert "|| true" not in post_maturin_python
     assert "retry" not in post_maturin_python.lower()
@@ -572,11 +576,25 @@ def main() -> None:
     assert "macos-latest" not in rc_workflow_text
     assert "macos-15-intel" not in rc_workflow_text
     assert "windows-latest" not in rc_workflow_text
-    assert rc_workflow_text.count("os: blacksmith-6vcpu-macos-15") == 3
-    assert rc_workflow_text.count("os: blacksmith-4vcpu-windows-2025") == 2
+    assert rc_workflow_text.count("os: blacksmith-12vcpu-macos-15") == 3
+    assert rc_workflow_text.count("os: blacksmith-8vcpu-windows-2025") == 2
     assert "architecture: ${{ matrix.node_arch }}" in rc_workflow_text
     assert 'test "$(node -p \'process.arch\')" = "$EXPECTED_NODE_ARCH"' in rc_workflow_text
     assert "scripts/ci/prepare-rustc-wrapper.py" in rc_workflow_text
+    assert rc_workflow_text.count("uses: useblacksmith/stickydisk@v1") == 3
+    assert rc_workflow_text.count("uses: actions/cache@v6") == 3
+    shared_linux_key = (
+        "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
+        "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+    )
+    assert rc_workflow_text.count(shared_linux_key) == 2
+    assert (
+        "${{ github.repository }}-release_candidate-rust-1.96.0-"
+        "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+    ) in rc_workflow_text
+    assert 'sccache: "true"' not in rc_workflow_text
+    assert "path: target\n          key: ${{ runner.os }}-cargo-registry" not in rc_workflow_text
+    assert "Reclaim sticky-disk ownership after maturin" in rc_workflow_text
     package_validation_step = rc_workflow_text.split("- name: Validate cross-built package", 1)[
         1
     ].split("- name: Write target evidence", 1)[0]
@@ -603,8 +621,10 @@ def main() -> None:
     assert "test -f index.js" in release_candidate_job
     assert "test -f index.d.ts" in release_candidate_job
     assert "package/index.js" in release_candidate_job
-    assert "pnpm --dir packages/cli pack" in release_candidate_job
-    assert "pnpm --dir packages/agent-skills pack" in release_candidate_job
+    assert 'pnpm --dir "$GITHUB_WORKSPACE/packages/cli" pack' in release_candidate_job
+    assert 'pnpm --dir "$GITHUB_WORKSPACE/packages/agent-skills" pack' in release_candidate_job
+    assert 'wait "$cli_pack_pid"' in release_candidate_job
+    assert 'wait "$agent_skills_pack_pid"' in release_candidate_job
     assert 'cargo package "${package_args[@]}" --allow-dirty --no-verify' in (release_candidate_job)
     assert 'cargo package -p "$crate"' not in release_candidate_job
     assert "scripts/set_release_version.py --check" in release_candidate_job
