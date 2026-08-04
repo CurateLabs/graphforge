@@ -1,5 +1,34 @@
 #!/usr/bin/env python3
-"""Enforce bounded, consumer-driven CI transfer storage."""
+"""Enforce Blacksmith-first, consumer-driven CI transfer storage.
+
+Speed and honesty share one storage model on Blacksmith runners:
+
+Allowed
+-------
+- ``useblacksmith/stickydisk`` for ``target/``, optional ``.sccache``, and other
+  large build trees (persist compile products across RC/publish-track runs;
+  ~3s hydrate vs multi-minute cache blobs).
+- Upstream ``actions/cache@v6`` for ``~/.cargo/registry`` + git (and pnpm/uv)
+  with exact lockfile keys — Blacksmith colocates this cache.
+- Local ``sccache`` with ``SCCACHE_DIR`` on a sticky disk (cross-crate compile
+  cache without GitHub-backed maturin sccache).
+- Larger Blacksmith runners for Binding RC cells when wall-clock requires them.
+
+Still forbidden
+---------------
+- Putting ``target/`` (or other large build trees) into ``actions/cache`` blobs —
+  wrong tool; use sticky disks.
+- Maturin-action ``sccache: true`` (GHA-integrated backend) — prefer sticky
+  ``SCCACHE_DIR`` / sticky ``target/`` we control.
+- Unbounded artifact uploads — keep consumer-driven retention for candidate
+  partitions (1-day transfer vs 30-day publication groups).
+
+Expected Binding RC Linux sticky keys use repository + lane + rustc +
+Cargo.lock hash + ``release-target-v1``. PR sticky keys stay job-isolated with
+``${{ github.job }}`` and ``target-v1``.
+
+This module inventories workflow storage steps and fails closed on drift.
+"""
 
 from __future__ import annotations
 
@@ -278,7 +307,9 @@ def dependency_contracts(text: str) -> list[str]:
         key = field(step, "key")
         assert key is not None, "dependency cache has no exact key"
         rendered = "\n".join(step)
-        assert "target" not in rendered, f"large build tree stored in actions/cache: {key}"
+        assert "target" not in rendered, (
+            f"large build tree stored in actions/cache (use stickydisk): {key}"
+        )
         assert "crates/**/*.rs" not in key and "crates/**" not in key, (
             f"dependency cache is keyed by source files: {key}"
         )
@@ -309,7 +340,9 @@ def validate_maturin_storage(text: str) -> None:
         assert field(step, "uses") == "PyO3/maturin-action@v1", "unapproved Maturin action"
         sccache = field(step, "sccache")
         assert sccache is None or sccache.lower() == "false", (
-            f"Maturin sccache uses GitHub storage: {sccache}"
+            "Maturin-action sccache:true uses the GitHub-integrated backend; "
+            "use sticky SCCACHE_DIR / sticky target/ instead "
+            f"(got sccache={sccache!r})"
         )
 
 

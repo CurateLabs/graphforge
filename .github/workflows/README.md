@@ -25,6 +25,37 @@ Binding RC is expected to use the same Blacksmith-first sticky + colocated-cache
 model (see storage policy tests); put `target/` on sticky disks, not in
 `actions/cache` blobs.
 
+### Blacksmith-first CI storage policy
+
+`scripts/ci/test-ci-storage-policy.py` encodes these rules (not the GitHub
+Actions cache-era bans that blocked RC speed):
+
+| Allowed | Purpose |
+| --- | --- |
+| `useblacksmith/stickydisk` for `target/`, optional `.sccache`, large trees | Persist compile products across RC/publish-track runs (~3s mount) |
+| Upstream `actions/cache@v6` for `~/.cargo/registry` + git (and pnpm/uv) | Colocated Blacksmith cache; exact lockfile keys |
+| Local `sccache` with `SCCACHE_DIR` on a sticky disk | Cross-crate compile cache without GHA-backend maturin sccache |
+| Bigger Blacksmith runners for RC cells | Linux 8/16 vCPU; larger macOS/Windows when needed |
+
+| Still forbidden | Why |
+| --- | --- |
+| Putting `target/` into `actions/cache` blobs | Wrong tool — use sticky disks |
+| Maturin-action `sccache: true` (GHA-integrated) | Prefer sticky `SCCACHE_DIR` / sticky `target/` |
+| Unbounded artifact uploads | Keep consumer-driven retention for candidate partitions |
+
+**Expected Binding RC Linux sticky keys** (release profile; shared across
+Python-ubuntu and Node-linux when safe):
+
+```text
+${{ github.repository }}-binding-rc-linux-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
+${{ github.repository }}-release_candidate-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
+```
+
+PR sticky keys stay job-isolated:
+`${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1`.
+macOS/Windows RC cells use larger Blacksmith runners + colocated registry cache;
+use sticky disks there only when the platform supports them.
+
 ## Pull-request contract
 
 - A newer commit cancels obsolete Test Suite, Documentation, and auto-label
