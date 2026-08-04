@@ -3529,6 +3529,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn label_rewrite_reports_missing_type_ids_column_for_add_and_remove() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "seed",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        let mut frontier = Frontier {
+            df_schema: DFSchema::try_from(schema.as_ref().clone()).unwrap(),
+            batches: vec![batch],
+        };
+        let add = frontier
+            .add_node_labels(VarId(0), &[1], &[true])
+            .unwrap_err();
+        assert!(add
+            .to_string()
+            .contains("MERGE label target has no type_ids column"));
+        let remove = frontier.remove_node_labels(VarId(0), &[1]).unwrap_err();
+        assert!(remove
+            .to_string()
+            .contains("REMOVE label target has no type_ids column"));
+    }
+
+    #[test]
     fn computed_columns_report_missing_and_misaligned_results() {
         let empty: Vec<crate::CreateComputed> = Vec::new();
         assert_eq!(computed_type(&empty, 3, "score"), DataType::Null);

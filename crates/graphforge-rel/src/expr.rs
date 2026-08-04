@@ -15375,6 +15375,15 @@ mod tests {
         let text = text.as_any().downcast_ref::<LargeStringArray>().unwrap();
         assert_eq!(text.value(0), "ad́A");
 
+        use datafusion::arrow::array::StringArray;
+        let utf8 = invoke(ScalarValue::Utf8(Some("Graph".into()))).unwrap();
+        let utf8 = match utf8 {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
+        };
+        let utf8 = utf8.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(utf8.value(0), "hparG");
+
         let list = ScalarValue::List(ScalarValue::new_list(
             &[
                 ScalarValue::Int64(Some(1)),
