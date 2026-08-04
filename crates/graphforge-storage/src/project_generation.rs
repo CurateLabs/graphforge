@@ -1749,6 +1749,74 @@ mod tests {
     }
 
     #[test]
+    fn wave9_interrupted_initialization_enforces_bounded_private_generation_layout() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        let generations = root.path().join("generations");
+        fs::create_dir(&generations).unwrap();
+        for _ in 0..17 {
+            fs::create_dir(generations.join(Uuid::now_v7().hyphenated().to_string())).unwrap();
+        }
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+        let generation = root
+            .path()
+            .join("generations")
+            .join(Uuid::now_v7().hyphenated().to_string());
+        fs::create_dir_all(&generation).unwrap();
+        for name in [PARTICIPANTS_DIR, LEASE_FILE, MANIFEST_FILE] {
+            let path = generation.join(name);
+            if name == PARTICIPANTS_DIR {
+                fs::create_dir(path).unwrap();
+            } else {
+                fs::write(path, b"partial").unwrap();
+            }
+        }
+        fs::write(generation.join("fourth-entry"), b"caller").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(generation.join("fourth-entry")).unwrap(),
+            b"caller"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave9_participant_inventory_rejects_links_and_special_files() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+
+        for kind in ["link", "socket"] {
+            let root = tempfile::Builder::new()
+                .prefix("gf")
+                .tempdir_in("/tmp")
+                .unwrap();
+            let resolved = open_or_initialize_project(root.path()).unwrap();
+            let participants = resolved.participants_root();
+            let hostile = participants.join(format!("hostile-{kind}"));
+            if kind == "link" {
+                symlink(root.path().join(CURRENT_FILE), &hostile).unwrap();
+            } else {
+                let _listener = UnixListener::bind(&hostile).unwrap();
+            }
+            assert_code(
+                resolved
+                    .validate_complete_participant_inventory()
+                    .unwrap_err(),
+                "GF_TRANSACTION_FAILED",
+            );
+        }
+    }
+
+    #[test]
     fn existing_resolution_remains_pinned_after_current_changes() {
         let (root, first) = project();
         let old_reader = resolve_project_generation(root.path()).unwrap();

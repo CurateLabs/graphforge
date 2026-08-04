@@ -1898,4 +1898,42 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn wave10_raw_space_and_outcome_corruption_matrix_is_total() {
+        let empty = RawSpace {
+            compatibility_id: id(1).to_hex(),
+            policy: None,
+            last_outcome: None,
+        };
+        assert!(matches!(
+            parse_space(empty),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "embedding refresh space state",
+                ..
+            })
+        ));
+
+        for (status, failure_class) in [
+            ("succeeded", Some("provider")),
+            ("cancelled", Some("storage")),
+            ("failed", None),
+            ("unknown", None),
+        ] {
+            let raw = RawOutcome {
+                status: status.into(),
+                failure_class: failure_class.map(str::to_owned),
+                graph_generation: 1,
+                source_fingerprint: fingerprint(1).to_hex(),
+                completed_at_micros: 1,
+            };
+            assert!(matches!(
+                parse_outcome(&raw),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding refresh outcome status",
+                    ..
+                })
+            ));
+        }
+    }
 }

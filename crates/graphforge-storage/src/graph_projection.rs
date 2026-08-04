@@ -1974,6 +1974,135 @@ mod tests {
         assert!(uuid_at(&nullable, 0).is_err());
     }
 
+    #[test]
+    fn wave10_projection_private_bounds_and_missing_inventory_are_exact() {
+        assert!(
+            sorted_parquet_files(Path::new("definitely-absent"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(exact_u32(usize::MAX, "field count").is_err());
+        assert!(validate_timezone(Some("America/Denver")).is_err());
+
+        let values: ArrayRef = Arc::new(arrow::array::Int64Array::from(vec![1]));
+        assert!(time64_value(&values, TimeUnit::Second, 0).is_err());
+        assert!(downcast::<arrow::array::StringArray>(&values).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave10_projection_inventory_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.parquet");
+        fs::write(&target, b"caller").unwrap();
+        symlink(&target, root.path().join("linked.parquet")).unwrap();
+        assert!(sorted_parquet_files(root.path()).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"caller");
+    }
+
+    #[test]
+    fn wave13_projection_rejects_duplicate_graph_identities() {
+        let root = TempDir::new().unwrap();
+        let duplicate = uuid(41);
+        let mut node_uuids = FixedSizeBinaryBuilder::new(16);
+        node_uuids.append_value(duplicate.as_bytes()).unwrap();
+        node_uuids.append_value(duplicate.as_bytes()).unwrap();
+        let nodes =
+            RecordBatch::try_from_iter([("node_uuid", Arc::new(node_uuids.finish()) as ArrayRef)])
+                .unwrap();
+        let nodes_path = root.path().join("nodes.parquet");
+        write_parquet(&nodes_path, &nodes).unwrap();
+        assert!(uuid_rows(&nodes_path, "node_uuid").is_err());
+
+        let mut edge_uuids = FixedSizeBinaryBuilder::new(16);
+        let mut sources = FixedSizeBinaryBuilder::new(16);
+        let mut targets = FixedSizeBinaryBuilder::new(16);
+        for _ in 0..2 {
+            edge_uuids.append_value(duplicate.as_bytes()).unwrap();
+            sources.append_value(uuid(42).as_bytes()).unwrap();
+            targets.append_value(uuid(43).as_bytes()).unwrap();
+        }
+        let edges = RecordBatch::try_from_iter([
+            ("edge_uuid", Arc::new(edge_uuids.finish()) as ArrayRef),
+            ("src_uuid", Arc::new(sources.finish()) as ArrayRef),
+            ("dst_uuid", Arc::new(targets.finish()) as ArrayRef),
+        ])
+        .unwrap();
+        let edges_path = root.path().join("edges.parquet");
+        write_parquet(&edges_path, &edges).unwrap();
+        assert!(edge_endpoints(&[edges_path]).is_err());
+    }
+
+    #[test]
+    fn wave13_projection_path_shape_and_cleanup_guards_are_structured() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("missing.parquet");
+        assert!(
+            project_parquet_file(
+                &missing,
+                &root.path().join("unused.parquet"),
+                "node_uuid",
+                &BTreeSet::new(),
+            )
+            .is_ok()
+        );
+        assert!(copy_regular_file_if_present(&missing, &root.path().join("copy")).is_ok());
+        assert!(clear_graph_empty_target(&root.path().join("absent-target")).is_ok());
+
+        let metadata_directory = root.path().join("metadata-directory");
+        fs::create_dir(&metadata_directory).unwrap();
+        assert!(
+            copy_regular_file_if_present(&metadata_directory, &root.path().join("metadata-copy"))
+                .is_err()
+        );
+
+        let source_file = root.path().join("manifest-source");
+        let target_file = root.path().join("nested/manifest-copy");
+        fs::write(&source_file, b"manifest").unwrap();
+        copy_regular_file_if_present(&source_file, &target_file).unwrap();
+        assert_eq!(fs::read(&target_file).unwrap(), b"manifest");
+
+        let target = root.path().join("clear-target");
+        for directory in ["topology", "properties", "edge_properties"] {
+            fs::create_dir_all(target.join(directory)).unwrap();
+        }
+        for name in [
+            graphforge_core::manifest::MANIFEST_FILE,
+            graphforge_core::manifest::ONTOLOGY_FILE,
+        ] {
+            fs::write(target.join(name), b"metadata").unwrap();
+        }
+        clear_graph_empty_target(&target).unwrap();
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn wave13_projection_target_metadata_must_be_regular_files() {
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join(graphforge_core::manifest::MANIFEST_FILE)).unwrap();
+        assert!(validate_graph_empty_target(target.path()).is_err());
+
+        let topology = TempDir::new().unwrap();
+        fs::create_dir(topology.path().join("generation.json")).unwrap();
+        assert!(validate_empty_topology(topology.path()).is_err());
+
+        let graph_directory = TempDir::new().unwrap();
+        fs::create_dir(graph_directory.path().join("nested.parquet")).unwrap();
+        assert!(validate_empty_parquet_directory(graph_directory.path()).is_err());
+
+        assert_ne!(normalize_f32(1.25), 0);
+        assert_ne!(normalize_f64(1.25), 0);
+        assert_eq!(
+            dictionary_value_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8),
+            )),
+            &DataType::Utf8
+        );
+    }
+
     fn id_map(batch: &RecordBatch, uuid_name: &str, id_name: &str) -> BTreeMap<[u8; 16], u64> {
         let uuids = uuid_column(batch, uuid_name).unwrap();
         let ids = batch

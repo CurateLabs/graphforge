@@ -1103,6 +1103,16 @@ const fn invalid(field: &'static str, message: &'static str) -> KnowledgeError {
 mod tests {
     use super::*;
 
+    fn invalid_code(error: &KnowledgeError) -> &'static str {
+        match error {
+            KnowledgeError::Invalid { .. } => "invalid",
+            KnowledgeError::Duplicate(_) => "duplicate",
+            KnowledgeError::Dangling(_) => "dangling",
+            KnowledgeError::Conflict(_) => "conflict",
+            _ => "other",
+        }
+    }
+
     fn uuid7(seed: u8) -> Uuid {
         let mut bytes = [seed; 16];
         bytes[6] = (bytes[6] & 0x0f) | 0x70;
@@ -1347,6 +1357,150 @@ mod tests {
                 vec![],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn wave12_contract_versions_and_duplicate_identities_fail_closed() {
+        let mut bad_group_version = group();
+        bad_group_version.contract_version = 2;
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![bad_group_version], vec![], vec![]).unwrap_err()
+            ),
+            "invalid"
+        );
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group(), group()], vec![], vec![]).unwrap_err()
+            ),
+            "duplicate"
+        );
+
+        let membership = member(10, 20, 30, HypothesisMembershipAction::Added, 2);
+        let mut bad_membership_version = membership.clone();
+        bad_membership_version.contract_version = 2;
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![bad_membership_version], vec![])
+                    .unwrap_err()
+            ),
+            "invalid"
+        );
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![membership.clone(), membership], vec![])
+                    .unwrap_err()
+            ),
+            "duplicate"
+        );
+
+        let selected = selection(11, 21, None, 3);
+        let mut bad_selection_version = selected.clone();
+        bad_selection_version.contract_version = 2;
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![], vec![bad_selection_version])
+                    .unwrap_err()
+            ),
+            "invalid"
+        );
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![], vec![selected.clone(), selected])
+                    .unwrap_err()
+            ),
+            "duplicate"
+        );
+    }
+
+    #[test]
+    fn wave12_dangling_and_temporally_invalid_events_are_rejected() {
+        let dangling_member = HypothesisMembershipEvent::new(
+            uuid7(10),
+            uuid7(20),
+            uuid7(99),
+            uuid7(30),
+            HypothesisMembershipAction::Added,
+            uuid7(40),
+            uuid7(50),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![dangling_member], vec![]).unwrap_err()
+            ),
+            "dangling"
+        );
+        let early_member = member(11, 21, 31, HypothesisMembershipAction::Added, 0);
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![early_member], vec![]).unwrap_err()
+            ),
+            "invalid"
+        );
+
+        let dangling_selection = HypothesisSelectionEvent::new(
+            uuid7(12),
+            uuid7(22),
+            uuid7(99),
+            None,
+            uuid7(42),
+            uuid7(52),
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![], vec![dangling_selection])
+                    .unwrap_err()
+            ),
+            "dangling"
+        );
+        let early_selection = selection(13, 23, None, 0);
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::new(vec![group()], vec![], vec![early_selection]).unwrap_err()
+            ),
+            "invalid"
+        );
+    }
+
+    #[test]
+    fn wave12_merge_conflicts_and_arrow_decode_errors_are_structured() {
+        let base = HypothesisLedger::new(vec![group()], vec![], vec![]).unwrap();
+        let conflicting_group =
+            HypothesisGroup::new(uuid7(1), "different.question".into(), uuid7(2), 1).unwrap();
+        let staged = HypothesisLedger::new(vec![conflicting_group], vec![], vec![]).unwrap();
+        assert_eq!(invalid_code(&base.merge(&staged).unwrap_err()), "conflict");
+
+        let wrong_schema = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert_eq!(
+            invalid_code(&HypothesisLedger::from_batches(&[wrong_schema], &[], &[]).unwrap_err()),
+            "invalid"
+        );
+
+        let ledger = HypothesisLedger::new(
+            vec![group()],
+            vec![member(10, 20, 30, HypothesisMembershipAction::Added, 2)],
+            vec![],
+        )
+        .unwrap();
+        let batch = ledger.membership_batch().unwrap();
+        let mut columns = batch.columns().to_vec();
+        columns[4] = Arc::new(StringArray::from(vec!["unknown"]));
+        let unknown_action = RecordBatch::try_new(batch.schema(), columns).unwrap();
+        assert_eq!(
+            invalid_code(
+                &HypothesisLedger::from_batches(
+                    &[ledger.group_batch().unwrap()],
+                    &[unknown_action],
+                    &[]
+                )
+                .unwrap_err()
+            ),
+            "invalid"
         );
     }
 }

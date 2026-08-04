@@ -956,4 +956,84 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn exact_zero_build_limits_and_empty_schema_validation_are_fail_closed() {
+        let root = TempDir::new().unwrap();
+        let mut limits = TextSearchLimits::default();
+        limits.documents = 0;
+        let document_limit = build_text_index(
+            &root.path().join("documents"),
+            &projection(vec![document(1, "title", "body")]),
+            limits,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            document_limit,
+            SearchArtifactError::ResourceExhausted {
+                resource: "text_documents",
+                limit: 0
+            }
+        ));
+
+        let no_properties = TextSourceProjection {
+            properties: Vec::new(),
+            documents: vec![document(1, "title", "body")],
+            source_bytes: 0,
+        };
+        assert_eq!(
+            build_text_index(
+                &root.path().join("no-properties"),
+                &no_properties,
+                TextSearchLimits::default(),
+                || Ok(())
+            )
+            .unwrap(),
+            TextIndexBuildOutcome::Empty
+        );
+
+        let empty_index = root.path().join("empty-index");
+        std::fs::create_dir(&empty_index).unwrap();
+        let (schema, _, _) =
+            text_schema(&["title".to_owned()], TextSearchLimits::default()).unwrap();
+        Index::create_in_dir(&empty_index, schema).unwrap();
+        let empty_error = validate_text_index(
+            &empty_index,
+            &["title".to_owned()],
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            empty_error,
+            SearchArtifactError::CorruptDerivedIndex { .. }
+        ));
+    }
+
+    #[test]
+    fn exact_zero_directory_io_classification_distinguishes_build_and_validation() {
+        let root = TempDir::new().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(matches!(
+            prepare_empty_directory(&file),
+            Err(SearchArtifactError::Io {
+                operation: "create text index directory",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            bounded_directory_bytes(&file, TextSearchLimits::default(), &mut || Ok(()), false,),
+            Err(SearchArtifactError::Io {
+                operation: "measure text index",
+                ..
+            })
+        ));
+        assert!(matches!(
+            bounded_directory_bytes(&file, TextSearchLimits::default(), &mut || Ok(()), true,),
+            Err(SearchArtifactError::CorruptDerivedIndex { .. })
+        ));
+    }
 }

@@ -6466,4 +6466,202 @@ mod tests {
             assert!(rendered.contains("Filter"), "{direction:?}: {rendered}");
         }
     }
+
+    #[test]
+    fn exact_zero_recursive_plan_reference_and_binding_analysis() {
+        let wanted = VarId(17);
+        let other = VarId(18);
+        let mut referenced_builder = GraphPlan::builder("openCypher");
+        referenced_builder.push_expr(IrExpr::VarRef(wanted));
+        let referenced = referenced_builder.build();
+        let mut unrelated_builder = GraphPlan::builder("openCypher");
+        unrelated_builder.push_expr(IrExpr::VarRef(other));
+        let unrelated = unrelated_builder.build();
+
+        assert!(plan_references_var(&referenced, wanted));
+        assert!(!plan_references_var(&unrelated, wanted));
+
+        let wrappers = [
+            GraphOp::Optional {
+                child: Box::new(referenced.clone()),
+            },
+            GraphOp::Exists {
+                child: Box::new(referenced.clone()),
+                negated: false,
+            },
+            GraphOp::PatternComprehension {
+                child: Box::new(referenced.clone()),
+                output: VarId(20),
+            },
+            GraphOp::ListElementPatternComprehension {
+                list_expr: ExprId(0),
+                loop_var: VarId(21),
+                child: Box::new(referenced.clone()),
+                pattern_output: VarId(22),
+                filter: None,
+                projection: None,
+                output: VarId(23),
+            },
+            GraphOp::Union {
+                all: true,
+                inputs: vec![unrelated.clone(), referenced.clone()],
+            },
+        ];
+        for wrapper in wrappers {
+            let plan = GraphPlan::builder("openCypher").push_op(wrapper).build();
+            assert!(plan_references_var(&plan, wanted));
+        }
+
+        for op in [
+            GraphOp::NodeScan {
+                var: wanted,
+                ty: None,
+            },
+            GraphOp::EdgeScan {
+                var: wanted,
+                ty: None,
+            },
+            GraphOp::TypedEdgeScan {
+                var: wanted,
+                rel_ty: TypeId(1),
+            },
+            GraphOp::Expand {
+                src: other,
+                edge: wanted,
+                dst: VarId(19),
+                rel_ty: None,
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            },
+        ] {
+            assert!(graph_op_binds_var(&op, wanted));
+        }
+        assert!(!graph_op_binds_var(
+            &GraphOp::NodeScan {
+                var: other,
+                ty: None,
+            },
+            wanted
+        ));
+
+        let mut outer = VarMap::new();
+        outer.insert(wanted, "outer");
+        assert!(!full_subquery_needs_outer_input(&unrelated, &outer));
+        assert!(full_subquery_needs_outer_input(&referenced, &outer));
+        let mut locally_bound_builder = GraphPlan::builder("openCypher");
+        locally_bound_builder.push_op_mut(GraphOp::NodeScan {
+            var: wanted,
+            ty: None,
+        });
+        locally_bound_builder.push_expr(IrExpr::VarRef(wanted));
+        let locally_bound = locally_bound_builder.build();
+        assert!(!full_subquery_needs_outer_input(&locally_bound, &outer));
+    }
+
+    #[test]
+    fn exact_zero_optional_scope_promotes_only_inner_entity_shapes() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+        let scan = |alias: &str, field: Field| {
+            LogicalPlanBuilder::scan(
+                alias,
+                table_source(Arc::new(Schema::new(vec![field]))),
+                None,
+            )
+            .and_then(LogicalPlanBuilder::build)
+            .unwrap()
+        };
+        let outer = scan("outer_scalar", Field::new("value", DataType::Int64, true));
+        let inner = scan("inner_node", Field::new("node_uuid", DataType::Utf8, false));
+        let promoted = VarId(30);
+        let absent_outer = VarId(31);
+        let mut child_vm = VarMap::new();
+        child_vm.insert(promoted, "inner_node");
+        child_vm.insert(absent_outer, "inner_node");
+        let mut outer_vm = VarMap::new();
+        outer_vm.insert(promoted, "outer_scalar");
+
+        promote_optional_entity_vars(&outer, &inner, &child_vm, &mut outer_vm);
+        assert_eq!(outer_vm.get(promoted), Some("inner_node"));
+        assert_eq!(outer_vm.get(absent_outer), None);
+
+        let already_entity = scan("outer_node", Field::new("node_uuid", DataType::Utf8, false));
+        outer_vm.insert(promoted, "outer_node");
+        promote_optional_entity_vars(&already_entity, &inner, &child_vm, &mut outer_vm);
+        assert_eq!(outer_vm.get(promoted), Some("outer_node"));
+    }
+
+    #[test]
+    fn exact_zero_validation_errors_are_specific_and_non_interpolated() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let empty_vm = VarMap::new();
+        let no_alternatives = lowerer
+            .lower_exists_alternatives(&[], false, empty_base(), &empty_vm)
+            .unwrap_err();
+        assert_eq!(
+            no_alternatives.to_string(),
+            "unsupported expression: pattern predicate has no alternatives"
+        );
+
+        let uncorrelated = GraphPlan::builder("openCypher").build();
+        let uncorrelated_error = lowerer
+            .lower_exists_alternatives(&[uncorrelated], true, empty_base(), &empty_vm)
+            .unwrap_err();
+        assert!(
+            uncorrelated_error
+                .to_string()
+                .contains("must share at least one bound variable")
+        );
+
+        let mut arena = ExprArena::new();
+        let not_a_map = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let map_error =
+            eval_map_literal(&lowerer, Some(not_a_map), &arena, &empty_vm, None).unwrap_err();
+        assert!(
+            map_error
+                .to_string()
+                .contains("CREATE properties must be a map literal")
+        );
+        assert_eq!(
+            eval_map_literal(&lowerer, None, &arena, &empty_vm, None).unwrap(),
+            (Vec::new(), Vec::new())
+        );
+
+        let mut edge_vm = VarMap::new();
+        let bound_error = expand_bound_edge_single_dir(
+            VarId(2),
+            Some(TypeId(999_999)),
+            "var_0",
+            "var_1",
+            true,
+            empty_base(),
+            &mut edge_vm,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap_err();
+        assert!(bound_error.to_string().contains("TypeId(999999)"));
+        assert!(bound_error.to_string().contains("no known relation name"));
+    }
+
+    #[test]
+    fn exact_zero_pagination_accepts_platform_boundary_values() {
+        assert!(matches!(
+            lower_limit(0, empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_skip(0, empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_limit(u64::try_from(usize::MAX).unwrap(), empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_skip(u64::try_from(usize::MAX).unwrap(), empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+    }
 }

@@ -2774,6 +2774,49 @@ mod tests {
     }
 
     #[test]
+    fn wave9_journal_metadata_and_lock_aliases_fail_closed() {
+        let root = project();
+        let journal = root.path().join(TRANSACTIONS_DIR).join("hostile.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+
+        std::fs::create_dir(&journal).unwrap();
+        assert_eq!(
+            read_journal(&journal).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+        std::fs::remove_dir(&journal).unwrap();
+        std::fs::write(&journal, vec![b'x'; MAX_JOURNAL_BYTES as usize + 1]).unwrap();
+        assert_eq!(
+            read_journal(&journal).unwrap_err().code(),
+            "GF_PROJECT_CORRUPT"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            std::fs::remove_file(&journal).unwrap();
+            let target = root.path().join("caller-journal");
+            std::fs::write(&target, b"caller bytes").unwrap();
+            symlink(&target, &journal).unwrap();
+            assert_eq!(
+                read_journal(&journal).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+
+            let owner = root.path().join("lock-owner");
+            let alias = root.path().join("lock-alias");
+            std::fs::write(&owner, b"").unwrap();
+            std::fs::hard_link(&owner, &alias).unwrap();
+            assert_eq!(
+                open_regular_lock(&alias).unwrap_err().code(),
+                "GF_PROJECT_CORRUPT"
+            );
+            assert!(owner.exists());
+        }
+    }
+
+    #[test]
     fn atomic_temp_cleanup_rejects_near_misses_links_and_multiple_entries() {
         let root = project();
         for name in [

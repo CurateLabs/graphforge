@@ -1394,4 +1394,93 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn wave10_private_vector_error_contracts_are_structured() {
+        let limits = VectorStoreLimits::default();
+        assert!(matches!(
+            dot_and_norm(&[1.0], &[0.0]),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            validate_rows(
+                &[row(1, &[1.0, 0.0], 1), row(2, &[1.0], 2)],
+                Some(2),
+                limits,
+                Path::new("fixture")
+            ),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            checked_cells(
+                2,
+                2,
+                VectorStoreLimits {
+                    vector_cells: 3,
+                    ..limits
+                }
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "vector_cells",
+                ..
+            })
+        ));
+        assert!(matches!(build("failed"), SearchArtifactError::Build(_)));
+        assert!(matches!(
+            io(
+                "read",
+                Path::new("fixture"),
+                std::io::Error::other("failed")
+            ),
+            SearchArtifactError::Io { .. }
+        ));
+    }
+
+    #[test]
+    fn wave12_snapshot_reader_rejects_schema_row_and_query_dimension_mismatches() {
+        let dir = TempDir::new().unwrap();
+        let limits = VectorStoreLimits::default();
+        write_vector_snapshot(dir.path(), &[row(1, &[1.0, 0.0], 1)], 2, limits, || Ok(())).unwrap();
+
+        assert!(matches!(
+            read_vector_snapshot(dir.path(), 1, limits, || Ok(())),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            read_vector_snapshot(
+                dir.path(),
+                2,
+                VectorStoreLimits {
+                    stored_vectors: 0,
+                    ..limits
+                },
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "stored_vectors",
+                ..
+            })
+        ));
+
+        let key = SearchArtifactKey::vector("Person", "semantic").unwrap();
+        let artifact = PublishedSearchArtifact {
+            path: dir.path().to_path_buf(),
+            manifest: SearchManifest::for_key(
+                &key,
+                VECTOR_BACKEND_VERSION,
+                VECTOR_CONTRACT_VERSION,
+                Some(2),
+                &source_snapshot().unwrap(),
+                true,
+            )
+            .unwrap(),
+        };
+        assert!(matches!(
+            search_published_vectors(&artifact, &[1.0], &BTreeSet::new(), 1, limits, || Ok(())),
+            Err(SearchArtifactError::InvalidSelector {
+                field: "vector",
+                ..
+            })
+        ));
+    }
 }

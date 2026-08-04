@@ -595,4 +595,34 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn wave11_writer_rejects_oversized_binary_and_text_before_publication() {
+        let binary = vec![0_u8; usize::try_from(MAX_CANONICAL_BINARY_BYTES + 1).unwrap()];
+        let mut writer = CanonicalWriter::new();
+        let error = writer.binary(&binary).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalError::Limit {
+                item: "binary",
+                observed,
+                limit: MAX_CANONICAL_BINARY_BYTES,
+            } if observed == MAX_CANONICAL_BINARY_BYTES + 1
+        ));
+        assert!(writer.finish().is_empty());
+        drop(binary);
+
+        let text = "x".repeat(usize::try_from(MAX_CANONICAL_TEXT_BYTES + 1).unwrap());
+        let mut writer = CanonicalWriter::new();
+        let error = writer.text(&text).unwrap_err();
+        assert!(matches!(
+            error,
+            CanonicalError::Limit {
+                item: "text",
+                observed,
+                limit: MAX_CANONICAL_TEXT_BYTES,
+            } if observed == MAX_CANONICAL_TEXT_BYTES + 1
+        ));
+        assert!(writer.finish().is_empty());
+    }
 }

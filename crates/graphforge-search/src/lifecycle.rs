@@ -1715,4 +1715,68 @@ mod tests {
             assert!(path.is_dir());
         }
     }
+
+    #[test]
+    fn exact_zero_lifecycle_filesystem_failures_remain_structured() {
+        let marker_root = TempDir::new().unwrap();
+        std::fs::create_dir(marker_root.path().join(EMPTY_MARKER_FILE)).unwrap();
+        let marker_error = inspect_text_path(
+            marker_root.path(),
+            &properties(),
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            marker_error,
+            SearchArtifactError::Io {
+                operation: "read empty text marker",
+                ..
+            }
+        ));
+
+        let missing_parent = marker_root.path().join("missing").join("artifact");
+        let write_error = write_empty_marker(&missing_parent).unwrap_err();
+        assert!(matches!(
+            write_error,
+            SearchArtifactError::Io {
+                operation: "write empty text marker",
+                ..
+            }
+        ));
+
+        let bad_properties = TempDir::new().unwrap();
+        std::fs::write(bad_properties.path().join("properties"), b"not a directory").unwrap();
+        assert!(matches!(
+            property_source_paths(bad_properties.path(), &mut || Ok(())),
+            Err(SearchArtifactError::SourceSnapshot { .. })
+        ));
+
+        let ignored = TempDir::new().unwrap();
+        std::fs::create_dir(ignored.path().join("properties")).unwrap();
+        std::fs::write(ignored.path().join("properties/notes.txt"), b"ignored").unwrap();
+        assert!(
+            property_source_paths(ignored.path(), &mut || Ok(()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exact_zero_freshness_inspection_bounds_repeated_mutation() {
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let error = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || {
+                bump_search_generation(project.path()).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SearchArtifactError::ConcurrentMutation));
+    }
 }

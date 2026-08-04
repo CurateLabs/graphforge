@@ -3441,6 +3441,74 @@ mod tests {
         assert_eq!(not_found().code(), "GF_NOT_FOUND");
     }
 
+    fn generation_without_family(
+        graph: &GraphForge,
+        omitted_family: &str,
+        transaction_uuid: Uuid,
+        generation_uuid: Uuid,
+    ) -> graphforge_storage::ResolvedProjectGeneration {
+        let parent = graphforge_storage::resolve_project_generation(
+            graph.resolved_generation.container_root(),
+        )
+        .unwrap();
+        let participants = parent
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.record_family_id != omitted_family)
+            .map(snapshot_to_participant)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let request = ProjectGenerationRequest {
+            transaction_uuid,
+            generation_uuid,
+            capabilities: parent
+                .capabilities()
+                .into_iter()
+                .map(|capability| ProjectCapability {
+                    capability_id: capability.capability_id,
+                    capability_version: capability.capability_version,
+                })
+                .collect(),
+            participants,
+        };
+        match graphforge_storage::stage_project_generation(
+            graph.resolved_generation.container_root(),
+            &request,
+        )
+        .unwrap()
+        {
+            ProjectStageOutcome::Staged(staged) => staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .unwrap()
+                .publish()
+                .unwrap(),
+            ProjectStageOutcome::AlreadyPublished(_) => panic!("fresh generation expected"),
+        };
+        graphforge_storage::resolve_project_generation(graph.resolved_generation.container_root())
+            .unwrap()
+    }
+
+    #[test]
+    fn incomplete_paired_knowledge_participants_fail_with_schema_mismatch() {
+        for (omitted, confidence, seed) in [
+            ("assertion_graph_refs", false, 120_u8),
+            ("confidence_inputs", true, 130_u8),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let graph = GraphForge::new(root.path().to_str()).unwrap();
+            enable(&graph, CapabilityId::Knowledge, seed);
+            let generation =
+                generation_without_family(&graph, omitted, uuid7(seed + 1), uuid7(seed + 2));
+            let error = if confidence {
+                read_confidence_ledger(&generation).unwrap_err()
+            } else {
+                read_ledger(&generation).unwrap_err()
+            };
+            assert_eq!(error.code(), "GF_SCHEMA_MISMATCH");
+        }
+    }
+
     fn enable(graph: &GraphForge, capability_id: CapabilityId, seed: u8) {
         graph
             .enable_capability(EnableCapabilityRequest {

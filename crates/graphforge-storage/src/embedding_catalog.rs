@@ -1044,4 +1044,40 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         sync_directory(directory.path()).unwrap();
     }
+
+    #[test]
+    fn wave10_catalog_lock_and_owned_path_corruption_are_structured() {
+        use std::time::Duration;
+
+        let project = tempfile::tempdir().unwrap();
+        let embeddings = project.path().join(EMBEDDINGS_DIR);
+        std::fs::create_dir(&embeddings).unwrap();
+        let first = CatalogWriterLock::acquire(
+            &embeddings,
+            SearchCoordinationLimits::default(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let zero_wait = SearchCoordinationLimits {
+            lock_timeout: Duration::ZERO,
+            lock_poll_interval: Duration::ZERO,
+            ..SearchCoordinationLimits::default()
+        };
+        assert!(matches!(
+            CatalogWriterLock::acquire(&embeddings, zero_wait, &mut || Ok(())),
+            Err(SearchArtifactError::Lock { .. })
+        ));
+        drop(first);
+
+        let owned = project.path().join("owned");
+        std::fs::write(&owned, b"caller").unwrap();
+        assert!(matches!(
+            ensure_owned_directory(&owned),
+            Err(SearchArtifactError::CorruptManifest { .. })
+        ));
+        assert!(matches!(
+            ensure_regular_file(project.path()),
+            Err(SearchArtifactError::CorruptManifest { .. })
+        ));
+    }
 }

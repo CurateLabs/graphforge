@@ -1556,4 +1556,38 @@ mod tests {
             generation_uuid
         );
     }
+
+    #[test]
+    fn wave12_portable_targets_reject_file_shapes_and_parent_files() {
+        let root = tempfile::tempdir().unwrap();
+        let target_file = root.path().join("target-file");
+        std::fs::write(&target_file, b"caller data").unwrap();
+        assert_eq!(
+            prepare_import_target(&target_file).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+
+        let parent_file = root.path().join("parent-file");
+        std::fs::write(&parent_file, b"caller data").unwrap();
+        assert_eq!(
+            reject_export_destination(&parent_file.join("export.gfproj"))
+                .unwrap_err()
+                .code(),
+            "GF_IO"
+        );
+        assert_eq!(
+            reject_symlink_components(&parent_file.join("child"), "portable test")
+                .unwrap_err()
+                .code(),
+            "GF_IO"
+        );
+    }
+
+    #[test]
+    fn wave12_portable_layout_reports_directory_inspection_failures() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, b"caller data").unwrap();
+        assert_eq!(directory_names(&file).unwrap_err().code(), "GF_IO");
+    }
 }

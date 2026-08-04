@@ -6127,7 +6127,7 @@ mod tests {
     }
 
     #[test]
-    fn unwind_explode_preserves_order_and_enforces_list_contract() {
+    fn wave11_unwind_explode_preserves_order_and_enforces_list_contract() {
         use arrow::array::{Int64Array, ListArray, StringArray};
         use arrow::datatypes::Field;
         use datafusion::common::DFSchema;
@@ -6197,6 +6197,134 @@ mod tests {
                 .to_string()
                 .contains("must evaluate to a list")
         );
+
+        let entity_cfg = UnwindConfig {
+            list_expr: col("items"),
+            input_schema: input_schema.clone(),
+            input_dfschema: Arc::new(DFSchema::try_from(input_schema.as_ref().clone()).unwrap()),
+            out_schema: Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("items", input_schema.field(1).data_type().clone(), true),
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), true),
+                Field::new("node_id", DataType::UInt64, true),
+            ])),
+        };
+        let primitive_lists =
+            ListArray::from_iter_primitive::<arrow::datatypes::Int64Type, _, _>([Some(vec![
+                Some(1),
+            ])]);
+        let entity_input = RecordBatch::try_new(
+            input_schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(primitive_lists),
+            ],
+        )
+        .unwrap();
+        assert!(
+            unwind_explode(&entity_cfg, &[entity_input])
+                .unwrap_err()
+                .to_string()
+                .contains("requires a struct element")
+        );
+    }
+
+    #[test]
+    fn wave11_low_level_expand_and_optional_schema_guards_fail_closed() {
+        use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+        use arrow::datatypes::Field;
+
+        let int_schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let ints = RecordBatch::try_new(
+            int_schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        assert!(
+            u64_column(&ints, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("UInt64")
+        );
+        assert!(
+            string_column(&ints, "missing")
+                .unwrap_err()
+                .to_string()
+                .contains("missing column")
+        );
+        assert!(
+            string_column(&ints, "value")
+                .unwrap_err()
+                .to_string()
+                .contains("Utf8")
+        );
+
+        let short_schema = Arc::new(Schema::new(vec![Field::new(
+            "uuid",
+            DataType::FixedSizeBinary(8),
+            false,
+        )]));
+        let short = FixedSizeBinaryArray::try_from_iter([&[1_u8; 8][..]].into_iter()).unwrap();
+        let short_batch =
+            RecordBatch::try_new(short_schema.clone(), vec![Arc::new(short)]).unwrap();
+        let optional = OptionalConfig {
+            join_keys: vec![(0, 0)],
+            inner_keep_idx: vec![],
+            out_schema: short_schema.clone(),
+            outer_schema: short_schema.clone(),
+            inner_schema: short_schema,
+        };
+        assert!(
+            optional_join(&optional, &[short_batch.clone()], &[short_batch])
+                .unwrap_err()
+                .to_string()
+                .contains("not a 16-byte UUID")
+        );
+
+        let dir = TempDir::new().unwrap();
+        let cfg = ExpandConfig {
+            rel_type_name: "KNOWS".into(),
+            direction: Direction::Out,
+            min_hops: 1,
+            max_hops: Some(1),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            src_col_idx: 0,
+            out_schema: Arc::new(Schema::empty()),
+            provider: Arc::new(PersistentAdjacencyProvider::new(
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )),
+        };
+        assert!(
+            build_edge_list_column(&cfg, &[], &HashMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("no edge-list column")
+        );
+        let mut not_list = cfg;
+        not_list.out_schema = int_schema;
+        assert!(
+            build_edge_list_column(&not_list, &[], &HashMap::new())
+                .unwrap_err()
+                .to_string()
+                .contains("must be a List")
+        );
+
+        let utf8 = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        assert!(u64_column(&utf8, 0).is_err());
     }
 
     #[test]
@@ -6664,6 +6792,133 @@ mod tests {
                 .to_string()
                 .contains("requires two physical inputs")
         );
+    }
+
+    #[tokio::test]
+    async fn wave11_physical_graph_execs_reject_missing_children_and_invalid_partitions() {
+        use arrow::datatypes::Field;
+        use datafusion::logical_expr::col;
+
+        let dir = TempDir::new().unwrap();
+        let (input, physical) = empty_write_input();
+        let expand = graphforge_plan::ExpandNode::new(
+            input.clone(),
+            "KNOWS",
+            1,
+            2,
+            3,
+            graphforge_ir::Direction::Out,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+            vec![],
+            vec![],
+            vec![],
+        );
+        let var_len = VarLenExpandNode::new(
+            input.clone(),
+            "KNOWS",
+            1,
+            Some(2),
+            1,
+            2,
+            3,
+            graphforge_ir::Direction::Out,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+            vec![],
+            graphforge_plan::var_len_edge_list_field(&[]),
+        );
+        let optional = OptionalMatchNode::new(input.clone(), input.clone(), vec![], vec![]);
+        let unwind = graphforge_plan::UnwindNode::new(
+            input.clone(),
+            col("missing_list"),
+            "item",
+            &Field::new("item", DataType::Int64, true),
+        );
+        let infer = graphforge_plan::OntologyInferNode::new(
+            input,
+            "KNOWS",
+            "transitive:KNOWS",
+            "conservative_min",
+        );
+        let state = SessionContext::new().state();
+        let planner = DefaultPhysicalPlanner::default();
+        let extension = GraphForgeExtensionPlanner;
+
+        let mut one_child = Vec::<Arc<dyn ExecutionPlan>>::new();
+        for node in [
+            &expand as &dyn UserDefinedLogicalNode,
+            &var_len as &dyn UserDefinedLogicalNode,
+            &unwind as &dyn UserDefinedLogicalNode,
+            &infer as &dyn UserDefinedLogicalNode,
+        ] {
+            one_child.push(
+                extension
+                    .plan_extension(&planner, node, &[], std::slice::from_ref(&physical), &state)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        let optional = extension
+            .plan_extension(
+                &planner,
+                &optional,
+                &[],
+                &[physical.clone(), physical],
+                &state,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        for plan in &one_child {
+            assert!(format!("{plan:?}").contains(plan.name()));
+            assert!(
+                datafusion::physical_plan::displayable(plan.as_ref())
+                    .one_line()
+                    .to_string()
+                    .contains(plan.name())
+            );
+            assert!(
+                plan.clone()
+                    .with_new_children(vec![])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("needs one child")
+            );
+        }
+        for plan in one_child.iter().take(3).chain(std::iter::once(&optional)) {
+            let error = match plan.execute(1, SessionContext::new().task_ctx()) {
+                Ok(_) => panic!("{} accepted invalid partition", plan.name()),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("only has partition 0"));
+        }
+        assert!(
+            optional
+                .clone()
+                .with_new_children(vec![])
+                .unwrap_err()
+                .to_string()
+                .contains("needs two children")
+        );
+    }
+
+    #[tokio::test]
+    async fn wave11_merge_requires_an_explicit_write_target() {
+        let session = make_session();
+        let plan = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Merge {
+                pattern: graphforge_ir::CreatePattern::default(),
+                on_create: vec![],
+                on_match: vec![],
+            })
+            .build();
+        let error = session.execute_create(&plan).await.unwrap_err();
+        assert!(error.to_string().contains("requires a write target"));
     }
 
     #[test]

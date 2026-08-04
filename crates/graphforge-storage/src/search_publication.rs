@@ -1390,4 +1390,36 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"caller bytes");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
+
+    #[test]
+    fn wave10_writer_timeout_and_cleanup_bounds_are_fail_closed() {
+        let project = TempDir::new().unwrap();
+        let root = key().artifact_root(project.path());
+        std::fs::create_dir_all(&root).unwrap();
+        let first =
+            SearchWriterLock::acquire(&root, SearchCoordinationLimits::default(), &mut || Ok(()))
+                .unwrap();
+        let zero_wait = SearchCoordinationLimits {
+            lock_timeout: Duration::ZERO,
+            lock_poll_interval: Duration::ZERO,
+            ..SearchCoordinationLimits::default()
+        };
+        assert!(matches!(
+            SearchWriterLock::acquire(&root, zero_wait, &mut || Ok(())),
+            Err(SearchArtifactError::Lock { .. })
+        ));
+        drop(first);
+
+        let cleanup = project.path().join("indexes/search/owned");
+        std::fs::create_dir_all(&cleanup).unwrap();
+        std::fs::write(cleanup.join("caller"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_search_builds(project.path(), 0),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "cleanup_entries",
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(cleanup.join("caller")).unwrap(), b"preserve");
+    }
 }

@@ -3012,6 +3012,99 @@ mod tests {
                 .contains("test allocation failed")
         );
     }
+
+    #[test]
+    fn missing_uuid_helpers_preserve_algorithm_specific_errors() {
+        let graph = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let errors = [
+            spanning_node_uuid(&graph, 0, AnalyzeAlgorithm::MinimumSpanningTree).unwrap_err(),
+            bipartite_node_uuid(&graph, 0).unwrap_err(),
+            matching_node_uuid(&graph, 0).unwrap_err(),
+            cardinality_matching_node_uuid(&graph, 0).unwrap_err(),
+            conductance_node_uuid(&graph, 0).unwrap_err(),
+            node_coloring_node_uuid(&graph, 0).unwrap_err(),
+            k1_coloring_node_uuid(&graph, 0).unwrap_err(),
+            chromatic_number_node_uuid(&graph, 0).unwrap_err(),
+            topological_node_uuid(&graph, 0).unwrap_err(),
+            find_cycles_node_uuid(&graph, 0).unwrap_err(),
+            dag_longest_path_node_uuid(&graph, 0).unwrap_err(),
+            weighted_dag_longest_path_node_uuid(&graph, 0).unwrap_err(),
+            edge_coloring_node_uuid(&graph, 0).unwrap_err(),
+            euler_circuit_node_uuid(&graph, 0).unwrap_err(),
+            euler_path_node_uuid(&graph, 0).unwrap_err(),
+            bridge_node_uuid(&graph, 0).unwrap_err(),
+        ];
+        for error in errors {
+            assert!(error.to_string().contains("UUID identity"));
+        }
+    }
+
+    #[test]
+    fn graphsage_and_dag_adapters_reject_incomplete_projection_identity() {
+        let mut missing_uuid = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::new(),
+            HashMap::new(),
+        );
+        missing_uuid
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap();
+        assert!(
+            graphsage_projection(&missing_uuid)
+                .unwrap_err()
+                .to_string()
+                .contains("selected node has no UUID identity")
+        );
+
+        let missing_vector = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::from([(0, [1; 16])]),
+            HashMap::new(),
+        );
+        assert!(
+            graphsage_projection(&missing_vector)
+                .unwrap_err()
+                .to_string()
+                .contains("no resolved feature vector")
+        );
+
+        let edge = crate::algorithm_graph::AlgorithmEdge {
+            edge_id: 1,
+            edge_uuid: [9; 16],
+            neighbor_id: 1,
+            weight: 1.0,
+        };
+        let mut missing_neighbor = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0],
+            HashMap::from([(0, [1; 16])]),
+            HashMap::from([(0, vec![edge])]),
+        );
+        missing_neighbor
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap();
+        assert!(
+            graphsage_projection(&missing_neighbor)
+                .unwrap_err()
+                .to_string()
+                .contains("selected neighbor has no UUID identity")
+        );
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        assert!(
+            directed_is_dag(&missing_neighbor, &control)
+                .unwrap_err()
+                .to_string()
+                .contains("unselected node")
+        );
+    }
     use crate::algorithm_partition::PartitionValue;
 
     fn node2vec_invocation(

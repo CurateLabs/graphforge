@@ -941,6 +941,62 @@ mod tests {
         Node2VecOptions, NodeSelector, PathsOptions, PropValue, RankOptions, SimilarOptions,
     };
 
+    fn raw_descriptor(
+        magic: &[u8; 4],
+        descriptor_version: u32,
+        verb: &str,
+        algorithm: &str,
+        algorithm_version: u32,
+        parameter_count: u64,
+        result_schema_version: u32,
+        schema_fingerprint: [u8; 32],
+    ) -> Vec<u8> {
+        let mut writer = CanonicalWriter::new();
+        writer.raw(magic).unwrap();
+        writer.u32(descriptor_version).unwrap();
+        writer.text(verb).unwrap();
+        writer.text(algorithm).unwrap();
+        writer.u32(algorithm_version).unwrap();
+        writer.raw(&[0; 32]).unwrap();
+        writer.u64(parameter_count).unwrap();
+        writer.u32(result_schema_version).unwrap();
+        writer.raw(&schema_fingerprint).unwrap();
+        writer.finish()
+    }
+
+    #[test]
+    fn wave10_canonical_decoder_rejects_each_frozen_envelope_violation() {
+        let schema = result_schema_fingerprint(Algorithm::Paths(PathAlgorithm::Bfs)).unwrap();
+        let cases = [
+            raw_descriptor(b"NOPE", 1, "paths", "bfs", 1, 0, 1, schema),
+            raw_descriptor(b"GFID", 2, "paths", "bfs", 1, 0, 1, schema),
+            raw_descriptor(b"GFID", 1, "unknown", "bfs", 1, 0, 1, schema),
+            raw_descriptor(b"GFID", 1, "paths", "unknown", 1, 0, 1, schema),
+            raw_descriptor(b"GFID", 1, "paths", "bfs", 2, 0, 1, schema),
+            raw_descriptor(b"GFID", 1, "paths", "bfs", 1, 65, 1, schema),
+            raw_descriptor(b"GFID", 1, "paths", "bfs", 1, 0, 2, schema),
+            raw_descriptor(b"GFID", 1, "paths", "bfs", 1, 0, 1, [9; 32]),
+        ];
+        for bytes in cases {
+            assert!(InvocationDescriptor::from_canonical_bytes(&bytes).is_err());
+        }
+
+        let descriptor = InvocationDescriptor::new(
+            Algorithm::Paths(PathAlgorithm::Bfs),
+            [0; 32],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let mut trailing = descriptor.canonical_bytes().to_vec();
+        trailing.push(0);
+        assert_eq!(
+            InvocationDescriptor::from_canonical_bytes(&trailing)
+                .unwrap_err()
+                .code(),
+            "GF_DESCRIPTOR_INVALID"
+        );
+    }
+
     #[test]
     fn registry_is_exhaustive_for_all_94_catalog_entries() {
         let contracts = algorithm_descriptor_contracts();

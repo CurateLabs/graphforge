@@ -640,4 +640,84 @@ mod tests {
         assert_eq!(entry.sort_key, &["recorded_at", "attachment_uuid"]);
         assert_eq!(entry.implementation_issue, 2004);
     }
+
+    #[test]
+    fn defensive_attachment_validation_and_optional_fingerprints_are_exact() {
+        let row = attachment(30, vec![uuid7(40)]);
+        assert!(matches!(
+            BeliefProjectionAttachmentLedger::new(vec![row.clone(), row.clone()]),
+            Err(KnowledgeError::Duplicate("attachment_uuid"))
+        ));
+
+        let mut invalid = row.clone();
+        invalid.contract_version += 1;
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported version")
+        );
+        invalid = row.clone();
+        invalid.policy_version = 0;
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must be positive")
+        );
+        invalid = row.clone();
+        invalid.policy_fingerprint = [0; 32];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match policy bytes")
+        );
+        invalid = row.clone();
+        invalid.source_record_uuids = vec![uuid7(42), uuid7(41)];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("sorted and deduplicated")
+        );
+        invalid = row;
+        invalid.source_record_uuids = vec![Uuid::nil()];
+        assert!(
+            validate(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("must not be nil")
+        );
+
+        let without_optional = BeliefProjectionAttachment::new(
+            uuid7(50),
+            uuid7(51),
+            uuid7(52),
+            10,
+            None,
+            1,
+            b"policy-v1".to_vec(),
+            [3; 32],
+            None,
+            [5; 32],
+            [6; 32],
+            vec![],
+            uuid7(53),
+            20,
+        )
+        .unwrap();
+        BeliefProjectionAttachmentLedger::new(vec![without_optional])
+            .unwrap()
+            .attachment_fingerprint(uuid7(50))
+            .unwrap();
+
+        let wrong = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert!(
+            BeliefProjectionAttachmentLedger::from_batches(&[wrong])
+                .unwrap_err()
+                .to_string()
+                .contains("schema mismatch")
+        );
+    }
 }

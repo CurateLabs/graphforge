@@ -1169,6 +1169,29 @@ mod tests {
     }
 
     #[test]
+    fn wave10_effective_entry_decode_rejects_malformed_csr_bounds() {
+        for malformed in [
+            CsrIndex {
+                offsets: vec![0, 2],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![1, 0],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![0, 1],
+                edge_ids: vec![1],
+                neighbor_ids: vec![],
+            },
+        ] {
+            assert!(entries_from_out_csr(&malformed).is_none());
+        }
+    }
+
+    #[test]
     fn public_csr_writer_rejects_every_inconsistent_topology_shape_without_file() {
         let dir = TempDir::new().unwrap();
         let path = csr_path(dir.path(), "BROKEN", Direction::Out);
@@ -1995,5 +2018,61 @@ mod tests {
             Some(inspection.source_generation)
         );
         assert!(inspection.artifact_fingerprint.is_some());
+    }
+
+    #[test]
+    fn wave13_inspection_classifies_malformed_effective_csr_as_unreadable() {
+        let root = TempDir::new().unwrap();
+        let malformed = CsrIndex {
+            offsets: vec![0, 2],
+            edge_ids: vec![1],
+            neighbor_ids: vec![2],
+        };
+        let inspection = inspect_effective_artifact(
+            root.path(),
+            7,
+            "fingerprint".to_owned(),
+            3,
+            &malformed,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(inspection.source_generation, 7);
+        assert_eq!(inspection.artifact_generation, Some(3));
+        assert_eq!(inspection.artifact_effective_generation, Some(7));
+        assert_eq!(inspection.artifact_fingerprint, None);
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(AdjacencyFreshnessReason::UnreadableArtifact)
+        );
+    }
+
+    #[test]
+    fn wave13_csr_io_rejects_parentless_destination_and_wrong_arrow_schema() {
+        let empty = CsrIndex {
+            offsets: vec![0],
+            edge_ids: vec![],
+            neighbor_ids: vec![],
+        };
+        assert!(write_csr(Path::new("/"), &empty).is_err());
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("wrong-schema.arrow");
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "wrong",
+            DataType::UInt64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(UInt64Array::from(vec![1]))],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        assert!(read_csr(&path).is_err());
     }
 }

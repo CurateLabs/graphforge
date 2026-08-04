@@ -9292,6 +9292,7 @@ mod tests {
             weighted_descriptor.parameters()["heuristic"],
             InvocationParameter::Utf8("heuristic".into())
         );
+        let source_uuid = source.uuid;
         let source = NodeSelector::Handle(source);
 
         let random_walk = PathsOptions {
@@ -9332,6 +9333,28 @@ mod tests {
             InvocationParameter::U64(7)
         );
         assert_eq!(descriptor.parameters()["seed"], InvocationParameter::U64(9));
+
+        let terminals = PathsOptions {
+            by: PathAlgorithm::MinSteinerTree,
+            directed: false,
+            k: 1,
+            via: None,
+            weight: None,
+            capacity_property: None,
+            cost_property: None,
+            heuristic: None,
+            walk_length: None,
+            seed: None,
+            terminal_uuids: vec![source_uuid.into_bytes()],
+            prize_property: None,
+        };
+        let descriptor = graph
+            .prepare_paths_invocation(None, None, &terminals)
+            .unwrap();
+        assert_eq!(
+            descriptor.parameters()["terminal_uuids"],
+            InvocationParameter::UuidList(vec![source_uuid.into_bytes()])
+        );
 
         for by in [
             PathAlgorithm::MinSteinerTree,

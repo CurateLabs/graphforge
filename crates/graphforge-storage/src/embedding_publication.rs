@@ -1775,4 +1775,63 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn wave10_generation_layout_rejects_nonfiles_and_excess_inventory() {
+        for kind in ["directory", "excess"] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join(MANIFEST_FILE), b"manifest").unwrap();
+            std::fs::write(root.path().join(VECTOR_DATA_FILE), b"vectors").unwrap();
+            if kind == "directory" {
+                std::fs::create_dir(root.path().join("unexpected")).unwrap();
+            } else {
+                std::fs::write(root.path().join("unexpected"), b"caller").unwrap();
+            }
+            assert!(matches!(
+                validate_generation_layout(root.path()),
+                Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave10_generation_sync_rejects_special_files() {
+        use std::os::unix::net::UnixListener;
+
+        let root = tempfile::Builder::new()
+            .prefix("gf")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let _socket = UnixListener::bind(root.path().join("socket")).unwrap();
+        assert!(matches!(
+            sync_tree(root.path()),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+    }
+
+    #[test]
+    fn wave13_embedding_path_helpers_fail_closed_on_regular_file_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let ancestor = root.path().join("regular-file");
+        std::fs::write(&ancestor, b"caller data").unwrap();
+        let child = ancestor.join("child");
+
+        assert!(matches!(
+            ensure_owned_directory(&child),
+            Err(SearchArtifactError::Io { .. })
+        ));
+        assert!(matches!(
+            path_exists(&child),
+            Err(SearchArtifactError::Io { .. })
+        ));
+        assert!(matches!(
+            ensure_existing_directory(&child),
+            Err(SearchArtifactError::Io { .. })
+        ));
+        assert!(matches!(
+            ensure_regular_file(&child),
+            Err(SearchArtifactError::Io { .. })
+        ));
+    }
 }

@@ -1673,13 +1673,55 @@ fn register_property_tables(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{FixedSizeBinaryArray, TimestampMicrosecondArray, UInt32Array, UInt64Array};
+    use arrow::array::{
+        FixedSizeBinaryArray, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
+    };
     use arrow::buffer::OffsetBuffer;
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::prelude::SessionContext;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct Wave12Observer {
+        started: std::sync::atomic::AtomicUsize,
+        scanned: std::sync::atomic::AtomicUsize,
+        completed: std::sync::atomic::AtomicUsize,
+        failed: std::sync::atomic::AtomicUsize,
+        pruning: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::io_stats::FilteredReadObserver for Wave12Observer {
+        fn read_started(&self, _: crate::io_stats::FilteredReadTable) {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn rows_scanned(&self, _: crate::io_stats::FilteredReadTable, rows: u64) {
+            self.scanned
+                .fetch_add(rows as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn read_completed(&self, _: crate::io_stats::FilteredReadTable, rows: u64, _: bool) {
+            self.completed
+                .fetch_add(rows as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn read_failed(&self, _: crate::io_stats::FilteredReadTable) {
+            self.failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn pruning(
+            &self,
+            _: crate::io_stats::FilteredReadTable,
+            _: crate::io_stats::FilteredReadPruning,
+        ) {
+            self.pruning
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 
     fn write_nodes_parquet(path: &Path) {
         let uuid_bytes: Vec<u8> = vec![1u8; 16];
@@ -2144,5 +2186,160 @@ mod tests {
         assert!(catalog.as_any().downcast_ref::<GraphCatalog>().is_some());
         assert!(catalog.schema("graph").is_some());
         assert!(catalog.schema("private").is_none());
+    }
+
+    #[test]
+    fn wave12_legacy_normalization_rejects_missing_and_mistyped_primary_labels() {
+        let missing = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+            "node_id",
+            DataType::UInt64,
+            false,
+        )])));
+        assert!(normalize_topology_nodes(vec![missing]).is_err());
+
+        let wrong_type = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "type_id",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["label"]))],
+        )
+        .unwrap();
+        assert!(normalize_topology_nodes(vec![wrong_type]).is_err());
+    }
+
+    #[test]
+    fn wave12_filtered_key_validation_rejects_missing_wrong_null_and_duplicate_ids() {
+        let missing = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::UInt64,
+            false,
+        )])));
+        assert!(!filtered_keys_match(
+            &[missing],
+            "node_id",
+            &Default::default()
+        ));
+
+        let wrong = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "node_id",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(vec!["1"]))],
+        )
+        .unwrap();
+        assert!(!filtered_keys_match(
+            &[wrong],
+            "node_id",
+            &[1].into_iter().collect()
+        ));
+
+        let nullable = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "node_id",
+                DataType::UInt64,
+                true,
+            )])),
+            vec![Arc::new(UInt64Array::from(vec![Some(1), None]))],
+        )
+        .unwrap();
+        assert!(!filtered_keys_match(
+            &[nullable],
+            "node_id",
+            &[1].into_iter().collect()
+        ));
+
+        let duplicate = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "node_id",
+                DataType::UInt64,
+                false,
+            )])),
+            vec![Arc::new(UInt64Array::from(vec![1, 1]))],
+        )
+        .unwrap();
+        assert!(!filtered_keys_match(
+            &[duplicate],
+            "node_id",
+            &[1].into_iter().collect()
+        ));
+    }
+
+    #[test]
+    fn wave12_filtered_observation_reports_completion_or_failure_once() {
+        let observer = Arc::new(Wave12Observer::default());
+        {
+            let erased: Arc<dyn crate::io_stats::FilteredReadObserver> = observer.clone();
+            let mut observation =
+                FilteredReadObservation::new(Some(&erased), FilteredReadKind::Node);
+            observation.scanned(3);
+            observation.pruning(crate::io_stats::FilteredReadPruning {
+                strategy: crate::io_stats::FilteredReadStrategy::RowGroupPredicate,
+                row_groups_considered: 1,
+                row_groups_selected: 1,
+                pages_considered: 1,
+                pages_selected: 1,
+                exact_rows_selected: 1,
+                metadata_fallbacks: 0,
+                validation_fallbacks: 0,
+            });
+            observation.complete(2, false);
+        }
+        {
+            let erased: Arc<dyn crate::io_stats::FilteredReadObserver> = observer.clone();
+            let _failed = FilteredReadObservation::new(Some(&erased), FilteredReadKind::Edge);
+        }
+        assert_eq!(
+            observer.started.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            observer.scanned.load(std::sync::atomic::Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            observer
+                .completed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            observer.failed.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            observer.pruning.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn wave12_typed_relation_names_are_confined_to_one_plain_stem() {
+        let dir = TempDir::new().unwrap();
+        for invalid in ["../escape", "nested/name", "."] {
+            assert!(read_edges(dir.path(), invalid, OntologyMode::Strict).is_err());
+            assert!(
+                read_edges_filtered(
+                    dir.path(),
+                    invalid,
+                    OntologyMode::Advisory,
+                    &[1].into_iter().collect(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn wave12_max_edge_id_skips_non_parquet_and_corrupt_parquet_entries() {
+        let dir = TempDir::new().unwrap();
+        let edges = dir.path().join("topology/edges");
+        std::fs::create_dir_all(&edges).unwrap();
+        std::fs::write(edges.join("note.txt"), b"not parquet").unwrap();
+        std::fs::write(edges.join("broken.parquet"), b"not parquet").unwrap();
+        assert_eq!(max_edge_id(dir.path()).unwrap(), 0);
     }
 }

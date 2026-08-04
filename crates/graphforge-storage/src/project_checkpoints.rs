@@ -2015,6 +2015,39 @@ mod tests {
         .unwrap();
     }
 
+    fn install_registry_intent(
+        checkpoint_root: &Path,
+        previous: Option<&Registry>,
+        next: &Registry,
+    ) -> RegistryIntent {
+        fs::create_dir_all(checkpoint_root).unwrap();
+        let transaction_uuid = Uuid::now_v7();
+        let next_bytes = next.canonical_bytes().unwrap();
+        let next_sha256 = hex(&Sha256::digest(&next_bytes).into());
+        let registry_temp = format!(".registry.{transaction_uuid}.json.next");
+        let checksum_temp = format!(".registry.{transaction_uuid}.sha256.next");
+        fs::write(checkpoint_root.join(&registry_temp), &next_bytes).unwrap();
+        fs::write(
+            checkpoint_root.join(&checksum_temp),
+            format!("{next_sha256}\n"),
+        )
+        .unwrap();
+        let intent = RegistryIntent {
+            transaction_uuid,
+            previous_revision: previous.map(|registry| registry.revision),
+            previous_sha256: previous
+                .map(|registry| hex(&Sha256::digest(registry.canonical_bytes().unwrap()).into())),
+            next_revision: next.revision,
+            next_sha256,
+            registry_temp,
+            checksum_temp,
+        };
+        let mut intent_bytes = serde_json::to_vec(&intent).unwrap();
+        intent_bytes.push(b'\n');
+        fs::write(checkpoint_root.join(INTENT_FILE), intent_bytes).unwrap();
+        intent
+    }
+
     #[test]
     fn revert_identity_matches_frozen_golden_vector() {
         let operation = Uuid::parse_str("018f0f4e-7b8c-7000-8000-000000000003").unwrap();
@@ -3020,6 +3053,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wave9_durable_registry_intent_recovers_every_atomic_pair_boundary() {
+        for boundary in [
+            "first-staged",
+            "previous-staged",
+            "registry-replaced",
+            "next-complete",
+        ] {
+            let directory = tempdir().unwrap();
+            crate::open_or_initialize_project(directory.path()).unwrap();
+            let checkpoint_root = directory.path().join(CHECKPOINTS_DIR);
+            let previous = Registry::empty();
+            let mut next = Registry::empty();
+            next.revision = 1;
+
+            let has_previous = boundary != "first-staged";
+            fs::create_dir_all(&checkpoint_root).unwrap();
+            if has_previous {
+                write_raw_registry(directory.path(), &previous);
+            }
+            let intent =
+                install_registry_intent(&checkpoint_root, has_previous.then_some(&previous), &next);
+            match boundary {
+                "first-staged" | "previous-staged" => {}
+                "registry-replaced" => {
+                    fs::rename(
+                        checkpoint_root.join(&intent.registry_temp),
+                        checkpoint_root.join(REGISTRY_FILE),
+                    )
+                    .unwrap();
+                }
+                "next-complete" => {
+                    fs::rename(
+                        checkpoint_root.join(&intent.registry_temp),
+                        checkpoint_root.join(REGISTRY_FILE),
+                    )
+                    .unwrap();
+                    fs::rename(
+                        checkpoint_root.join(&intent.checksum_temp),
+                        checkpoint_root.join(CHECKSUM_FILE),
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            recover_pair(&checkpoint_root).unwrap();
+
+            assert!(!checkpoint_root.join(INTENT_FILE).exists(), "{boundary}");
+            assert!(
+                !checkpoint_root.join(&intent.registry_temp).exists(),
+                "{boundary}"
+            );
+            assert!(
+                !checkpoint_root.join(&intent.checksum_temp).exists(),
+                "{boundary}"
+            );
+            let recovered = read_registry(&checkpoint_root).unwrap();
+            let expected_revision =
+                usize::from(matches!(boundary, "registry-replaced" | "next-complete"));
+            assert_eq!(recovered.revision, expected_revision as u64, "{boundary}");
+        }
+    }
+
+    #[test]
+    fn wave9_registry_intent_rejects_unsafe_names_and_wrong_staged_revision() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        let checkpoint_root = directory.path().join(CHECKPOINTS_DIR);
+        let mut next = Registry::empty();
+        next.revision = 1;
+        let mut intent = install_registry_intent(&checkpoint_root, None, &next);
+        intent.registry_temp = "../registry.json".into();
+        let mut bytes = serde_json::to_vec(&intent).unwrap();
+        bytes.push(b'\n');
+        fs::write(checkpoint_root.join(INTENT_FILE), bytes).unwrap();
+        assert_eq!(
+            recover_pair(&checkpoint_root).unwrap_err().code(),
+            "GF_CHECKPOINT_REGISTRY_CORRUPT"
+        );
+
+        fs::remove_dir_all(&checkpoint_root).unwrap();
+        fs::create_dir(&checkpoint_root).unwrap();
+        let mut intent = install_registry_intent(&checkpoint_root, None, &next);
+        intent.next_revision = 2;
+        let mut bytes = serde_json::to_vec(&intent).unwrap();
+        bytes.push(b'\n');
+        fs::write(checkpoint_root.join(INTENT_FILE), bytes).unwrap();
+        assert_eq!(
+            recover_pair(&checkpoint_root).unwrap_err().code(),
+            "GF_CHECKPOINT_REGISTRY_CORRUPT"
+        );
     }
 
     #[test]

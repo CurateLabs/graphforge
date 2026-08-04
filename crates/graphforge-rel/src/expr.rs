@@ -12307,6 +12307,33 @@ mod tests {
         Ok(array)
     }
 
+    fn invoke_test_udf_with_return_type<U: ScalarUDFImpl>(
+        udf: &U,
+        values: Vec<ScalarValue>,
+        return_type: DataType,
+    ) -> datafusion::error::Result<ColumnarValue> {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let types = values
+            .iter()
+            .map(ScalarValue::data_type)
+            .collect::<Vec<_>>();
+        udf.invoke_with_args(ScalarFunctionArgs {
+            args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+            arg_fields: types
+                .iter()
+                .enumerate()
+                .map(|(index, data_type)| {
+                    Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                })
+                .collect(),
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", return_type, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+    }
+
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct CountingVolatilePredicate {
         signature: Signature,
@@ -16682,5 +16709,468 @@ mod tests {
             assert!(render_temporal(name, value).is_some());
         }
         assert_eq!(render_temporal("unknown", "P1D"), None);
+    }
+
+    #[test]
+    fn exact_zero_dynamic_heterogeneous_list_builds_row_aligned_variants() {
+        use datafusion::arrow::array::{Array, ListArray, StructArray};
+
+        let output = invoke_test_udf(
+            &CypherDynamicHetList::new(),
+            vec![
+                ScalarValue::Int64(Some(7)),
+                ScalarValue::Utf8(Some("seven".into())),
+                ScalarValue::Boolean(None),
+            ],
+        )
+        .unwrap();
+        let lists = output.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists.value_length(0), 3);
+        let values = lists.value(0);
+        let variants = values.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(variants.len(), 3);
+        assert!(!variants.is_null(0));
+        assert!(!variants.is_null(1));
+        assert!(variants.is_null(2));
+    }
+
+    #[test]
+    fn exact_zero_list_plus_handles_each_operand_shape_and_null_propagation() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, ListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+
+        let list = |values: &[i64]| {
+            ScalarValue::List(ScalarValue::new_list(
+                &values
+                    .iter()
+                    .copied()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>(),
+                &DataType::Int64,
+                true,
+            ))
+        };
+        for (left, right, expected) in [
+            (list(&[1, 2]), list(&[3, 4]), vec![1, 2, 3, 4]),
+            (list(&[1, 2]), ScalarValue::Int64(Some(3)), vec![1, 2, 3]),
+            (ScalarValue::Int64(Some(1)), list(&[2, 3]), vec![1, 2, 3]),
+        ] {
+            let output = invoke_test_udf(&CypherListPlus::new(), vec![left, right]).unwrap();
+            let lists = output.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = lists.value(0);
+            assert_eq!(
+                (0..values.len())
+                    .map(|row| { unwrap_het(ScalarValue::try_from_array(&values, row).unwrap()) })
+                    .collect::<Vec<_>>(),
+                expected
+                    .into_iter()
+                    .map(|value| ScalarValue::Int64(Some(value)))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let null_list = ScalarValue::List(Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Int64, true)),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 0])),
+            Arc::new(Int64Array::from(Vec::<i64>::new())) as ArrayRef,
+            Some(NullBuffer::from(vec![false])),
+        )));
+        let output = invoke_test_udf(
+            &CypherListPlus::new(),
+            vec![null_list, ScalarValue::Int64(Some(1))],
+        )
+        .unwrap();
+        assert!(output.is_null(0));
+
+        assert!(
+            invoke_test_udf(
+                &CypherListPlus::new(),
+                vec![ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("at least one list operand")
+        );
+    }
+
+    #[test]
+    fn exact_zero_total_order_keys_distinguish_core_cypher_value_domains() {
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(2))],
+            &DataType::Int64,
+            true,
+        ));
+        let values = [
+            ScalarValue::Null,
+            list,
+            ScalarValue::Utf8(Some("text".into())),
+            ScalarValue::Boolean(Some(true)),
+            ScalarValue::Int64(Some(-2)),
+            ScalarValue::Float64(Some(2.5)),
+            ScalarValue::Float64(Some(f64::NAN)),
+        ];
+        let keys = values.iter().map(cypher_order_key).collect::<Vec<_>>();
+        assert!(keys[0].starts_with("99:null"));
+        assert!(keys[1].starts_with("40:list"));
+        assert!(keys[2].starts_with("60:str"));
+        assert!(keys[3].starts_with("70:bool"));
+        assert!(keys[4].starts_with("80:num"));
+        assert!(keys[5].starts_with("80:num"));
+        assert!(keys[6].starts_with("90:nan"));
+        assert_eq!(
+            cypher_order(
+                &ScalarValue::Utf8(Some("a".into())),
+                &ScalarValue::Boolean(Some(false))
+            ),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn exact_zero_dynamic_list_access_supports_negative_null_and_missing_indexes() {
+        let values = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Utf8(Some("first".into())),
+                ScalarValue::Utf8(Some("second".into())),
+            ],
+            &DataType::Utf8,
+            true,
+        ));
+        for (index, expected) in [
+            (ScalarValue::Int64(Some(0)), Some("first")),
+            (ScalarValue::Int64(Some(-1)), Some("second")),
+            (ScalarValue::Int64(Some(9)), None),
+            (ScalarValue::Int64(Some(-9)), None),
+            (ScalarValue::Int64(None), None),
+        ] {
+            let output =
+                invoke_test_udf(&CypherValueAccess::new(), vec![values.clone(), index]).unwrap();
+            assert_eq!(
+                ScalarValue::try_from_array(&output, 0).unwrap(),
+                ScalarValue::Utf8(expected.map(str::to_owned))
+            );
+        }
+        assert!(
+            invoke_test_udf(
+                &CypherValueAccess::new(),
+                vec![values, ScalarValue::Utf8(Some("not-an-index".into())),],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("index must be an integer")
+        );
+    }
+
+    #[test]
+    fn exact_zero_udf_return_shape_guards_report_contract_errors() {
+        let too_wide = (0..128)
+            .map(|value| ScalarValue::Int64(Some(value)))
+            .collect::<Vec<_>>();
+        assert!(
+            invoke_test_udf(&CypherDynamicHetList::new(), too_wide)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 127 elements")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherDynamicHetList::new(),
+                vec![ScalarValue::Int64(Some(1))],
+                DataType::Int64,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("non-list return type")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherDynamicHetList::new(),
+                vec![ScalarValue::Int64(Some(1))],
+                DataType::new_list(DataType::Int64, true),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("non-struct element type")
+        );
+        assert!(
+            invoke_test_udf_with_return_type(
+                &CypherListPlus::new(),
+                vec![
+                    ScalarValue::List(ScalarValue::new_list(
+                        &[ScalarValue::Int64(Some(1))],
+                        &DataType::Int64,
+                        true,
+                    )),
+                    ScalarValue::Int64(Some(2)),
+                ],
+                DataType::Int64,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("return type is not a list")
+        );
+    }
+
+    #[test]
+    fn exact_zero_tagged_append_rejects_incompatible_arrow_shapes() {
+        use datafusion::arrow::array::{ArrayRef, Int64Array};
+
+        let scalar: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        assert!(
+            invoke_tagged_list_element_plus(&scalar, &scalar, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        assert!(
+            invoke_tagged_list_element_plus(&list, &scalar, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+
+        let map = const_map_scalar(&[("value".into(), ScalarValue::Int64(Some(1)))])
+            .unwrap()
+            .to_array_of_size(1)
+            .unwrap();
+        assert!(
+            invoke_tagged_list_element_plus(&list, &map, &DataType::Int64)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            invoke_tagged_list_element_plus(
+                &list,
+                &map,
+                &DataType::new_list(map.data_type().clone(), true),
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn exact_zero_heterogeneous_depth_and_builder_type_matrix_is_total() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let primitives = [
+            DataType::Null,
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float16,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+        ];
+        for data_type in primitives {
+            assert_eq!(het_depth_for_data_type(&data_type), Some(0));
+        }
+        assert_eq!(
+            het_depth_for_data_type(&DataType::new_list(
+                DataType::new_list(DataType::Int64, true),
+                true,
+            )),
+            Some(2)
+        );
+        assert_eq!(het_depth_for_data_type(&DataType::Binary), None);
+
+        let map_type = DataType::Struct(Fields::from(vec![Field::new(
+            "value",
+            DataType::new_list(DataType::Int64, true),
+            true,
+        )]));
+        assert_eq!(het_depth_for_data_type(&map_type), Some(2));
+        assert!(build_het_struct(&[ScalarValue::Binary(Some(vec![1]))], 0).is_none());
+
+        let nested_list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ));
+        assert!(build_het_struct(std::slice::from_ref(&nested_list), 0).is_none());
+        assert!(build_het_struct(&[const_map_scalar(&[]).unwrap()], 0).is_none());
+        let built = build_het_struct(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Float64(Some(2.0)),
+                ScalarValue::LargeUtf8(Some("three".into())),
+                ScalarValue::Boolean(Some(true)),
+                nested_list,
+                const_map_scalar(&[("k".into(), ScalarValue::Int64(Some(4)))]).unwrap(),
+                ScalarValue::Null,
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(built.len(), 7);
+        assert!(built.is_null(6));
+    }
+
+    #[test]
+    fn exact_zero_map_union_rejects_non_maps_and_conflicting_key_types() {
+        assert!(all_map_union_list(&[ScalarValue::Int64(Some(1))]).is_none());
+        let int_map = const_map_scalar(&[("key".into(), ScalarValue::Int64(Some(1)))]).unwrap();
+        let text_map =
+            const_map_scalar(&[("key".into(), ScalarValue::Utf8(Some("one".into())))]).unwrap();
+        assert!(all_map_union_list(&[int_map, text_map]).is_none());
+
+        let left = const_map_scalar(&[("left".into(), ScalarValue::Int64(Some(1)))]).unwrap();
+        let right =
+            const_map_scalar(&[("right".into(), ScalarValue::Utf8(Some("r".into())))]).unwrap();
+        let union = all_map_union_list(&[left, ScalarValue::Null, right]).unwrap();
+        let DfExpr::Literal(ScalarValue::List(values), None) = union else {
+            panic!("map union must const-fold to a list")
+        };
+        assert_eq!(values.value(0).len(), 3);
+        assert!(values.value(0).is_null(1));
+    }
+
+    #[test]
+    fn exact_zero_map_and_subscript_error_guards_are_precise() {
+        let null_keys = invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Null]).unwrap();
+        assert!(null_keys.is_null(0));
+        assert!(
+            invoke_test_udf(&CypherMapKeys::new(), vec![ScalarValue::Int64(Some(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("keys() requires a map")
+        );
+        assert!(
+            invoke_test_udf(
+                &CypherStaticValueAccess::new("key".into()),
+                vec![ScalarValue::Int64(Some(1))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("property access requires a map")
+        );
+        assert!(
+            invoke_test_udf(
+                &CypherValueAccess::new(),
+                vec![ScalarValue::Int64(Some(1)), ScalarValue::Int64(Some(0)),],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires a list or map")
+        );
+
+        let map = const_map_scalar(&[("key".into(), ScalarValue::Int64(Some(7)))]).unwrap();
+        let mismatch = invoke_test_udf_with_return_type(
+            &CypherStaticValueAccess::new("key".into()),
+            vec![map],
+            DataType::Utf8,
+        )
+        .unwrap_err();
+        assert!(mismatch.to_string().contains("incompatible runtime type"));
+
+        assert_eq!(value_access_return_type(None).unwrap(), DataType::Null);
+        assert_eq!(
+            value_access_return_type(Some(&DataType::Null)).unwrap(),
+            DataType::Null
+        );
+        assert_eq!(
+            value_access_return_type(Some(&DataType::new_list(DataType::Int64, true))).unwrap(),
+            DataType::Int64
+        );
+        assert_eq!(
+            static_value_access_return_type(None, "key").unwrap(),
+            DataType::Null
+        );
+    }
+
+    #[test]
+    fn exact_zero_heterogeneous_promotion_preserves_struct_and_list_validity() {
+        use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray};
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let source_map = const_map_scalar(&[("present".into(), ScalarValue::Int64(Some(7)))])
+            .unwrap()
+            .to_array_of_size(1)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &source_map,
+            &promote_het_array(&source_map, source_map.data_type()).unwrap()
+        ));
+        let target = DataType::Struct(Fields::from(vec![
+            Field::new("present", DataType::Float64, true),
+            Field::new("missing", DataType::Utf8, true),
+        ]));
+        let promoted = promote_het_array(&source_map, &target).unwrap();
+        let promoted = promoted.as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(promoted.num_columns(), 2);
+        assert_eq!(
+            promoted
+                .column_by_name("present")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            7.0
+        );
+        assert!(promoted.column_by_name("missing").unwrap().is_null(0));
+
+        let source_list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1)), ScalarValue::Int64(None)],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        let target_list = DataType::new_list(DataType::Float64, true);
+        let promoted = promote_het_array(&source_list, &target_list).unwrap();
+        let promoted = promoted.as_any().downcast_ref::<ListArray>().unwrap();
+        assert_eq!(promoted.value_length(0), 2);
+        assert!(promoted.value(0).is_null(1));
+    }
+
+    #[test]
+    fn exact_zero_uncorrelated_list_comprehension_preserves_null_and_empty_rows() {
+        use datafusion::arrow::array::{Array, Int64Builder, ListArray, ListBuilder};
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let mut builder = ListBuilder::new(Int64Builder::new());
+        builder.append_null();
+        builder.append(true);
+        builder.values().append_value(1);
+        builder.values().append_value(2);
+        builder.append(true);
+        let input = Arc::new(builder.finish()) as datafusion::arrow::array::ArrayRef;
+        let udf = CypherListComp::new(None, None, "__gf_elem".into(), vec![]);
+        let return_type = udf.return_type(&[input.data_type().clone()]).unwrap();
+        let output = udf
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Array(input)],
+                arg_fields: vec![Arc::new(Field::new(
+                    "list",
+                    DataType::new_list(DataType::Int64, true),
+                    true,
+                ))],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("out", return_type, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+            .unwrap()
+            .into_array(3)
+            .unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().unwrap();
+        assert!(output.is_null(0));
+        assert_eq!(output.value_length(1), 0);
+        assert_eq!(output.value_length(2), 2);
     }
 }

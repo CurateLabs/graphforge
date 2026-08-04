@@ -1412,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_and_projection_helper_errors_are_exact_and_closed() {
+    fn wave12_attachment_and_projection_helper_errors_are_exact_and_closed() {
         let duplicate_policy = BeliefProjectionPolicyV1 {
             included_statuses: vec![AssertionStatus::Supported, AssertionStatus::Supported],
             statusless: StatuslessPolicyV1::Include,
@@ -1526,6 +1526,17 @@ mod tests {
         ] {
             assert_eq!(result.unwrap_err().code(), "GF_SCHEMA_MISMATCH");
         }
+        let no_batches = graphforge_exec::ExecutionResult {
+            schema: Arc::new(Schema::empty()),
+            batches: vec![],
+            stats: graphforge_exec::ExecutionStats::default(),
+            side_effects: None,
+            mutation_receipt: None,
+        };
+        assert_eq!(
+            one_batch(&no_batches, "empty").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
         let null_uuid =
             FixedSizeBinaryArray::try_from_sparse_iter_with_size([None::<Vec<u8>>].into_iter(), 16)
                 .unwrap();

@@ -1860,6 +1860,39 @@ mod tests {
     }
 
     #[test]
+    fn wave13_validation_display_and_disappeared_endpoint_are_structured() {
+        let error = BulkValidationError {
+            kind: BulkInputKind::Edge,
+            reason: BulkValidationReason::MissingEndpoint,
+            batch_index: Some(2),
+            row_ordinal: Some(7),
+            field: Some("src_uuid".into()),
+            message: "endpoint does not exist".into(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "GF_BULK_VALIDATION(missing_endpoint): bulk edge batch 2 row 7 field \"src_uuid\": endpoint does not exist"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
+        let mut writer = graphforge_storage::GraphWriter::open_at(
+            &graph.dir,
+            graph.ontology_mode,
+            (graph.clock.lock().unwrap())().unwrap(),
+        )
+        .unwrap();
+        let missing = uuid(70_001);
+        let failure =
+            register_existing_endpoints(&mut writer, &graph.dir, &BTreeSet::from([missing]))
+                .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "validation error: bulk edge endpoint disappeared before publication"
+        );
+    }
+
+    #[test]
     fn strict_ontology_arrow_compatibility_matrix_is_closed() {
         let list_item = Arc::new(Field::new("item", DataType::Utf8, true));
         let compatible = [
@@ -2187,7 +2220,7 @@ mod tests {
     }
 
     #[test]
-    fn property_normalization_and_strict_owner_failures_keep_bulk_context() {
+    fn wave13_property_normalization_and_strict_owner_failures_keep_bulk_context() {
         let field = Field::new("when", DataType::Date32, false);
         let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![1]));
         let columns = [(&field, &array)];
@@ -2589,7 +2622,7 @@ mod tests {
     }
 
     #[test]
-    fn public_schema_validation_matrix_preserves_error_kind_field_and_partition() {
+    fn wave13_public_schema_validation_matrix_preserves_error_kind_field_and_partition() {
         let reserved =
             bulk_node_input_schema(vec![Field::new("label", DataType::Utf8, true)]).unwrap_err();
         assert_eq!(reserved.reason, BulkValidationReason::ReservedField);
@@ -3052,7 +3085,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_inherited_properties_and_types_are_validated_without_publication() {
+    fn wave13_strict_inherited_properties_and_types_are_validated_without_publication() {
         let dir = tempfile::TempDir::new().unwrap();
         let project_path = dir.path().join("project");
         std::fs::create_dir(&project_path).unwrap();
@@ -3559,7 +3592,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_publication_conflicts_preserve_the_committed_generation_and_rows() {
+    fn wave13_bulk_publication_conflicts_preserve_the_committed_generation_and_rows() {
         let directory = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
         let left = uuid(9_100);

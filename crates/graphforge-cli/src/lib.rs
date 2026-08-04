@@ -1352,6 +1352,156 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn wave11_skill_bundle_rejects_linked_components_nonfiles_and_entry_overflow() {
+        use std::os::unix::fs::symlink;
+
+        let external = tempdir().unwrap();
+        fs::write(external.path().join("SKILL.md"), b"external").unwrap();
+        let root = tempdir().unwrap();
+        symlink(external.path(), root.path().join("linked")).unwrap();
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "linked/SKILL.md"})
+            ),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("must not contain symlinks")
+        ));
+        assert_eq!(
+            fs::read(external.path().join("SKILL.md")).unwrap(),
+            b"external"
+        );
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("directory.md")).unwrap();
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "directory.md"})
+            ),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("must be a real file")
+        ));
+
+        let root = tempdir().unwrap();
+        let paths = (0..=MAX_SKILL_BUNDLE_FILES)
+            .map(|index| format!("skill-{index}.md"))
+            .collect::<Vec<_>>();
+        write_loader_manifest(root.path(), &paths);
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("exceeds file bound")
+        ));
+
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("manifest.json")).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("manifest must be a real file")
+        ));
+
+        let root = tempdir().unwrap();
+        fs::File::create(root.path().join("manifest.json"))
+            .unwrap()
+            .set_len(MAX_SKILL_MANIFEST_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(message))
+                if message.contains("manifest exceeds byte bound")
+        ));
+    }
+
+    #[test]
+    fn wave11_portable_and_preview_output_contracts_cover_plain_json_and_write_failure() {
+        struct FailWrite;
+        impl Write for FailWrite {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("closed output"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let source = Uuid::from_u128(1);
+        let generation = Uuid::from_u128(2);
+        for replay in [false, true] {
+            let result = PortableImportResult {
+                contract: "graphforge-portable-import/1",
+                source_generation_uuid: source,
+                generation_uuid: generation,
+                envelope_sha256: "00".repeat(32),
+                idempotent_replay: replay,
+            };
+            let mut plain = Vec::new();
+            write_import_result(&result, false, &mut plain).unwrap();
+            let text = String::from_utf8(plain).unwrap();
+            assert!(text.starts_with(if replay { "replayed" } else { "imported" }));
+            let mut json = Vec::new();
+            write_import_result(&result, true, &mut json).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&json).unwrap()["idempotent_replay"],
+                replay
+            );
+            assert!(matches!(
+                write_import_result(&result, replay, &mut FailWrite),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+
+        let preview = RevertCheckpointPreview {
+            checkpoint_uuid: Uuid::from_u128(3),
+            source_generation_uuid: source,
+            source_manifest_sha256: "11".repeat(32),
+            current_generation_uuid: generation,
+        };
+        for json in [false, true] {
+            let mut output = Vec::new();
+            write_revert_preview(&preview, json, &mut output).unwrap();
+            assert!(!output.is_empty());
+            assert!(matches!(
+                write_revert_preview(&preview, json, &mut FailWrite),
+                Err(graphforge_api::GfError::Execution(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn wave11_reusable_execution_separates_plain_parse_and_runtime_failures() {
+        let parse = execute(["launcher", "unknown-command"]);
+        assert_eq!(parse.exit_code, 2);
+        assert!(parse.stdout.is_empty());
+        assert!(
+            String::from_utf8(parse.stderr)
+                .unwrap()
+                .contains("unrecognized subcommand")
+        );
+
+        let root = tempdir().unwrap();
+        let runtime = execute([
+            "launcher",
+            "--project",
+            root.path().to_str().unwrap(),
+            "checkpoint",
+            "create",
+            "snapshot",
+            "--idempotency-key",
+            "not-a-uuid",
+        ]);
+        assert_ne!(runtime.exit_code, 0);
+        assert!(runtime.stdout.is_empty());
+        assert!(
+            String::from_utf8(runtime.stderr)
+                .unwrap()
+                .starts_with("GF_")
+        );
+    }
+
     #[test]
     fn reusable_execution_normalizes_identity_and_captures_structured_errors() {
         let version = execute(["arbitrary-launcher", "--version"]);
