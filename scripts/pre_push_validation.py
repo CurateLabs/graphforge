@@ -122,8 +122,16 @@ class Coordinator:
                 text=True,
                 stderr=subprocess.DEVNULL,
             ).strip()
+        except FileNotFoundError as error:
+            raise ValidationError(
+                "missing prerequisite(s): git. Install git so validation can "
+                "locate the shared compilation cache."
+            ) from error
         except subprocess.CalledProcessError:
+            # Non-repository trees (tests, unpackaged checkouts) keep a local cache.
             return self.root / ".graphforge" / "validation" / "shared-cache"
+        except OSError as error:
+            raise ValidationError(f"unable to resolve git common dir: {error}") from error
         path = Path(value)
         return (self.root / path).resolve() if not path.is_absolute() else path
 
@@ -206,7 +214,9 @@ class Coordinator:
             return None, "miss:incompatible-evidence"
         if not isinstance(value.get("proof_digest"), str):
             return None, "miss:malformed-evidence"
-        artifacts = value.get("artifacts", [])
+        if "artifacts" not in value:
+            return None, "miss:malformed-evidence"
+        artifacts = value["artifacts"]
         if not isinstance(artifacts, list) or not self.artifacts_match(artifacts):
             return None, "miss:artifact-identity-drift"
         return value, "hit:compatible-evidence"
@@ -215,10 +225,12 @@ class Coordinator:
         command: Command = (
             "uv",
             "run",
+            "--no-sync",
             "python",
             "-c",
-            "import graphforge, hashlib; from pathlib import Path; "
-            "p=Path(graphforge.__file__).resolve(); "
+            "import hashlib; from pathlib import Path; "
+            "from graphforge import _graphforge_rs; "
+            "p=Path(_graphforge_rs.__file__).resolve(); "
             "print(hashlib.sha256(p.read_bytes()).hexdigest())",
         )
         completed = subprocess.run(
@@ -362,8 +374,8 @@ class Coordinator:
             profile_root = self.evidence_root / "profiles" / stage.name
             profile_root.mkdir(parents=True, exist_ok=True)
             environment["LLVM_PROFILE_FILE"] = str(profile_root / "%p-%m.profraw")
-        # Cargo fingerprints individual units. This cache key scopes those units to compatible
-        # source, toolchain, profile, and build settings while native outputs remain local.
+        # Cargo fingerprints first-party units inside one target directory. Key only on
+        # toolchain/profile/manifest inputs that make a target directory incompatible.
         if stage.heavy:
             environment["CARGO_TARGET_DIR"] = str(
                 self.shared_cache_root / "cargo" / self.cargo_cache_digest(stage)[:24]
@@ -384,7 +396,6 @@ class Coordinator:
                         "Cargo.toml",
                         "Cargo.lock",
                         "rust-toolchain.toml",
-                        "crates/**/*.rs",
                         "crates/**/Cargo.toml",
                     )
                 ),
@@ -657,6 +668,15 @@ def stages() -> tuple[Stage, ...]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_minimum = os.environ.get("GF_PRE_PUSH_MIN_FREE_GIB")
+    try:
+        default_minimum = int(raw_minimum) if raw_minimum else MIN_FREE_GIB
+    except ValueError:
+        print(
+            f"GF_PRE_PUSH_MIN_FREE_GIB must be an integer number of GiB; got {raw_minimum!r}",
+            file=sys.stderr,
+        )
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("preflight", "run"))
     parser.add_argument(
@@ -667,7 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--minimum-free-gib",
         type=int,
-        default=int(os.environ.get("GF_PRE_PUSH_MIN_FREE_GIB", MIN_FREE_GIB)),
+        default=default_minimum,
     )
     args = parser.parse_args(argv)
     all_stages = stages()
@@ -679,21 +699,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         minimum_free_gib=args.minimum_free_gib,
         cache_stages=all_stages,
     )
+    filename = "preflight-summary.json" if args.command == "preflight" else "summary.json"
     try:
         results = coordinator.run()
-        filename = "preflight-summary.json" if args.command == "preflight" else "summary.json"
-        coordinator.write_summary(results, filename=filename)
+        summary_path = coordinator.write_summary(results, filename=filename)
     except ValidationError as error:
-        filename = "preflight-summary.json" if args.command == "preflight" else "summary.json"
-        coordinator.write_summary(
+        summary_path = coordinator.write_summary(
             list(coordinator.results.values()),
             outcome="failed",
             error=str(error),
             filename=filename,
         )
         print(f"pre-push validation failed: {error}", file=sys.stderr)
+        print(f"summary={summary_path.relative_to(coordinator.root)}", file=sys.stderr)
         return 1
-    print(f"pre-push validation passed; summary=.graphforge/validation/v1/{filename}")
+    print(f"pre-push validation passed; summary={summary_path.relative_to(coordinator.root)}")
     return 0
 
 

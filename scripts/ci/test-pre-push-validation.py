@@ -127,6 +127,44 @@ class PrePushValidationTests(unittest.TestCase):
             self.assertEqual(calls, [("rust",), ("binding",)])
             self.assertEqual(rerun.results["binding"].status, "miss")
 
+    def test_evidence_missing_artifacts_key_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_root(root)
+            calls: list[tuple[str, ...]] = []
+            initial = self.coordinator(root, calls)
+            initial.run()
+            evidence_path = initial.evidence_path(
+                initial.stages["rust"], initial.results["rust"].digest
+            )
+            value = GATE.json.loads(evidence_path.read_text(encoding="utf-8"))
+            del value["artifacts"]
+            evidence_path.write_text(GATE.json.dumps(value), encoding="utf-8")
+            calls.clear()
+            rerun = self.coordinator(root, calls)
+            rerun.run()
+            self.assertEqual(calls, [("rust",), ("binding",)])
+            self.assertEqual(rerun.results["rust"].reason, "miss:malformed-evidence")
+
+    def test_cargo_cache_digest_excludes_first_party_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            self.make_root(root)
+            (root / "rust-toolchain.toml").write_text("[toolchain]\n", encoding="utf-8")
+            crate = root / "crates" / "demo"
+            crate.mkdir(parents=True)
+            (crate / "Cargo.toml").write_text("[package]\nname='demo'\n", encoding="utf-8")
+            (crate / "lib.rs").write_text("fn first() {}\n", encoding="utf-8")
+            stage = GATE.Stage("heavy", commands=(("cargo",),), heavy=True)
+            coordinator = GATE.Coordinator(root, (), cache_stages=(stage,))
+            coordinator.command_versions = lambda _stage: {"tool": "test"}
+            before = coordinator.cargo_cache_digest(stage)
+            (crate / "lib.rs").write_text("fn changed() {}\n", encoding="utf-8")
+            after = coordinator.cargo_cache_digest(stage)
+            self.assertEqual(before, after)
+            (crate / "Cargo.toml").write_text("[package]\nname='demo2'\n", encoding="utf-8")
+            self.assertNotEqual(before, coordinator.cargo_cache_digest(stage))
+
     def test_missing_native_artifact_rejects_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
