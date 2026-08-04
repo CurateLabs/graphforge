@@ -209,6 +209,38 @@ make coverage-diff       # changed Python wrapper files only
 pytest tests/ -n auto
 ```
 
+## Resumable full validation
+
+`make pre-push` is the full local gate. It begins with a prerequisite and disk
+preflight, then records content-addressed evidence for policy checks, Rust
+tests and coverage, the instrumented native Python and Node builds consumed by
+acceptance, wrapper coverage, API BDD acceptance, and
+coverage thresholds. It never skips a gate: a compatible passed stage is reused
+only when its exact inputs, command contract, toolchain, dependency evidence,
+and required native artifact identity still match.
+
+The human-readable stage lines and machine-readable summary report elapsed time,
+evidence hit or miss, identity digest, invalidation reason, and disk budget.
+They are stored locally at `.graphforge/validation/v1/summary.json`; standalone
+preflight writes `preflight-summary.json` so it cannot replace the full-run
+outcome. These paths are ignored by Git and the evidence contains no command
+output or secrets. The instrumented Rust coverage run executes the full Rust
+corpus once and builds each native artifact once; later acceptance stages reuse
+those exact artifact identities.
+Compatible Cargo dependency compilation is shared beneath the common Git
+metadata directory, while evidence and native binding artifacts stay scoped to
+their individual worktree.
+
+Run `make pre-push-preflight` to check those prerequisites and disk budget
+without starting any heavy compilation.
+
+Use `make pre-push-clean` to discard only this local validation evidence and
+force every stage to rerun. If the preflight reports insufficient space, it does
+not start compilation. Review its reported safe options first: `make
+clean-builds` removes stale Rust artifacts when possible, while `make
+clean-builds-all` removes all Rust artifacts and forces future recompilation.
+Neither command is run automatically.
+
 ### Core Fixtures (`tests/conftest.py`)
 
 ```python
