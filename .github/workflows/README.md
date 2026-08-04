@@ -205,7 +205,7 @@ The required Rust + Binding RC run IDs are an input contract for this workflow
 only. They do **not** make the cascade a close gate for child implementation or
 construction issues; those close on outcomes (see `AGENTS.md` § Issue close).
 
-### `binding-release-candidate.yml`, `release-credential-preflight.yml`, and `publish.yaml`
+### `binding-release-candidate.yml`, `publish-track.yml`, `release-credential-preflight.yml`, and `publish.yaml`
 
 The exact-SHA Binding RC retains tested release bytes and their partitioned v2
 candidate manifest for 30 days. Credential preflight verifies the npm/crates.io
@@ -218,6 +218,15 @@ bytes only. Skip re-RC when a complete unexpired candidate for the current
 `main` tip already exists. Target wall-clock: Binding RC ≤20m p50 warm /
 ≤35m cold; publish-track ≤35m p50 / ≤50m cold (see TESTING.md). M1,
 checkpoint, and m20/m21 are **not** required on this path.
+
+`publish-track.yml` schedules exact-main Binding RC dispatch every six hours.
+It reassembles and validates every retained partition before deciding a
+candidate is reusable. Schedule runs never tag or publish. A maintainer must
+set both `create_release` and `confirm_registry_publish` and supply the exact
+root-version tag to create a published GitHub Release; that event triggers
+`publish.yaml`. Mixed SHA, incomplete/expired partitions, tag disagreement,
+existing Release identity, and all `publish.yaml` registry conflict checks fail
+closed.
 
 ### `clean-env-verify.yml`
 

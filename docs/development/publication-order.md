@@ -40,9 +40,38 @@ Before a maintainer authorizes publication (publish-track or human close):
 5. PyPI and crates.io trusted publishing are configured for
    `CurateLabs/graphforge` and `publish.yaml`; the npm token has scoped
    public-package write access and Bypass 2FA.
-6. The maintainer (or publish-track automation) creates the immutable tag and
-   GitHub Release identity that `publish.yaml` consumes. Implementation CI and
-   ordinary issue close do not run Binding RC or the human-close cascade.
+6. The maintainer explicitly enables the immutable tag and GitHub Release
+   identity. Implementation CI and ordinary issue close do not run Binding RC
+   or the human-close cascade.
+
+## Publish-track orchestration
+
+`.github/workflows/publish-track.yml` runs on a six-hour schedule and by
+maintainer dispatch. It resolves the current `main` SHA (or rejects a supplied
+SHA that is not current `main`), then looks for one successful Binding RC run
+with exactly one unexpired retained artifact for each required group. It
+downloads and validates the whole candidate before treating it as reusable.
+Therefore an unexpired candidate for the same SHA skips another RC; a missing,
+expired, duplicate, or invalid candidate cannot reach tag or registry-write
+steps.
+
+For ordinary scheduled runs, the workflow only dispatches the existing
+`binding-release-candidate.yml` for an exact current `main` SHA when no valid
+candidate is retained. It neither creates a tag nor writes a registry.
+
+To publish a validated candidate, a maintainer dispatches `Publish Track` with:
+
+1. `create_release: true`;
+2. `confirm_registry_publish: true`; and
+3. `release_tag` exactly equal to `v<root-version>`.
+
+Both booleans are intentional release controls: creating the published GitHub
+Release emits the existing release event that starts `publish.yaml`. The
+orchestrator refuses an existing Release identity and directs recovery to the
+explicit `publish.yaml` recovery dispatch instead. It verifies an existing tag
+resolves to the candidate SHA and never moves it. `publish.yaml` remains the
+only registry writer and independently revalidates the retained manifest,
+partitions, rehearsal, live registry truth, and conflict evidence.
 
 ## Planner-driven execution
 
@@ -149,11 +178,12 @@ yank/deprecate mechanism and prepare one coordinated later GraphForge version.
 
 ## Remaining human decisions
 
-Automation stops before these actions unless separately authorized:
+Publish-track automates candidate dispatch and makes the release/publish
+boundary explicit. Maintainers still make these decisions:
 
 - choose the final v0.5.1 commit after normal exact-head PR CI;
-- create the immutable v0.5.1 tag and GitHub Release;
-- allow the release-triggered publication workflow to make registry writes;
+- explicitly enable both publish-track release controls for the immutable
+  v0.5.1 tag and GitHub Release;
 - decide any registry-specific yank/deprecation if reconciliation finds a
   conflict; and
 - close the human release tracker only after the 24-node summary is complete.

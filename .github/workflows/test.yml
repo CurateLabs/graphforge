@@ -137,6 +137,7 @@ jobs:
           python3 scripts/ci/test-prepare-napi-packages.py
           python3 scripts/ci/test-publish-npm-artifacts.py
           python3 scripts/ci/test-amend-npm-main-artifact.py
+          python3 scripts/ci/test-publish-track.py
 
       - name: Test CI storage policy
         run: python3 scripts/ci/test-ci-storage-policy.py
