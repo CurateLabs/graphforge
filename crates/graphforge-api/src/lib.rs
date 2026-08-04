@@ -9061,6 +9061,95 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_preparation_materializes_optional_analysis_and_path_parameters() {
+        let graph = GraphForge::new(None).unwrap();
+        let analyze = AnalyzeOptions {
+            by: AnalyzeAlgorithm::IsDag,
+            via: Some("KNOWS".into()),
+            directed: true,
+            weight: Some("weight".into()),
+            k: Some(3),
+            partition_property: Some("partition".into()),
+        };
+        assert_eq!(
+            graph
+                .prepare_analyze_invocation(Some("Person"), &analyze)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let source = graph.add_node("Person", &HashMap::new()).unwrap();
+        let source = NodeSelector::Handle(source);
+
+        let random_walk = PathsOptions {
+            by: PathAlgorithm::RandomWalk,
+            directed: true,
+            k: 2,
+            via: Some("KNOWS".into()),
+            weight: None,
+            capacity_property: None,
+            cost_property: None,
+            heuristic: None,
+            walk_length: None,
+            seed: None,
+            terminal_uuids: Vec::new(),
+            prize_property: None,
+        };
+        let descriptor = graph
+            .prepare_paths_invocation(Some(&source), None, &random_walk)
+            .unwrap();
+        assert_eq!(
+            descriptor.parameters()["walk_length"],
+            InvocationParameter::U64(10)
+        );
+        assert_eq!(descriptor.parameters()["seed"], InvocationParameter::U64(0));
+        assert_eq!(
+            descriptor.parameters()["via"],
+            InvocationParameter::Utf8("KNOWS".into())
+        );
+
+        let mut explicit = random_walk;
+        explicit.walk_length = Some(7);
+        explicit.seed = Some(9);
+        let descriptor = graph
+            .prepare_paths_invocation(Some(&source), None, &explicit)
+            .unwrap();
+        assert_eq!(
+            descriptor.parameters()["walk_length"],
+            InvocationParameter::U64(7)
+        );
+        assert_eq!(descriptor.parameters()["seed"], InvocationParameter::U64(9));
+
+        for by in [
+            PathAlgorithm::MinSteinerTree,
+            PathAlgorithm::PrizeCollectingSteinerTree,
+            PathAlgorithm::GomoryHuTree,
+        ] {
+            let options = PathsOptions {
+                by,
+                directed: false,
+                k: 1,
+                via: None,
+                weight: None,
+                capacity_property: None,
+                cost_property: None,
+                heuristic: None,
+                walk_length: None,
+                seed: None,
+                terminal_uuids: Vec::new(),
+                prize_property: None,
+            };
+            let selector = NodeSelector::Uuid(uuid::Uuid::nil());
+            let error = graph
+                .prepare_paths_invocation(Some(&selector), None, &options)
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert!(error.to_string().contains("does not accept positional"));
+        }
+    }
+
+    #[test]
     fn graphsage_executes_through_typed_api_with_scalar_and_list_features() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();

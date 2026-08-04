@@ -12434,6 +12434,82 @@ mod tests {
             temporal_null_scalar("datetime.realtime").data_type(),
             datetime_scalar(None).data_type()
         );
+        assert_eq!(temporal_null_scalar("unknown"), ScalarValue::Null);
+    }
+
+    #[test]
+    fn temporal_struct_builders_and_extractors_preserve_values_and_nulls() {
+        use crate::temporal::DurationValue;
+        use datafusion::arrow::array::{ArrayRef, Int32Array, StructArray};
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let dates = build_date_struct(&[Some(19_723), None]);
+        assert_eq!(date_struct_value(&dates, 0), Some(19_723));
+        assert_eq!(date_struct_value(&dates, 1), None);
+
+        let local = build_localdatetime_struct(&[(Some((19_723, 45_000))), None]);
+        assert_eq!(
+            localdatetime_struct_parts(&local, 0),
+            Some((19_723, 45_000))
+        );
+        assert_eq!(localdatetime_struct_parts(&local, 1), None);
+
+        let duration = DurationValue {
+            months: 14,
+            days: -2,
+            seconds: 90,
+            nanos: 123,
+        };
+        let durations = build_duration_struct(&[Some(duration), None]);
+        assert_eq!(duration_struct_parts(&durations, 0), Some(duration));
+        assert_eq!(duration_struct_parts(&durations, 1), None);
+        assert_eq!(
+            dur_secs_nanos(-3, 7),
+            DurationValue {
+                months: 0,
+                days: 0,
+                seconds: -3,
+                nanos: 7,
+            }
+        );
+        assert_eq!(
+            duration_value_to_ir(duration),
+            IrLiteral::Duration {
+                months: 14,
+                days: -2,
+                seconds: 90,
+                nanos: 123,
+            }
+        );
+
+        let times = build_time_struct(&[Some((86_399_000_000_000, -25_200)), None]);
+        assert_eq!(
+            time_struct_parts(&times, 0),
+            Some((86_399_000_000_000, -25_200))
+        );
+        assert_eq!(time_struct_parts(&times, 1), None);
+
+        let datetimes = build_datetime_struct(&[
+            Some((19_723, 45_000, 3_600, Some("Europe/Paris".into()))),
+            Some((19_724, 46_000, 0, None)),
+            None,
+        ]);
+        assert_eq!(
+            datetime_struct_parts(&datetimes, 0),
+            Some((19_723, 45_000, 3_600, Some("Europe/Paris".into())))
+        );
+        assert_eq!(
+            datetime_struct_parts(&datetimes, 1),
+            Some((19_724, 46_000, 0, None))
+        );
+        assert_eq!(datetime_struct_parts(&datetimes, 2), None);
+
+        // Extractors reject a structurally wrong child type without fabricating
+        // a value. This exercises the defensive downcast path with valid Arrow.
+        let wrong_fields = Fields::from(vec![Field::new("epoch_day", DataType::Int32, true)]);
+        let wrong_children: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![Some(1)]))];
+        let wrong_date = StructArray::new(wrong_fields, wrong_children, None);
+        assert_eq!(date_struct_value(&wrong_date, 0), None);
     }
 
     #[test]

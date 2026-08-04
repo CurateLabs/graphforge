@@ -3249,6 +3249,16 @@ mod tests {
                 "GF_VALIDATION",
             ),
             (KnowledgeError::Duplicate("assertion_uuid"), "GF_VALIDATION"),
+            (
+                KnowledgeError::Canonical(graphforge_core::canonical::CanonicalError::Malformed(
+                    "payload",
+                )),
+                "GF_VALIDATION",
+            ),
+            (
+                KnowledgeError::Arrow(arrow::error::ArrowError::SchemaError("schema".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
         ] {
             assert_eq!(knowledge_error(error).code(), code);
         }
@@ -3281,6 +3291,16 @@ mod tests {
             (
                 ProvenanceError::Dangling("event_uuid"),
                 "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Arrow(arrow::error::ArrowError::SchemaError("schema".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+            (
+                ProvenanceError::Canonical(graphforge_core::canonical::CanonicalError::Malformed(
+                    "payload",
+                )),
+                "GF_VALIDATION",
             ),
         ] {
             assert_eq!(provenance_error(error).code(), code);

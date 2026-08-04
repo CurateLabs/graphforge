@@ -2910,6 +2910,108 @@ mod tests {
             });
         }
     }
+
+    #[test]
+    fn malformed_adjacency_is_rejected_by_every_analysis_projection_adapter() {
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let missing = AdjacencyGraph::malformed_for_defensive_tests(
+            true,
+            vec![0, 1],
+            HashMap::from([(0, [1; 16]), (1, [2; 16])]),
+            HashMap::from([(
+                0,
+                vec![crate::algorithm_graph::AlgorithmEdge {
+                    edge_id: 1,
+                    edge_uuid: [9; 16],
+                    neighbor_id: 2,
+                    weight: 1.0,
+                }],
+            )]),
+        );
+        let empty_partitions = ResolvedPartitionMap::try_new(
+            [[1; 16]],
+            [(
+                [1; 16],
+                crate::algorithm_partition::PartitionValue::String("a".into()),
+            )],
+        )
+        .unwrap();
+        let adapters: Vec<Box<dyn RustAlgorithm>> = vec![
+            Box::new(CountAutomorphisms { directed: true }),
+            Box::new(Conductance {
+                partitions: empty_partitions.clone(),
+            }),
+            Box::new(Modularity {
+                partitions: empty_partitions.clone(),
+            }),
+            Box::new(MaxBipartiteMatching {
+                partitions: Some(empty_partitions),
+            }),
+            Box::new(TriangleCount),
+            Box::new(Transitivity),
+            Box::new(IsPlanar),
+            Box::new(TriadCensus),
+            Box::new(DyadCensus),
+        ];
+        for adapter in adapters {
+            assert!(
+                adapter.execute(&missing, &control).is_err(),
+                "{:?}",
+                adapter.capability().algorithm
+            );
+        }
+
+        let edge = |neighbor_id| crate::algorithm_graph::AlgorithmEdge {
+            edge_id: neighbor_id,
+            edge_uuid: [7; 16],
+            neighbor_id,
+            weight: 1.0,
+        };
+        let inconsistent = AdjacencyGraph::malformed_for_defensive_tests(
+            false,
+            vec![0, 1],
+            HashMap::from([(0, [1; 16]), (1, [2; 16])]),
+            HashMap::from([(0, vec![edge(0), edge(1)])]),
+        );
+        let partitions = ResolvedPartitionMap::try_new(
+            [[1; 16], [2; 16]],
+            [
+                (
+                    [1; 16],
+                    crate::algorithm_partition::PartitionValue::String("a".into()),
+                ),
+                (
+                    [2; 16],
+                    crate::algorithm_partition::PartitionValue::String("b".into()),
+                ),
+            ],
+        )
+        .unwrap();
+        for adapter in [
+            Box::new(CountAutomorphisms { directed: false }) as Box<dyn RustAlgorithm>,
+            Box::new(Conductance {
+                partitions: partitions.clone(),
+            }),
+            Box::new(Modularity {
+                partitions: partitions.clone(),
+            }),
+            Box::new(MaxBipartiteMatching {
+                partitions: Some(partitions),
+            }),
+        ] {
+            assert!(
+                adapter.execute(&inconsistent, &control).is_err(),
+                "{:?}",
+                adapter.capability().algorithm
+            );
+        }
+        assert!(
+            automorphism_allocation("test")
+                .to_string()
+                .contains("test allocation failed")
+        );
+    }
     use crate::algorithm_partition::PartitionValue;
 
     fn node2vec_invocation(

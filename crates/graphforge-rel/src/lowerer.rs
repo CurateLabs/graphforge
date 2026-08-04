@@ -5728,6 +5728,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_kind_resolution_covers_node_typed_edge_and_invalid_targets() {
+        use std::collections::HashMap;
+
+        use datafusion::arrow::datatypes::{DataType, Field};
+        use datafusion::common::{DFSchema, TableReference};
+
+        let schema = |names: &[&str]| {
+            Arc::new(
+                DFSchema::new_with_metadata(
+                    names
+                        .iter()
+                        .map(|name| {
+                            (
+                                Some(TableReference::bare("var_7")),
+                                Arc::new(Field::new(*name, DataType::Utf8, true)),
+                            )
+                        })
+                        .collect(),
+                    HashMap::new(),
+                )
+                .unwrap(),
+            )
+        };
+
+        assert!(
+            !GraphPlanLowerer::resolve_write_kind(&schema(&["node_uuid"]), VarId(7), "SET")
+                .unwrap()
+        );
+        assert!(
+            GraphPlanLowerer::resolve_write_kind(
+                &schema(&["edge_uuid", "rel_type_name"]),
+                VarId(7),
+                "REMOVE"
+            )
+            .unwrap()
+        );
+
+        let untyped_edge =
+            GraphPlanLowerer::resolve_write_kind(&schema(&["edge_uuid"]), VarId(7), "SET")
+                .unwrap_err();
+        assert!(untyped_edge.to_string().contains("known relation type"));
+
+        let unbound =
+            GraphPlanLowerer::resolve_write_kind(&schema(&[]), VarId(7), "REMOVE").unwrap_err();
+        assert!(unbound.to_string().contains("must be bound"));
+
+        // A malformed schema carrying both identities resolves as a node, the
+        // same precedence used by DELETE target classification.
+        assert!(
+            !GraphPlanLowerer::resolve_write_kind(
+                &schema(&["node_uuid", "edge_uuid", "rel_type_name"]),
+                VarId(7),
+                "SET"
+            )
+            .unwrap()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // SET / REMOVE lowering (#791)
     // -----------------------------------------------------------------------

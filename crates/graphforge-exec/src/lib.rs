@@ -5200,6 +5200,7 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::{FixedSizeBinaryBuilder, Int64Array};
     use arrow::datatypes::Schema;
     use datafusion::logical_expr::{Extension, LogicalPlanBuilder, lit};
     use datafusion::physical_plan::empty::EmptyExec;
@@ -5264,6 +5265,224 @@ mod tests {
             })
             .build();
         assert!(!plan_reads_persisted_data(&union));
+    }
+
+    #[test]
+    fn create_writer_covers_typed_edges_properties_recording_and_persisted_lookup() {
+        use graphforge_core::uuid::{new_v7, to_bytes};
+        use graphforge_plan::{ResolvedEdgeSpec, ResolvedNodeSpec};
+
+        let dir = TempDir::new().unwrap();
+        let arrow_schema = Arc::new(Schema::empty());
+        let input = RecordBatch::try_new_with_options(
+            Arc::clone(&arrow_schema),
+            vec![],
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(2)),
+        )
+        .unwrap();
+        let nodes = vec![
+            ResolvedNodeSpec {
+                var: 1,
+                label_ids: vec![7],
+                label_names: vec!["Person".into()],
+                properties: vec![("name".into(), IrLiteral::Str("Alice".into()))],
+                computed_properties: vec![],
+                is_reference: false,
+            },
+            ResolvedNodeSpec {
+                var: 2,
+                label_ids: vec![7, 8],
+                label_names: vec!["Person".into(), "Employee".into()],
+                properties: vec![("missing".into(), IrLiteral::Null)],
+                computed_properties: vec![],
+                is_reference: false,
+            },
+        ];
+        let edge = ResolvedEdgeSpec {
+            var: 3,
+            src: 1,
+            dst: 2,
+            rel_type_id: Some(9),
+            rel_type_name: Some("KNOWS".into()),
+            direction: graphforge_ir::Direction::In,
+            properties: vec![("since".into(), IrLiteral::Int(2020))],
+            computed_properties: vec![],
+        };
+        let cfg = CreateConfig {
+            nodes: nodes.clone(),
+            edges: vec![edge.clone()],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: Arc::clone(&arrow_schema),
+        };
+        validate_edge_specs(&cfg).unwrap();
+        assert!(build_ref_by_var(&cfg).is_empty());
+
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
+                .unwrap();
+        let mut recorder = write_driver::CreateRecorder::default();
+        let mut tally = CreateTally::default();
+        write_batch_creates(
+            &cfg,
+            &mut writer,
+            &input,
+            &HashMap::new(),
+            CreateExtras {
+                recorder: Some(&mut recorder),
+                ..CreateExtras::default()
+            },
+            &mut tally,
+        )
+        .unwrap();
+        assert_eq!((tally.nodes_created, tally.edges_created), (4, 2));
+        assert_eq!(tally.properties_set, 4);
+        assert_eq!(distinct_created_labels(&nodes, tally.nodes_created), 2);
+        assert_eq!(recorder.node_identities(1).unwrap().0.len(), 2);
+        writer.flush().unwrap();
+        assert_eq!(persisted_node_ids(dir.path()).unwrap().len(), 4);
+
+        let invalid_untyped = CreateConfig {
+            nodes: nodes.clone(),
+            edges: vec![ResolvedEdgeSpec {
+                rel_type_id: None,
+                rel_type_name: None,
+                ..edge.clone()
+            }],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: Arc::clone(&arrow_schema),
+        };
+        assert!(
+            validate_edge_specs(&invalid_untyped)
+                .unwrap_err()
+                .to_string()
+                .contains("relationship type")
+        );
+        let invalid_undirected = CreateConfig {
+            nodes,
+            edges: vec![ResolvedEdgeSpec {
+                direction: graphforge_ir::Direction::Undirected,
+                ..edge
+            }],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: arrow_schema,
+        };
+        assert!(
+            validate_edge_specs(&invalid_undirected)
+                .unwrap_err()
+                .to_string()
+                .contains("undirected")
+        );
+
+        let known = new_v7();
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 2)
+                .unwrap();
+        writer.create_node_with_labels(known, &[]).unwrap();
+        writer.flush().unwrap();
+        assert!(
+            persisted_node_ids(dir.path())
+                .unwrap()
+                .contains_key(&to_bytes(&known))
+        );
+    }
+
+    #[test]
+    fn create_identity_and_emit_helpers_reject_every_incomplete_shape() {
+        use graphforge_plan::ResolvedNodeSpec;
+
+        let mut uuid_builder = FixedSizeBinaryBuilder::with_capacity(2, 16);
+        uuid_builder.append_value([1; 16]).unwrap();
+        uuid_builder.append_null();
+        let uuid_array = Arc::new(uuid_builder.finish()) as ArrayRef;
+        let batch = RecordBatch::try_from_iter([("node_uuid", Arc::clone(&uuid_array))]).unwrap();
+        let cols = RefNodeCols {
+            var: 4,
+            uuid_idx: 0,
+            uuid_child_idx: None,
+            node_id_idx: Some(0),
+        };
+        assert_eq!(
+            referenced_node_uuid(&batch, &cols, 0).unwrap().as_bytes(),
+            &[1; 16]
+        );
+        assert!(
+            referenced_node_uuid(&batch, &cols, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("null")
+        );
+
+        let non_struct = RecordBatch::try_from_iter([(
+            "entity",
+            Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+        )])
+        .unwrap();
+        let nested = RefNodeCols {
+            var: 5,
+            uuid_idx: 0,
+            uuid_child_idx: Some(0),
+            node_id_idx: None,
+        };
+        assert!(
+            referenced_node_uuid(&non_struct, &nested, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("not a struct")
+        );
+
+        let spec = ResolvedNodeSpec {
+            var: 7,
+            label_ids: vec![1],
+            label_names: vec!["Person".into()],
+            properties: vec![],
+            computed_properties: vec![],
+            is_reference: false,
+        };
+        let mut out = Vec::new();
+        assert!(
+            append_created_node_output_cols(
+                &spec,
+                1,
+                &CreateComputed::new(),
+                &write_driver::CreateRecorder::default(),
+                &mut out,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("did not record identities")
+        );
+
+        let mut recorder = write_driver::CreateRecorder::default();
+        recorder.record_node(7, [1; 16], 1, 1);
+        assert!(
+            append_created_node_output_cols(&spec, 2, &CreateComputed::new(), &recorder, &mut out,)
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete emitted identities")
+        );
+
+        let computed = HashMap::from([(
+            7,
+            vec![(
+                "score".into(),
+                Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef,
+            )],
+        )]);
+        assert!(
+            append_created_node_output_cols(&spec, 1, &computed, &recorder, &mut out)
+                .unwrap_err()
+                .to_string()
+                .contains("computed property column")
+        );
     }
 
     fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {

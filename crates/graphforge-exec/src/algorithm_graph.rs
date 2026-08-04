@@ -102,6 +102,27 @@ pub(crate) struct AdjacencyGraph {
 }
 
 impl AdjacencyGraph {
+    #[cfg(test)]
+    pub(crate) fn malformed_for_defensive_tests(
+        directed: bool,
+        node_ids: Vec<u64>,
+        node_uuid_by_id: HashMap<u64, [u8; 16]>,
+        neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
+    ) -> Self {
+        let node_id_by_uuid = node_uuid_by_id
+            .iter()
+            .map(|(node_id, uuid)| (*uuid, *node_id))
+            .collect();
+        Self {
+            directed,
+            node_ids,
+            node_uuid_by_id,
+            node_id_by_uuid,
+            neighbors,
+            node_vectors: HashMap::new(),
+        }
+    }
+
     /// Fingerprint public UUID topology without execution surrogates.
     pub(crate) fn projection_fingerprint(&self) -> Result<AlgorithmProjectionFingerprint, GfError> {
         let mut nodes = self.node_uuids().collect::<Vec<_>>();
