@@ -84,6 +84,10 @@ _ensure-graphforge:  ## Fail fast unless the native graphforge package is import
 		 echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \
 		 exit 1)
 
+# Default maintainer loop: make pre-push-fast (~30s). Use this full coverage
+# gate for coverage-sensitive changes or floor claims.
+# Rust adapter acceptance is not pytest-cov/c8 evidence, so wrapper reports
+# remain separate fail-closed measurements rather than being silently skipped.
 coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Rust coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage-rust

@@ -53,6 +53,8 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}": 1,
         "M1-Release-Reconciliation-${{ github.run_id }}": 1,
         "visualization-limits-stress-${{ github.sha }}": 1,
+        "pr-python-wheel-${{ github.sha }}": 1,
+        "pr-node-addon-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -73,11 +75,14 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "pr-python-wheel-${{ github.sha }}": 1,
+        "pr-node-addon-${{ github.sha }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
         "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
+        "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
@@ -212,6 +217,11 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "binding-rc-reports/${{ matrix.report_target }}.json",
             "dist/*.whl",
             "crates/graphforge-bindings-node/*.node",
+            (
+                "crates/graphforge-bindings-node/*.node\n"
+                "crates/graphforge-bindings-node/index.js\n"
+                "crates/graphforge-bindings-node/index.d.ts"
+            ),
             "non-cypher-evidence/",
             "binding-rc-aggregate/report.json",
             "m1-release-load-evidence",
@@ -243,6 +253,8 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts/npm",
             "candidate/release-artifacts/crates",
             "candidate/release-artifacts",
+            "dist",
+            "crates/graphforge-bindings-node",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
@@ -255,7 +267,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            cross_run = name != "M1-Release-Load-${{ github.run_id }}"
+            cross_run = name != "M1-Release-Load-${{ github.run_id }}" and not name.startswith(
+                "pr-"
+            )
             if cross_run:
                 assert field(step, "github-token") == "${{ github.token }}", (
                     f"cross-run artifact has no token: {name}"
