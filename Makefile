@@ -66,7 +66,7 @@ test-tck:  ## Run TCK compliance tests via Rust BDD runner
 	cargo test -p graphforge-core --test bdd
 
 # Multi-surface coverage thresholds (#742 §2). Override per surface as needed.
-COVERAGE_FAIL_UNDER_RUST ?= 93.5
+COVERAGE_FAIL_UNDER_RUST ?= 95
 COVERAGE_FAIL_UNDER_RUST_CRATE ?= 80
 COVERAGE_FAIL_UNDER_RUST_PATCH ?= 90
 COVERAGE_FAIL_UNDER_RUST_PYTHON_ADAPTER ?= 80
@@ -141,7 +141,7 @@ check-coverage-python:  ## Validate Python wrapper coverage (≥85% default)
 		(echo "❌ Python wrapper coverage below $(COVERAGE_FAIL_UNDER_PYTHON)%" && exit 1)
 	@echo "✅ Python wrapper coverage meets threshold"
 
-check-coverage-rust:  ## Validate core (≥93.5%), crates (≥80%), patch (≥90%), adapters (≥80%)
+check-coverage-rust:  ## Validate core (≥95%), crates (≥80%), patch (≥90%), adapters (≥80%)
 	@test -f build/coverage-rust/ledger.json || \
 		(echo "❌ Missing build/coverage-rust/ledger.json — run make coverage-rust first"; exit 1)
 	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \

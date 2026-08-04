@@ -614,6 +614,34 @@ mod tests {
     }
 
     #[test]
+    fn public_policy_advisory_and_application_accessors_are_stable() {
+        assert_eq!(RerankFailurePolicy::Error.as_str(), "error");
+        assert_eq!(
+            RerankFailurePolicy::CanonicalUnreranked.as_str(),
+            CANONICAL_UNRERANKED_POLICY
+        );
+        let canonical = hits();
+        let contract = test_contract(ProviderCapability::CandidateReranking);
+        let application =
+            omit_reranking(&canonical, Some(&contract), RerankAdvisoryPolicy::Emit).unwrap();
+        assert_eq!(application.hits(), canonical);
+        let RerankStatus::Canonical {
+            advisory: Some(advisory),
+        } = application.status()
+        else {
+            panic!("compatible omitted reranker must emit its advisory");
+        };
+        assert_eq!(advisory.provider(), contract.provider());
+        assert_eq!(advisory.model(), contract.model());
+        let (returned, status) = application.into_parts();
+        assert_eq!(returned, canonical);
+        assert!(matches!(
+            status,
+            RerankStatus::Canonical { advisory: Some(_) }
+        ));
+    }
+
+    #[test]
     fn omission_is_byte_equivalent_and_advisory_is_suppressible() {
         let canonical = hits();
         let contract = test_contract(ProviderCapability::CandidateReranking);

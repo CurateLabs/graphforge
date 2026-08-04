@@ -306,10 +306,11 @@ fn selected_catalog_rows(target: &Path, catalog: &RecordBatch) -> Result<Vec<usi
     let mut relation_names = BTreeSet::new();
     for path in sorted_parquet_files(&target.join("topology/edges"))? {
         let stem = parquet_stem(&path)?;
-        if stem != "_exploratory" {
+        let batches = read_parquet(&path)?;
+        if stem != "_exploratory" && batches.iter().any(|batch| batch.num_rows() != 0) {
             relation_names.insert(stem);
         }
-        for batch in read_parquet(&path)? {
+        for batch in batches {
             if let Some(column) = batch.column_by_name("rel_type_name") {
                 let values = column
                     .as_any()
@@ -1043,8 +1044,15 @@ fn storage(error: impl std::fmt::Display) -> GfError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
-    use arrow::array::{FixedSizeBinaryBuilder, Int64Array, ListArray, UInt32Array, UInt64Array};
+    use arrow::array::{
+        ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryBuilder, Float32Array, Float64Array,
+        Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, ListArray, StringArray,
+        Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+        UInt64Array,
+    };
     use graphforge_core::uuid::Uuid;
     use graphforge_core::{OntologyMode, TypeId};
     use graphforge_ir::{IrLiteral, RuntimeCatalog};
@@ -1369,6 +1377,120 @@ mod tests {
     }
 
     #[test]
+    fn typed_projection_keeps_exact_owned_catalog_and_reopens_graph_rows() {
+        let source = TempDir::new().unwrap();
+        let (alice, bob, excluded) = (uuid(31), uuid(32), uuid(33));
+        let (knows, ignores) = (uuid(41), uuid(42));
+        let mut catalog = RuntimeCatalog::new();
+        let person = catalog.intern_label("Person");
+        let company = catalog.intern_label("Company");
+        catalog.intern_relation_type("KNOWS");
+        catalog.intern_relation_type("IGNORES");
+        catalog.intern_property("name", Some("Person"));
+        catalog.intern_property("global", None);
+        catalog.intern_property("since", Some("KNOWS"));
+        catalog.intern_property("noise", Some("Company"));
+
+        let mut writer = GraphWriter::open_at(source.path(), OntologyMode::Strict, TS).unwrap();
+        writer.create_node(alice, TypeId(person.0)).unwrap();
+        writer.create_node(bob, TypeId(person.0)).unwrap();
+        writer.create_node(excluded, TypeId(company.0)).unwrap();
+        writer.create_edge(knows, "KNOWS", &alice, &bob).unwrap();
+        writer
+            .create_edge(ignores, "IGNORES", &alice, &excluded)
+            .unwrap();
+        writer
+            .set_properties(
+                &alice,
+                Some("Person"),
+                HashMap::from([
+                    ("name".into(), IrLiteral::Str("Alice".into())),
+                    ("global".into(), IrLiteral::Bool(true)),
+                ]),
+            )
+            .unwrap();
+        writer
+            .set_properties(
+                &excluded,
+                Some("Company"),
+                HashMap::from([("noise".into(), IrLiteral::Str("exclude".into()))]),
+            )
+            .unwrap();
+        writer
+            .set_edge_properties(
+                &knows,
+                Some("KNOWS"),
+                HashMap::from([("since".into(), IrLiteral::Int(2020))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+        write_parquet(
+            &source.path().join("topology/runtime_catalog.parquet"),
+            &catalog.to_record_batch(),
+        )
+        .unwrap();
+
+        let target = TempDir::new().unwrap();
+        let summary = materialize_graph_projection(
+            source.path(),
+            target.path(),
+            &GraphProjectionSelection {
+                node_uuids: BTreeSet::from([*alice.as_bytes()]),
+                edge_uuids: BTreeSet::from([*knows.as_bytes()]),
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.node_uuids, vec![*alice.as_bytes(), *bob.as_bytes()]);
+        assert_eq!(summary.edge_uuids, vec![*knows.as_bytes()]);
+        assert_eq!(summary.endpoint_node_uuids, vec![*bob.as_bytes()]);
+
+        let projected = read_parquet(&target.path().join("topology/runtime_catalog.parquet"))
+            .unwrap()
+            .remove(0);
+        let kinds = string_column(&projected, "entry_kind").unwrap();
+        let names = string_column(&projected, "name").unwrap();
+        let owners = string_column(&projected, "owner_label").unwrap();
+        let inventory = (0..projected.num_rows())
+            .map(|row| {
+                (
+                    kinds.value(row).to_owned(),
+                    names.value(row).to_owned(),
+                    (!owners.is_null(row)).then(|| owners.value(row).to_owned()),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            inventory,
+            BTreeSet::from([
+                ("entity_type".into(), "Person".into(), None),
+                ("relation_type".into(), "KNOWS".into(), None),
+                ("property".into(), "global".into(), None),
+                ("property".into(), "name".into(), Some("Person".into())),
+                ("property".into(), "since".into(), Some("KNOWS".into())),
+            ])
+        );
+
+        let reopened_nodes = read_nodes(target.path()).unwrap();
+        assert_eq!(
+            reopened_nodes
+                .iter()
+                .map(RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            read_properties(target.path(), "Person").unwrap()[0].num_rows(),
+            1
+        );
+        assert_eq!(
+            read_edge_properties(target.path(), "KNOWS").unwrap()[0].num_rows(),
+            1
+        );
+        let projected_again = projected_graph_fingerprint(target.path()).unwrap();
+        assert_eq!(projected_again, summary.graph_content_fingerprint);
+    }
+
+    #[test]
     fn existing_graph_empty_hydrated_workspace_is_a_valid_target() {
         let (source, nodes, _) = fixture();
         let target = TempDir::new().unwrap();
@@ -1403,6 +1525,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_projection_target_validation_rejects_nonregular_metadata_and_graph_entries() {
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join(graphforge_core::manifest::MANIFEST_FILE)).unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let target = TempDir::new().unwrap();
+        let properties = target.path().join("properties");
+        fs::create_dir(&properties).unwrap();
+        fs::write(properties.join("not-parquet.txt"), b"preserve").unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(properties.join("not-parquet.txt")).unwrap(),
+            b"preserve"
+        );
+
+        let target = TempDir::new().unwrap();
+        let edges = target.path().join("topology/edges");
+        fs::create_dir_all(&edges).unwrap();
+        fs::create_dir(edges.join("nested.parquet")).unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
     fn missing_identity_and_nonempty_target_fail_before_writing() {
         let (source, _, _) = fixture();
         let target = TempDir::new().unwrap();
@@ -1431,6 +1591,106 @@ mod tests {
     }
 
     #[test]
+    fn projection_rejects_overlapping_and_nonempty_targets_without_mutation() {
+        let (source, _, _) = fixture();
+        let empty = GraphProjectionSelection::default();
+        let same_error =
+            materialize_graph_projection(source.path(), source.path(), &empty).unwrap_err();
+        assert_eq!(same_error.code(), "GF_VALIDATION");
+        assert!(same_error.to_string().contains("must be disjoint"));
+
+        let child = source.path().join("projection-child");
+        fs::create_dir(&child).unwrap();
+        fs::write(child.join("sentinel"), b"child").unwrap();
+        let child_error = materialize_graph_projection(source.path(), &child, &empty).unwrap_err();
+        assert_eq!(child_error.code(), "GF_VALIDATION");
+        assert_eq!(fs::read(child.join("sentinel")).unwrap(), b"child");
+
+        let ancestor = TempDir::new().unwrap();
+        let nested_source = ancestor.path().join("source");
+        fs::create_dir(&nested_source).unwrap();
+        let ancestor_error =
+            materialize_graph_projection(&nested_source, ancestor.path(), &empty).unwrap_err();
+        assert_eq!(ancestor_error.code(), "GF_VALIDATION");
+        assert!(nested_source.exists());
+
+        let regular_root = TempDir::new().unwrap();
+        let regular_target = regular_root.path().join("target");
+        fs::write(&regular_target, b"regular").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), &regular_target, &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(fs::read(&regular_target).unwrap(), b"regular");
+
+        let unexpected = TempDir::new().unwrap();
+        fs::write(unexpected.path().join("knowledge.parquet"), b"owned").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), unexpected.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(unexpected.path().join("knowledge.parquet")).unwrap(),
+            b"owned"
+        );
+
+        let bad_topology = TempDir::new().unwrap();
+        fs::create_dir(bad_topology.path().join("topology")).unwrap();
+        fs::write(bad_topology.path().join("topology/unknown"), b"keep").unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), bad_topology.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(bad_topology.path().join("topology/unknown")).unwrap(),
+            b"keep"
+        );
+
+        let bad_properties = TempDir::new().unwrap();
+        fs::create_dir(bad_properties.path().join("properties")).unwrap();
+        fs::write(
+            bad_properties.path().join("properties/not-parquet"),
+            b"keep",
+        )
+        .unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), bad_properties.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(bad_properties.path().join("properties/not-parquet")).unwrap(),
+            b"keep"
+        );
+
+        let nonempty = TempDir::new().unwrap();
+        let mut node_uuid = FixedSizeBinaryBuilder::new(16);
+        node_uuid.append_value(uuid(90).as_bytes()).unwrap();
+        let batch = RecordBatch::try_from_iter([
+            ("node_uuid", Arc::new(node_uuid.finish()) as ArrayRef),
+            ("value", Arc::new(Int64Array::from(vec![1])) as ArrayRef),
+        ])
+        .unwrap();
+        let nonempty_path = nonempty.path().join("properties/Person.parquet");
+        write_parquet(&nonempty_path, &batch).unwrap();
+        let before = fs::read(&nonempty_path).unwrap();
+        assert_eq!(
+            materialize_graph_projection(source.path(), nonempty.path(), &empty)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(fs::read(&nonempty_path).unwrap(), before);
+    }
+
+    #[test]
     fn corrupt_property_uuid_is_rejected_instead_of_silently_dropped() {
         let source = TempDir::new().unwrap();
         let target = TempDir::new().unwrap();
@@ -1454,6 +1714,393 @@ mod tests {
         assert!(matches!(error, GfError::Validation(_)));
         assert!(error.to_string().contains("UUID column contains null"));
         assert!(!target.path().join("properties/Person.parquet").exists());
+    }
+
+    #[test]
+    fn canonical_graph_encoding_normalizes_floats_timezones_and_nested_types() {
+        assert_eq!(normalize_f32(f32::NAN), 0x7fc0_0000);
+        assert_eq!(normalize_f32(-0.0), 0);
+        assert_eq!(normalize_f64(f64::NAN), 0x7ff8_0000_0000_0000);
+        assert_eq!(normalize_f64(-0.0), 0);
+        assert_eq!(time_unit_tag(TimeUnit::Second), 0);
+        assert_eq!(time_unit_tag(TimeUnit::Millisecond), 1);
+        assert_eq!(time_unit_tag(TimeUnit::Microsecond), 2);
+        assert_eq!(time_unit_tag(TimeUnit::Nanosecond), 3);
+        for timezone in [
+            None,
+            Some("UTC"),
+            Some("Etc/UTC"),
+            Some("Z"),
+            Some("+00:00"),
+        ] {
+            assert!(validate_timezone(timezone).is_ok());
+        }
+        assert_eq!(
+            validate_timezone(Some("America/Denver"))
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let supported = [
+            DataType::Boolean,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::Binary,
+            DataType::LargeBinary,
+            DataType::FixedSizeBinary(16),
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            DataType::Time64(TimeUnit::Nanosecond),
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::UInt64, false)), 2),
+            DataType::Struct(vec![Field::new("name", DataType::Utf8, false)].into()),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        ];
+        for data_type in supported {
+            let mut writer = CanonicalWriter::new();
+            encode_type(&mut writer, &data_type).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_type(&mut writer, &DataType::Date32)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let micros: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![TS]));
+        assert_eq!(
+            timestamp_value(&micros, TimeUnit::Microsecond, 0).unwrap(),
+            TS
+        );
+        let time: ArrayRef = Arc::new(Time64MicrosecondArray::from(vec![123_i64]));
+        assert_eq!(time64_value(&time, TimeUnit::Microsecond, 0).unwrap(), 123);
+        assert_eq!(
+            time64_value(&time, TimeUnit::Second, 0).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn canonical_value_encoding_traverses_every_supported_nested_arrow_shape() {
+        use arrow::array::{
+            FixedSizeListArray, Int32Array, LargeListArray, StringDictionaryBuilder, StructArray,
+        };
+        use arrow::datatypes::Int32Type;
+
+        let large: ArrayRef = Arc::new(LargeListArray::from_iter_primitive::<Int32Type, _, _>([
+            Some(vec![Some(1), None, Some(2)]),
+        ]));
+        let fixed: ArrayRef = Arc::new(FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(
+            [Some(vec![Some(3), Some(4)])],
+            2,
+        ));
+        let struct_fields: arrow::datatypes::Fields =
+            vec![Field::new("value", DataType::Int32, false)].into();
+        let structure: ArrayRef = Arc::new(StructArray::new(
+            struct_fields.clone(),
+            vec![Arc::new(Int32Array::from(vec![5]))],
+            None,
+        ));
+        let mut dictionary_builder = StringDictionaryBuilder::<Int32Type>::new();
+        dictionary_builder.append("six").unwrap();
+        let dictionary: ArrayRef = Arc::new(dictionary_builder.finish());
+
+        for (data_type, array) in [
+            (large.data_type().clone(), large),
+            (fixed.data_type().clone(), fixed),
+            (DataType::Struct(struct_fields), structure),
+            (dictionary.data_type().clone(), dictionary),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            encode_present_value(&mut writer, &data_type, &array, 0).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
+    }
+
+    #[test]
+    fn canonical_value_encoding_rejects_type_mismatch_and_nonnullable_null() {
+        let floats: ArrayRef = Arc::new(Float32Array::from(vec![Some(-0.0), Some(f32::NAN)]));
+        let doubles: ArrayRef = Arc::new(Float64Array::from(vec![Some(-0.0), Some(f64::NAN)]));
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("value"), None]));
+        let mut writer = CanonicalWriter::new();
+        encode_present_value(&mut writer, &DataType::Float32, &floats, 0).unwrap();
+        encode_present_value(&mut writer, &DataType::Float32, &floats, 1).unwrap();
+        encode_present_value(&mut writer, &DataType::Float64, &doubles, 0).unwrap();
+        encode_present_value(&mut writer, &DataType::Float64, &doubles, 1).unwrap();
+        encode_value(&mut writer, &DataType::Utf8, &strings, 0, false).unwrap();
+        encode_value(&mut writer, &DataType::Utf8, &strings, 1, true).unwrap();
+        assert!(!writer.finish().is_empty());
+
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_value(&mut writer, &DataType::Utf8, &strings, 1, false)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let mut writer = CanonicalWriter::new();
+        assert_eq!(
+            encode_present_value(&mut writer, &DataType::UInt64, &strings, 0)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
+    fn canonical_value_encoding_covers_every_scalar_and_time_representation() {
+        let values: Vec<(DataType, ArrayRef)> = vec![
+            (DataType::Boolean, Arc::new(BooleanArray::from(vec![true]))),
+            (DataType::Int32, Arc::new(Int32Array::from(vec![-7]))),
+            (DataType::Int64, Arc::new(Int64Array::from(vec![-9]))),
+            (DataType::UInt32, Arc::new(UInt32Array::from(vec![7]))),
+            (DataType::UInt64, Arc::new(UInt64Array::from(vec![9]))),
+            (DataType::Utf8, Arc::new(StringArray::from(vec!["small"]))),
+            (
+                DataType::LargeUtf8,
+                Arc::new(LargeStringArray::from(vec!["large"])),
+            ),
+            (
+                DataType::Binary,
+                Arc::new(BinaryArray::from_vec(vec![b"small".as_slice()])),
+            ),
+            (
+                DataType::LargeBinary,
+                Arc::new(LargeBinaryArray::from_vec(vec![b"large".as_slice()])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Second, None),
+                Arc::new(TimestampSecondArray::from(vec![1_i64])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Millisecond, Some("Z".into())),
+                Arc::new(TimestampMillisecondArray::from(vec![2_i64]).with_timezone("Z")),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                Arc::new(TimestampMicrosecondArray::from(vec![3_i64]).with_timezone("UTC")),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("Etc/UTC".into())),
+                Arc::new(TimestampNanosecondArray::from(vec![4_i64]).with_timezone("Etc/UTC")),
+            ),
+            (
+                DataType::Time64(TimeUnit::Microsecond),
+                Arc::new(Time64MicrosecondArray::from(vec![5_i64])),
+            ),
+            (
+                DataType::Time64(TimeUnit::Nanosecond),
+                Arc::new(Time64NanosecondArray::from(vec![6_i64])),
+            ),
+        ];
+        let mut encodings = Vec::new();
+        for (data_type, array) in values {
+            let mut writer = CanonicalWriter::new();
+            encode_present_value(&mut writer, &data_type, &array, 0).unwrap();
+            let encoded = writer.finish();
+            assert!(!encoded.is_empty(), "{data_type} must emit canonical bytes");
+            encodings.push(encoded);
+        }
+        assert_eq!(encodings.len(), 15);
+
+        let seconds: ArrayRef = Arc::new(TimestampSecondArray::from(vec![11_i64]));
+        let millis: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![12_i64]));
+        let nanos: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![13_i64]));
+        assert_eq!(timestamp_value(&seconds, TimeUnit::Second, 0).unwrap(), 11);
+        assert_eq!(
+            timestamp_value(&millis, TimeUnit::Millisecond, 0).unwrap(),
+            12
+        );
+        assert_eq!(
+            timestamp_value(&nanos, TimeUnit::Nanosecond, 0).unwrap(),
+            13
+        );
+        let time_nanos: ArrayRef = Arc::new(Time64NanosecondArray::from(vec![14_i64]));
+        assert_eq!(
+            time64_value(&time_nanos, TimeUnit::Nanosecond, 0).unwrap(),
+            14
+        );
+    }
+
+    #[test]
+    fn projection_identity_and_path_validation_matrix_fails_before_mutation() {
+        let one = [1_u8; 16];
+        let two = [2_u8; 16];
+        assert!(require_present(&BTreeSet::new(), &BTreeSet::new(), "node").is_ok());
+        assert!(
+            require_present(&BTreeSet::from([one]), &BTreeSet::from([one, two]), "node").is_ok()
+        );
+        assert!(
+            require_present(&BTreeSet::from([two]), &BTreeSet::from([one]), "edge")
+                .unwrap_err()
+                .to_string()
+                .contains("missing edge UUID")
+        );
+
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        assert!(validate_distinct_paths(&source, &sibling).is_ok());
+        assert!(validate_distinct_paths(&source, &source).is_err());
+        assert!(validate_distinct_paths(&source, &source.join("child")).is_err());
+        assert!(validate_distinct_paths(&source.join("child"), &source).is_err());
+
+        assert!(
+            uuid_rows(&source.join("missing.parquet"), "node_uuid")
+                .unwrap()
+                .is_empty()
+        );
+        let wrong = RecordBatch::try_from_iter([(
+            "node_uuid",
+            Arc::new(UInt64Array::from(vec![1_u64])) as ArrayRef,
+        )])
+        .unwrap();
+        assert!(uuid_column(&wrong, "node_uuid").is_err());
+        assert!(uuid_column(&wrong, "missing").is_err());
+
+        let mut nullable = FixedSizeBinaryBuilder::new(16);
+        nullable.append_null();
+        let nullable = nullable.finish();
+        assert!(uuid_at(&nullable, 0).is_err());
+    }
+
+    #[test]
+    fn wave10_projection_private_bounds_and_missing_inventory_are_exact() {
+        assert!(
+            sorted_parquet_files(Path::new("definitely-absent"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(exact_u32(usize::MAX, "field count").is_err());
+        assert!(validate_timezone(Some("America/Denver")).is_err());
+
+        let values: ArrayRef = Arc::new(arrow::array::Int64Array::from(vec![1]));
+        assert!(time64_value(&values, TimeUnit::Second, 0).is_err());
+        assert!(downcast::<arrow::array::StringArray>(&values).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wave10_projection_inventory_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target.parquet");
+        fs::write(&target, b"caller").unwrap();
+        symlink(&target, root.path().join("linked.parquet")).unwrap();
+        assert!(sorted_parquet_files(root.path()).is_err());
+        assert_eq!(fs::read(target).unwrap(), b"caller");
+    }
+
+    #[test]
+    fn wave13_projection_rejects_duplicate_graph_identities() {
+        let root = TempDir::new().unwrap();
+        let duplicate = uuid(41);
+        let mut node_uuids = FixedSizeBinaryBuilder::new(16);
+        node_uuids.append_value(duplicate.as_bytes()).unwrap();
+        node_uuids.append_value(duplicate.as_bytes()).unwrap();
+        let nodes =
+            RecordBatch::try_from_iter([("node_uuid", Arc::new(node_uuids.finish()) as ArrayRef)])
+                .unwrap();
+        let nodes_path = root.path().join("nodes.parquet");
+        write_parquet(&nodes_path, &nodes).unwrap();
+        assert!(uuid_rows(&nodes_path, "node_uuid").is_err());
+
+        let mut edge_uuids = FixedSizeBinaryBuilder::new(16);
+        let mut sources = FixedSizeBinaryBuilder::new(16);
+        let mut targets = FixedSizeBinaryBuilder::new(16);
+        for _ in 0..2 {
+            edge_uuids.append_value(duplicate.as_bytes()).unwrap();
+            sources.append_value(uuid(42).as_bytes()).unwrap();
+            targets.append_value(uuid(43).as_bytes()).unwrap();
+        }
+        let edges = RecordBatch::try_from_iter([
+            ("edge_uuid", Arc::new(edge_uuids.finish()) as ArrayRef),
+            ("src_uuid", Arc::new(sources.finish()) as ArrayRef),
+            ("dst_uuid", Arc::new(targets.finish()) as ArrayRef),
+        ])
+        .unwrap();
+        let edges_path = root.path().join("edges.parquet");
+        write_parquet(&edges_path, &edges).unwrap();
+        assert!(edge_endpoints(&[edges_path]).is_err());
+    }
+
+    #[test]
+    fn wave13_projection_path_shape_and_cleanup_guards_are_structured() {
+        let root = TempDir::new().unwrap();
+        let missing = root.path().join("missing.parquet");
+        assert!(
+            project_parquet_file(
+                &missing,
+                &root.path().join("unused.parquet"),
+                "node_uuid",
+                &BTreeSet::new(),
+            )
+            .is_ok()
+        );
+        assert!(copy_regular_file_if_present(&missing, &root.path().join("copy")).is_ok());
+        assert!(clear_graph_empty_target(&root.path().join("absent-target")).is_ok());
+
+        let metadata_directory = root.path().join("metadata-directory");
+        fs::create_dir(&metadata_directory).unwrap();
+        assert!(
+            copy_regular_file_if_present(&metadata_directory, &root.path().join("metadata-copy"))
+                .is_err()
+        );
+
+        let source_file = root.path().join("manifest-source");
+        let target_file = root.path().join("nested/manifest-copy");
+        fs::write(&source_file, b"manifest").unwrap();
+        copy_regular_file_if_present(&source_file, &target_file).unwrap();
+        assert_eq!(fs::read(&target_file).unwrap(), b"manifest");
+
+        let target = root.path().join("clear-target");
+        for directory in ["topology", "properties", "edge_properties"] {
+            fs::create_dir_all(target.join(directory)).unwrap();
+        }
+        for name in [
+            graphforge_core::manifest::MANIFEST_FILE,
+            graphforge_core::manifest::ONTOLOGY_FILE,
+        ] {
+            fs::write(target.join(name), b"metadata").unwrap();
+        }
+        clear_graph_empty_target(&target).unwrap();
+        assert!(fs::read_dir(&target).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn wave13_projection_target_metadata_must_be_regular_files() {
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join(graphforge_core::manifest::MANIFEST_FILE)).unwrap();
+        assert!(validate_graph_empty_target(target.path()).is_err());
+
+        let topology = TempDir::new().unwrap();
+        fs::create_dir(topology.path().join("generation.json")).unwrap();
+        assert!(validate_empty_topology(topology.path()).is_err());
+
+        let graph_directory = TempDir::new().unwrap();
+        fs::create_dir(graph_directory.path().join("nested.parquet")).unwrap();
+        assert!(validate_empty_parquet_directory(graph_directory.path()).is_err());
+
+        assert_ne!(normalize_f32(1.25), 0);
+        assert_ne!(normalize_f64(1.25), 0);
+        assert_eq!(
+            dictionary_value_type(&DataType::Dictionary(
+                Box::new(DataType::Int32),
+                Box::new(DataType::Utf8),
+            )),
+            &DataType::Utf8
+        );
     }
 
     fn id_map(batch: &RecordBatch, uuid_name: &str, id_name: &str) -> BTreeMap<[u8; 16], u64> {

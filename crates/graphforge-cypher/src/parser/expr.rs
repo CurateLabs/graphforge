@@ -1798,4 +1798,84 @@ mod tests {
         assert_eq!(pred.var, "n");
         assert_eq!(pred.labels, vec!["A", "B"]);
     }
+
+    #[test]
+    fn every_keyword_expression_name_has_a_stable_spelling() {
+        let cases = [
+            (Tok::Match, "match"),
+            (Tok::Return, "return"),
+            (Tok::Where, "where"),
+            (Tok::With, "with"),
+            (Tok::As, "as"),
+            (Tok::Distinct, "distinct"),
+            (Tok::Union, "union"),
+            (Tok::All, "all"),
+            (Tok::Create, "create"),
+            (Tok::Merge, "merge"),
+            (Tok::On, "on"),
+            (Tok::Set, "set"),
+            (Tok::Remove, "remove"),
+            (Tok::Delete, "delete"),
+            (Tok::Detach, "detach"),
+            (Tok::Call, "call"),
+            (Tok::Yield, "yield"),
+            (Tok::Unwind, "unwind"),
+            (Tok::Order, "order"),
+            (Tok::By, "by"),
+            (Tok::Skip, "skip"),
+            (Tok::Limit, "limit"),
+            (Tok::Is, "is"),
+            (Tok::In, "in"),
+            (Tok::Starts, "starts"),
+            (Tok::Ends, "ends"),
+            (Tok::Contains, "contains"),
+            (Tok::Case, "case"),
+            (Tok::When, "when"),
+            (Tok::Then, "then"),
+            (Tok::Else, "else"),
+            (Tok::End, "end"),
+            (Tok::True, "true"),
+            (Tok::False, "false"),
+            (Tok::Null, "null"),
+            (Tok::Count, "count"),
+            (Tok::Exists, "exists"),
+            (Tok::Not, "not"),
+            (Tok::And, "and"),
+            (Tok::Or, "or"),
+            (Tok::Xor, "xor"),
+            (Tok::Optional, "optional"),
+            (Tok::Any, "any"),
+            (Tok::None, "none"),
+            (Tok::Single, "single"),
+            (Tok::Filter, "filter"),
+            (Tok::Extract, "extract"),
+            (Tok::Reduce, "reduce"),
+            (Tok::ShortestPath, "shortestPath"),
+            (Tok::AllShortestPaths, "allShortestPaths"),
+            (Tok::Asc, "asc"),
+            (Tok::Desc, "desc"),
+            (Tok::Ascending, "ascending"),
+            (Tok::Descending, "descending"),
+        ];
+        for (token, spelling) in cases {
+            assert_eq!(tok_as_keyword_str(&token), Some(spelling));
+        }
+        assert_eq!(tok_as_keyword_str(&Tok::Comma), None);
+
+        for (token, spelling) in [
+            (Tok::Count, "count"),
+            (Tok::Exists, "exists"),
+            (Tok::All, "all"),
+            (Tok::Any, "any"),
+            (Tok::None, "none"),
+            (Tok::Single, "single"),
+            (Tok::Filter, "filter"),
+            (Tok::Extract, "extract"),
+            (Tok::Reduce, "reduce"),
+            (Tok::ShortestPath, "shortestPath"),
+            (Tok::AllShortestPaths, "allShortestPaths"),
+        ] {
+            assert_eq!(tok_keyword_name(&token), spelling);
+        }
+    }
 }

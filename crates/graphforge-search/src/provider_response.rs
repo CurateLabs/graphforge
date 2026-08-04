@@ -620,4 +620,86 @@ mod tests {
         };
         assert_eq!(error.class(), ProviderFailureClass::MalformedResponse);
     }
+
+    #[test]
+    fn exact_zero_output_value_overflow_and_storage_failures_are_classified() {
+        let contract = contract(ProviderCapability::QueryEmbeddings);
+        for result in [
+            validate_output_values(&contract, usize::MAX, 2, usize::MAX),
+            validate_output_values(&contract, 2, 2, 3),
+        ] {
+            assert!(matches!(
+                result,
+                Err(error) if error.class() == ProviderFailureClass::ResourceExhausted
+            ));
+        }
+
+        let eligible = BTreeSet::from([[1; 16]]);
+        let cancelled = ProviderError::new(&contract, ProviderFailureClass::Cancelled);
+        let result = validate_storage_batch(
+            &contract,
+            vec![EmbeddingBatchRow {
+                node_uuid: [1; 16],
+                vector: vec![1.0, 0.0],
+            }],
+            &eligible,
+            2,
+            EmbeddingNormalization::None,
+            VectorStoreLimits::default(),
+            &mut || Err(cancelled.clone()),
+        );
+        assert!(matches!(
+            result,
+            Err(error) if error.class() == ProviderFailureClass::Cancelled
+        ));
+
+        let mut limits = VectorStoreLimits::default();
+        limits.vector_cells = 1;
+        let exhausted = validate_storage_batch(
+            &contract,
+            vec![EmbeddingBatchRow {
+                node_uuid: [1; 16],
+                vector: vec![1.0, 0.0],
+            }],
+            &eligible,
+            2,
+            EmbeddingNormalization::None,
+            limits,
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(exhausted.class(), ProviderFailureClass::ResourceExhausted);
+
+        let malformed = validate_storage_batch(
+            &contract,
+            vec![EmbeddingBatchRow {
+                node_uuid: [9; 16],
+                vector: vec![1.0, 0.0],
+            }],
+            &eligible,
+            2,
+            EmbeddingNormalization::None,
+            VectorStoreLimits::default(),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(malformed.class(), ProviderFailureClass::MalformedResponse);
+    }
+
+    #[test]
+    fn exact_zero_rerank_output_limit_precedes_payload_iteration() {
+        let contract = contract(ProviderCapability::CandidateReranking);
+        let candidates = [RerankCandidate {
+            node_uuid: [1; 16],
+            retrieval_rank: 1,
+            text: "candidate",
+            token_count: 1,
+        }];
+        let mut limits = ProviderRequestLimits::default();
+        limits.output_values = 0;
+        let Err(error) = RerankRequest::new(&contract, "query", 1, &candidates, limits) else {
+            panic!("zero output_values must fail closed before response validation")
+        };
+        assert_eq!(error.class(), ProviderFailureClass::ResourceExhausted);
+    }
 }

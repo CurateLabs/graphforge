@@ -795,4 +795,156 @@ mod tests {
         assert_eq!(options.space, None);
         assert!(!options.force_stale);
     }
+
+    #[test]
+    fn stable_error_code_enums_cover_every_public_variant() {
+        let api = [
+            (ApiErrorCode::NotFound, "GF_NOT_FOUND"),
+            (ApiErrorCode::Cancelled, "GF_CANCELLED"),
+            (ApiErrorCode::ResourceLimit, "GF_RESOURCE_LIMIT"),
+            (ApiErrorCode::PageInvalid, "GF_PAGE_INVALID"),
+            (ApiErrorCode::PageSnapshotGone, "GF_PAGE_SNAPSHOT_GONE"),
+            (ApiErrorCode::SchemaMismatch, "GF_SCHEMA_MISMATCH"),
+            (ApiErrorCode::UnknownArgument, "GF_UNKNOWN_ARGUMENT"),
+            (ApiErrorCode::AmbiguousProjection, "GF_AMBIGUOUS_PROJECTION"),
+            (ApiErrorCode::IdentityConflict, "GF_IDENTITY_CONFLICT"),
+            (
+                ApiErrorCode::FingerprintCollision,
+                "GF_FINGERPRINT_COLLISION",
+            ),
+            (ApiErrorCode::ResultNotRetained, "GF_RESULT_NOT_RETAINED"),
+        ];
+        for (code, spelling) in api {
+            assert_eq!(code.as_str(), spelling);
+            assert_eq!(code.to_string(), spelling);
+        }
+
+        let project = [
+            (
+                ProjectErrorCode::UnsupportedProjectFormat,
+                "GF_UNSUPPORTED_PROJECT_FORMAT",
+            ),
+            (
+                ProjectErrorCode::ProjectUninitialized,
+                "GF_PROJECT_UNINITIALIZED",
+            ),
+            (ProjectErrorCode::ProjectCorrupt, "GF_PROJECT_CORRUPT"),
+            (
+                ProjectErrorCode::UnsupportedFilesystem,
+                "GF_UNSUPPORTED_FILESYSTEM",
+            ),
+            (ProjectErrorCode::WriterBusy, "GF_WRITER_BUSY"),
+            (ProjectErrorCode::WriteConflict, "GF_WRITE_CONFLICT"),
+            (ProjectErrorCode::RebaseExhausted, "GF_REBASE_EXHAUSTED"),
+            (
+                ProjectErrorCode::TransactionConflict,
+                "GF_IDEMPOTENCY_CONFLICT",
+            ),
+            (ProjectErrorCode::PublicationFailed, "GF_PUBLICATION_FAILED"),
+            (
+                ProjectErrorCode::UnsupportedCapabilityVersion,
+                "GF_UNSUPPORTED_CAPABILITY_VERSION",
+            ),
+            (
+                ProjectErrorCode::CapabilityDisabled,
+                "GF_CAPABILITY_DISABLED",
+            ),
+            (ProjectErrorCode::TransactionFailed, "GF_TRANSACTION_FAILED"),
+            (ProjectErrorCode::CheckpointExists, "GF_CHECKPOINT_EXISTS"),
+            (
+                ProjectErrorCode::CheckpointNotFound,
+                "GF_CHECKPOINT_NOT_FOUND",
+            ),
+            (
+                ProjectErrorCode::CheckpointRegistryCorrupt,
+                "GF_CHECKPOINT_REGISTRY_CORRUPT",
+            ),
+            (ProjectErrorCode::ReadOnlyView, "GF_READ_ONLY_VIEW"),
+            (ProjectErrorCode::ResourceLimit, "GF_RESOURCE_LIMIT"),
+        ];
+        for (code, spelling) in project {
+            assert_eq!(code.as_str(), spelling);
+            assert_eq!(code.to_string(), spelling);
+        }
+    }
+
+    #[test]
+    fn public_value_display_and_selector_validation_cover_all_shapes() {
+        let values = [
+            (PropValue::Null, "null"),
+            (PropValue::Bool(true), "true"),
+            (PropValue::Int(-7), "-7"),
+            (PropValue::Float(1.5), "1.5"),
+            (PropValue::Str("x".into()), "x"),
+            (
+                PropValue::List(vec![PropValue::Int(1), PropValue::Null]),
+                "[1, null]",
+            ),
+        ];
+        for (value, rendered) in values {
+            assert_eq!(value.to_string(), rendered);
+        }
+        assert!(matches!(
+            NodeSelector::uuid("00000000-0000-0000-0000-000000000001"),
+            Ok(NodeSelector::Uuid(_))
+        ));
+        assert!(matches!(
+            NodeSelector::uuid("not-a-uuid"),
+            Err(GfError::Validation(_))
+        ));
+        assert_eq!(format!("{:?}", GraphIdentity::new()), "GraphIdentity(..)");
+    }
+
+    #[test]
+    fn every_gf_error_fault_domain_has_a_stable_code() {
+        let span = Span::new(1, 2);
+        let errors = [
+            (GfError::NotImplemented("x"), "GF_NOT_IMPLEMENTED"),
+            (
+                GfError::Parse {
+                    msg: "x".into(),
+                    span,
+                },
+                "GF_PARSE",
+            ),
+            (
+                GfError::Bind {
+                    msg: "x".into(),
+                    span,
+                },
+                "GF_PLAN",
+            ),
+            (GfError::Plan("x".into()), "GF_PLAN"),
+            (GfError::Execution("x".into()), "GF_EXECUTION"),
+            (
+                GfError::Provider {
+                    class: "c".into(),
+                    provider: "p".into(),
+                    model: "m".into(),
+                },
+                "GF_EXECUTION",
+            ),
+            (GfError::Storage("x".into()), "GF_IO"),
+            (
+                GfError::Project {
+                    code: ProjectErrorCode::ProjectCorrupt,
+                    message: "x".into(),
+                },
+                "GF_PROJECT_CORRUPT",
+            ),
+            (
+                GfError::Api {
+                    code: ApiErrorCode::NotFound,
+                    message: "x".into(),
+                },
+                "GF_NOT_FOUND",
+            ),
+            (GfError::Lifecycle("x".into()), "GF_LIFECYCLE"),
+            (GfError::Validation("x".into()), "GF_VALIDATION"),
+            (GfError::Ontology("x".into()), "GF_ONTOLOGY"),
+        ];
+        for (error, code) in errors {
+            assert_eq!(error.code(), code);
+        }
+    }
 }

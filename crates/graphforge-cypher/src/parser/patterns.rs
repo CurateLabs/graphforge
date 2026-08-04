@@ -696,4 +696,68 @@ mod tests {
         assert_eq!(n.span.start, 0);
         assert!(n.span.end > n.span.start);
     }
+
+    #[test]
+    fn every_reserved_word_has_a_stable_label_spelling() {
+        let cases = [
+            (Tok::Match, "Match"),
+            (Tok::Return, "Return"),
+            (Tok::Where, "Where"),
+            (Tok::With, "With"),
+            (Tok::As, "As"),
+            (Tok::Distinct, "Distinct"),
+            (Tok::Union, "Union"),
+            (Tok::All, "All"),
+            (Tok::Create, "Create"),
+            (Tok::Merge, "Merge"),
+            (Tok::On, "On"),
+            (Tok::Set, "Set"),
+            (Tok::Remove, "Remove"),
+            (Tok::Delete, "Delete"),
+            (Tok::Detach, "Detach"),
+            (Tok::Call, "Call"),
+            (Tok::Yield, "Yield"),
+            (Tok::Unwind, "Unwind"),
+            (Tok::Order, "Order"),
+            (Tok::By, "By"),
+            (Tok::Skip, "Skip"),
+            (Tok::Limit, "Limit"),
+            (Tok::Is, "Is"),
+            (Tok::In, "In"),
+            (Tok::Starts, "Starts"),
+            (Tok::Ends, "Ends"),
+            (Tok::Contains, "Contains"),
+            (Tok::Case, "Case"),
+            (Tok::When, "When"),
+            (Tok::Then, "Then"),
+            (Tok::Else, "Else"),
+            (Tok::End, "End"),
+            (Tok::True, "True"),
+            (Tok::False, "False"),
+            (Tok::Null, "Null"),
+            (Tok::Count, "Count"),
+            (Tok::Exists, "Exists"),
+            (Tok::Not, "Not"),
+            (Tok::And, "And"),
+            (Tok::Or, "Or"),
+            (Tok::Xor, "Xor"),
+            (Tok::Optional, "Optional"),
+            (Tok::Any, "Any"),
+            (Tok::None, "None"),
+            (Tok::Single, "Single"),
+            (Tok::Filter, "Filter"),
+            (Tok::Extract, "Extract"),
+            (Tok::Reduce, "Reduce"),
+            (Tok::ShortestPath, "ShortestPath"),
+            (Tok::AllShortestPaths, "AllShortestPaths"),
+            (Tok::Asc, "Asc"),
+            (Tok::Desc, "Desc"),
+            (Tok::Ascending, "Ascending"),
+            (Tok::Descending, "Descending"),
+        ];
+        for (token, spelling) in cases {
+            assert_eq!(tok_as_label_str(&token), Some(spelling));
+        }
+        assert_eq!(tok_as_label_str(&Tok::Comma), None);
+    }
 }

@@ -548,6 +548,292 @@ mod tests {
         ProviderEmbeddingPlanRequest,
     };
 
+    #[test]
+    fn refresh_failure_classification_is_exhaustive_and_stable() {
+        use EmbeddingRefreshFailureClass as Refresh;
+        use EmbeddingRefreshOutcomeStatus::{Cancelled, Failed};
+        let provider_cases = [
+            (ProviderFailureClass::Cancelled, Cancelled),
+            (
+                ProviderFailureClass::ResourceExhausted,
+                Failed(Refresh::ResourceExhausted),
+            ),
+            (
+                ProviderFailureClass::InvalidRequest,
+                Failed(Refresh::Validation),
+            ),
+            (
+                ProviderFailureClass::MalformedResponse,
+                Failed(Refresh::Validation),
+            ),
+            (
+                ProviderFailureClass::UnsupportedCapability,
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                ProviderFailureClass::Authentication,
+                Failed(Refresh::Unavailable),
+            ),
+            (ProviderFailureClass::Timeout, Failed(Refresh::Provider)),
+            (ProviderFailureClass::Transport, Failed(Refresh::Provider)),
+            (
+                ProviderFailureClass::ProviderRejected,
+                Failed(Refresh::Provider),
+            ),
+        ];
+        for (input, expected) in provider_cases {
+            assert_eq!(provider_outcome(input), expected);
+        }
+
+        let api_cases = [
+            (GfError::Storage("disk".into()), Refresh::Storage),
+            (
+                GfError::Project {
+                    code: graphforge_core::ProjectErrorCode::ProjectCorrupt,
+                    message: "project".into(),
+                },
+                Refresh::Storage,
+            ),
+            (
+                GfError::Lifecycle("closed".into()),
+                Refresh::ConcurrentMutation,
+            ),
+            (
+                GfError::NotImplemented("future".into()),
+                Refresh::Unavailable,
+            ),
+            (GfError::Execution("execute".into()), Refresh::Provider),
+            (GfError::Validation("invalid".into()), Refresh::Validation),
+            (GfError::Ontology("ontology".into()), Refresh::Validation),
+        ];
+        for (input, expected) in api_cases {
+            assert_eq!(api_outcome(&input), Failed(expected));
+        }
+    }
+
+    #[test]
+    fn refresh_artifact_and_api_failure_classes_cover_every_public_domain() {
+        use std::path::PathBuf;
+
+        use EmbeddingRefreshFailureClass as Refresh;
+        use EmbeddingRefreshOutcomeStatus::{Cancelled, Failed};
+
+        let path = PathBuf::from("redacted-artifact");
+        let artifacts = [
+            (SearchArtifactError::Cancelled, Cancelled),
+            (
+                SearchArtifactError::ResourceExhausted {
+                    resource: "vectors",
+                    limit: 1,
+                },
+                Failed(Refresh::ResourceExhausted),
+            ),
+            (
+                SearchArtifactError::ConcurrentMutation,
+                Failed(Refresh::ConcurrentMutation),
+            ),
+            (
+                SearchArtifactError::InvalidSelector {
+                    field: "space",
+                    reason: "mismatch".into(),
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::CorruptManifest {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::CorruptDerivedIndex {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::CorruptPrimaryVectors {
+                    path: path.clone(),
+                    reason: "invalid".into(),
+                },
+                Failed(Refresh::Corrupt),
+            ),
+            (
+                SearchArtifactError::IncompatibleManifest {
+                    path: path.clone(),
+                    found: 2,
+                    supported: 1,
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::Stale {
+                    reason: "generation changed".into(),
+                },
+                Failed(Refresh::Incompatible),
+            ),
+            (
+                SearchArtifactError::Missing { path: path.clone() },
+                Failed(Refresh::Unavailable),
+            ),
+            (
+                SearchArtifactError::Build("build".into()),
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::SourceSnapshot {
+                    reason: "snapshot".into(),
+                },
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::Lock {
+                    path: path.clone(),
+                    reason: "busy".into(),
+                },
+                Failed(Refresh::Storage),
+            ),
+            (
+                SearchArtifactError::Io {
+                    operation: "read",
+                    path,
+                    source: std::io::Error::other("io"),
+                },
+                Failed(Refresh::Storage),
+            ),
+        ];
+        for (input, expected) in artifacts {
+            assert_eq!(artifact_outcome(&input), expected);
+        }
+
+        for (input, expected) in [
+            (GfError::Plan("plan".into()), Refresh::Validation),
+            (
+                GfError::Api {
+                    code: graphforge_core::ApiErrorCode::UnknownArgument,
+                    message: "api".into(),
+                },
+                Refresh::Validation,
+            ),
+            (
+                GfError::Provider {
+                    class: "timeout".into(),
+                    provider: "vendor".into(),
+                    model: "model".into(),
+                },
+                Refresh::Provider,
+            ),
+        ] {
+            assert_eq!(api_outcome(&input), Failed(expected));
+        }
+    }
+
+    #[test]
+    fn execution_error_conversions_preserve_source_and_redaction() {
+        let request = request();
+        let provider = ProviderError::new(&request.contract, ProviderFailureClass::Authentication);
+        let execution = ProviderEmbeddingExecutionError::from(provider);
+        assert!(execution.source().is_some());
+        assert!(matches!(
+            execution,
+            ProviderEmbeddingExecutionError::Publication(
+                ProviderPublicationError::Provider(ref error)
+            ) if error.class() == ProviderFailureClass::Authentication
+        ));
+
+        let execution = ProviderEmbeddingExecutionError::from(SearchArtifactError::Cancelled);
+        assert!(execution.source().is_some());
+        assert!(matches!(
+            execution,
+            ProviderEmbeddingExecutionError::Publication(ProviderPublicationError::Artifact(
+                SearchArtifactError::Cancelled
+            ))
+        ));
+    }
+
+    #[test]
+    fn provider_checkpoint_and_plan_error_adapters_preserve_exact_domains() {
+        let contract = contract("vendor/model");
+        let mut success_checkpoint = || Ok(());
+        assert_eq!(
+            with_artifact_checkpoint(&contract, &mut success_checkpoint, |checkpoint| {
+                checkpoint()?;
+                Ok(7_u8)
+            })
+            .unwrap(),
+            7
+        );
+
+        let mut cancelled_checkpoint = || Err(SearchArtifactError::Cancelled);
+        let error = with_artifact_checkpoint(&contract, &mut cancelled_checkpoint, |checkpoint| {
+            checkpoint()?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderPublicationError::Artifact(SearchArtifactError::Cancelled)
+        ));
+
+        let mut success_checkpoint = || Ok(());
+        let error = with_artifact_checkpoint(&contract, &mut success_checkpoint, |_| {
+            Err::<(), _>(ProviderError::new(&contract, ProviderFailureClass::Timeout))
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderPublicationError::Provider(ref error)
+                if error.class() == ProviderFailureClass::Timeout
+        ));
+
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Artifact(
+            SearchArtifactError::Cancelled,
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Artifact(SearchArtifactError::Cancelled)
+        ));
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Provider(
+            ProviderError::new(&contract, ProviderFailureClass::Authentication),
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Provider(ref error)
+                if error.class() == ProviderFailureClass::Authentication
+        ));
+        let publication = publication_plan_error(ProviderEmbeddingPlanError::Api(
+            GfError::Validation("invalid".into()),
+        ));
+        assert!(matches!(
+            publication,
+            ProviderPublicationError::Artifact(SearchArtifactError::Build(ref message))
+                if message.contains("invalid")
+        ));
+
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Artifact(
+                SearchArtifactError::Cancelled
+            )),
+            SearchArtifactError::Cancelled
+        ));
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Provider(ProviderError::new(
+                &contract,
+                ProviderFailureClass::Transport,
+            ))),
+            SearchArtifactError::Build(ref message) if !message.is_empty()
+        ));
+        assert!(matches!(
+            plan_artifact_error(ProviderEmbeddingPlanError::Api(GfError::Validation(
+                "invalid".into()
+            ))),
+            SearchArtifactError::Build(ref message) if message.contains("invalid")
+        ));
+        assert!(transaction_time_micros() > 0);
+    }
+
     struct FakeProvider<'a> {
         contract: ProviderModelContract,
         mutate: Option<&'a GraphForge>,

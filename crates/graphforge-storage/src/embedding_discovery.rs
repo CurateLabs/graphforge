@@ -487,6 +487,79 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn discovery_limit_and_deletion_state_matrix_is_deterministic() {
+        let project = tempfile::tempdir().unwrap();
+        for limits in [
+            EmbeddingSpaceDiscoveryLimits {
+                spaces: 0,
+                ..EmbeddingSpaceDiscoveryLimits::default()
+            },
+            EmbeddingSpaceDiscoveryLimits {
+                directory_entries: 0,
+                ..EmbeddingSpaceDiscoveryLimits::default()
+            },
+            EmbeddingSpaceDiscoveryLimits {
+                descriptor_bytes: 0,
+                ..EmbeddingSpaceDiscoveryLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                discover_embedding_spaces(project.path(), limits, || Ok(())),
+                Err(SearchArtifactError::InvalidSelector {
+                    field: "embedding discovery limits",
+                    ..
+                })
+            ));
+            assert!(!project.path().join(EMBEDDINGS_DIR).exists());
+        }
+
+        let deleted = descriptor("deleted");
+        descriptor_only(project.path(), &deleted);
+        let id = deleted.compatibility_id().unwrap();
+        std::fs::write(
+            crate::embedding_publication::deletion_marker(project.path(), id),
+            b"deleting",
+        )
+        .unwrap();
+        assert!(
+            discover_embedding_spaces(
+                project.path(),
+                EmbeddingSpaceDiscoveryLimits::default(),
+                || Ok(())
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            project
+                .path()
+                .join(EMBEDDINGS_DIR)
+                .join(SPACES_DIR)
+                .join(id.to_hex())
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn non_directory_embedding_ancestors_fail_closed_without_replacement() {
+        for relative in [EMBEDDINGS_DIR, "embeddings/spaces"] {
+            let project = tempfile::tempdir().unwrap();
+            let path = project.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"owned-by-caller").unwrap();
+            assert!(matches!(
+                discover_embedding_spaces(
+                    project.path(),
+                    EmbeddingSpaceDiscoveryLimits::default(),
+                    || Ok(())
+                ),
+                Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+            ));
+            assert_eq!(std::fs::read(path).unwrap(), b"owned-by-caller");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_lineage_fails_closed() {

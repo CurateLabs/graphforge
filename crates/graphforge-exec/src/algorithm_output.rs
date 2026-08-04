@@ -741,4 +741,145 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("duplicate rows"));
     }
+
+    #[test]
+    fn property_materialization_rejects_malformed_identity_schema_and_ambiguity() {
+        let wrong_result = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "node_uuid",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        )
+        .unwrap();
+        assert_eq!(
+            materialize_node_properties_with(&wrong_result, &[], |_| Ok(vec![]))
+                .unwrap_err()
+                .to_string(),
+            "Rust algorithm execution failed: invalid algorithm property materialization: algorithm result requires \"node_uuid\" as FixedSizeBinary(16)"
+        );
+
+        let null_uuid = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            std::iter::once(None::<[u8; 16]>),
+            16,
+        )
+        .unwrap();
+        let null_result = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "node_uuid",
+                DataType::FixedSizeBinary(16),
+                true,
+            )])),
+            vec![Arc::new(null_uuid)],
+        )
+        .unwrap();
+        assert!(
+            materialize_node_properties_with(&null_result, &[], |_| Ok(vec![]))
+                .unwrap_err()
+                .to_string()
+                .contains("NULL node_uuid")
+        );
+
+        let one = property_batch(&[[1; 16]], "name", Arc::new(StringArray::from(vec!["Ada"])));
+        let incompatible = property_batch(&[[1; 16]], "age", Arc::new(Int64Array::from(vec![37])));
+        assert!(
+            materialize_node_properties_with(&node_result(&[[1; 16]]), &["Person".into()], |_| {
+                Ok(vec![one.clone(), incompatible.clone()])
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("inconsistent batch schemas")
+        );
+
+        assert!(
+            materialize_node_properties_with(
+                &node_result(&[[1; 16]]),
+                &["Employee".into(), "Person".into()],
+                |_| Ok(vec![one.clone()]),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous")
+        );
+
+        let score = property_batch(&[[1; 16]], "score", Arc::new(Float64Array::from(vec![2.0])));
+        assert!(
+            materialize_node_properties_with(&node_result(&[[1; 16]]), &["Person".into()], |_| Ok(
+                vec![score.clone()]
+            ),)
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous")
+        );
+    }
+
+    #[test]
+    fn every_output_field_enforces_its_logical_type_and_nullability() {
+        for algorithm in [
+            Algorithm::Rank(RankAlgorithm::Degree),
+            Algorithm::Cluster(ClusterAlgorithm::Components),
+            Algorithm::Paths(PathAlgorithm::Bfs),
+            Algorithm::Analyze(AnalyzeAlgorithm::Node2Vec),
+            Algorithm::Analyze(AnalyzeAlgorithm::Conductance),
+            Algorithm::Analyze(AnalyzeAlgorithm::IsDag),
+            Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring),
+        ] {
+            let canonical = output(algorithm, true);
+            for (index, field) in canonical.schema.fields.iter().enumerate() {
+                let mut wrong_type = canonical.clone();
+                wrong_type.rows[0][index] = AlgorithmValue::Utf8("wrong-type".into());
+                if field.data_type == AlgorithmFieldType::Utf8 {
+                    wrong_type.rows[0][index] = AlgorithmValue::Boolean(false);
+                }
+                let error = shape_algorithm_output(algorithm, &wrong_type)
+                    .expect_err("logical output type mismatch");
+                assert!(error.to_string().contains(field.name));
+
+                let mut null = canonical.clone();
+                null.rows[0][index] = AlgorithmValue::Null;
+                match shape_algorithm_output(algorithm, &null) {
+                    Ok(batch) => {
+                        assert!(field.nullable);
+                        assert_eq!(batch.column(index).null_count(), 1);
+                    }
+                    Err(error) => {
+                        assert!(!field.nullable);
+                        assert!(error.to_string().contains(field.name));
+                    }
+                }
+            }
+        }
+
+        for (algorithm, replacement) in [
+            (
+                Algorithm::Analyze(AnalyzeAlgorithm::Node2Vec),
+                AlgorithmValue::Float32List(vec![f32::NAN]),
+            ),
+            (
+                Algorithm::Analyze(AnalyzeAlgorithm::Conductance),
+                AlgorithmValue::Float64(f64::INFINITY),
+            ),
+        ] {
+            let mut malformed = output(algorithm, true);
+            let index = malformed
+                .schema
+                .fields
+                .iter()
+                .position(|field| {
+                    matches!(
+                        field.data_type,
+                        AlgorithmFieldType::Float32List | AlgorithmFieldType::Float64
+                    )
+                })
+                .unwrap();
+            malformed.rows[0][index] = replacement;
+            assert!(
+                shape_algorithm_output(algorithm, &malformed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("non-finite")
+            );
+        }
+    }
 }

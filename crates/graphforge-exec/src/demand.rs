@@ -795,6 +795,7 @@ impl RecordBatchStream for DemandGuardStream {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::task::Context;
 
     use arrow::datatypes::Schema;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -803,6 +804,151 @@ mod tests {
     use datafusion::physical_plan::stream::EmptyRecordBatchStream;
 
     use super::*;
+
+    #[test]
+    fn capture_accounts_for_every_hop_filter_and_storage_outcome() {
+        use graphforge_storage::io_stats::{
+            FilteredReadObserver, FilteredReadPruning, FilteredReadStrategy, FilteredReadTable,
+        };
+
+        // Process-global capture must not interleave with other capture users.
+        static CAPTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        let _guard = CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        reset();
+        record_input(12, 3);
+        record_candidates(12, 7);
+        record_emitted(12, 2);
+        record_filter(4, true, true, 7);
+        record_filter(4, true, false, 2);
+
+        let observer = HopReadObserver::new(12);
+        for table in [FilteredReadTable::Edge, FilteredReadTable::Node] {
+            observer.read_started(table);
+            observer.rows_scanned(table, 11);
+            observer.read_completed(table, 5, true);
+            observer.read_failed(table);
+        }
+        for strategy in [
+            FilteredReadStrategy::DenseRowSelection,
+            FilteredReadStrategy::RowGroupPredicate,
+            FilteredReadStrategy::FullFallback,
+        ] {
+            observer.pruning(
+                FilteredReadTable::Node,
+                FilteredReadPruning {
+                    strategy,
+                    row_groups_considered: 9,
+                    row_groups_selected: 4,
+                    pages_considered: 8,
+                    pages_selected: 3,
+                    exact_rows_selected: 2,
+                    metadata_fallbacks: 1,
+                    validation_fallbacks: 1,
+                },
+            );
+        }
+        observer.pruning(
+            FilteredReadTable::Edge,
+            FilteredReadPruning {
+                strategy: FilteredReadStrategy::DenseRowSelection,
+                row_groups_considered: 99,
+                row_groups_selected: 99,
+                pages_considered: 99,
+                pages_selected: 99,
+                exact_rows_selected: 99,
+                metadata_fallbacks: 99,
+                validation_fallbacks: 99,
+            },
+        );
+
+        let captured = snapshot();
+        let hop = &captured.hops[&12];
+        assert_eq!((hop.input_batches, hop.input_rows), (1, 3));
+        assert_eq!((hop.candidates_generated, hop.rows_emitted), (7, 2));
+        assert_eq!(
+            (
+                hop.edge_reads_started,
+                hop.edge_reads_completed,
+                hop.edge_reads_failed
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_reads_started,
+                hop.node_reads_completed,
+                hop.node_reads_failed
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                hop.edge_rows_scanned,
+                hop.edge_rows_returned,
+                hop.edge_full_reads
+            ),
+            (11, 5, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_rows_scanned,
+                hop.node_rows_returned,
+                hop.node_full_reads
+            ),
+            (11, 5, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_dense_row_selection_reads,
+                hop.node_row_group_predicate_reads
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            (hop.node_row_groups_considered, hop.node_row_groups_selected),
+            (27, 12)
+        );
+        assert_eq!(
+            (hop.node_pages_considered, hop.node_pages_selected),
+            (24, 9)
+        );
+        assert_eq!(
+            (
+                hop.node_exact_rows_selected,
+                hop.node_metadata_fallbacks,
+                hop.node_validation_fallbacks
+            ),
+            (6, 3, 3)
+        );
+        assert_eq!(
+            (
+                captured.filters[&4].input_rows,
+                captured.filters[&4].output_rows
+            ),
+            (7, 2)
+        );
+
+        disable();
+        record_input(12, 100);
+        assert_eq!(snapshot(), captured);
+    }
+
+    #[test]
+    fn quiescence_tracks_live_permits_and_output_thresholds() {
+        let demand = Arc::new(QueryDemand::new());
+        assert!(!demand.observe_output(2, 3));
+        assert!(demand.observe_output(1, 3));
+
+        let permit = demand.begin_read(1).unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(demand.poll_quiescent(&mut cx), Poll::Pending));
+        drop(permit);
+        assert!(matches!(demand.poll_quiescent(&mut cx), Poll::Ready(())));
+    }
 
     #[test]
     fn read_permit_double_check_rejects_post_cancellation_work() {
@@ -841,5 +987,126 @@ mod tests {
             .optimize(Arc::clone(&plan), &ConfigOptions::new())
             .unwrap();
         assert!(Arc::ptr_eq(&plan, &optimized));
+    }
+
+    #[tokio::test]
+    async fn demand_wrappers_replace_children_and_enforce_zero_demand() {
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
+        let replacement: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
+
+        let probe = Arc::new(ProbeExec::new(Arc::clone(&child), 4, true, false));
+        let probe_error = Arc::clone(&probe)
+            .with_new_children(vec![])
+            .expect_err("probe requires one child");
+        assert!(matches!(
+            probe_error,
+            DataFusionError::Internal(message) if message == "DemandProbeExec needs one child"
+        ));
+        let replaced_probe = probe
+            .with_new_children(vec![Arc::clone(&replacement)])
+            .expect("replace probe child");
+        assert!(Arc::ptr_eq(replaced_probe.children()[0], &replacement));
+
+        let demand = Arc::new(QueryDemand::new());
+        let guard = Arc::new(DemandGuardExec::new(
+            Arc::clone(&child),
+            Arc::clone(&demand),
+            0,
+        ));
+        let guard_error = Arc::clone(&guard)
+            .with_new_children(vec![])
+            .expect_err("guard requires one child");
+        assert!(matches!(
+            guard_error,
+            DataFusionError::Internal(message) if message == "DemandGuardExec needs one child"
+        ));
+        let replaced_guard = guard
+            .with_new_children(vec![replacement])
+            .expect("replace guard child");
+        assert_eq!(replaced_guard.name(), "DemandGuardExec");
+
+        let context = SessionContext::new();
+        let batches = collect(replaced_guard, context.task_ctx())
+            .await
+            .expect("zero-demand guard returns an empty stream");
+        assert!(batches.is_empty());
+        assert!(
+            !demand.is_cancelled(),
+            "zero demand does not start the child"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_child_cancels_demand_and_finishes_quiescently() {
+        use datafusion::physical_plan::collect;
+        use datafusion::prelude::SessionContext;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(schema));
+        let demand = Arc::new(QueryDemand::new());
+        let guard: Arc<dyn ExecutionPlan> =
+            Arc::new(DemandGuardExec::new(child, Arc::clone(&demand), 10));
+        let batches = collect(guard, SessionContext::new().task_ctx())
+            .await
+            .expect("empty child finishes normally");
+        assert!(batches.is_empty());
+        assert!(demand.is_cancelled());
+        assert_eq!(demand.in_flight_reads.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn demand_wrappers_expose_diagnostics_and_cancel_on_child_error() {
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures::StreamExt;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
+        let probe = ProbeExec::new(Arc::clone(&child), 3, true, true);
+        assert_eq!(probe.name(), "DemandProbeExec");
+        assert!(probe.as_any().is::<ProbeExec>());
+        assert!(format!("{probe:?}").contains("ordinal: 3"));
+        assert!(
+            format!(
+                "{}",
+                datafusion::physical_plan::displayable(&probe).one_line()
+            )
+            .contains("side=input")
+        );
+        assert_eq!(probe.children().len(), 1);
+        assert_eq!(probe.schema(), schema);
+
+        let demand = Arc::new(QueryDemand::new());
+        let guard = DemandGuardExec::new(child, Arc::clone(&demand), 2);
+        assert!(guard.as_any().is::<DemandGuardExec>());
+        assert!(format!("{guard:?}").contains("cancel_after: 2"));
+        assert!(
+            format!(
+                "{}",
+                datafusion::physical_plan::displayable(&guard).one_line()
+            )
+            .contains("cancel_after=2")
+        );
+
+        let error = DataFusionError::Execution("sentinel child failure".into());
+        let inner = RecordBatchStreamAdapter::new(
+            Arc::clone(&schema),
+            futures::stream::iter(vec![Err(error)]),
+        );
+        let mut stream = DemandGuardStream {
+            schema: Arc::clone(&schema),
+            inner: Some(Box::pin(inner)),
+            demand: Arc::clone(&demand),
+            cancel_after: 2,
+            finishing: false,
+        };
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("sentinel child failure"));
+        assert!(demand.is_cancelled());
+        assert!(stream.inner.is_none());
+        assert_eq!(stream.schema(), schema);
     }
 }

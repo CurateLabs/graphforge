@@ -131,6 +131,71 @@ def main() -> None:
         malformed.write_text("SF:no-lines.rs\nend_of_record\n", encoding="utf-8")
         expect_error("no executable lines", lambda: ledger_module.parse_lcov(malformed, ROOT))
 
+        fixture_root = temp / "coverage-source"
+        source_path = fixture_root / "crates/example/src/lib.rs"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text(
+            """pub fn production() -> &'static str { "{ production }" }
+// A comment containing a misleading brace: }
+#[cfg(test)]
+mod tests {
+    const RAW: &str = r###"a } and { inside a raw string"###;
+    /* nested comment { /* } */ } */
+    #[test]
+    fn unit_test() { assert_eq!('{', '{'); }
+}
+#[cfg(test)]
+pub fn test_helper() {
+    let value = "}";
+    assert_eq!(value, "}");
+}
+pub fn also_production() {}
+#[cfg(test)]
+mod external_tests;
+""",
+            encoding="utf-8",
+        )
+        external_test_path = fixture_root / "crates/example/src/external_tests.rs"
+        external_test_path.write_text("pub fn helper() {}\n", encoding="utf-8")
+        fixture_records = {
+            "crates/example/src/lib.rs": dict.fromkeys(range(1, 18), 1),
+            "crates/example/src/external_tests.rs": {1: 1},
+            "crates/example/tests/integration.rs": {1: 1},
+            "crates/example/benches/throughput.rs": {1: 1},
+            "crates/example/examples/demo.rs": {1: 1},
+        }
+        filtered = ledger_module.production_records(fixture_records, fixture_root)
+        if set(filtered) != {"crates/example/src/lib.rs"}:
+            raise AssertionError(f"test-only Rust paths entered production: {set(filtered)}")
+        if set(filtered["crates/example/src/lib.rs"]) != {1, 2, 15}:
+            raise AssertionError(
+                "cfg(test) source lines were not removed deterministically: "
+                f"{sorted(filtered['crates/example/src/lib.rs'])}"
+            )
+
+        binding_records = {
+            "crates/graphforge-bindings-py/src/lib.rs": {1: 1},
+            "crates/graphforge-bindings-node/src/lib.rs": {1: 1},
+        }
+        if ledger_module.select_surface(binding_records, "python_adapter") != {
+            "crates/graphforge-bindings-py/src/lib.rs": {1: 1}
+        }:
+            raise AssertionError("Python binding adapter coverage was filtered")
+        if ledger_module.select_surface(binding_records, "node_adapter") != {
+            "crates/graphforge-bindings-node/src/lib.rs": {1: 1}
+        }:
+            raise AssertionError("Node binding adapter coverage was filtered")
+
+        broken_path = fixture_root / "crates/broken/src/lib.rs"
+        broken_path.parent.mkdir(parents=True)
+        broken_path.write_text("#[cfg(test)]\nmod tests {\n", encoding="utf-8")
+        expect_error(
+            "unbalanced Rust delimiter",
+            lambda: ledger_module.production_records(
+                {"crates/broken/src/lib.rs": {1: 1, 2: 0}}, fixture_root
+            ),
+        )
+
         args = SimpleNamespace(
             root=ROOT,
             patch_base="HEAD",

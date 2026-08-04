@@ -3089,6 +3089,352 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn closed_domain_vocabularies_round_trip_and_reject_unknown_tokens() {
+        for value in [GraphObjectKind::Node, GraphObjectKind::Edge] {
+            assert_eq!(GraphObjectKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(GraphObjectKind::parse("vertex").is_err());
+        for value in [
+            AssertionGraphRole::Subject,
+            AssertionGraphRole::Object,
+            AssertionGraphRole::Context,
+        ] {
+            assert_eq!(AssertionGraphRole::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(AssertionGraphRole::parse("target").is_err());
+        for value in [
+            EvidenceSourceKind::Document,
+            EvidenceSourceKind::Observation,
+            EvidenceSourceKind::GraphNode,
+            EvidenceSourceKind::GraphEdge,
+        ] {
+            assert_eq!(EvidenceSourceKind::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(EvidenceSourceKind::parse("web").is_err());
+        for value in [
+            EvidenceRole::Supports,
+            EvidenceRole::Contradicts,
+            EvidenceRole::Context,
+        ] {
+            assert_eq!(EvidenceRole::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(EvidenceRole::parse("proves").is_err());
+        for value in [
+            ConfidencePolicy::Explicit,
+            ConfidencePolicy::ConservativeMin,
+        ] {
+            assert_eq!(ConfidencePolicy::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(ConfidencePolicy::parse("average").is_err());
+        for value in [
+            AlgorithmRunState::Started,
+            AlgorithmRunState::Completed,
+            AlgorithmRunState::Failed,
+            AlgorithmRunState::Cancelled,
+            AlgorithmRunState::Interrupted,
+        ] {
+            assert_eq!(AlgorithmRunState::parse(value.as_str()).unwrap(), value);
+        }
+        assert!(!AlgorithmRunState::Started.is_terminal());
+        assert!(AlgorithmRunState::Completed.is_terminal());
+        assert!(AlgorithmRunState::parse("running").is_err());
+    }
+
+    #[test]
+    fn knowledge_error_codes_are_closed_and_exact() {
+        let cases = [
+            (invalid("field", "bad"), "GF_KNOWLEDGE_INVALID"),
+            (
+                KnowledgeError::Limit {
+                    participant: "assertions",
+                    observed: 2,
+                    limit: 1,
+                },
+                "GF_RESOURCE_LIMIT",
+            ),
+            (KnowledgeError::Duplicate("id"), "GF_KNOWLEDGE_DUPLICATE"),
+            (KnowledgeError::Dangling("id"), "GF_KNOWLEDGE_DANGLING"),
+            (KnowledgeError::Conflict("id"), "GF_IDEMPOTENCY_CONFLICT"),
+            (
+                KnowledgeError::TransactionConflict("id"),
+                "GF_TRANSACTION_CONFLICT",
+            ),
+            (
+                KnowledgeError::Canonical(CanonicalError::Malformed("bad")),
+                "GF_CANONICAL_INVALID",
+            ),
+            (
+                KnowledgeError::Arrow(arrow::error::ArrowError::SchemaError("bad".into())),
+                "GF_SCHEMA_MISMATCH",
+            ),
+        ];
+        for (error, code) in cases {
+            assert_eq!(error.code(), code);
+            assert!(!error.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn algorithm_run_validation_rejects_every_malformed_identity_and_transition() {
+        let run = AlgorithmRun::new(
+            uuid7(40),
+            "pagerank".into(),
+            1,
+            1,
+            vec![1],
+            [2; 32],
+            uuid7(41),
+            100,
+        )
+        .unwrap();
+        for invalid_run in [
+            AlgorithmRun {
+                algorithm: String::new(),
+                ..run.clone()
+            },
+            AlgorithmRun {
+                algorithm_version: 2,
+                ..run.clone()
+            },
+            AlgorithmRun {
+                descriptor_version: 2,
+                ..run.clone()
+            },
+            AlgorithmRun {
+                descriptor: Vec::new(),
+                ..run.clone()
+            },
+            AlgorithmRun {
+                contract_version: 2,
+                ..run.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_algorithm_run(&invalid_run),
+                Err(KnowledgeError::Invalid { .. })
+            ));
+        }
+
+        let start = AlgorithmRunEvent::new(
+            uuid7(42),
+            run.run_uuid,
+            AlgorithmRunState::Started,
+            None,
+            None,
+            100,
+            run.provenance_uuid,
+        )
+        .unwrap();
+        let completed = AlgorithmRunEvent::new(
+            uuid7(43),
+            run.run_uuid,
+            AlgorithmRunState::Completed,
+            Some([3; 32]),
+            None,
+            101,
+            uuid7(44),
+        )
+        .unwrap();
+        assert_eq!(
+            AlgorithmRunLedger::new(vec![run.clone()], vec![start.clone(), completed.clone()])
+                .unwrap()
+                .events_for(run.run_uuid)
+                .len(),
+            2
+        );
+        assert!(matches!(
+            validate_algorithm_run_event(&AlgorithmRunEvent {
+                contract_version: 2,
+                ..start.clone()
+            }),
+            Err(KnowledgeError::Invalid { .. })
+        ));
+        for event in [
+            AlgorithmRunEvent {
+                result_fingerprint: Some([1; 32]),
+                ..start.clone()
+            },
+            AlgorithmRunEvent {
+                result_fingerprint: None,
+                ..completed.clone()
+            },
+            AlgorithmRunEvent {
+                state: AlgorithmRunState::Failed,
+                result_fingerprint: None,
+                error_code: None,
+                ..completed.clone()
+            },
+            AlgorithmRunEvent {
+                state: AlgorithmRunState::Failed,
+                result_fingerprint: None,
+                error_code: Some("bad".into()),
+                ..completed.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_algorithm_run_event(&event),
+                Err(KnowledgeError::Invalid { .. })
+            ));
+        }
+
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone(), run.clone()], vec![start.clone()]),
+            Err(KnowledgeError::Duplicate("run_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone()], vec![start.clone(), start.clone()]),
+            Err(KnowledgeError::Duplicate("event_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run.clone()],
+                vec![AlgorithmRunEvent {
+                    run_uuid: uuid7(50),
+                    ..start.clone()
+                }]
+            ),
+            Err(KnowledgeError::Dangling("run_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run.clone()],
+                vec![AlgorithmRunEvent {
+                    recorded_at_micros: 99,
+                    ..start.clone()
+                }]
+            ),
+            Err(KnowledgeError::Invalid {
+                field: "recorded_at",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone()], Vec::new()),
+            Err(KnowledgeError::Invalid {
+                field: "started",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run],
+                vec![
+                    start,
+                    completed.clone(),
+                    AlgorithmRunEvent {
+                        event_uuid: uuid7(51),
+                        ..completed
+                    },
+                ]
+            ),
+            Err(KnowledgeError::Invalid {
+                field: "terminal",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn assertion_and_algorithm_run_merges_cover_idempotent_append_and_conflict_paths() {
+        let base = fixture();
+        assert_eq!(base.merge(&base).unwrap(), base);
+        let second_id = uuid7(20);
+        let second = AssertionLedger::new(
+            vec![Assertion::new(second_id, "second".into(), uuid7(21), 20).unwrap()],
+            vec![
+                AssertionGraphRef::new(
+                    second_id,
+                    uuid7(22),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let merged = base.merge(&second).unwrap();
+        assert_eq!(merged.assertions.len(), 2);
+        let conflicting = AssertionLedger::new(
+            vec![Assertion::new(uuid7(1), "different".into(), uuid7(2), 10).unwrap()],
+            base.graph_refs.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            base.merge(&conflicting),
+            Err(KnowledgeError::Conflict("assertion_uuid"))
+        ));
+
+        let run = AlgorithmRun::new(
+            uuid7(40),
+            "pagerank".into(),
+            1,
+            1,
+            vec![1],
+            [2; 32],
+            uuid7(41),
+            100,
+        )
+        .unwrap();
+        let started = AlgorithmRunEvent::new(
+            uuid7(42),
+            run.run_uuid,
+            AlgorithmRunState::Started,
+            None,
+            None,
+            100,
+            run.provenance_uuid,
+        )
+        .unwrap();
+        let initial = AlgorithmRunLedger::new(vec![run.clone()], vec![started.clone()]).unwrap();
+        assert_eq!(initial.run(run.run_uuid), Some(&run));
+        assert_eq!(initial.events_for(run.run_uuid), vec![started.clone()]);
+        assert!(initial.terminal_event(run.run_uuid).is_none());
+        assert_eq!(initial.merge(&initial).unwrap(), initial);
+
+        let completed = AlgorithmRunEvent::new(
+            uuid7(43),
+            run.run_uuid,
+            AlgorithmRunState::Completed,
+            Some([3; 32]),
+            None,
+            101,
+            uuid7(44),
+        )
+        .unwrap();
+        let staged =
+            AlgorithmRunLedger::new(vec![run.clone()], vec![started, completed.clone()]).unwrap();
+        let merged = initial.merge(&staged).unwrap();
+        assert_eq!(merged.terminal_event(run.run_uuid), Some(&completed));
+
+        let conflicting_run = AlgorithmRun {
+            algorithm: "hits".into(),
+            ..run.clone()
+        };
+        let conflict = AlgorithmRunLedger {
+            runs: vec![conflicting_run],
+            events: vec![],
+        };
+        assert!(matches!(
+            initial.merge(&conflict),
+            Err(KnowledgeError::Conflict("run_uuid"))
+        ));
+        let conflicting_event = AlgorithmRunEvent {
+            error_code: Some("GF_EXECUTION".into()),
+            state: AlgorithmRunState::Failed,
+            ..completed
+        };
+        let conflict = AlgorithmRunLedger {
+            runs: vec![],
+            events: vec![conflicting_event],
+        };
+        assert!(matches!(
+            merged.merge(&conflict),
+            Err(KnowledgeError::Conflict("event_uuid"))
+        ));
+    }
 }
 pub use belief_projection::{
     ALGORITHM_INTERPRETATION_ATTACHMENT_SCHEMA, BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION,

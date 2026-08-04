@@ -350,6 +350,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn public_result_limit_validation_is_exact_at_zero_boundary_and_cap() {
+        let limits = VectorStoreLimits::default();
+        assert!(matches!(
+            validate_result_limit(0, limits),
+            Err(SearchArtifactError::InvalidSelector { field: "limit", .. })
+        ));
+        validate_result_limit(limits.results, limits).unwrap();
+        assert!(matches!(
+            validate_result_limit(limits.results + 1, limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "search_results",
+                ..
+            })
+        ));
+    }
+
     fn write_members(dir: &TempDir, members: &[(u8, Vec<u32>)]) {
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
         for (value, labels) in members {

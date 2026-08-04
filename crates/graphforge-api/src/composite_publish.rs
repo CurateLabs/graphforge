@@ -1290,6 +1290,7 @@ mod tests {
         CancellationToken, CapabilityId, EnableCapabilityRequest, GraphForgeOptions, OperationId,
         ProjectWriteMode, PropValue, WriteContext,
     };
+    use arrow::array::StringArray;
     use graphforge_knowledge::{
         Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus, AssertionStatusEvent,
         GraphObjectKind,
@@ -1321,6 +1322,75 @@ mod tests {
                 capability_version: 1,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn empty_composite_domain_merges_do_not_require_optional_capabilities() {
+        let graph = GraphForge::new(None).unwrap();
+        let parent = graphforge_storage::resolve_project_generation(
+            graph.resolved_generation.container_root(),
+        )
+        .unwrap();
+        let knowledge = CompositeKnowledgeParticipants::default();
+        assert!(
+            merge_provenance(&parent, &knowledge)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(
+            merge_assertions(&parent, &knowledge)
+                .unwrap()
+                .assertions
+                .is_empty()
+        );
+        assert!(
+            merge_confidence(&parent, &knowledge)
+                .unwrap()
+                .assessments
+                .is_empty()
+        );
+        assert!(
+            merge_evidence(&parent, &knowledge)
+                .unwrap()
+                .links
+                .is_empty()
+        );
+        assert!(
+            merge_reasoning(&parent, &knowledge)
+                .unwrap()
+                .records
+                .is_empty()
+        );
+        assert!(merge_status(&parent, &knowledge).unwrap().events.is_empty());
+        assert!(
+            merge_supersessions(&parent, &knowledge)
+                .unwrap()
+                .relations()
+                .is_empty()
+        );
+        let hypotheses = merge_hypotheses(&parent, &knowledge).unwrap();
+        assert!(hypotheses.groups().is_empty());
+        assert!(hypotheses.membership_events().is_empty());
+        assert!(hypotheses.selection_events().is_empty());
+        assert!(
+            merge_validity(&parent, &knowledge)
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert!(
+            replacement_families(&CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(99)),
+                    actor_uuid: None,
+                },
+                graph_mutations: Vec::new(),
+                knowledge,
+            })
+            .is_empty()
+        );
     }
 
     fn publish_request() -> CompositeTransactionRequest {
@@ -1421,6 +1491,20 @@ mod tests {
         }
     }
 
+    fn delete_node_request(operation_seed: u8, node_seed: u8) -> CompositeTransactionRequest {
+        CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(operation_seed)),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::DeleteNode {
+                node_uuid: uuid7(node_seed),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        }
+    }
+
     fn optimistic_options(max_rebase_attempts: u32) -> GraphForgeOptions {
         GraphForgeOptions {
             write_mode: ProjectWriteMode::OptimisticMultiWriter,
@@ -1435,6 +1519,37 @@ mod tests {
         assert_eq!(
             publication_parent_changed(false).code(),
             "GF_IDEMPOTENCY_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn rebase_compatibility_rejects_administrative_drift_and_removed_targets() {
+        let graph = GraphForge::new(None).unwrap();
+        let parent = graphforge_storage::resolve_project_generation(
+            graph.resolved_generation.container_root(),
+        )
+        .unwrap();
+        let request = publish_request();
+        let mut baseline = RebaseBaseline {
+            fields: BTreeMap::new(),
+            node_targets: BTreeSet::new(),
+            edge_targets: BTreeSet::new(),
+            administrative_contract: Vec::new(),
+            non_mergeable: false,
+        };
+        assert_eq!(
+            ensure_rebase_compatible(&graph, &request, &parent, &baseline)
+                .unwrap_err()
+                .code(),
+            "GF_WRITE_CONFLICT"
+        );
+        baseline.administrative_contract = administrative_contract(&parent).unwrap();
+        baseline.node_targets.insert(uuid7(250));
+        assert_eq!(
+            ensure_rebase_compatible(&graph, &request, &parent, &baseline)
+                .unwrap_err()
+                .code(),
+            "GF_WRITE_CONFLICT"
         );
     }
 
@@ -1674,6 +1789,45 @@ mod tests {
     }
 
     #[test]
+    fn optimistic_delete_and_property_change_publish_exactly_one_complete_result() {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let directory = TempDir::new().unwrap();
+        let bootstrap = GraphForge::new(directory.path().to_str()).unwrap();
+        bootstrap
+            .publish_composite_transaction(graph_request(160, 161, "Initial"))
+            .unwrap();
+        drop(bootstrap);
+
+        let results = publish_concurrently(
+            &directory,
+            optimistic_options(1),
+            delete_node_request(162, 161),
+            property_request(163, 161, "nickname", "survivor"),
+        );
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let conflict = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .unwrap();
+        assert_eq!(conflict.code(), "GF_WRITE_CONFLICT");
+
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let rows = reopened
+            .execute("MATCH (n:Person) RETURN n.nickname AS nickname")
+            .unwrap();
+        assert!(rows.batches[0].num_rows() <= 1);
+        if rows.batches[0].num_rows() == 1 {
+            let nicknames = rows.batches[0]
+                .column_by_name("nickname")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(nicknames.value(0), "survivor");
+        }
+    }
+
+    #[test]
     fn optimistic_first_reconciliation_remaps_identity_collision() {
         let directory = TempDir::new().unwrap();
         GraphForge::new(directory.path().to_str()).unwrap();
@@ -1714,5 +1868,144 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn composite_graph_mutations_cover_created_and_existing_objects() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        let left = uuid7(201);
+        let right = uuid7(202);
+        let old_edge = uuid7(203);
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(200)),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: left,
+                        label: "Person".into(),
+                        properties: HashMap::from([(
+                            "obsolete".into(),
+                            PropValue::Str("left".into()),
+                        )]),
+                    },
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: right,
+                        label: "Person".into(),
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::CreateEdge {
+                        edge_uuid: old_edge,
+                        rel_type: "KNOWS".into(),
+                        source_uuid: left,
+                        target_uuid: right,
+                        properties: HashMap::from([(
+                            "obsolete".into(),
+                            PropValue::Str("edge".into()),
+                        )]),
+                    },
+                ],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+
+        let created_node = uuid7(205);
+        let created_edge = uuid7(206);
+        graph
+            .publish_composite_transaction(CompositeTransactionRequest {
+                contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(204)),
+                    actor_uuid: None,
+                },
+                graph_mutations: vec![
+                    CompositeGraphMutation::CreateNode {
+                        node_uuid: created_node,
+                        label: "Person".into(),
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::SetNodeProperty {
+                        node_uuid: created_node,
+                        property: "name".into(),
+                        value: PropValue::Str("created".into()),
+                    },
+                    CompositeGraphMutation::CreateEdge {
+                        edge_uuid: created_edge,
+                        rel_type: "KNOWS".into(),
+                        source_uuid: left,
+                        target_uuid: created_node,
+                        properties: HashMap::new(),
+                    },
+                    CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: created_edge,
+                        property: "weight".into(),
+                        value: PropValue::Int(7),
+                    },
+                    CompositeGraphMutation::SetNodeProperty {
+                        node_uuid: left,
+                        property: "nickname".into(),
+                        value: PropValue::Str("existing".into()),
+                    },
+                    CompositeGraphMutation::SetEdgeProperty {
+                        edge_uuid: old_edge,
+                        property: "weight".into(),
+                        value: PropValue::Int(3),
+                    },
+                    CompositeGraphMutation::RemoveNodeProperty {
+                        node_uuid: left,
+                        property: "obsolete".into(),
+                    },
+                    CompositeGraphMutation::RemoveEdgeProperty {
+                        edge_uuid: old_edge,
+                        property: "obsolete".into(),
+                    },
+                    CompositeGraphMutation::DeleteEdge {
+                        edge_uuid: old_edge,
+                    },
+                    CompositeGraphMutation::DeleteNode { node_uuid: right },
+                ],
+                knowledge: CompositeKnowledgeParticipants::default(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            graph
+                .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
+                .unwrap()
+                .batches[0]
+                .num_rows(),
+            2
+        );
+    }
+
+    #[test]
+    fn strict_composite_snapshot_uses_declared_ontology_types() {
+        let directory = TempDir::new().unwrap();
+        let mut graph = GraphForge::new(directory.path().to_str()).unwrap();
+        let ontology_path = directory.path().join("strict.yaml");
+        std::fs::write(
+            &ontology_path,
+            "ontology_id: composite\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types:\n  - name: KNOWS\n    src: Person\n    dst: Person\n",
+        )
+        .unwrap();
+        graph
+            .adopt_ontology(crate::AdoptOntologyRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(210)),
+                    actor_uuid: None,
+                },
+                path: ontology_path,
+                mode: OntologyMode::Strict,
+            })
+            .unwrap();
+
+        graph
+            .publish_composite_transaction(graph_request(211, 212, "Ada"))
+            .unwrap();
+        assert_eq!(graph.ontology_mode(), OntologyMode::Strict);
     }
 }

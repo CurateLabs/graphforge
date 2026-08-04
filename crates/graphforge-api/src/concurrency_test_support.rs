@@ -77,3 +77,40 @@ pub fn hold_writer(root: impl AsRef<Path>) -> Result<HeldWriter, GfError> {
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GraphForge;
+
+    #[test]
+    fn wave10_writer_guard_holds_the_project_lock_until_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = GraphForge::new(root.path().to_str()).unwrap();
+        graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
+
+        let held = hold_writer(root.path()).unwrap();
+        let busy = match hold_writer(root.path()) {
+            Ok(_) => panic!("second writer unexpectedly acquired the lock"),
+            Err(error) => error,
+        };
+        assert_eq!(busy.code(), "GF_WRITER_BUSY");
+
+        drop(held);
+        let reacquired = hold_writer(root.path()).unwrap();
+        drop(reacquired);
+
+        let reopened = GraphForge::new(root.path().to_str()).unwrap();
+        assert_eq!(reopened.node_count("").unwrap(), 1);
+    }
+
+    #[test]
+    fn wave10_writer_guard_rejects_an_uninitialized_root() {
+        let root = tempfile::tempdir().unwrap();
+        let error = match hold_writer(root.path()) {
+            Ok(_) => panic!("uninitialized project unexpectedly held a writer"),
+            Err(error) => error,
+        };
+        assert_ne!(error.code(), "GF_WRITER_BUSY");
+    }
+}

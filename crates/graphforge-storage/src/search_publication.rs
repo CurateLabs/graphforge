@@ -986,6 +986,41 @@ mod tests {
     }
 
     #[test]
+    fn atomic_update_requires_replace_and_cannot_reuse_missing_publication() {
+        let dir = TempDir::new().unwrap();
+        let key = key();
+        let error = coordinate_search_update(
+            dir.path(),
+            plan(&key, SearchPublicationMode::ReuseFresh),
+            SearchCoordinationLimits::default(),
+            || Ok(snapshot(1)),
+            |_, _, _, _| Ok(SearchUpdateBuild::Publish),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SearchArtifactError::Build(reason) if reason.contains("replacement mode"))
+        );
+
+        let error = coordinate_search_update(
+            dir.path(),
+            plan(&key, SearchPublicationMode::Replace),
+            SearchCoordinationLimits::default(),
+            || Ok(snapshot(1)),
+            |current, _, _, _| {
+                assert!(current.is_none());
+                Ok(SearchUpdateBuild::ReuseCurrent)
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SearchArtifactError::Build(reason) if reason.contains("without a current artifact"))
+        );
+        assert!(current_search_artifact(dir.path(), &key).unwrap().is_none());
+    }
+
+    #[test]
     fn same_key_requests_serialize_and_share_one_lazy_build() {
         let dir = Arc::new(TempDir::new().unwrap());
         let key = Arc::new(key());
@@ -1225,5 +1260,166 @@ mod tests {
             SearchArtifactError::CorruptPrimaryVectors { .. }
         ));
         assert_eq!(std::fs::read(root.join(CURRENT_FILE)).unwrap(), b"corrupt");
+    }
+
+    #[test]
+    fn current_pointer_malformed_state_matrix_is_exact_and_non_mutating() {
+        let key = key();
+        let cases: Vec<Vec<u8>> = vec![
+            b"not-json".to_vec(),
+            br#"{}"#.to_vec(),
+            br#"{"version":"../escape"}"#.to_vec(),
+            br#"{"version":"version-bad/slash"}"#.to_vec(),
+            vec![b'x'; MAX_CURRENT_BYTES + 1],
+        ];
+        for bytes in cases {
+            let dir = TempDir::new().unwrap();
+            let root = key.artifact_root(dir.path());
+            std::fs::create_dir_all(&root).unwrap();
+            let pointer = root.join(CURRENT_FILE);
+            std::fs::write(&pointer, &bytes).unwrap();
+            let result = current_search_artifact(dir.path(), &key);
+            assert!(matches!(
+                result,
+                Err(SearchArtifactError::CorruptManifest { .. })
+                    | Err(SearchArtifactError::ResourceExhausted {
+                        resource: "current_pointer_bytes",
+                        ..
+                    })
+            ));
+            assert_eq!(std::fs::read(&pointer).unwrap(), bytes);
+            assert!(!root.join(VERSIONS_DIR).exists());
+        }
+    }
+
+    #[test]
+    fn rebuildability_primary_wrapping_and_owned_name_matrices_are_total() {
+        let path = PathBuf::from("artifact");
+        let rebuildable = [
+            SearchArtifactError::Missing { path: path.clone() },
+            SearchArtifactError::CorruptManifest {
+                path: path.clone(),
+                reason: "bad".into(),
+            },
+            SearchArtifactError::CorruptDerivedIndex {
+                path: path.clone(),
+                reason: "bad".into(),
+            },
+            SearchArtifactError::IncompatibleManifest {
+                path: path.clone(),
+                found: 2,
+                supported: 1,
+            },
+            SearchArtifactError::Stale {
+                reason: "old".into(),
+            },
+            SearchArtifactError::ResourceExhausted {
+                resource: "manifest_bytes",
+                limit: 1,
+            },
+            SearchArtifactError::ResourceExhausted {
+                resource: "current_pointer_bytes",
+                limit: 1,
+            },
+        ];
+        for error in &rebuildable {
+            assert!(rebuildable_metadata(error), "{error}");
+        }
+        for error in [
+            SearchArtifactError::Cancelled,
+            SearchArtifactError::ConcurrentMutation,
+            SearchArtifactError::ResourceExhausted {
+                resource: "other",
+                limit: 1,
+            },
+            SearchArtifactError::Build("bad".into()),
+        ] {
+            assert!(!rebuildable_metadata(&error), "{error}");
+        }
+
+        let primary = SearchArtifactError::CorruptPrimaryVectors {
+            path: path.clone(),
+            reason: "primary".into(),
+        };
+        assert!(matches!(
+            primary_vector_error(path.clone(), primary),
+            SearchArtifactError::CorruptPrimaryVectors { reason, .. } if reason == "primary"
+        ));
+        assert!(matches!(
+            primary_vector_error(path.clone(), SearchArtifactError::Cancelled),
+            SearchArtifactError::CorruptPrimaryVectors { path: actual, reason }
+                if actual == path && reason.contains("cancelled")
+        ));
+
+        for valid in ["build-A1", "version-z9"] {
+            let prefix = if valid.starts_with("build") {
+                "build-"
+            } else {
+                "version-"
+            };
+            assert!(valid_owned_name(valid, prefix));
+        }
+        for invalid in ["build-", "build-a/b", "build-a_b", "other-a"] {
+            assert!(!valid_owned_name(invalid, "build-"));
+        }
+        for (name, expected) in [
+            ("current.json.A1.tmp", true),
+            ("current.json..tmp", false),
+            ("current.json.a_b.tmp", false),
+            ("current.json.a", false),
+        ] {
+            assert_eq!(valid_pointer_temp(name), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn syncing_build_with_symlink_fails_without_following_or_mutating_target() {
+        use std::os::unix::fs::symlink;
+
+        let build = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let target = external.path().join("secret");
+        std::fs::write(&target, b"caller bytes").unwrap();
+        let link = build.path().join("linked");
+        symlink(&target, &link).unwrap();
+        assert!(matches!(
+            sync_tree(build.path()),
+            Err(SearchArtifactError::Build(_))
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"caller bytes");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn wave10_writer_timeout_and_cleanup_bounds_are_fail_closed() {
+        let project = TempDir::new().unwrap();
+        let root = key().artifact_root(project.path());
+        std::fs::create_dir_all(&root).unwrap();
+        let first =
+            SearchWriterLock::acquire(&root, SearchCoordinationLimits::default(), &mut || Ok(()))
+                .unwrap();
+        let zero_wait = SearchCoordinationLimits {
+            lock_timeout: Duration::ZERO,
+            lock_poll_interval: Duration::ZERO,
+            ..SearchCoordinationLimits::default()
+        };
+        assert!(matches!(
+            SearchWriterLock::acquire(&root, zero_wait, &mut || Ok(())),
+            Err(SearchArtifactError::Lock { .. })
+        ));
+        drop(first);
+
+        let cleanup = project.path().join("indexes/search/owned");
+        std::fs::create_dir_all(&cleanup).unwrap();
+        std::fs::write(cleanup.join("caller"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_search_builds(project.path(), 0),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "cleanup_entries",
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(cleanup.join("caller")).unwrap(), b"preserve");
     }
 }

@@ -530,6 +530,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wave10_validity_identity_guards_reject_nil_operation_actor_and_filter_ids() {
+        let nil_operation = WriteContext {
+            operation_uuid: OperationId(Uuid::nil()),
+            actor_uuid: None,
+        };
+        assert_eq!(
+            validate_context(&nil_operation).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+        let nil_actor = WriteContext {
+            operation_uuid: OperationId(uuid7(90)),
+            actor_uuid: Some(Uuid::nil()),
+        };
+        assert_eq!(
+            validate_context(&nil_actor).unwrap_err().code(),
+            "GF_VALIDATION"
+        );
+
+        let graph = GraphForge::new(None).unwrap();
+        let error = graph
+            .list_assertion_validity(ListAssertionValidityRequest {
+                assertion_uuid: Some(Uuid::nil()),
+                page: PageRequest::default(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert_eq!(conflict("changed").code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert_eq!(not_found("assertion").code(), "GF_NOT_FOUND");
+    }
+
     fn enable(graph: &GraphForge, capability_id: CapabilityId, seed: u8) {
         graph
             .enable_capability(EnableCapabilityRequest {

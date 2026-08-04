@@ -363,6 +363,7 @@ fn source(reason: impl Into<String>) -> SearchArtifactError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::HashMap;
 
     use graphforge_core::uuid::Uuid;
@@ -376,6 +377,43 @@ mod tests {
         let mut bytes = [0_u8; 16];
         bytes[15] = value;
         Uuid::from_bytes(bytes)
+    }
+
+    #[test]
+    fn property_normalization_and_source_byte_accounting_are_exact() {
+        assert_eq!(
+            normalize_properties(
+                &[" title ".into(), "body".into(), "title".into()],
+                TextSearchLimits::default()
+            )
+            .unwrap(),
+            ["body", "title"]
+        );
+        for invalid_name in ["", "node_uuid", "line\nbreak"] {
+            assert!(matches!(
+                normalize_properties(&[invalid_name.into()], TextSearchLimits::default()),
+                Err(SearchArtifactError::InvalidSelector { .. })
+            ));
+        }
+
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.parquet");
+        let mut total = 7;
+        add_source_bytes(&missing, &mut total, TextSearchLimits::default()).unwrap();
+        assert_eq!(total, 7);
+        let source = dir.path().join("source.parquet");
+        std::fs::write(&source, b"four").unwrap();
+        add_source_bytes(&source, &mut total, TextSearchLimits::default()).unwrap();
+        assert_eq!(total, 11);
+        let mut constrained = TextSearchLimits::default();
+        constrained.source_bytes = 3;
+        assert!(matches!(
+            add_source_bytes(&source, &mut 0, constrained),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -493,5 +531,147 @@ mod tests {
             project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || Ok(())),
             Err(SearchArtifactError::SourceSnapshot { .. })
         ));
+    }
+
+    #[test]
+    fn explicit_selection_filters_fields_and_property_row_budget_is_enforced() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        let selected = uuid(1);
+        writer.create_node(selected, TypeId(7)).unwrap();
+        writer
+            .set_properties(
+                &selected,
+                Some("Person"),
+                HashMap::from([
+                    ("name".to_owned(), IrLiteral::Str("Alice".to_owned())),
+                    ("bio".to_owned(), IrLiteral::Str("Engineer".to_owned())),
+                    ("score".to_owned(), IrLiteral::Int(9)),
+                ]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let projection = project_text_source(
+            dir.path(),
+            7,
+            Some(&["name".to_owned(), "absent".to_owned()]),
+            TextSearchLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(projection.properties, ["absent", "name"]);
+        assert_eq!(projection.documents.len(), 1);
+        assert_eq!(projection.documents[0].fields.len(), 1);
+        assert_eq!(projection.documents[0].fields["name"], "Alice");
+
+        let mut limits = TextSearchLimits::default();
+        limits.property_rows = 0;
+        assert!(matches!(
+            project_text_source(dir.path(), 7, None, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_property_rows",
+                limit: 0,
+            })
+        ));
+    }
+
+    #[test]
+    fn selector_validation_canonicalizes_safe_names_and_rejects_unsafe_bounds() {
+        let limits = TextSearchLimits::default();
+        assert_eq!(
+            normalize_properties(&[" z ".to_owned(), "a".to_owned(), "z".to_owned()], limits)
+                .unwrap(),
+            ["a", "z"]
+        );
+        for properties in [
+            Vec::<String>::new(),
+            vec![String::new()],
+            vec!["node_uuid".to_owned()],
+            vec!["line\nbreak".to_owned()],
+        ] {
+            assert!(matches!(
+                normalize_properties(&properties, limits),
+                Err(SearchArtifactError::InvalidSelector { .. })
+            ));
+        }
+
+        let mut bounded = limits;
+        bounded.selected_properties = 1;
+        assert!(matches!(
+            normalize_properties(&["a".to_owned(), "b".to_owned()], bounded),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_selected_properties",
+                limit: 1,
+            })
+        ));
+        bounded = limits;
+        bounded.selector_bytes = 2;
+        assert!(matches!(
+            normalize_properties(&["long".to_owned()], bounded),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_selector_bytes",
+                limit: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn source_byte_accounting_handles_missing_files_limits_and_overflow() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing");
+        let mut total = 7;
+        add_source_bytes(&missing, &mut total, TextSearchLimits::default()).unwrap();
+        assert_eq!(total, 7);
+
+        let file = dir.path().join("source");
+        std::fs::write(&file, b"abc").unwrap();
+        let mut limits = TextSearchLimits::default();
+        limits.source_bytes = 2;
+        total = 0;
+        assert!(matches!(
+            add_source_bytes(&file, &mut total, limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                limit: 2,
+            })
+        ));
+
+        total = u64::MAX;
+        assert!(matches!(
+            add_source_bytes(&file, &mut total, TextSearchLimits::default()),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "text_source_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_is_observed_during_topology_and_property_projection() {
+        let dir = TempDir::new().unwrap();
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Strict, 1).unwrap();
+        let node = uuid(1);
+        writer.create_node(node, TypeId(1)).unwrap();
+        writer
+            .set_properties(
+                &node,
+                Some("Person"),
+                HashMap::from([("name".to_owned(), IrLiteral::Str("Alice".to_owned()))]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let calls = Cell::new(0_usize);
+        let result = project_text_source(dir.path(), 1, None, TextSearchLimits::default(), || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 6 {
+                Err(SearchArtifactError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(SearchArtifactError::Cancelled)));
+        assert_eq!(calls.get(), 6);
     }
 }

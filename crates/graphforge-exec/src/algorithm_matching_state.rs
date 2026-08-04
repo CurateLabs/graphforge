@@ -1515,6 +1515,55 @@ mod tests {
     }
 
     #[test]
+    fn matching_state_boundaries_are_exact_and_queue_is_idempotent() {
+        let mut state = AlternatingDualState::new(3, &[]).unwrap();
+        assert!(state.require_vertex(0).is_ok());
+        assert_eq!(
+            state.require_vertex(3).unwrap_err(),
+            execution("matching vertex index is out of bounds")
+        );
+        state.outer_queue.clear();
+        state.queued.fill(false);
+        state.enqueue(1);
+        state.enqueue(1);
+        assert_eq!(state.outer_queue.iter().copied().collect::<Vec<_>>(), [1]);
+        assert!(state.queued[1]);
+
+        assert_eq!(
+            state.mate_pair(1, 1, 0).unwrap_err(),
+            execution("matching mates must be distinct and free")
+        );
+        state.mate_pair(0, 1, 7).unwrap();
+        assert_eq!(state.vertices[0].mate, Some((1, 7)));
+        assert_eq!(state.vertices[1].mate, Some((0, 7)));
+        assert_eq!(
+            state.mate_pair(0, 2, 8).unwrap_err(),
+            execution("matching mates must be distinct and free")
+        );
+
+        for (preferred, forward, reverse, expected) in [
+            (Some(1), true, true, Ok(1)),
+            (Some(-1), true, false, Ok(1)),
+            (None, true, false, Ok(1)),
+            (Some(-1), false, true, Ok(-1)),
+            (Some(1), false, true, Ok(-1)),
+        ] {
+            assert_eq!(
+                select_expansion_direction(preferred, forward, reverse),
+                expected
+            );
+        }
+        assert_eq!(
+            select_expansion_direction(None, true, true).unwrap_err(),
+            execution("expanded blossom parent direction is ambiguous")
+        );
+        assert_eq!(
+            select_expansion_direction(None, false, false).unwrap_err(),
+            execution("expanded blossom directions conflict with matching parity")
+        );
+    }
+
+    #[test]
     fn exact_dyadic_halves_below_subnormal_and_normalizes_cancellation() {
         let smallest = exact(&[f64::from_bits(1)]);
         let mut half = smallest.clone();

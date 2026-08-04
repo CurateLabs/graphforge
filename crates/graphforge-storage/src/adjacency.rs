@@ -1152,6 +1152,74 @@ mod tests {
             neighbor_ids: vec![9],
         };
         assert!(entries_from_out_csr(&descending).is_none());
+
+        let mismatched_columns = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![7],
+            neighbor_ids: vec![],
+        };
+        assert!(entries_from_out_csr(&mismatched_columns).is_none());
+
+        let missing_offsets = CsrIndex {
+            offsets: vec![],
+            edge_ids: vec![],
+            neighbor_ids: vec![],
+        };
+        assert_eq!(entries_from_out_csr(&missing_offsets), Some(Vec::new()));
+    }
+
+    #[test]
+    fn wave10_effective_entry_decode_rejects_malformed_csr_bounds() {
+        for malformed in [
+            CsrIndex {
+                offsets: vec![0, 2],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![1, 0],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![0, 1],
+                edge_ids: vec![1],
+                neighbor_ids: vec![],
+            },
+        ] {
+            assert!(entries_from_out_csr(&malformed).is_none());
+        }
+    }
+
+    #[test]
+    fn public_csr_writer_rejects_every_inconsistent_topology_shape_without_file() {
+        let dir = TempDir::new().unwrap();
+        let path = csr_path(dir.path(), "BROKEN", Direction::Out);
+        for malformed in [
+            CsrIndex {
+                offsets: vec![],
+                edge_ids: vec![],
+                neighbor_ids: vec![],
+            },
+            CsrIndex {
+                offsets: vec![0, 2],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![0, 1],
+                edge_ids: vec![1],
+                neighbor_ids: vec![],
+            },
+            CsrIndex {
+                offsets: vec![1],
+                edge_ids: vec![],
+                neighbor_ids: vec![],
+            },
+        ] {
+            assert_eq!(write_csr(&path, &malformed).unwrap_err().code(), "GF_IO");
+            assert!(!path.exists());
+        }
     }
 
     #[test]
@@ -1686,6 +1754,42 @@ mod tests {
     }
 
     #[test]
+    fn inspection_distinguishes_manifest_union_absence_and_union_corruption_after_reopen() {
+        for case in ["manifest", "missing-union", "corrupt-union"] {
+            let dir = TempDir::new().unwrap();
+            write_diamond(dir.path());
+            build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+            match case {
+                "manifest" => std::fs::write(manifest_path(dir.path()), b"corrupt").unwrap(),
+                "missing-union" => {
+                    std::fs::remove_file(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out))
+                        .unwrap();
+                }
+                "corrupt-union" => {
+                    std::fs::write(
+                        csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out),
+                        b"corrupt",
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let inspection = inspect_adjacency_index(dir.path()).unwrap();
+            assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+            assert_eq!(
+                inspection.reason,
+                Some(if case == "missing-union" {
+                    AdjacencyFreshnessReason::MissingCsr
+                } else {
+                    AdjacencyFreshnessReason::UnreadableArtifact
+                })
+            );
+            assert_eq!(inspection.artifact_fingerprint, None);
+        }
+    }
+
+    #[test]
     fn inspection_accepts_only_a_complete_delta_chain_as_current() {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
@@ -1698,6 +1802,74 @@ mod tests {
             inspection.reason,
             Some(AdjacencyFreshnessReason::IncompleteDeltaChain)
         );
+    }
+
+    #[test]
+    fn freshness_vocabulary_and_manifest_generation_failures_are_exact() {
+        assert_eq!(AdjacencyFreshnessState::Current.as_str(), "current");
+        assert_eq!(AdjacencyFreshnessState::Missing.as_str(), "missing");
+        assert_eq!(AdjacencyFreshnessState::Stale.as_str(), "stale");
+        assert_eq!(
+            AdjacencyFreshnessState::Incompatible.as_str(),
+            "incompatible"
+        );
+        for (reason, token) in [
+            (AdjacencyFreshnessReason::NotBuilt, "not_built"),
+            (
+                AdjacencyFreshnessReason::MixedArtifactGeneration,
+                "mixed_artifact_generation",
+            ),
+            (
+                AdjacencyFreshnessReason::IncompleteDeltaChain,
+                "incomplete_delta_chain",
+            ),
+            (AdjacencyFreshnessReason::MissingCsr, "missing_csr"),
+            (
+                AdjacencyFreshnessReason::UnreadableArtifact,
+                "unreadable_artifact",
+            ),
+            (
+                AdjacencyFreshnessReason::ContentMismatch,
+                "content_mismatch",
+            ),
+            (
+                AdjacencyFreshnessReason::FutureArtifactGeneration,
+                "future_artifact_generation",
+            ),
+        ] {
+            assert_eq!(reason.as_str(), token);
+        }
+
+        let mixed = TempDir::new().unwrap();
+        write_diamond(mixed.path());
+        build_adjacency_index(mixed.path(), BUILD_TS).unwrap();
+        let mut manifest = read_manifest(mixed.path()).unwrap();
+        manifest[0].topology_generation += 1;
+        write_manifest(mixed.path(), &manifest).unwrap();
+        let inspection = inspect_adjacency_index(mixed.path()).unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(AdjacencyFreshnessReason::MixedArtifactGeneration)
+        );
+        assert_eq!(inspection.artifact_generation, None);
+
+        let future = TempDir::new().unwrap();
+        write_diamond(future.path());
+        build_adjacency_index(future.path(), BUILD_TS).unwrap();
+        let mut manifest = read_manifest(future.path()).unwrap();
+        for row in &mut manifest {
+            row.topology_generation += 1;
+        }
+        write_manifest(future.path(), &manifest).unwrap();
+        let inspection = inspect_adjacency_index(future.path()).unwrap();
+        assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(AdjacencyFreshnessReason::FutureArtifactGeneration)
+        );
+        assert_eq!(inspection.artifact_generation, Some(2));
+        assert_eq!(inspection.artifact_fingerprint, None);
     }
 
     #[test]
@@ -1846,5 +2018,33 @@ mod tests {
             Some(inspection.source_generation)
         );
         assert!(inspection.artifact_fingerprint.is_some());
+    }
+
+    #[test]
+    fn wave13_csr_io_rejects_parentless_destination_and_wrong_arrow_schema() {
+        let empty = CsrIndex {
+            offsets: vec![0],
+            edge_ids: vec![],
+            neighbor_ids: vec![],
+        };
+        assert!(write_csr(Path::new("/"), &empty).is_err());
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("wrong-schema.arrow");
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "wrong",
+            DataType::UInt64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(UInt64Array::from(vec![1]))],
+        )
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = FileWriter::try_new(file, &schema).unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        assert!(read_csr(&path).is_err());
     }
 }

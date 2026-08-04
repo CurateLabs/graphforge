@@ -619,4 +619,21 @@ mod tests {
             Err(KnowledgeError::Conflict("status_event_uuid"))
         ));
     }
+
+    #[test]
+    fn assertion_status_registry_is_closed_and_terminal_only_for_superseded() {
+        let values = [
+            AssertionStatus::Hypothesis,
+            AssertionStatus::Supported,
+            AssertionStatus::Refuted,
+            AssertionStatus::Disputed,
+            AssertionStatus::Retracted,
+            AssertionStatus::Superseded,
+        ];
+        for value in values {
+            assert_eq!(AssertionStatus::parse(value.as_str()).unwrap(), value);
+            assert_eq!(value.is_terminal(), value == AssertionStatus::Superseded);
+        }
+        assert!(AssertionStatus::parse("unknown").is_err());
+    }
 }

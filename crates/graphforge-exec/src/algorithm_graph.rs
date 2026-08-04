@@ -102,6 +102,27 @@ pub(crate) struct AdjacencyGraph {
 }
 
 impl AdjacencyGraph {
+    #[cfg(test)]
+    pub(crate) fn malformed_for_defensive_tests(
+        directed: bool,
+        node_ids: Vec<u64>,
+        node_uuid_by_id: HashMap<u64, [u8; 16]>,
+        neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
+    ) -> Self {
+        let node_id_by_uuid = node_uuid_by_id
+            .iter()
+            .map(|(node_id, uuid)| (*uuid, *node_id))
+            .collect();
+        Self {
+            directed,
+            node_ids,
+            node_uuid_by_id,
+            node_id_by_uuid,
+            neighbors,
+            node_vectors: HashMap::new(),
+        }
+    }
+
     /// Fingerprint public UUID topology without execution surrogates.
     pub(crate) fn projection_fingerprint(&self) -> Result<AlgorithmProjectionFingerprint, GfError> {
         let mut nodes = self.node_uuids().collect::<Vec<_>>();
@@ -1182,6 +1203,44 @@ mod tests {
 
     const TS: i64 = 1_700_000_000_000_000;
 
+    #[test]
+    fn graph_feature_matrix_and_numeric_conversion_boundaries_are_exact() {
+        let mut graph = AdjacencyGraph::from_resolved_projection(ResolvedGraphProjection {
+            directed: true,
+            nodes: vec![[1; 16], [2; 16]],
+            edges: vec![ResolvedGraphEdge {
+                edge_uuid: [3; 16],
+                source_uuid: [1; 16],
+                target_uuid: [2; 16],
+                weight: 1.0,
+            }],
+        })
+        .unwrap();
+        assert_eq!(graph.node_ids(), &[0, 1]);
+        assert_eq!(graph.node_id(&[1; 16]), Some(0));
+        assert_eq!(graph.node_uuid(1), Some([2; 16]));
+        assert!(graph.node_vector(0).is_none());
+        assert!(!graph.is_empty());
+        assert_eq!(graph.edge_entry_count(), 1);
+
+        let error = graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap_err();
+        assert!(error.to_string().contains("feature matrix"));
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0]), (1, vec![2.0])]))
+            .unwrap();
+        assert_eq!(graph.node_vector(1), Some([2.0].as_slice()));
+
+        let exact = 1_i64 << 53;
+        assert_eq!(exact_i64_as_f64(exact), Some(exact as f64));
+        assert_eq!(exact_i64_as_f64(-exact), Some(-(exact as f64)));
+        assert_eq!(exact_i64_as_f64(exact + 1), None);
+        assert_eq!(exact_u64_as_f64(1_u64 << 53), Some((1_u64 << 53) as f64));
+        assert_eq!(exact_u64_as_f64((1_u64 << 53) + 1), None);
+        assert!(storage_error("sentinel").to_string().contains("sentinel"));
+    }
+
     struct Fixture {
         dir: TempDir,
         uuids: [Uuid; 4],
@@ -1248,6 +1307,7 @@ mod tests {
                             "side".to_owned(),
                             IrLiteral::Str(if index < 2.0 { "left" } else { "right" }.into()),
                         ),
+                        ("score".to_owned(), IrLiteral::Float(index + 1.0)),
                     ]),
                 )
                 .unwrap();
@@ -1625,6 +1685,7 @@ mod tests {
         assert!(graph.is_empty());
         assert!(graph.neighbors(42).is_empty());
         load_node_vectors(&mut graph, dir.path(), &[], "features").unwrap();
+        load_node_feature_properties(&mut graph, dir.path(), &["features".into()]).unwrap();
     }
 
     #[test]
@@ -1693,6 +1754,150 @@ mod tests {
                 .map(|&node_id| graph.node_vector(node_id).unwrap().to_vec())
                 .collect::<Vec<_>>(),
             before
+        );
+    }
+
+    #[test]
+    fn graph_native_loaders_reject_conflicting_stems_and_ragged_features() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            fixture.dir.path(),
+            "Other",
+            &HashMap::from([(
+                to_bytes(&fixture.uuids[0]),
+                HashMap::from([
+                    (
+                        "features".into(),
+                        IrLiteral::List(vec![IrLiteral::Float(99.0)]),
+                    ),
+                    ("score".into(), IrLiteral::Float(99.0)),
+                ]),
+            )]),
+        )
+        .unwrap();
+
+        for error in [
+            load_node_vectors(
+                &mut graph,
+                fixture.dir.path(),
+                &["Person".into(), "Other".into()],
+                "features",
+            )
+            .unwrap_err(),
+            load_node_numeric_property(&graph, fixture.dir.path(), "score").unwrap_err(),
+            load_node_feature_properties(&mut graph, fixture.dir.path(), &["features".into()])
+                .unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("conflicting"), "{error}");
+        }
+
+        let ragged = self::fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(ragged.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut ragged_graph = export_adjacency(
+            &provider,
+            ragged.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            ragged.dir.path(),
+            "Person",
+            &HashMap::from([(
+                to_bytes(&ragged.uuids[1]),
+                HashMap::from([(
+                    "features".into(),
+                    IrLiteral::List(vec![IrLiteral::Float(1.0)]),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let error = load_node_feature_properties(
+            &mut ragged_graph,
+            ragged.dir.path(),
+            &["features".into()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("width"), "{error}");
+    }
+
+    #[test]
+    fn vector_loader_ignores_property_rows_for_unselected_nodes() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            fixture.dir.path(),
+            "Foreign",
+            &HashMap::from([(
+                to_bytes(&new_v7()),
+                HashMap::from([(
+                    "foreign".into(),
+                    IrLiteral::List(vec![IrLiteral::Float(1.0)]),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let error = load_node_vectors(
+            &mut graph,
+            fixture.dir.path(),
+            &["Foreign".into()],
+            "foreign",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing vector property"));
+    }
+
+    #[test]
+    fn scalar_feature_loader_is_ordered_and_rejects_invalid_or_missing_values() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+
+        load_node_scalar_features(&mut graph, fixture.dir.path(), &["score".into()]).unwrap();
+        for (index, &node_id) in fixture.ids.iter().enumerate() {
+            let index = f64::from(u32::try_from(index).unwrap());
+            assert_eq!(graph.node_vector(node_id), Some([index + 1.0].as_slice()));
+        }
+        assert!(matches!(
+            load_node_numeric_property(&graph, fixture.dir.path(), "side"),
+            Err(GfError::Validation(_))
+        ));
+        assert!(matches!(
+            load_node_numeric_property(&graph, fixture.dir.path(), "missing"),
+            Err(GfError::Validation(_))
+        ));
+
+        load_node_scalar_features(&mut graph, fixture.dir.path(), &[]).unwrap();
+        assert!(
+            fixture
+                .ids
+                .iter()
+                .all(|&node_id| graph.node_vector(node_id).is_none())
         );
     }
 
@@ -1939,5 +2144,114 @@ mod tests {
         )
         .unwrap();
         assert_eq!(graph.neighbors(fixture.ids[1]).len(), 2);
+    }
+
+    #[test]
+    fn projection_fingerprint_rejects_corrupt_topology_and_vectors() {
+        let uuid0 = u128::from(10_u8).to_be_bytes();
+        let uuid1 = u128::from(11_u8).to_be_bytes();
+        let edge_uuid = u128::from(12_u8).to_be_bytes();
+        let base = || AdjacencyGraph {
+            directed: true,
+            node_ids: vec![0, 1],
+            node_uuid_by_id: HashMap::from([(0, uuid0), (1, uuid1)]),
+            node_id_by_uuid: HashMap::from([(uuid0, 0), (uuid1, 1)]),
+            neighbors: HashMap::from([(
+                0,
+                vec![AlgorithmEdge {
+                    edge_id: 0,
+                    neighbor_id: 1,
+                    edge_uuid,
+                    weight: 2.5,
+                }],
+            )]),
+            node_vectors: HashMap::new(),
+        };
+
+        let valid = base().projection_fingerprint().expect("valid projection");
+        assert_ne!(valid.as_bytes(), &[0; 32]);
+
+        let mut missing_target = base();
+        missing_target.neighbors.get_mut(&0).unwrap()[0].neighbor_id = 9;
+        assert_eq!(
+            missing_target
+                .projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm projection target has no UUID identity"
+        );
+
+        let mut non_finite = base();
+        non_finite.neighbors.get_mut(&0).unwrap()[0].weight = f64::NAN;
+        assert_eq!(
+            non_finite.projection_fingerprint().unwrap_err().to_string(),
+            "execution error: algorithm projection edge weight is not finite"
+        );
+
+        let mut unmirrored = base();
+        unmirrored.directed = false;
+        assert_eq!(
+            unmirrored.projection_fingerprint().unwrap_err().to_string(),
+            "execution error: undirected algorithm projection edge is missing its mirrored adjacency"
+        );
+
+        let mut vectors = base();
+        vectors.node_vectors.insert(0, vec![1.0, 2.0]);
+        vectors.node_vectors.insert(1, vec![3.0, 4.0]);
+        let fingerprint = vectors
+            .descriptor_projection_fingerprint()
+            .expect("finite descriptor projection");
+        assert_ne!(fingerprint.as_bytes(), valid.as_bytes());
+
+        vectors.node_vectors.get_mut(&1).unwrap()[0] = f64::INFINITY;
+        assert_eq!(
+            vectors
+                .descriptor_projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm vector projection contains a non-finite value"
+        );
+        vectors.node_vectors.remove(&1);
+        vectors.node_vectors.insert(9, vec![1.0]);
+        assert_eq!(
+            vectors
+                .descriptor_projection_fingerprint()
+                .unwrap_err()
+                .to_string(),
+            "execution error: algorithm vector projection has no UUID identity"
+        );
+    }
+
+    #[test]
+    fn numeric_projection_accepts_every_supported_arrow_primitive_width() {
+        use arrow::array::{
+            Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, StringArray,
+            UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        };
+
+        let arrays: Vec<(Box<dyn Array>, f64)> = vec![
+            (Box::new(Float64Array::from(vec![1.5])), 1.5),
+            (Box::new(Float32Array::from(vec![2.5])), 2.5),
+            (Box::new(Int64Array::from(vec![3])), 3.0),
+            (Box::new(Int32Array::from(vec![4])), 4.0),
+            (Box::new(Int16Array::from(vec![5])), 5.0),
+            (Box::new(Int8Array::from(vec![6])), 6.0),
+            (Box::new(UInt64Array::from(vec![7])), 7.0),
+            (Box::new(UInt32Array::from(vec![8])), 8.0),
+            (Box::new(UInt16Array::from(vec![9])), 9.0),
+            (Box::new(UInt8Array::from(vec![10])), 10.0),
+        ];
+        for (array, expected) in arrays {
+            assert_eq!(numeric_value(array.as_ref(), 0), Some(expected));
+        }
+        assert_eq!(numeric_value(&StringArray::from(vec!["nope"]), 0), None);
+        assert_eq!(
+            numeric_value(&Int64Array::from(vec![(1_i64 << 53) + 1]), 0),
+            None
+        );
+        assert_eq!(
+            numeric_value(&UInt64Array::from(vec![(1_u64 << 53) + 1]), 0),
+            None
+        );
     }
 }

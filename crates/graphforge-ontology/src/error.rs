@@ -122,3 +122,40 @@ pub enum OntologyError {
         to: String,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validation_kind_and_record_display_are_closed_and_stable() {
+        let cases = [
+            (ValidationErrorKind::DuplicateName, "DuplicateName"),
+            (
+                ValidationErrorKind::UnresolvedReference,
+                "UnresolvedReference",
+            ),
+            (ValidationErrorKind::InheritanceCycle, "InheritanceCycle"),
+            (
+                ValidationErrorKind::InverseInconsistency,
+                "InverseInconsistency",
+            ),
+            (
+                ValidationErrorKind::MigrationVersionOrder,
+                "MigrationVersionOrder",
+            ),
+        ];
+        for (kind, token) in cases {
+            assert_eq!(kind.to_string(), token);
+            let error = OntologyValidationError {
+                kind,
+                location: "entity_types[0]".into(),
+                message: "invalid".into(),
+            };
+            assert_eq!(
+                error.to_string(),
+                format!("[{token}] entity_types[0]: invalid")
+            );
+        }
+    }
+}

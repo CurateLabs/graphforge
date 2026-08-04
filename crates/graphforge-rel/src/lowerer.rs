@@ -60,6 +60,19 @@ use crate::expr::{ExprLowerer, LoweringError, VarMap, list_index_range};
 
 const INPUT_ORDER_COLUMN_PREFIX: &str = "__gf_input_order_";
 
+/// Convert an underlying planner error into the relational facade's stable
+/// unsupported-expression diagnostic without duplicating formatting logic at
+/// every builder call site.
+trait MapUnsupportedExpr<T> {
+    fn map_unsupported_expr(self) -> Result<T, LoweringError>;
+}
+
+impl<T, E: std::fmt::Display> MapUnsupportedExpr<T> for Result<T, E> {
+    fn map_unsupported_expr(self) -> Result<T, LoweringError> {
+        self.map_err(|error| LoweringError::UnsupportedExpr(error.to_string()))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GraphPlanLowerer
 // ---------------------------------------------------------------------------
@@ -429,7 +442,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let prop_src = datafusion::datasource::provider_as_source(Arc::new(prop_table));
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         // Snapshot the input's existing qualified columns BEFORE the join, so the
         // projection preserves exactly what `scan` carried (one var for a fresh
@@ -448,7 +461,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let joined = LogicalPlanBuilder::from(scan)
             .join_on(prop_scan, JoinType::Left, vec![join_pred])
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         // Project: every pre-join input column through unchanged, then each
         // property column re-qualified under var_N so `var_N.<prop>` resolves.
@@ -463,7 +476,7 @@ impl<'a> GraphPlanLowerer<'a> {
         LogicalPlanBuilder::from(joined)
             .project(projections)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .map_unsupported_expr()
     }
 
     /// Lower a complete [`GraphPlan`] to a DataFusion [`LogicalPlan`].
@@ -670,7 +683,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let produce_one_row = !ordered.first().copied().is_some_and(is_source_op);
         let mut current = LogicalPlanBuilder::empty(produce_one_row)
             .build()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         for (i, op) in ordered.iter().enumerate() {
             // A `CREATE` with any clause after it feeds a read (RETURN/WITH/…),
@@ -820,9 +833,8 @@ impl<'a> GraphPlanLowerer<'a> {
                 }
                 return LogicalPlanBuilder::from(input)
                     .cross_join(scan)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-                    .build()
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()));
+                    .and_then(LogicalPlanBuilder::build)
+                    .map_unsupported_expr();
             }
             GraphOp::TypedEdgeScan { var, rel_ty } => {
                 return lower_typed_edge_scan(
@@ -901,7 +913,7 @@ impl<'a> GraphPlanLowerer<'a> {
                 return LogicalPlanBuilder::from(input)
                     .filter(predicate)
                     .and_then(LogicalPlanBuilder::build)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()));
+                    .map_unsupported_expr();
             }
             // UNWIND — emit the graphforge-plan stub Extension node (physical execution
             // deferred to M13).  Needs the expression lowerer for `list_expr`.
@@ -1316,7 +1328,7 @@ impl<'a> GraphPlanLowerer<'a> {
         LogicalPlanBuilder::from(input)
             .join(child_plan, join_type, (left_keys, right_keys), None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .map_unsupported_expr()
     }
 
     fn lower_exists_alternatives(
@@ -1367,13 +1379,13 @@ impl<'a> GraphPlanLowerer<'a> {
             let key_plan = LogicalPlanBuilder::from(child_plan)
                 .project(key_projection)
                 .and_then(LogicalPlanBuilder::build)
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+                .map_unsupported_expr()?;
             key_union = Some(match key_union {
                 None => key_plan,
                 Some(union) => LogicalPlanBuilder::from(union)
                     .union(key_plan)
                     .and_then(LogicalPlanBuilder::build)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?,
+                    .map_unsupported_expr()?,
             });
         }
 
@@ -1396,7 +1408,7 @@ impl<'a> GraphPlanLowerer<'a> {
         LogicalPlanBuilder::from(input)
             .join(key_union, join_type, (left_keys, right_keys), None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .map_unsupported_expr()
     }
 
     fn lower_pattern_comprehension_op(
@@ -1451,9 +1463,7 @@ impl<'a> GraphPlanLowerer<'a> {
             .expr_lowerer(&child.exprs, &child_vm)
             .with_input_schema(child_plan.schema().clone())
             .lower(item.expr)?;
-        let element_type = value
-            .get_type(child_plan.schema())
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        let element_type = value.get_type(child_plan.schema()).map_unsupported_expr()?;
         let key_aliases = (0..join_keys.len())
             .map(|idx| format!("__gf_pattern_key_{idx}"))
             .collect::<Vec<_>>();
@@ -1469,7 +1479,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let collected = LogicalPlanBuilder::from(child_plan)
             .aggregate(group_exprs, aggregate_exprs)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         let left_keys = join_keys
             .iter()
@@ -1482,7 +1492,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let joined = LogicalPlanBuilder::from(input)
             .join(collected, JoinType::Left, (left_keys, right_keys), None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         let empty = ScalarValue::List(ScalarValue::new_list(&[], &element_type, true));
         let mut projection = outer_columns;
@@ -1496,7 +1506,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let result = LogicalPlanBuilder::from(joined)
             .project(projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         var_map.insert(output, output_alias);
         Ok(result)
     }
@@ -1548,10 +1558,7 @@ impl<'a> GraphPlanLowerer<'a> {
             .expr_lowerer(exprs, var_map)
             .with_input_schema(input.schema().clone())
             .lower(list_expr)?;
-        let DataType::List(item) = list
-            .get_type(input.schema())
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        else {
+        let DataType::List(item) = list.get_type(input.schema()).map_unsupported_expr()? else {
             return Err(LoweringError::InvalidType(
                 "nested pattern comprehension source must be a list".into(),
             ));
@@ -1567,7 +1574,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let indexed = LogicalPlanBuilder::from(input)
             .project(indexed_projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         let mut index_projection = plan_columns(&indexed);
         index_projection
@@ -1575,7 +1582,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let with_indices = LogicalPlanBuilder::from(indexed.clone())
             .project(index_projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         let index_field = Field::new(INDEX, DataType::Int64, true);
         let expanded = LogicalPlan::Extension(Extension {
             node: Arc::new(UnwindNode::new(
@@ -1599,7 +1606,7 @@ impl<'a> GraphPlanLowerer<'a> {
         let expanded = LogicalPlanBuilder::from(expanded)
             .project(element_projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         var_map.insert(loop_var, loop_alias.clone());
 
         let matched =
@@ -1619,16 +1626,14 @@ impl<'a> GraphPlanLowerer<'a> {
                 .lower(expr)?,
             None => DfExpr::Column(Column::new(Some(loop_alias.as_str()), "node_uuid")),
         };
-        let element_type = value
-            .get_type(filtered.schema())
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        let element_type = value.get_type(filtered.schema()).map_unsupported_expr()?;
         let output_alias = format!("__gf_list_pattern_{}", output.0);
         let ordered = array_agg(value)
             .order_by(vec![
                 DfExpr::Column(Column::from_name(INDEX)).sort(true, true),
             ])
             .build()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
+            .map_unsupported_expr()?
             .alias(&output_alias);
         let collected = LogicalPlanBuilder::from(filtered)
             .aggregate(
@@ -1640,7 +1645,7 @@ impl<'a> GraphPlanLowerer<'a> {
                 vec![ordered],
             )
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         let joined = LogicalPlanBuilder::from(indexed)
             .join(
                 collected,
@@ -1655,7 +1660,7 @@ impl<'a> GraphPlanLowerer<'a> {
                 None,
             )
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         let empty = ScalarValue::List(ScalarValue::new_list(&[], &element_type, true));
         let null = ScalarValue::new_null_list(element_type, true, 1);
@@ -1667,14 +1672,14 @@ impl<'a> GraphPlanLowerer<'a> {
             DfExpr::Column(Column::from_name(output_alias.clone())),
             DfExpr::Literal(empty, None),
         ]))
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
+        .map_unsupported_expr()?
         .alias(&output_alias);
         let mut final_projection = outer_columns;
         final_projection.push(result_list);
         let result = LogicalPlanBuilder::from(joined)
             .project(final_projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         var_map.insert(output, output_alias);
         Ok(result)
     }
@@ -1892,9 +1897,8 @@ impl<'a> GraphPlanLowerer<'a> {
         }
         let projected = LogicalPlanBuilder::from(input)
             .project(select)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-            .build()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()?;
         drop(node_shapes);
         if !forwarded_node_shapes.is_empty() {
             self.node_shapes
@@ -1915,9 +1919,8 @@ impl<'a> GraphPlanLowerer<'a> {
                 let df_pred = lowerer.lower(pred)?;
                 LogicalPlanBuilder::from(projected)
                     .filter(df_pred)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-                    .build()
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
+                    .and_then(LogicalPlanBuilder::build)
+                    .map_unsupported_expr()?
             }
             None => projected,
         };
@@ -1985,9 +1988,8 @@ impl<'a> GraphPlanLowerer<'a> {
             }
             LogicalPlanBuilder::from(filtered)
                 .project(final_select)
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-                .build()
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
+                .and_then(LogicalPlanBuilder::build)
+                .map_unsupported_expr()?
         } else {
             filtered
         };
@@ -1995,9 +1997,8 @@ impl<'a> GraphPlanLowerer<'a> {
         if distinct {
             output = LogicalPlanBuilder::from(output)
                 .distinct()
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-                .build()
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+                .and_then(LogicalPlanBuilder::build)
+                .map_unsupported_expr()?;
         }
 
         // 4. Install the new scope: WITH resets it to exactly its aliases, so
@@ -2123,14 +2124,12 @@ impl<'a> GraphPlanLowerer<'a> {
             }
             for (name, expr) in &spec.computed_properties {
                 Self::ensure_created_node_emit_property_name(name)?;
-                let ty = expr
-                    .get_type(input_schema)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+                let ty = expr.get_type(input_schema).map_unsupported_expr()?;
                 push(name, ty, true);
             }
         }
-        let schema = DFSchema::new_with_metadata(qualified, HashMap::new())
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        let schema =
+            DFSchema::new_with_metadata(qualified, HashMap::new()).map_unsupported_expr()?;
         Ok(Arc::new(schema))
     }
 
@@ -2436,9 +2435,8 @@ fn lower_filter(
     let df_pred = lowerer.lower(predicate)?;
     LogicalPlanBuilder::from(input)
         .filter(df_pred)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 fn lower_project(
@@ -2460,16 +2458,14 @@ fn lower_project(
 
     let plan = LogicalPlanBuilder::from(input)
         .project(select_exprs)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
 
     if distinct {
         LogicalPlanBuilder::from(plan)
             .distinct()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-            .build()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .and_then(LogicalPlanBuilder::build)
+            .map_unsupported_expr()
     } else {
         Ok(plan)
     }
@@ -2513,7 +2509,7 @@ fn preserve_collect_order(
     aggregate
         .order_by(input_order.to_vec())
         .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 #[allow(
@@ -2625,9 +2621,8 @@ fn lower_aggregate(
 
     let aggregate = LogicalPlanBuilder::from(input)
         .aggregate(group_exprs, aggr_exprs?)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
     if row_marker_aliases.is_empty() {
         return Ok(aggregate);
     }
@@ -2645,9 +2640,8 @@ fn lower_aggregate(
         .collect::<Vec<_>>();
     LogicalPlanBuilder::from(aggregate)
         .project(visible_columns)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 fn lower_sort(
@@ -2672,9 +2666,8 @@ fn lower_sort(
 
     LogicalPlanBuilder::from(input)
         .sort(sort_exprs?)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 fn lower_limit(count: u64, input: LogicalPlan) -> Result<LogicalPlan, LoweringError> {
@@ -2683,9 +2676,8 @@ fn lower_limit(count: u64, input: LogicalPlan) -> Result<LogicalPlan, LoweringEr
     })?;
     LogicalPlanBuilder::from(input)
         .limit(0, Some(fetch))
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 fn lower_skip(count: u64, input: LogicalPlan) -> Result<LogicalPlan, LoweringError> {
@@ -2694,9 +2686,8 @@ fn lower_skip(count: u64, input: LogicalPlan) -> Result<LogicalPlan, LoweringErr
     })?;
     LogicalPlanBuilder::from(input)
         .limit(skip, None)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()
 }
 
 fn lower_agg_func(
@@ -3051,7 +3042,7 @@ fn filter_node_by_type(
     LogicalPlanBuilder::from(input)
         .filter(array_has(col(format!("{alias}.type_ids")), lit(type_id.0)))
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 fn enrich_bound_node_identity(
@@ -3065,7 +3056,7 @@ fn enrich_bound_node_identity(
     let identity_alias = format!("__gf_identity_{alias}");
     let identity = LogicalPlanBuilder::scan(identity_alias.clone(), node_scan_source(dir), None)
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .map_unsupported_expr()?;
     let joined = LogicalPlanBuilder::from(input.clone())
         .join(
             identity,
@@ -3078,9 +3069,8 @@ fn enrich_bound_node_identity(
             ),
             None,
         )
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .and_then(LogicalPlanBuilder::build)
+        .map_unsupported_expr()?;
     let mut projection = input
         .schema()
         .iter()
@@ -3092,7 +3082,7 @@ fn enrich_bound_node_identity(
     LogicalPlanBuilder::from(joined)
         .project(projection)
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 fn lower_node_scan(
@@ -3110,29 +3100,25 @@ fn lower_node_scan(
         let mut batches = dir
             .map(graphforge_storage::read_nodes)
             .transpose()
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?
+            .map_unsupported_expr()?
             .unwrap_or_default();
         batches.push(batch.clone());
-        let table = MemTable::try_new(batch.schema(), vec![batches])
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        let table = MemTable::try_new(batch.schema(), vec![batches]).map_unsupported_expr()?;
         provider_as_source(Arc::new(table))
     } else {
         node_scan_source(dir)
     };
-    let mut builder = LogicalPlanBuilder::scan(alias.clone(), src, None)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+    let mut builder = LogicalPlanBuilder::scan(alias.clone(), src, None).map_unsupported_expr()?;
 
     if let Some(type_id) = ty {
         use datafusion::functions_nested::expr_fn::array_has;
         use datafusion::logical_expr::{col, lit};
         builder = builder
             .filter(array_has(col(format!("{alias}.type_ids")), lit(type_id.0)))
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
     }
 
-    builder
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+    builder.build().map_unsupported_expr()
 }
 
 fn lower_typed_edge_scan(
@@ -3172,14 +3158,14 @@ fn lower_typed_edge_scan(
         LogicalPlanBuilder::scan(alias, src, None)
             .and_then(|b| b.filter(filter_expr))
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .map_unsupported_expr()
     } else {
         let src = edge_scan_source(dir, rel_name, TYPED_EDGE_SCHEMA.clone(), mode);
         // Use alias as the scan qualifier so downstream join predicates
         // (var_map.get(edge) → "var_N") can resolve edge columns correctly.
         LogicalPlanBuilder::scan(alias, src, None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+            .map_unsupported_expr()
     }
 }
 
@@ -3197,20 +3183,17 @@ fn lower_edge_scan(
     var_map.insert(var, alias.clone());
 
     let src = edge_scan_source(dir, "_exploratory", EXPLORATORY_EDGE_SCHEMA.clone(), mode);
-    let mut builder = LogicalPlanBuilder::scan(alias, src, None)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+    let mut builder = LogicalPlanBuilder::scan(alias, src, None).map_unsupported_expr()?;
 
     if let Some(type_id) = ty
         && let Some(name) = type_id_to_rel_name.get(&type_id.0)
     {
         builder = builder
             .filter(col("rel_type_name").eq(lit(name.as_str())))
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
     }
 
-    builder
-        .build()
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+    builder.build().map_unsupported_expr()
 }
 
 /// Resolve the element column **type** for an `UNWIND <list_expr>` from the
@@ -3617,7 +3600,7 @@ fn lower_var_len_expand(
                     .eq(col(format!("{bound_dst}.node_uuid"))),
             )
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         let traversal_ref = datafusion::common::TableReference::bare(traversal_alias);
         let projection = base
             .schema()
@@ -3637,7 +3620,7 @@ fn lower_var_len_expand(
         base = LogicalPlanBuilder::from(base)
             .project(projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
     }
     if let Some(bound_edge_list) = bound_edge_list {
         let produced = format!(
@@ -3648,7 +3631,7 @@ fn lower_var_len_expand(
         base = LogicalPlanBuilder::from(base)
             .filter(col(bound_edge_list).eq(col(produced)))
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
     }
     // Wrap in one OntologyInferNode per applicable rule (#605); the execution
     // session records a kind="inference" provenance event per rule. Pass-through
@@ -3819,7 +3802,7 @@ fn lower_expand(
                     col(format!("{edge_alias}.src_id")).not_eq(col(format!("{edge_alias}.dst_id"))),
                 )
                 .and_then(LogicalPlanBuilder::build)
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+                .map_unsupported_expr()?;
 
             // DataFusion's `union` DROPS all relation qualifiers and, for
             // same-named columns (`var_0.node_id` and `var_2.node_id` both become
@@ -3847,14 +3830,14 @@ fn lower_expand(
                 LogicalPlanBuilder::from(plan)
                     .project(proj)
                     .and_then(LogicalPlanBuilder::build)
-                    .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+                    .map_unsupported_expr()
             };
             let out_plan = stable(out_plan)?;
             let in_plan = stable(in_plan)?;
             let unioned = LogicalPlanBuilder::from(out_plan)
                 .union(in_plan)
                 .and_then(LogicalPlanBuilder::build)
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+                .map_unsupported_expr()?;
             let projections: Vec<DfExpr> = leg_schema
                 .iter()
                 .enumerate()
@@ -3865,7 +3848,7 @@ fn lower_expand(
             LogicalPlanBuilder::from(unioned)
                 .project(projections)
                 .and_then(LogicalPlanBuilder::build)
-                .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+                .map_unsupported_expr()
         }
     }
 }
@@ -3981,7 +3964,7 @@ fn try_lower_provider_expand(
                     .eq(col(format!("{bound_dst}.node_uuid"))),
             )
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         let traversal_ref = datafusion::common::TableReference::bare(traversal_alias);
         let projection = base
             .schema()
@@ -4001,7 +3984,7 @@ fn try_lower_provider_expand(
         base = LogicalPlanBuilder::from(base)
             .project(projection)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
     }
     Ok(Some(base))
 }
@@ -4088,7 +4071,7 @@ fn expand_single_dir(
     let joined = LogicalPlanBuilder::from(input)
         .join_on(edge_plan, JoinType::Inner, vec![join_pred])
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .map_unsupported_expr()?;
 
     let edge_dst_col = col(
         match (out_direction, bound_dst.as_ref().map(|(_, _, uuid)| *uuid)) {
@@ -4104,7 +4087,7 @@ fn expand_single_dir(
         return LogicalPlanBuilder::from(joined)
             .filter(edge_dst_col.eq(col(format!("{dst_alias}.{dst_field}"))))
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()));
+            .map_unsupported_expr();
     }
 
     // Produce the dst node scan.
@@ -4120,7 +4103,7 @@ fn expand_single_dir(
     LogicalPlanBuilder::from(joined)
         .join_on(dst_plan, JoinType::Inner, vec![join_pred2])
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4164,14 +4147,14 @@ fn expand_bound_edge_single_dir(
     let filtered = LogicalPlanBuilder::from(input)
         .filter(predicate)
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+        .map_unsupported_expr()?;
 
     let edge_dst = col(format!("{edge_alias}.{edge_dst_field}"));
     if let Some(dst_alias) = var_map.get(dst).map(str::to_owned) {
         return LogicalPlanBuilder::from(filtered)
             .filter(edge_dst.eq(col(format!("{dst_alias}.node_id"))))
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()));
+            .map_unsupported_expr();
     }
 
     let dir = target.map(|(d, _)| d);
@@ -4187,7 +4170,7 @@ fn expand_bound_edge_single_dir(
             vec![edge_dst.eq(col(format!("{dst_alias}.node_id")))],
         )
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 /// LEFT-join an edge scan with its persisted properties (#784), the edge
@@ -4271,7 +4254,7 @@ fn join_edge_properties(
         let prop_src = datafusion::datasource::provider_as_source(Arc::new(prop_table));
         let prop_scan = LogicalPlanBuilder::scan(prop_alias.clone(), prop_src, None)
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
 
         // LEFT join: edge ⟕ props ON edge.edge_uuid = props.edge_uuid. For a
         // wildcard edge scan, constrain each property table to its relation so a
@@ -4284,7 +4267,7 @@ fn join_edge_properties(
         joined = LogicalPlanBuilder::from(joined)
             .join_on(prop_scan, JoinType::Left, vec![join_pred])
             .and_then(LogicalPlanBuilder::build)
-            .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))?;
+            .map_unsupported_expr()?;
         for name in prop_cols {
             prop_refs
                 .entry(name.clone())
@@ -4312,7 +4295,7 @@ fn join_edge_properties(
     LogicalPlanBuilder::from(joined)
         .project(projections)
         .and_then(LogicalPlanBuilder::build)
-        .map_err(|e| LoweringError::UnsupportedExpr(e.to_string()))
+        .map_unsupported_expr()
 }
 
 // ---------------------------------------------------------------------------
@@ -4329,6 +4312,18 @@ mod tests {
 
     fn empty_base() -> LogicalPlan {
         LogicalPlanBuilder::empty(false).build().unwrap()
+    }
+
+    #[test]
+    fn unsupported_error_mapping_preserves_success_and_exact_diagnostic() {
+        let success: Result<u8, &str> = Ok(7);
+        assert_eq!(success.map_unsupported_expr().unwrap(), 7);
+
+        let failure: Result<u8, &str> = Err("planner diagnostic: var_9");
+        assert_eq!(
+            failure.map_unsupported_expr().unwrap_err().to_string(),
+            "unsupported expression: planner diagnostic: var_9"
+        );
     }
 
     fn make_catalog_and_lowerer() -> (
@@ -4465,6 +4460,74 @@ mod tests {
     }
 
     #[test]
+    fn with_where_scalar_alias_uses_projected_scope_then_drops_inputs() {
+        let (_dir, catalog, _rc) = make_catalog_and_lowerer();
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let mut builder = GraphPlan::builder("openCypher");
+        let value = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
+        let predicate = builder.push_expr(IrExpr::VarRef(VarId(9)));
+        let plan = builder
+            .push_op(GraphOp::With {
+                items: vec![ProjectItem {
+                    expr: value,
+                    alias: Some("keep".into()),
+                    out_var: Some(VarId(9)),
+                }],
+                distinct: false,
+                where_predicate: Some(predicate),
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(final_projection) = lowered else {
+            panic!("expected final WITH projection");
+        };
+        assert_eq!(final_projection.schema.fields().len(), 1);
+        assert_eq!(final_projection.schema.field(0).name(), "keep");
+        assert!(matches!(
+            final_projection.input.as_ref(),
+            DfLogicalPlan::Filter(_)
+        ));
+    }
+
+    #[test]
+    fn with_where_forwards_complete_node_shape_through_new_scope() {
+        let (_dir, catalog, _rc) = make_catalog_and_lowerer();
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let mut builder = GraphPlan::builder("openCypher");
+        let node = builder.push_expr(IrExpr::VarRef(VarId(0)));
+        let predicate = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
+        let plan = builder
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::With {
+                items: vec![ProjectItem {
+                    expr: node,
+                    alias: Some("n".into()),
+                    out_var: Some(VarId(0)),
+                }],
+                distinct: false,
+                where_predicate: Some(predicate),
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(final_projection) = lowered else {
+            panic!("expected final WITH projection");
+        };
+        assert!(final_projection.schema.fields().len() >= 4);
+        assert!(final_projection.schema.iter().all(|(qualifier, _)| {
+            qualifier.is_some_and(|qualifier| qualifier.table() == "var_0")
+        }));
+        assert!(matches!(
+            final_projection.input.as_ref(),
+            DfLogicalPlan::Filter(_)
+        ));
+    }
+
+    #[test]
     fn aggregate_count_star() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
         let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
@@ -4499,6 +4562,100 @@ mod tests {
             matches!(result, DfLogicalPlan::Aggregate(_)),
             "expected Aggregate, got {result:?}"
         );
+    }
+
+    #[test]
+    fn aggregate_function_argument_contract_matrix_and_specialized_paths() {
+        use datafusion::arrow::datatypes::{DataType, Field, Fields};
+        use datafusion::logical_expr::lit;
+
+        for (function, expected) in [
+            (
+                AggFunc::CountDistinct,
+                "COUNT DISTINCT requires an argument",
+            ),
+            (AggFunc::Sum, "SUM requires an argument"),
+            (AggFunc::SumDistinct, "SUM DISTINCT requires an argument"),
+            (AggFunc::Avg, "AVG requires an argument"),
+            (AggFunc::AvgDistinct, "AVG DISTINCT requires an argument"),
+            (AggFunc::Min, "MIN requires an argument"),
+            (AggFunc::Max, "MAX requires an argument"),
+            (AggFunc::Collect, "COLLECT requires an argument"),
+            (AggFunc::CollectDistinct, "COLLECT requires an argument"),
+            (
+                AggFunc::PercentileDisc,
+                "percentileDisc requires a value argument",
+            ),
+            (
+                AggFunc::PercentileCont,
+                "percentileCont requires a value argument",
+            ),
+        ] {
+            assert_eq!(
+                lower_agg_func(function, None, None, None)
+                    .unwrap_err()
+                    .to_string(),
+                format!("unsupported expression: {expected}")
+            );
+        }
+
+        for function in [AggFunc::PercentileDisc, AggFunc::PercentileCont] {
+            assert!(
+                lower_agg_func(function, Some(lit(1_i64)), None, Some(&DataType::Int64))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("percentile argument")
+            );
+        }
+
+        for function in [
+            AggFunc::Count,
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+        ] {
+            let arg = (function != AggFunc::Count).then(|| lit(1_i64));
+            assert!(lower_agg_func(function, arg, None, Some(&DataType::Int64)).is_ok());
+        }
+        assert!(
+            lower_agg_func(
+                AggFunc::Avg,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&DataType::Null),
+            )
+            .is_ok()
+        );
+        assert!(
+            lower_agg_func(
+                AggFunc::AvgDistinct,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&DataType::Null),
+            )
+            .is_ok()
+        );
+
+        let heterogeneous = DataType::Struct(Fields::from(vec![
+            Field::new("__het_tag", DataType::Int8, false),
+            Field::new("__het_value_0", DataType::Int64, true),
+        ]));
+        for function in [AggFunc::Min, AggFunc::Max] {
+            let expression = lower_agg_func(
+                function,
+                Some(lit(datafusion::scalar::ScalarValue::Null)),
+                None,
+                Some(&heterogeneous),
+            )
+            .unwrap();
+            assert!(format!("{expression}").contains("cypher_"));
+        }
     }
 
     #[test]
@@ -4608,6 +4765,222 @@ mod tests {
             matches!(result, Err(LoweringError::UnsupportedExpr(_))),
             "expected UnsupportedExpr for NodeScan"
         );
+    }
+
+    #[test]
+    fn statement_driver_only_write_forms_are_rejected_by_relational_lowering() {
+        use graphforge_ir::{LabelItem, RemovePropItem, SetMapItem};
+
+        let dir = tempfile::tempdir().unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            None,
+            None,
+            dir.path(),
+            graphforge_core::OntologyMode::Exploratory,
+        );
+
+        let mut set_builder = GraphPlan::builder("openCypher");
+        let map = set_builder.push_expr(IrExpr::MapLiteral(vec![]));
+        let set_map = set_builder
+            .push_op(GraphOp::Set {
+                items: vec![],
+                map_items: vec![SetMapItem {
+                    target: VarId(1),
+                    map,
+                    replace: false,
+                }],
+                label_items: vec![],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&set_map)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+
+        let set_labels = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Set {
+                items: vec![],
+                map_items: vec![],
+                label_items: vec![LabelItem {
+                    target: VarId(1),
+                    labels: vec![TypeId(7)],
+                }],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&set_labels)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+
+        let remove_labels = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Remove {
+                items: Vec::<RemovePropItem>::new(),
+                label_items: vec![LabelItem {
+                    target: VarId(1),
+                    labels: vec![TypeId(7)],
+                }],
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&remove_labels)
+                .unwrap_err()
+                .to_string()
+                .contains("statement driver")
+        );
+    }
+
+    #[test]
+    fn correlated_subquery_shapes_fail_with_precise_contract_errors() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+
+        let no_alternatives = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Exists {
+                child: Box::new(
+                    GraphPlan::builder("openCypher")
+                        .push_op(GraphOp::Union {
+                            all: true,
+                            inputs: vec![],
+                        })
+                        .build(),
+                ),
+                negated: false,
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&no_alternatives)
+                .unwrap_err()
+                .to_string()
+                .contains("no alternatives")
+        );
+
+        let uncorrelated = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Exists {
+                child: Box::new(GraphPlan::builder("openCypher").build()),
+                negated: true,
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&uncorrelated)
+                .unwrap_err()
+                .to_string()
+                .contains("share at least one bound variable")
+        );
+
+        let empty_comprehension = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::PatternComprehension {
+                child: Box::new(GraphPlan::builder("openCypher").build()),
+                output: VarId(10),
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&empty_comprehension)
+                .unwrap_err()
+                .to_string()
+                .contains("child is empty")
+        );
+
+        let wrong_terminal = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::PatternComprehension {
+                child: Box::new(
+                    GraphPlan::builder("openCypher")
+                        .push_op(GraphOp::Limit { count: 1 })
+                        .build(),
+                ),
+                output: VarId(10),
+            })
+            .build();
+        assert!(
+            lowerer
+                .lower_plan(&wrong_terminal)
+                .unwrap_err()
+                .to_string()
+                .contains("must end in a value projection")
+        );
+    }
+
+    #[test]
+    fn pattern_comprehension_projection_contract_is_strict() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let cases = [
+            (
+                true,
+                PATTERN_COMPREHENSION_VALUE_ALIAS,
+                "exactly one non-distinct",
+            ),
+            (false, "wrong_alias", "invalid value projection"),
+        ];
+        for (distinct, alias, expected) in cases {
+            let mut child = GraphPlan::builder("openCypher");
+            let value = child.push_expr(IrExpr::Literal(IrLiteral::Int(1)));
+            child.push_op_mut(GraphOp::Project {
+                items: vec![ProjectItem {
+                    expr: value,
+                    alias: Some(alias.into()),
+                    out_var: None,
+                }],
+                distinct,
+            });
+            let plan = GraphPlan::builder("openCypher")
+                .push_op(GraphOp::PatternComprehension {
+                    child: Box::new(child.build()),
+                    output: VarId(11),
+                })
+                .build();
+            assert!(
+                lowerer
+                    .lower_plan(&plan)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_suffix_uses_supplied_schema_and_preserves_scope() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::DFSchema;
+
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let schema = Arc::new(
+            DFSchema::try_from(Schema::new(vec![Field::new(
+                "seed",
+                DataType::Int64,
+                false,
+            )]))
+            .unwrap(),
+        );
+        let mut arena = ExprArena::new();
+        let literal = arena.push(IrExpr::Literal(IrLiteral::Int(9)));
+        let mut vars = VarMap::new();
+        vars.insert(VarId(4), "seed");
+        let suffix = lowerer
+            .lower_terminal_suffix(
+                &[GraphOp::Project {
+                    items: vec![ProjectItem {
+                        expr: literal,
+                        alias: Some("answer".into()),
+                        out_var: Some(VarId(5)),
+                    }],
+                    distinct: false,
+                }],
+                &arena,
+                &mut vars,
+                schema,
+            )
+            .unwrap();
+        assert!(matches!(suffix, DfLogicalPlan::Projection(_)));
+        assert_eq!(vars.get(VarId(5)), Some("answer"));
     }
 
     #[test]
@@ -5072,6 +5445,61 @@ mod tests {
     }
 
     #[test]
+    fn create_followed_by_read_emits_created_rows_for_real_pipeline() {
+        use graphforge_ir::CreateNodeSpec;
+        use graphforge_plan::GraphCreateNode;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            None,
+            None,
+            dir.path(),
+            graphforge_core::OntologyMode::Exploratory,
+        );
+        let mut builder = GraphPlan::builder("openCypher");
+        let returned = builder.push_expr(IrExpr::VarRef(VarId(0)));
+        let plan = builder
+            .push_op(GraphOp::Create {
+                pattern: CreatePattern {
+                    nodes: vec![CreateNodeSpec {
+                        var: VarId(0),
+                        labels: vec![],
+                        properties: None,
+                        is_reference: false,
+                    }],
+                    edges: vec![],
+                },
+            })
+            .push_op(GraphOp::Project {
+                items: vec![ProjectItem {
+                    expr: returned,
+                    alias: Some("created".into()),
+                    out_var: None,
+                }],
+                distinct: false,
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(project) = lowered else {
+            panic!("expected trailing projection");
+        };
+        let DfLogicalPlan::Extension(create) = project.input.as_ref() else {
+            panic!("expected emitting CREATE input");
+        };
+        let create = create
+            .node
+            .as_any()
+            .downcast_ref::<GraphCreateNode>()
+            .expect("GraphCreateNode");
+        assert!(
+            !datafusion::logical_expr::UserDefinedLogicalNodeCore::schema(create)
+                .fields()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn create_without_write_target_errors() {
         // The read-only `new` constructor has no write target.
         let lowerer = GraphPlanLowerer::new(None, None);
@@ -5415,6 +5843,65 @@ mod tests {
         assert!(
             node.targets[0].is_edge,
             "the edge var must resolve to is_edge=true"
+        );
+    }
+
+    #[test]
+    fn write_kind_resolution_covers_node_typed_edge_and_invalid_targets() {
+        use std::collections::HashMap;
+
+        use datafusion::arrow::datatypes::{DataType, Field};
+        use datafusion::common::{DFSchema, TableReference};
+
+        let schema = |names: &[&str]| {
+            Arc::new(
+                DFSchema::new_with_metadata(
+                    names
+                        .iter()
+                        .map(|name| {
+                            (
+                                Some(TableReference::bare("var_7")),
+                                Arc::new(Field::new(*name, DataType::Utf8, true)),
+                            )
+                        })
+                        .collect(),
+                    HashMap::new(),
+                )
+                .unwrap(),
+            )
+        };
+
+        assert!(
+            !GraphPlanLowerer::resolve_write_kind(&schema(&["node_uuid"]), VarId(7), "SET")
+                .unwrap()
+        );
+        assert!(
+            GraphPlanLowerer::resolve_write_kind(
+                &schema(&["edge_uuid", "rel_type_name"]),
+                VarId(7),
+                "REMOVE"
+            )
+            .unwrap()
+        );
+
+        let untyped_edge =
+            GraphPlanLowerer::resolve_write_kind(&schema(&["edge_uuid"]), VarId(7), "SET")
+                .unwrap_err();
+        assert!(untyped_edge.to_string().contains("known relation type"));
+
+        let unbound =
+            GraphPlanLowerer::resolve_write_kind(&schema(&[]), VarId(7), "REMOVE").unwrap_err();
+        assert!(unbound.to_string().contains("must be bound"));
+
+        // A malformed schema carrying both identities resolves as a node, the
+        // same precedence used by DELETE target classification.
+        assert!(
+            !GraphPlanLowerer::resolve_write_kind(
+                &schema(&["node_uuid", "edge_uuid", "rel_type_name"]),
+                VarId(7),
+                "SET"
+            )
+            .unwrap()
         );
     }
 
@@ -5779,5 +6266,402 @@ mod tests {
             err.to_string().contains("unbound") || err.to_string().contains("Unbound"),
             "expected an unbound-variable error, got {err:?}"
         );
+    }
+
+    #[test]
+    fn pure_lowering_helpers_cover_constants_collections_and_aggregate_contracts() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::DFSchema;
+        use datafusion::logical_expr::expr_fn::col;
+        use datafusion::logical_expr::{Operator, lit};
+        use datafusion::scalar::ScalarValue;
+
+        assert_eq!(
+            const_eval_scalar(&lit(ScalarValue::Int64(Some(7)))),
+            Some(ScalarValue::Int64(Some(7)))
+        );
+        assert_eq!(
+            const_eval_scalar(&DfExpr::BinaryExpr(
+                datafusion::logical_expr::BinaryExpr::new(
+                    Box::new(lit(ScalarValue::Int64(Some(2)))),
+                    Operator::Plus,
+                    Box::new(lit(ScalarValue::Int64(Some(3)))),
+                )
+            )),
+            Some(ScalarValue::Int64(Some(5)))
+        );
+        assert_eq!(const_eval_scalar(&col("missing")), None);
+
+        for literal in [
+            IrLiteral::Null,
+            IrLiteral::Int(1),
+            IrLiteral::List(vec![IrLiteral::Int(1)]),
+        ] {
+            assert!(!contains_map_literal(&literal));
+            reject_map_property_value("safe", &literal).unwrap();
+        }
+        for literal in [
+            IrLiteral::Map(vec![]),
+            IrLiteral::List(vec![IrLiteral::Map(vec![])]),
+        ] {
+            assert!(contains_map_literal(&literal));
+            assert!(
+                reject_map_property_value("nested", &literal)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot store map values")
+            );
+        }
+        assert_eq!(var_alias(VarId(42)), "var_42");
+        assert!(build_type_id_map(None).is_empty());
+        assert!(build_entity_id_map(None).is_empty());
+        assert!(build_inference_rules(None).is_empty());
+
+        let schema = Arc::new(
+            DFSchema::try_from(Schema::new(vec![
+                Field::new("small", DataType::new_list(DataType::Utf8, true), true),
+                Field::new(
+                    "large",
+                    DataType::new_large_list(DataType::Int32, true),
+                    true,
+                ),
+                Field::new(
+                    "fixed",
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new_list_field(DataType::Boolean, true)),
+                        2,
+                    ),
+                    true,
+                ),
+            ]))
+            .unwrap(),
+        );
+        for (name, expected) in [
+            ("small", DataType::Utf8),
+            ("large", DataType::Int32),
+            ("fixed", DataType::Boolean),
+        ] {
+            assert_eq!(
+                unwind_element_field(&col(name), &schema, std::iter::empty::<&str>()).data_type(),
+                &expected
+            );
+        }
+        let unknown = unwind_element_field(&col("unknown"), &schema, ["z", "a", "a"]);
+        let DataType::Struct(fields) = unknown.data_type() else {
+            panic!("unknown typed UNWIND must expose a map-shaped element")
+        };
+        assert_eq!(
+            fields.iter().map(|f| f.name().as_str()).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+
+        let value = Some(col("value"));
+        for function in [
+            AggFunc::Count,
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+        ] {
+            assert!(
+                lower_agg_func(function, value.clone(), None, Some(&DataType::Int64)).is_ok(),
+                "{function:?}"
+            );
+        }
+        for function in [AggFunc::PercentileDisc, AggFunc::PercentileCont] {
+            assert!(
+                lower_agg_func(
+                    function,
+                    value.clone(),
+                    Some(lit(ScalarValue::Float64(Some(0.5)))),
+                    Some(&DataType::Int64),
+                )
+                .is_ok()
+            );
+        }
+        assert!(lower_agg_func(AggFunc::Count, None, None, None).is_ok());
+        for function in [
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+            AggFunc::PercentileDisc,
+            AggFunc::PercentileCont,
+        ] {
+            assert!(
+                lower_agg_func(function, None, None, None).is_err(),
+                "{function:?}"
+            );
+        }
+        for function in [AggFunc::Min, AggFunc::Max] {
+            let heterogeneous =
+                DataType::Struct(vec![Field::new("__het_tag", DataType::Int8, false)].into());
+            assert!(
+                format!(
+                    "{}",
+                    lower_agg_func(function, value.clone(), None, Some(&heterogeneous),).unwrap()
+                )
+                .contains("cypher_")
+            );
+        }
+    }
+
+    #[test]
+    fn exact_zero_var_len_unknown_relation_and_directional_join_paths() {
+        let unknown = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Expand {
+                src: VarId(0),
+                edge: VarId(1),
+                dst: VarId(2),
+                rel_ty: Some(TypeId(999_999)),
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(3),
+            })
+            .build();
+        assert!(
+            GraphPlanLowerer::new(None, None)
+                .lower_plan(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("has no known relation name")
+        );
+
+        for direction in [Direction::In, Direction::Undirected] {
+            let plan = GraphPlan::builder("openCypher")
+                .push_op(GraphOp::NodeScan {
+                    var: VarId(0),
+                    ty: None,
+                })
+                .push_op(GraphOp::NodeScan {
+                    var: VarId(2),
+                    ty: None,
+                })
+                .push_op(GraphOp::Expand {
+                    src: VarId(0),
+                    edge: VarId(1),
+                    dst: VarId(2),
+                    rel_ty: None,
+                    dir: direction,
+                    min_hops: 1,
+                    max_hops: Some(1),
+                })
+                .build();
+            let lowered = GraphPlanLowerer::new(None, None).lower_plan(&plan).unwrap();
+            let rendered = lowered.display_indent_schema().to_string();
+            assert!(rendered.contains("Filter"), "{direction:?}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn exact_zero_recursive_plan_reference_and_binding_analysis() {
+        let wanted = VarId(17);
+        let other = VarId(18);
+        let mut referenced_builder = GraphPlan::builder("openCypher");
+        referenced_builder.push_expr(IrExpr::VarRef(wanted));
+        let referenced = referenced_builder.build();
+        let mut unrelated_builder = GraphPlan::builder("openCypher");
+        unrelated_builder.push_expr(IrExpr::VarRef(other));
+        let unrelated = unrelated_builder.build();
+
+        assert!(plan_references_var(&referenced, wanted));
+        assert!(!plan_references_var(&unrelated, wanted));
+
+        let wrappers = [
+            GraphOp::Optional {
+                child: Box::new(referenced.clone()),
+            },
+            GraphOp::Exists {
+                child: Box::new(referenced.clone()),
+                negated: false,
+            },
+            GraphOp::PatternComprehension {
+                child: Box::new(referenced.clone()),
+                output: VarId(20),
+            },
+            GraphOp::ListElementPatternComprehension {
+                list_expr: ExprId(0),
+                loop_var: VarId(21),
+                child: Box::new(referenced.clone()),
+                pattern_output: VarId(22),
+                filter: None,
+                projection: None,
+                output: VarId(23),
+            },
+            GraphOp::Union {
+                all: true,
+                inputs: vec![unrelated.clone(), referenced.clone()],
+            },
+        ];
+        for wrapper in wrappers {
+            let plan = GraphPlan::builder("openCypher").push_op(wrapper).build();
+            assert!(plan_references_var(&plan, wanted));
+        }
+
+        for op in [
+            GraphOp::NodeScan {
+                var: wanted,
+                ty: None,
+            },
+            GraphOp::EdgeScan {
+                var: wanted,
+                ty: None,
+            },
+            GraphOp::TypedEdgeScan {
+                var: wanted,
+                rel_ty: TypeId(1),
+            },
+            GraphOp::Expand {
+                src: other,
+                edge: wanted,
+                dst: VarId(19),
+                rel_ty: None,
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(1),
+            },
+        ] {
+            assert!(graph_op_binds_var(&op, wanted));
+        }
+        assert!(!graph_op_binds_var(
+            &GraphOp::NodeScan {
+                var: other,
+                ty: None,
+            },
+            wanted
+        ));
+
+        let mut outer = VarMap::new();
+        outer.insert(wanted, "outer");
+        assert!(!full_subquery_needs_outer_input(&unrelated, &outer));
+        assert!(full_subquery_needs_outer_input(&referenced, &outer));
+        let mut locally_bound_builder = GraphPlan::builder("openCypher");
+        locally_bound_builder.push_op_mut(GraphOp::NodeScan {
+            var: wanted,
+            ty: None,
+        });
+        locally_bound_builder.push_expr(IrExpr::VarRef(wanted));
+        let locally_bound = locally_bound_builder.build();
+        assert!(!full_subquery_needs_outer_input(&locally_bound, &outer));
+    }
+
+    #[test]
+    fn exact_zero_optional_scope_promotes_only_inner_entity_shapes() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+        let scan = |alias: &str, field: Field| {
+            LogicalPlanBuilder::scan(
+                alias,
+                table_source(Arc::new(Schema::new(vec![field]))),
+                None,
+            )
+            .and_then(LogicalPlanBuilder::build)
+            .unwrap()
+        };
+        let outer = scan("outer_scalar", Field::new("value", DataType::Int64, true));
+        let inner = scan("inner_node", Field::new("node_uuid", DataType::Utf8, false));
+        let promoted = VarId(30);
+        let absent_outer = VarId(31);
+        let mut child_vm = VarMap::new();
+        child_vm.insert(promoted, "inner_node");
+        child_vm.insert(absent_outer, "inner_node");
+        let mut outer_vm = VarMap::new();
+        outer_vm.insert(promoted, "outer_scalar");
+
+        promote_optional_entity_vars(&outer, &inner, &child_vm, &mut outer_vm);
+        assert_eq!(outer_vm.get(promoted), Some("inner_node"));
+        assert_eq!(outer_vm.get(absent_outer), None);
+
+        let already_entity = scan("outer_node", Field::new("node_uuid", DataType::Utf8, false));
+        outer_vm.insert(promoted, "outer_node");
+        promote_optional_entity_vars(&already_entity, &inner, &child_vm, &mut outer_vm);
+        assert_eq!(outer_vm.get(promoted), Some("outer_node"));
+    }
+
+    #[test]
+    fn exact_zero_validation_errors_are_specific_and_non_interpolated() {
+        let lowerer = GraphPlanLowerer::new(None, None);
+        let empty_vm = VarMap::new();
+        let no_alternatives = lowerer
+            .lower_exists_alternatives(&[], false, empty_base(), &empty_vm)
+            .unwrap_err();
+        assert_eq!(
+            no_alternatives.to_string(),
+            "unsupported expression: pattern predicate has no alternatives"
+        );
+
+        let uncorrelated = GraphPlan::builder("openCypher").build();
+        let uncorrelated_error = lowerer
+            .lower_exists_alternatives(&[uncorrelated], true, empty_base(), &empty_vm)
+            .unwrap_err();
+        assert!(
+            uncorrelated_error
+                .to_string()
+                .contains("must share at least one bound variable")
+        );
+
+        let mut arena = ExprArena::new();
+        let not_a_map = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let map_error =
+            eval_map_literal(&lowerer, Some(not_a_map), &arena, &empty_vm, None).unwrap_err();
+        assert!(
+            map_error
+                .to_string()
+                .contains("CREATE properties must be a map literal")
+        );
+        assert_eq!(
+            eval_map_literal(&lowerer, None, &arena, &empty_vm, None).unwrap(),
+            (Vec::new(), Vec::new())
+        );
+
+        let mut edge_vm = VarMap::new();
+        let bound_error = expand_bound_edge_single_dir(
+            VarId(2),
+            Some(TypeId(999_999)),
+            "var_0",
+            "var_1",
+            true,
+            empty_base(),
+            &mut edge_vm,
+            &HashMap::new(),
+            None,
+        )
+        .unwrap_err();
+        assert!(bound_error.to_string().contains("TypeId(999999)"));
+        assert!(bound_error.to_string().contains("no known relation name"));
+    }
+
+    #[test]
+    fn exact_zero_pagination_accepts_platform_boundary_values() {
+        assert!(matches!(
+            lower_limit(0, empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_skip(0, empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_limit(u64::try_from(usize::MAX).unwrap(), empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
+        assert!(matches!(
+            lower_skip(u64::try_from(usize::MAX).unwrap(), empty_base()).unwrap(),
+            DfLogicalPlan::Limit(_)
+        ));
     }
 }

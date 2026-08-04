@@ -229,6 +229,17 @@ mod tests {
     }
 
     #[test]
+    fn create_default_reports_missing_parent_as_storage_without_partial_manifest() {
+        let parent = temp_dir();
+        let missing = parent.join("missing");
+        let error =
+            ProjectManifest::create_default(&missing, "p", "2026-06-02T00:00:00Z").unwrap_err();
+        assert_eq!(error.code(), "GF_IO");
+        assert!(!missing.join(MANIFEST_FILE).exists());
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
     fn effective_mode_is_exploratory_without_ontology() {
         let dir = temp_dir();
         let m = ProjectManifest::create_default(&dir, "p", "2026-06-02T00:00:00Z").unwrap();

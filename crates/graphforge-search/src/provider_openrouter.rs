@@ -768,6 +768,35 @@ mod tests {
     }
 
     #[test]
+    fn fixed_endpoints_and_bounded_serialization_are_pure_and_exact() {
+        assert_eq!(
+            OpenRouterEndpoint::Embeddings.path(),
+            OPENROUTER_EMBEDDINGS_PATH
+        );
+        assert_eq!(OpenRouterEndpoint::Rerank.path(), OPENROUTER_RERANK_PATH);
+        let contract = contract();
+        assert_eq!(
+            serialize_bounded(&contract, &json!({"value": 1}), 64).unwrap(),
+            br#"{"value":1}"#
+        );
+        assert_eq!(
+            serialize_bounded(&contract, &json!({"value": 1}), 2)
+                .unwrap_err()
+                .class(),
+            ProviderFailureClass::ResourceExhausted
+        );
+        let mut body = BoundedBody {
+            bytes: Vec::new(),
+            limit: 2,
+            exhausted: false,
+        };
+        assert_eq!(body.write(b"ok").unwrap(), 2);
+        assert!(body.write(b"!").is_err());
+        assert!(body.exhausted);
+        body.flush().unwrap();
+    }
+
+    #[test]
     fn three_capabilities_use_fixed_strict_wire_contracts_and_canonical_identity() {
         let contract = contract();
         let credential = "private-token";
@@ -1071,6 +1100,38 @@ mod tests {
             .class(),
             ProviderFailureClass::Authentication
         );
+        for credential in ["contains space", "line\nbreak"] {
+            assert_eq!(
+                OpenRouterAdapter::new(
+                    &contract,
+                    credential,
+                    &mut transport,
+                    OpenRouterWireLimits::default(),
+                )
+                .err()
+                .unwrap()
+                .class(),
+                ProviderFailureClass::Authentication
+            );
+        }
+        for limits in [
+            OpenRouterWireLimits {
+                request_bytes: 0,
+                response_bytes: 1,
+            },
+            OpenRouterWireLimits {
+                request_bytes: 1,
+                response_bytes: 0,
+            },
+        ] {
+            assert_eq!(
+                OpenRouterAdapter::new(&contract, "token", &mut transport, limits)
+                    .err()
+                    .unwrap()
+                    .class(),
+                ProviderFailureClass::InvalidRequest
+            );
+        }
 
         struct FailingTransport(OpenRouterTransportError);
         impl OpenRouterTransport for FailingTransport {
@@ -1126,6 +1187,93 @@ mod tests {
         .err()
         .unwrap();
         assert_eq!(error.class(), ProviderFailureClass::Cancelled);
+    }
+
+    #[test]
+    fn adapter_rejects_foreign_provider_and_request_contracts_before_transport() {
+        let contract = contract();
+        let foreign = ProviderModelContract::remote(
+            Some("another-provider"),
+            "vendor/model",
+            "revision",
+            "v1",
+            ProviderCapabilities::new([
+                ProviderCapability::DocumentEmbeddings,
+                ProviderCapability::QueryEmbeddings,
+                ProviderCapability::CandidateReranking,
+            ])
+            .unwrap(),
+            contract.tokenizer().clone(),
+            None,
+        )
+        .unwrap();
+        let mut transport = FakeTransport {
+            expected_credential: "token".into(),
+            calls: VecDeque::new(),
+        };
+        assert_eq!(
+            OpenRouterAdapter::new(
+                &foreign,
+                "token",
+                &mut transport,
+                OpenRouterWireLimits::default(),
+            )
+            .err()
+            .unwrap()
+            .class(),
+            ProviderFailureClass::InvalidRequest
+        );
+
+        let input = [DocumentEmbeddingInput {
+            node_uuid: [1; 16],
+            text: "document",
+            token_count: 1,
+        }];
+        let documents =
+            DocumentEmbeddingRequest::new(&foreign, &input, ProviderRequestLimits::default())
+                .unwrap();
+        let query =
+            QueryEmbeddingRequest::new(&foreign, "query", 1, ProviderRequestLimits::default())
+                .unwrap();
+        let candidates = [RerankCandidate {
+            node_uuid: [1; 16],
+            retrieval_rank: 1,
+            text: "document",
+            token_count: 1,
+        }];
+        let rerank = RerankRequest::new(
+            &foreign,
+            "query",
+            1,
+            &candidates,
+            ProviderRequestLimits::default(),
+        )
+        .unwrap();
+        let mut adapter = OpenRouterAdapter::new(
+            &contract,
+            "token",
+            &mut transport,
+            OpenRouterWireLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(DocumentEmbeddingProvider::contract(&adapter), &contract);
+        assert_eq!(QueryEmbeddingProvider::contract(&adapter), &contract);
+        assert_eq!(CandidateReranker::contract(&adapter), &contract);
+        let document_error = match adapter.provide_documents(&documents, &mut || Ok(())) {
+            Ok(_) => panic!("foreign document contract must fail"),
+            Err(error) => error,
+        };
+        let query_error = match adapter.provide_query(&query, &mut || Ok(())) {
+            Ok(_) => panic!("foreign query contract must fail"),
+            Err(error) => error,
+        };
+        let rerank_error = match adapter.provide_rerank(&rerank, &mut || Ok(())) {
+            Ok(_) => panic!("foreign rerank contract must fail"),
+            Err(error) => error,
+        };
+        for error in [document_error, query_error, rerank_error] {
+            assert_eq!(error.class(), ProviderFailureClass::InvalidRequest);
+        }
     }
 
     #[test]
