@@ -1683,6 +1683,14 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use tempfile::TempDir;
 
+    #[test]
+    fn parquet_and_io_error_helpers_preserve_external_messages() {
+        let parquet = parquet_err("parquet boom");
+        assert!(parquet.to_string().contains("parquet boom"));
+        let io = io_err(&std::io::Error::other("io boom"));
+        assert!(io.to_string().contains("io boom"));
+    }
+
     #[derive(Default)]
     struct Wave12Observer {
         started: std::sync::atomic::AtomicUsize,
