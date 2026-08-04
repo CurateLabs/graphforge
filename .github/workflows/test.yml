@@ -114,7 +114,7 @@ jobs:
           python3 scripts/ci/api-bdd-policy.py --check-issues
           python3 scripts/ci/test-api-bdd-policy.py
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         if: >-
           steps.policy-suites.outputs.release == 'true' ||
           steps.policy-suites.outputs.cli_publish == 'true'
@@ -262,7 +262,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -302,7 +302,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -327,7 +327,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -502,7 +502,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node for cross-package publication tests
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -648,7 +648,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
@@ -767,7 +767,7 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: pnpm
