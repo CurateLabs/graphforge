@@ -1257,6 +1257,86 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rebuildability_primary_wrapping_and_owned_name_matrices_are_total() {
+        let path = PathBuf::from("artifact");
+        let rebuildable = [
+            SearchArtifactError::Missing { path: path.clone() },
+            SearchArtifactError::CorruptManifest {
+                path: path.clone(),
+                reason: "bad".into(),
+            },
+            SearchArtifactError::CorruptDerivedIndex {
+                path: path.clone(),
+                reason: "bad".into(),
+            },
+            SearchArtifactError::IncompatibleManifest {
+                path: path.clone(),
+                found: 2,
+                supported: 1,
+            },
+            SearchArtifactError::Stale {
+                reason: "old".into(),
+            },
+            SearchArtifactError::ResourceExhausted {
+                resource: "manifest_bytes",
+                limit: 1,
+            },
+            SearchArtifactError::ResourceExhausted {
+                resource: "current_pointer_bytes",
+                limit: 1,
+            },
+        ];
+        for error in &rebuildable {
+            assert!(rebuildable_metadata(error), "{error}");
+        }
+        for error in [
+            SearchArtifactError::Cancelled,
+            SearchArtifactError::ConcurrentMutation,
+            SearchArtifactError::ResourceExhausted {
+                resource: "other",
+                limit: 1,
+            },
+            SearchArtifactError::Build("bad".into()),
+        ] {
+            assert!(!rebuildable_metadata(&error), "{error}");
+        }
+
+        let primary = SearchArtifactError::CorruptPrimaryVectors {
+            path: path.clone(),
+            reason: "primary".into(),
+        };
+        assert!(matches!(
+            primary_vector_error(path.clone(), primary),
+            SearchArtifactError::CorruptPrimaryVectors { reason, .. } if reason == "primary"
+        ));
+        assert!(matches!(
+            primary_vector_error(path.clone(), SearchArtifactError::Cancelled),
+            SearchArtifactError::CorruptPrimaryVectors { path: actual, reason }
+                if actual == path && reason.contains("cancelled")
+        ));
+
+        for valid in ["build-A1", "version-z9"] {
+            let prefix = if valid.starts_with("build") {
+                "build-"
+            } else {
+                "version-"
+            };
+            assert!(valid_owned_name(valid, prefix));
+        }
+        for invalid in ["build-", "build-a/b", "build-a_b", "other-a"] {
+            assert!(!valid_owned_name(invalid, "build-"));
+        }
+        for (name, expected) in [
+            ("current.json.A1.tmp", true),
+            ("current.json..tmp", false),
+            ("current.json.a_b.tmp", false),
+            ("current.json.a", false),
+        ] {
+            assert_eq!(valid_pointer_temp(name), expected);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn syncing_build_with_symlink_fails_without_following_or_mutating_target() {

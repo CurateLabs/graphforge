@@ -3331,6 +3331,106 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn assertion_and_algorithm_run_merges_cover_idempotent_append_and_conflict_paths() {
+        let base = fixture();
+        assert_eq!(base.merge(&base).unwrap(), base);
+        let second_id = uuid7(20);
+        let second = AssertionLedger::new(
+            vec![Assertion::new(second_id, "second".into(), uuid7(21), 20).unwrap()],
+            vec![
+                AssertionGraphRef::new(
+                    second_id,
+                    uuid7(22),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let merged = base.merge(&second).unwrap();
+        assert_eq!(merged.assertions.len(), 2);
+        let conflicting = AssertionLedger::new(
+            vec![Assertion::new(uuid7(1), "different".into(), uuid7(2), 10).unwrap()],
+            base.graph_refs.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            base.merge(&conflicting),
+            Err(KnowledgeError::Conflict("assertion_uuid"))
+        ));
+
+        let run = AlgorithmRun::new(
+            uuid7(40),
+            "pagerank".into(),
+            1,
+            1,
+            vec![1],
+            [2; 32],
+            uuid7(41),
+            100,
+        )
+        .unwrap();
+        let started = AlgorithmRunEvent::new(
+            uuid7(42),
+            run.run_uuid,
+            AlgorithmRunState::Started,
+            None,
+            None,
+            100,
+            run.provenance_uuid,
+        )
+        .unwrap();
+        let initial = AlgorithmRunLedger::new(vec![run.clone()], vec![started.clone()]).unwrap();
+        assert_eq!(initial.run(run.run_uuid), Some(&run));
+        assert_eq!(initial.events_for(run.run_uuid), vec![started.clone()]);
+        assert!(initial.terminal_event(run.run_uuid).is_none());
+        assert_eq!(initial.merge(&initial).unwrap(), initial);
+
+        let completed = AlgorithmRunEvent::new(
+            uuid7(43),
+            run.run_uuid,
+            AlgorithmRunState::Completed,
+            Some([3; 32]),
+            None,
+            101,
+            uuid7(44),
+        )
+        .unwrap();
+        let staged =
+            AlgorithmRunLedger::new(vec![run.clone()], vec![started, completed.clone()]).unwrap();
+        let merged = initial.merge(&staged).unwrap();
+        assert_eq!(merged.terminal_event(run.run_uuid), Some(&completed));
+
+        let conflicting_run = AlgorithmRun {
+            algorithm: "hits".into(),
+            ..run.clone()
+        };
+        let conflict = AlgorithmRunLedger {
+            runs: vec![conflicting_run],
+            events: vec![],
+        };
+        assert!(matches!(
+            initial.merge(&conflict),
+            Err(KnowledgeError::Conflict("run_uuid"))
+        ));
+        let conflicting_event = AlgorithmRunEvent {
+            error_code: Some("GF_EXECUTION".into()),
+            state: AlgorithmRunState::Failed,
+            ..completed
+        };
+        let conflict = AlgorithmRunLedger {
+            runs: vec![],
+            events: vec![conflicting_event],
+        };
+        assert!(matches!(
+            merged.merge(&conflict),
+            Err(KnowledgeError::Conflict("event_uuid"))
+        ));
+    }
 }
 pub use belief_projection::{
     ALGORITHM_INTERPRETATION_ATTACHMENT_SCHEMA, BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION,

@@ -1685,4 +1685,162 @@ mod tests {
             ("cancelled", None)
         );
     }
+
+    #[test]
+    fn direct_update_matrix_covers_idempotence_cleanup_capacity_and_policy_resolution() {
+        let limits = EmbeddingRefreshConfigLimits {
+            entries: 1,
+            ..EmbeddingRefreshConfigLimits::default()
+        };
+        let mut config = EmbeddingRefreshConfig::default();
+        assert!(config.is_empty());
+        assert_eq!(config.len(), 0);
+        let project_policy = config.project_policy();
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetProjectPolicy(project_policy),
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: None,
+                },
+                limits,
+            )
+            .unwrap()
+        );
+
+        let policy = EmbeddingRefreshSpacePolicy {
+            proactive: Some(false),
+            debounce: Some(Duration::from_millis(25)),
+        };
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: Some(policy),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert_eq!(config.len(), 1);
+        assert_eq!(config.spaces()[0].policy, Some(policy));
+        let resolved = config.resolved_policy(id(1));
+        assert!(!resolved.proactive);
+        assert_eq!(resolved.debounce, Duration::from_millis(25));
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: Some(policy),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(matches!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(2),
+                    policy: Some(policy),
+                },
+                limits,
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_entries",
+                ..
+            })
+        ));
+
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RecordOutcome {
+                    compatibility_id: id(1),
+                    outcome: outcome(1, 1, 10),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::SetSpacePolicy {
+                    compatibility_id: id(1),
+                    policy: None,
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            config.len(),
+            1,
+            "outcome retains the lineage after policy removal"
+        );
+        assert!(
+            apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RemoveSpace {
+                    compatibility_id: id(1),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(
+            !apply_update(
+                &mut config,
+                EmbeddingRefreshConfigUpdate::RemoveSpace {
+                    compatibility_id: id(1),
+                },
+                limits,
+            )
+            .unwrap()
+        );
+        assert!(config.is_empty());
+
+        let invalid_state = EmbeddingRefreshConfig {
+            project: EmbeddingRefreshProjectPolicy::default(),
+            spaces: BTreeMap::from([(id(1), StoredSpaceState::default())]),
+        };
+        assert!(invalid_state.to_canonical_json(limits).is_err());
+        let too_many = EmbeddingRefreshConfig {
+            project: EmbeddingRefreshProjectPolicy::default(),
+            spaces: BTreeMap::from([
+                (
+                    id(1),
+                    StoredSpaceState {
+                        policy: Some(policy),
+                        last_outcome: None,
+                    },
+                ),
+                (
+                    id(2),
+                    StoredSpaceState {
+                        policy: Some(policy),
+                        last_outcome: None,
+                    },
+                ),
+            ]),
+        };
+        assert!(matches!(
+            too_many.to_canonical_json(limits),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_entries",
+                ..
+            })
+        ));
+    }
 }

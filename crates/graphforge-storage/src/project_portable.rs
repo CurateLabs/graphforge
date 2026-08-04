@@ -1431,4 +1431,35 @@ mod tests {
         assert!(reject_export_destination(&available).is_ok());
         assert!(!available.exists());
     }
+
+    #[test]
+    fn pristine_import_target_requires_exact_layout_and_participant_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let resolved = open_or_initialize_project(root.path()).unwrap();
+        assert!(is_pristine_initialized_target(root.path()).unwrap());
+        assert!(has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+
+        let extra = root.path().join("caller-file");
+        std::fs::write(&extra, b"preserve").unwrap();
+        assert!(!is_pristine_initialized_target(root.path()).unwrap());
+        assert!(!has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+        assert_eq!(
+            directory_names(root.path()).unwrap().last().unwrap(),
+            "generations"
+        );
+        std::fs::remove_file(&extra).unwrap();
+
+        let generation = root
+            .path()
+            .join("generations")
+            .join(resolved.generation_uuid().hyphenated().to_string());
+        let participant = generation.join("participants/workspace/configuration.json");
+        let stable = std::fs::read(&participant).unwrap();
+        std::fs::write(&participant, b"different").unwrap();
+        assert!(is_pristine_initialized_target(root.path()).is_err());
+        std::fs::write(&participant, stable).unwrap();
+
+        let non_project = tempfile::tempdir().unwrap();
+        assert!(!is_pristine_initialized_target(non_project.path()).unwrap());
+    }
 }

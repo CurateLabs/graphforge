@@ -752,6 +752,71 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn provider_checkpoint_and_plan_error_adapters_preserve_exact_domains() {
+        let contract = contract("vendor/model");
+        let mut success_checkpoint = || Ok(());
+        assert_eq!(
+            with_artifact_checkpoint(&contract, &mut success_checkpoint, |checkpoint| {
+                checkpoint()?;
+                Ok(7_u8)
+            })
+            .unwrap(),
+            7
+        );
+
+        let mut cancelled_checkpoint = || Err(SearchArtifactError::Cancelled);
+        let error = with_artifact_checkpoint(&contract, &mut cancelled_checkpoint, |checkpoint| {
+            checkpoint()?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderPublicationError::Artifact(SearchArtifactError::Cancelled)
+        ));
+
+        let mut success_checkpoint = || Ok(());
+        let error = with_artifact_checkpoint(&contract, &mut success_checkpoint, |_| {
+            Err::<(), _>(ProviderError::new(&contract, ProviderFailureClass::Timeout))
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProviderPublicationError::Provider(ref error)
+                if error.class() == ProviderFailureClass::Timeout
+        ));
+
+        for error in [
+            ProviderEmbeddingPlanError::Artifact(SearchArtifactError::Cancelled),
+            ProviderEmbeddingPlanError::Provider(ProviderError::new(
+                &contract,
+                ProviderFailureClass::Authentication,
+            )),
+            ProviderEmbeddingPlanError::Api(GfError::Validation("invalid".into())),
+        ] {
+            let publication = publication_plan_error(error);
+            assert!(matches!(
+                publication,
+                ProviderPublicationError::Artifact(_) | ProviderPublicationError::Provider(_)
+            ));
+        }
+        for error in [
+            ProviderEmbeddingPlanError::Artifact(SearchArtifactError::Cancelled),
+            ProviderEmbeddingPlanError::Provider(ProviderError::new(
+                &contract,
+                ProviderFailureClass::Transport,
+            )),
+            ProviderEmbeddingPlanError::Api(GfError::Validation("invalid".into())),
+        ] {
+            assert!(matches!(
+                plan_artifact_error(error),
+                SearchArtifactError::Cancelled | SearchArtifactError::Build(_)
+            ));
+        }
+        assert!(transaction_time_micros() > 0);
+    }
+
     struct FakeProvider<'a> {
         contract: ProviderModelContract,
         mutate: Option<&'a GraphForge>,

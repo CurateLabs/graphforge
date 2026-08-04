@@ -3274,4 +3274,67 @@ mod tests {
         }
         assert_eq!(read_registry(&root).unwrap(), stable);
     }
+
+    #[test]
+    fn tombstone_identity_revision_and_operation_disjointness_matrix_is_total() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(801), "Deleted"),
+        )
+        .unwrap();
+        delete_checkpoint(
+            directory.path(),
+            &CheckpointDeleteRequest {
+                operation_uuid: Uuid::from_u128(802),
+                name: "Deleted".into(),
+                actor_uuid: None,
+            },
+        )
+        .unwrap();
+        let root = directory.path().join(CHECKPOINTS_DIR);
+        let stable = read_registry(&root).unwrap();
+        assert_eq!(stable.active.len(), 0);
+        assert_eq!(stable.tombstones.len(), 1);
+        assert!(validate_registry(&stable).is_ok());
+
+        let mutations: Vec<Box<dyn Fn(&mut Registry)>> = vec![
+            Box::new(|registry| registry.tombstones[0].name = " bad".into()),
+            Box::new(|registry| registry.tombstones[0].description = Some("bad\nvalue".into())),
+            Box::new(|registry| registry.tombstones[0].generation_manifest_sha256 = "bad".into()),
+            Box::new(|registry| registry.tombstones[0].create_request_sha256 = "bad".into()),
+            Box::new(|registry| registry.tombstones[0].delete_request_sha256 = "bad".into()),
+            Box::new(|registry| registry.tombstones[0].checkpoint_uuid = Uuid::nil()),
+            Box::new(|registry| registry.tombstones[0].created_revision = 0),
+            Box::new(|registry| {
+                registry.tombstones[0].deleted_revision = registry.tombstones[0].created_revision
+            }),
+            Box::new(|registry| registry.tombstones[0].deleted_revision = registry.revision + 1),
+            Box::new(|registry| {
+                registry.tombstones[0].delete_operation_uuid =
+                    registry.tombstones[0].create_operation_uuid
+            }),
+            Box::new(|registry| registry.revision = 0),
+        ];
+        for mutate in mutations {
+            let mut candidate = stable.clone();
+            mutate(&mut candidate);
+            assert_eq!(
+                validate_registry(&candidate).unwrap_err().code(),
+                "GF_CHECKPOINT_REGISTRY_CORRUPT"
+            );
+        }
+
+        let mut duplicate = stable.clone();
+        let mut second = duplicate.tombstones[0].clone();
+        second.deleted_revision += 1;
+        duplicate.revision = second.deleted_revision;
+        duplicate.tombstones.push(second);
+        assert_eq!(
+            validate_registry(&duplicate).unwrap_err().code(),
+            "GF_CHECKPOINT_REGISTRY_CORRUPT"
+        );
+        assert_eq!(read_registry(&root).unwrap(), stable);
+    }
 }

@@ -3990,6 +3990,51 @@ mod tests {
     }
 
     #[test]
+    fn managed_skill_status_detects_missing_extra_nested_and_symlinked_files() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        let (manifest, files) = test_skill_manifest();
+        let bundle = SkillBundle {
+            manifest: &manifest,
+            files: &files,
+        };
+        context.skills_install(&bundle, false).unwrap();
+
+        let bootstrap = context
+            .contained_path(".agents/skills/graphforge-bootstrap/SKILL.md")
+            .unwrap();
+        fs::remove_file(&bootstrap).unwrap();
+        assert_eq!(
+            context.skills_status(&bundle).unwrap().status,
+            SkillStatus::Conflict
+        );
+        context.skills_install(&bundle, true).unwrap();
+
+        let extra = context
+            .contained_path(".agents/skills/graphforge-bootstrap/nested/extra.md")
+            .unwrap();
+        fs::create_dir_all(extra.parent().unwrap()).unwrap();
+        fs::write(&extra, "extra").unwrap();
+        assert_eq!(
+            context.skills_status(&bundle).unwrap().status,
+            SkillStatus::Conflict
+        );
+        context.skills_install(&bundle, true).unwrap();
+
+        #[cfg(unix)]
+        {
+            let link = context
+                .contained_path(".agents/skills/graphforge-bootstrap/link")
+                .unwrap();
+            std::os::unix::fs::symlink(root.path(), link).unwrap();
+            assert_eq!(
+                context.skills_status(&bundle).unwrap_err().code(),
+                "GF_VALIDATION"
+            );
+        }
+    }
+
+    #[test]
     fn bare_managed_directory_is_not_a_valid_manifest_file() {
         assert!(validate_skill_path("graphforge-bootstrap").is_err());
         assert!(validate_skill_path("graphforge-bootstrap/SKILL.md").is_ok());

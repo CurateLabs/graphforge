@@ -1584,6 +1584,77 @@ mod tests {
     }
 
     #[test]
+    fn inspection_classifies_every_persisted_manifest_drift_without_rebuilding() {
+        let project = TempDir::new().unwrap();
+        write_person(project.path(), "Alice");
+        let published = prepare(project.path());
+        let manifest_path = published.artifact().path.join(MANIFEST_FILE);
+        let original = std::fs::read(&manifest_path).unwrap();
+
+        let cases = [
+            (
+                "backend_version",
+                serde_json::json!("future-backend"),
+                TextIndexFreshnessReason::BackendVersion,
+            ),
+            (
+                "contract_version",
+                serde_json::json!("future-contract"),
+                TextIndexFreshnessReason::ContractVersion,
+            ),
+            (
+                "source_fingerprint",
+                serde_json::json!(format!("gf-fnv1a256:{}", "0".repeat(64))),
+                TextIndexFreshnessReason::SourceFingerprintChanged,
+            ),
+        ];
+        for (field, value, expected) in cases {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+            manifest[field] = value;
+            std::fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let inspection = inspect_text_index_freshness(
+                project.path(),
+                lazy_request(),
+                Some(&properties()),
+                TextLifecycleLimits::default(),
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(inspection.reason, Some(expected), "field={field}");
+            assert!(matches!(
+                inspection.state,
+                TextIndexFreshnessState::Incompatible | TextIndexFreshnessState::Stale
+            ));
+            std::fs::write(&manifest_path, &original).unwrap();
+        }
+
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        manifest["manifest_version"] = serde_json::json!(u32::MAX);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let inspection = inspect_text_index_freshness(
+            project.path(),
+            lazy_request(),
+            Some(&properties()),
+            TextLifecycleLimits::default(),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(inspection.state, TextIndexFreshnessState::Incompatible);
+        assert_eq!(
+            inspection.reason,
+            Some(TextIndexFreshnessReason::ManifestVersion)
+        );
+    }
+
+    #[test]
     fn snapshot_rejects_nonregular_source_entries_without_reading_or_replacing_them() {
         for relative in ["topology/nodes.parquet", "properties/Person.parquet"] {
             let project = TempDir::new().unwrap();

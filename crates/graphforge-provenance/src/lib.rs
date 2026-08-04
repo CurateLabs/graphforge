@@ -1412,4 +1412,59 @@ mod tests {
             assert!(!error.to_string().is_empty());
         }
     }
+
+    #[test]
+    fn lineage_canonical_domains_optional_actor_and_version_drift_are_explicit() {
+        let (event, rows) = fixture();
+        assert!(!rows[0].canonical_bytes().unwrap().is_empty());
+        assert_eq!(
+            rows[0].fingerprint().unwrap(),
+            rows[0].fingerprint().unwrap()
+        );
+        for entry in schema_registry() {
+            assert_eq!(
+                entry.diff_identity_fingerprint_domain(),
+                CanonicalDomain::ArrowResult
+            );
+            assert_eq!(
+                entry.diff_record_fingerprint_domain(),
+                entry.fingerprint_domain
+            );
+        }
+
+        let actorless = ProvenanceEvent::new(uuid(20), EventKind::Delete, None, 200).unwrap();
+        let batch = ProvenanceLedger::new(vec![actorless], vec![])
+            .unwrap()
+            .event_batch()
+            .unwrap();
+        assert!(batch.column_by_name("actor_uuid").unwrap().is_null(0));
+
+        let mut invalid_event = event.clone();
+        invalid_event.contract_version += 1;
+        assert!(matches!(
+            ProvenanceLedger::new(vec![invalid_event], vec![]),
+            Err(ProvenanceError::Invalid {
+                field: "event.contract_version",
+                ..
+            })
+        ));
+        let mut invalid_lineage = rows[0].clone();
+        invalid_lineage.contract_version += 1;
+        assert!(matches!(
+            ProvenanceLedger::new(vec![event.clone()], vec![invalid_lineage]),
+            Err(ProvenanceError::Invalid {
+                field: "lineage.contract_version",
+                ..
+            })
+        ));
+        let mut wrong_identity = rows[0].clone();
+        wrong_identity.lineage_uuid = uuid(99);
+        assert!(matches!(
+            ProvenanceLedger::new(vec![event], vec![wrong_identity]),
+            Err(ProvenanceError::Invalid {
+                field: "lineage_uuid",
+                ..
+            })
+        ));
+    }
 }

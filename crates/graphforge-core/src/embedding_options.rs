@@ -192,3 +192,63 @@ impl Default for HashGnnOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedding_defaults_are_the_complete_frozen_public_contract() {
+        let node2vec = Node2VecOptions::default();
+        assert_eq!(
+            (
+                node2vec.dimensions,
+                node2vec.walk_length,
+                node2vec.walks_per_node
+            ),
+            (128, 80, 10)
+        );
+        assert_eq!(
+            (node2vec.p, node2vec.q, node2vec.learning_rate),
+            (1.0, 1.0, 0.025)
+        );
+        assert_eq!(
+            (
+                node2vec.window_size,
+                node2vec.negative_samples,
+                node2vec.epochs,
+                node2vec.seed
+            ),
+            (10, 5, 1, 0)
+        );
+
+        let sage = GraphSageOptions::default();
+        assert_eq!(
+            (sage.dimensions, sage.hidden_dimensions, sage.layers),
+            (256, 256, 2)
+        );
+        assert_eq!(sage.sample_sizes, [25, 10]);
+        assert_eq!(sage.aggregator, GraphSageAggregator::Mean);
+        assert_eq!((sage.epochs, sage.negative_samples, sage.seed), (1, 20, 0));
+        assert_eq!(sage.learning_rate, 0.000_002);
+        assert!(sage.feature_properties.is_empty());
+
+        let fastrp = FastRpOptions::default();
+        assert_eq!(fastrp.dimensions, 128);
+        assert_eq!(fastrp.iteration_weights, [0.0, 1.0, 1.0]);
+        assert_eq!(
+            (fastrp.normalization_strength, fastrp.feature_weight),
+            (0.0, 0.0)
+        );
+        assert!(fastrp.feature_properties.is_empty());
+        assert_eq!(fastrp.seed, 0);
+
+        let hashgnn = HashGnnOptions::default();
+        assert_eq!((hashgnn.dimensions, hashgnn.iterations), (256, 2));
+        assert_eq!(hashgnn.embedding_density, 0.25);
+        assert!(!hashgnn.heterogeneous);
+        assert_eq!(hashgnn.node_type_property, None);
+        assert_eq!(hashgnn.relationship_type_property, None);
+        assert_eq!(hashgnn.seed, 0);
+    }
+}

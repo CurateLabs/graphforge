@@ -1855,6 +1855,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn projection_identity_and_path_validation_matrix_fails_before_mutation() {
+        let one = [1_u8; 16];
+        let two = [2_u8; 16];
+        assert!(require_present(&BTreeSet::new(), &BTreeSet::new(), "node").is_ok());
+        assert!(
+            require_present(&BTreeSet::from([one]), &BTreeSet::from([one, two]), "node").is_ok()
+        );
+        assert!(
+            require_present(&BTreeSet::from([two]), &BTreeSet::from([one]), "edge")
+                .unwrap_err()
+                .to_string()
+                .contains("missing edge UUID")
+        );
+
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let sibling = root.path().join("sibling");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        assert!(validate_distinct_paths(&source, &sibling).is_ok());
+        assert!(validate_distinct_paths(&source, &source).is_err());
+        assert!(validate_distinct_paths(&source, &source.join("child")).is_err());
+        assert!(validate_distinct_paths(&source.join("child"), &source).is_err());
+
+        assert!(
+            uuid_rows(&source.join("missing.parquet"), "node_uuid")
+                .unwrap()
+                .is_empty()
+        );
+        let wrong = RecordBatch::try_from_iter([(
+            "node_uuid",
+            Arc::new(UInt64Array::from(vec![1_u64])) as ArrayRef,
+        )])
+        .unwrap();
+        assert!(uuid_column(&wrong, "node_uuid").is_err());
+        assert!(uuid_column(&wrong, "missing").is_err());
+
+        let mut nullable = FixedSizeBinaryBuilder::new(16);
+        nullable.append_null();
+        let nullable = nullable.finish();
+        assert!(uuid_at(&nullable, 0).is_err());
+    }
+
     fn id_map(batch: &RecordBatch, uuid_name: &str, id_name: &str) -> BTreeMap<[u8; 16], u64> {
         let uuids = uuid_column(batch, uuid_name).unwrap();
         let ids = batch

@@ -480,4 +480,62 @@ mod tests {
 
         assert_eq!(error.class(), ProviderFailureClass::ResourceExhausted);
     }
+
+    #[test]
+    fn refresh_completion_and_token_count_cover_every_terminal_domain() {
+        let contract = ProviderModelContract::remote(
+            None,
+            "vendor/model",
+            "r1",
+            "v1",
+            ProviderCapabilities::new([ProviderCapability::DocumentEmbeddings]).unwrap(),
+            TokenizerIdentity {
+                identifier: TOKENIZER_IDENTIFIER.into(),
+                version: TOKENIZER_VERSION.into(),
+                count_class: TokenCountClass::Approximate,
+                max_input_tokens: 1_024,
+                normalization: TOKENIZER_NORMALIZATION.into(),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(count_tokens(&contract, "").unwrap(), 1);
+        assert_eq!(count_tokens(&contract, "é").unwrap(), 2);
+        assert_eq!(
+            ConfiguredProviderRefreshRuntime::completion(&Ok(())),
+            EmbeddingRefreshCompletion::Succeeded
+        );
+        for error in [
+            ProviderEmbeddingExecutionError::Plan(ProviderEmbeddingPlanError::Artifact(
+                SearchArtifactError::Cancelled,
+            )),
+            ProviderEmbeddingExecutionError::Publication(
+                graphforge_search::ProviderPublicationError::Artifact(
+                    SearchArtifactError::Cancelled,
+                ),
+            ),
+            ProviderEmbeddingExecutionError::Plan(ProviderEmbeddingPlanError::Provider(
+                graphforge_search::ProviderError::new(&contract, ProviderFailureClass::Cancelled),
+            )),
+            ProviderEmbeddingExecutionError::Publication(
+                graphforge_search::ProviderPublicationError::Provider(
+                    graphforge_search::ProviderError::new(
+                        &contract,
+                        ProviderFailureClass::Cancelled,
+                    ),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                ConfiguredProviderRefreshRuntime::completion(&Err(error)),
+                EmbeddingRefreshCompletion::Cancelled
+            );
+        }
+        assert_eq!(
+            ConfiguredProviderRefreshRuntime::completion(&Err(
+                ProviderEmbeddingExecutionError::Api(GfError::Validation("invalid".into()))
+            )),
+            EmbeddingRefreshCompletion::Failed
+        );
+    }
 }

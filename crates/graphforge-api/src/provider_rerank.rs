@@ -682,6 +682,42 @@ mod tests {
         assert!(provider.source().is_some());
     }
 
+    #[test]
+    fn rerank_request_validation_rejects_each_ambiguous_shape() {
+        let mut cases = Vec::new();
+        let mut value = request(RerankFailurePolicy::Error);
+        value.query.clear();
+        cases.push(value);
+        let mut value = request(RerankFailurePolicy::Error);
+        value.properties.clear();
+        cases.push(value);
+        for properties in [
+            vec!["title".into(), "title".into()],
+            vec!["z".into(), "a".into()],
+            vec![String::new()],
+            vec![" title".into()],
+            vec!["node_uuid".into()],
+            vec!["bad\nname".into()],
+        ] {
+            let mut value = request(RerankFailurePolicy::Error);
+            value.properties = properties;
+            cases.push(value);
+        }
+        for (depth, limit) in [(0, 0), (10_001, 1), (2, 0), (2, 3)] {
+            let mut value = request(RerankFailurePolicy::Error);
+            value.candidate_depth = depth;
+            value.limit = limit;
+            cases.push(value);
+        }
+        for value in cases {
+            assert!(matches!(
+                validate_request(&value),
+                Err(ProviderRerankError::Api(GfError::Validation(_)))
+            ));
+        }
+        validate_request(&request(RerankFailurePolicy::Error)).unwrap();
+    }
+
     fn request(failure_policy: RerankFailurePolicy) -> ProviderRerankRequest {
         ProviderRerankRequest {
             label: "Document".to_owned(),
