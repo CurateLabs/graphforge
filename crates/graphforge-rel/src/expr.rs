@@ -12331,6 +12331,39 @@ mod tests {
     static VOLATILE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static VOLATILE_ROWS: AtomicUsize = AtomicUsize::new(0);
 
+    fn invoke_test_udf<U: ScalarUDFImpl>(
+        udf: &U,
+        values: Vec<ScalarValue>,
+    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let types = values
+            .iter()
+            .map(ScalarValue::data_type)
+            .collect::<Vec<_>>();
+        let return_type = udf.return_type(&types)?;
+        let result = udf.invoke_with_args(ScalarFunctionArgs {
+            args: values.into_iter().map(ColumnarValue::Scalar).collect(),
+            arg_fields: types
+                .iter()
+                .enumerate()
+                .map(|(index, data_type)| {
+                    Arc::new(Field::new(format!("arg_{index}"), data_type.clone(), true))
+                })
+                .collect(),
+            number_rows: 1,
+            return_field: Arc::new(Field::new("result", return_type.clone(), true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })?;
+        let array = match result {
+            ColumnarValue::Array(array) => array,
+            ColumnarValue::Scalar(value) => value.to_array_of_size(1)?,
+        };
+        assert_eq!(array.data_type(), &return_type);
+        Ok(array)
+    }
+
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct CountingVolatilePredicate {
         signature: Signature,
@@ -12489,6 +12522,109 @@ mod tests {
         assert_eq!(optional_i64_at(&overrides, 1), None);
         let wrong_override: ArrayRef = Arc::new(Int32Array::from(vec![Some(8)]));
         assert_eq!(optional_i64_at(&wrong_override, 0), None);
+    }
+
+    #[test]
+    fn temporal_project_and_truncate_udfs_execute_all_typed_families() {
+        use datafusion::arrow::array::Array;
+
+        let null_ints = |count| vec![ScalarValue::Int64(None); count];
+        let assert_value = |array: datafusion::arrow::array::ArrayRef| {
+            assert_eq!(array.len(), 1);
+            assert!(!array.is_null(0));
+        };
+
+        let mut args = vec![ScalarValue::Utf8(Some("2024-02-29".into()))];
+        args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateProject::new(), args).unwrap());
+        let mut null_args = vec![ScalarValue::Utf8(None)];
+        null_args.extend(null_ints(8));
+        let null_date = invoke_test_udf(&CypherDateProject::new(), null_args).unwrap();
+        assert!(null_date.is_null(0));
+        let mut typed_args = vec![date_scalar(Some(19_782))];
+        typed_args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateProject::new(), typed_args).unwrap());
+
+        let mut args = vec![ScalarValue::Utf8(Some("12:34:56.123".into()))];
+        args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![ScalarValue::Time64Nanosecond(Some(45_296_123_000_000))];
+        typed_args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("12:34:56.123".into())),
+            ScalarValue::Utf8(Some("second".into())),
+        ];
+        args.extend(null_ints(6));
+        assert_value(invoke_test_udf(&CypherLocalTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("12:34:56.123".into())),
+        ];
+        args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![
+            date_scalar(Some(19_782)),
+            ScalarValue::Time64Nanosecond(Some(45_296_123_000_000)),
+        ];
+        typed_args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29T12:34:56.123".into())),
+            ScalarValue::Utf8(Some("day".into())),
+        ];
+        args.extend(null_ints(14));
+        assert_value(invoke_test_udf(&CypherLocalDateTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![ScalarValue::Utf8(Some("12:34:56+01:00".into()))];
+        args.extend(null_ints(6));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![time_scalar(Some((45_296_000_000_000, 3_600)))];
+        typed_args.extend(null_ints(6));
+        typed_args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("12:34:56+01:00".into())),
+            ScalarValue::Utf8(Some("minute".into())),
+        ];
+        args.extend(null_ints(6));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("12:34:56+01:00".into())),
+        ];
+        args.extend(null_ints(14));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeProject::new(), args).unwrap());
+        let mut typed_args = vec![
+            date_scalar(Some(19_782)),
+            time_scalar(Some((45_296_000_000_000, 3_600))),
+        ];
+        typed_args.extend(null_ints(14));
+        typed_args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeProject::new(), typed_args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29T12:34:56+01:00".into())),
+            ScalarValue::Utf8(Some("hour".into())),
+        ];
+        args.extend(null_ints(14));
+        args.push(ScalarValue::Utf8(None));
+        assert_value(invoke_test_udf(&CypherDateTimeTruncate::new(), args).unwrap());
+
+        let mut args = vec![
+            ScalarValue::Utf8(Some("2024-02-29".into())),
+            ScalarValue::Utf8(Some("month".into())),
+        ];
+        args.extend(null_ints(8));
+        assert_value(invoke_test_udf(&CypherDateTruncate::new(), args).unwrap());
     }
 
     #[test]
@@ -12700,6 +12836,38 @@ mod tests {
         assert_eq!(output.value(3).len(), 1);
         assert_eq!(VOLATILE_CALLS.load(Ordering::SeqCst), 1);
         assert_eq!(VOLATILE_ROWS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn correlated_list_comprehension_filters_and_projects_with_outer_value() {
+        use datafusion::arrow::array::{Array, ListArray};
+        use datafusion::logical_expr::{col, lit};
+
+        let input = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(3)),
+                ScalarValue::Int64(Some(5)),
+            ],
+            &DataType::Int64,
+            true,
+        ));
+        let udf = CypherListComp::new(
+            Some(col("__gf_elem").gt(col("threshold"))),
+            Some(col("__gf_elem") + col("threshold") + lit(0_i64)),
+            "__gf_elem".into(),
+            vec!["threshold".into()],
+        );
+        let output = invoke_test_udf(&udf, vec![input, ScalarValue::Int64(Some(2))]).unwrap();
+        let output = output.as_any().downcast_ref::<ListArray>().expect("List");
+        assert!(!output.is_null(0));
+        let values = output.value(0);
+        assert_eq!(
+            (0..values.len())
+                .map(|row| ScalarValue::try_from_array(&values, row).unwrap())
+                .collect::<Vec<_>>(),
+            vec![ScalarValue::Int64(Some(5)), ScalarValue::Int64(Some(7))]
+        );
     }
 
     /// Invoke a `cypher_quantifier` UDF (no outer columns) over a single list
@@ -15116,6 +15284,80 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Execution error: list + requires at least one list operand"
+        );
+    }
+
+    #[test]
+    fn cypher_list_plus_executes_large_list_operands_and_null_rows() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, LargeListArray, ListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+        use datafusion::arrow::datatypes::Field;
+
+        let large = |values: &[i64], valid: bool| {
+            let values: ArrayRef = Arc::new(Int64Array::from(values.to_vec()));
+            ScalarValue::LargeList(Arc::new(LargeListArray::new(
+                Arc::new(Field::new("item", DataType::Int64, true)),
+                OffsetBuffer::new(ScalarBuffer::from(vec![
+                    0_i64,
+                    i64::try_from(values.len()).unwrap(),
+                ])),
+                values,
+                Some(NullBuffer::from(vec![valid])),
+            )))
+        };
+        let values = |array: ArrayRef| {
+            let list = array.as_any().downcast_ref::<ListArray>().expect("List");
+            if list.is_null(0) {
+                return None;
+            }
+            let values = list.value(0);
+            Some(
+                (0..values.len())
+                    .map(|row| {
+                        let value = ScalarValue::try_from_array(&values, row).unwrap();
+                        decode_het(&value).unwrap_or(value)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![large(&[1, 2], true), ScalarValue::Int64(Some(3))],
+                )
+                .unwrap()
+            ),
+            Some(vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+                ScalarValue::Int64(Some(3)),
+            ])
+        );
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![ScalarValue::Int64(Some(0)), large(&[1, 2], true)],
+                )
+                .unwrap()
+            ),
+            Some(vec![
+                ScalarValue::Int64(Some(0)),
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2)),
+            ])
+        );
+        assert_eq!(
+            values(
+                invoke_test_udf(
+                    &CypherListPlus::new(),
+                    vec![large(&[1], false), large(&[2], true)],
+                )
+                .unwrap()
+            ),
+            None
         );
     }
 

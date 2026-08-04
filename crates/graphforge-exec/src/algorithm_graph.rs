@@ -2075,4 +2075,37 @@ mod tests {
             "execution error: algorithm vector projection has no UUID identity"
         );
     }
+
+    #[test]
+    fn numeric_projection_accepts_every_supported_arrow_primitive_width() {
+        use arrow::array::{
+            Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, StringArray,
+            UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        };
+
+        let arrays: Vec<(Box<dyn Array>, f64)> = vec![
+            (Box::new(Float64Array::from(vec![1.5])), 1.5),
+            (Box::new(Float32Array::from(vec![2.5])), 2.5),
+            (Box::new(Int64Array::from(vec![3])), 3.0),
+            (Box::new(Int32Array::from(vec![4])), 4.0),
+            (Box::new(Int16Array::from(vec![5])), 5.0),
+            (Box::new(Int8Array::from(vec![6])), 6.0),
+            (Box::new(UInt64Array::from(vec![7])), 7.0),
+            (Box::new(UInt32Array::from(vec![8])), 8.0),
+            (Box::new(UInt16Array::from(vec![9])), 9.0),
+            (Box::new(UInt8Array::from(vec![10])), 10.0),
+        ];
+        for (array, expected) in arrays {
+            assert_eq!(numeric_value(array.as_ref(), 0), Some(expected));
+        }
+        assert_eq!(numeric_value(&StringArray::from(vec!["nope"]), 0), None);
+        assert_eq!(
+            numeric_value(&Int64Array::from(vec![(1_i64 << 53) + 1]), 0),
+            None
+        );
+        assert_eq!(
+            numeric_value(&UInt64Array::from(vec![(1_u64 << 53) + 1]), 0),
+            None
+        );
+    }
 }

@@ -1290,6 +1290,7 @@ mod tests {
         CancellationToken, CapabilityId, EnableCapabilityRequest, GraphForgeOptions, OperationId,
         ProjectWriteMode, PropValue, WriteContext,
     };
+    use arrow::array::StringArray;
     use graphforge_knowledge::{
         Assertion, AssertionGraphRef, AssertionGraphRole, AssertionStatus, AssertionStatusEvent,
         GraphObjectKind,
@@ -1485,6 +1486,20 @@ mod tests {
                 node_uuid: uuid7(node_seed),
                 property: property.into(),
                 value: PropValue::Str(value.into()),
+            }],
+            knowledge: CompositeKnowledgeParticipants::default(),
+        }
+    }
+
+    fn delete_node_request(operation_seed: u8, node_seed: u8) -> CompositeTransactionRequest {
+        CompositeTransactionRequest {
+            contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(operation_seed)),
+                actor_uuid: None,
+            },
+            graph_mutations: vec![CompositeGraphMutation::DeleteNode {
+                node_uuid: uuid7(node_seed),
             }],
             knowledge: CompositeKnowledgeParticipants::default(),
         }
@@ -1740,6 +1755,45 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn optimistic_delete_and_property_change_publish_exactly_one_complete_result() {
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let directory = TempDir::new().unwrap();
+        let bootstrap = GraphForge::new(directory.path().to_str()).unwrap();
+        bootstrap
+            .publish_composite_transaction(graph_request(160, 161, "Initial"))
+            .unwrap();
+        drop(bootstrap);
+
+        let results = publish_concurrently(
+            &directory,
+            optimistic_options(1),
+            delete_node_request(162, 161),
+            property_request(163, 161, "nickname", "survivor"),
+        );
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let conflict = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .unwrap();
+        assert_eq!(conflict.code(), "GF_WRITE_CONFLICT");
+
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let rows = reopened
+            .execute("MATCH (n:Person) RETURN n.nickname AS nickname")
+            .unwrap();
+        assert!(rows.batches[0].num_rows() <= 1);
+        if rows.batches[0].num_rows() == 1 {
+            let nicknames = rows.batches[0]
+                .column_by_name("nickname")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(nicknames.value(0), "survivor");
+        }
     }
 
     #[test]

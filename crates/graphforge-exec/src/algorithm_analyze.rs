@@ -3134,6 +3134,29 @@ mod tests {
     }
 
     #[test]
+    fn public_embedding_facade_executes_an_empty_persisted_projection() {
+        let project = tempfile::tempdir().unwrap();
+        let provider = crate::adjacency::ScanBuildAdjacencyProvider::new(
+            project.path().to_path_buf(),
+            OntologyMode::Exploratory,
+        );
+        let invocation =
+            node2vec_invocation(graphforge_core::embedding_options::Node2VecOptions::default());
+
+        let result = embedding_algorithm(
+            &provider,
+            project.path(),
+            OntologyMode::Exploratory,
+            None,
+            &invocation,
+        )
+        .unwrap();
+
+        assert_eq!(result.num_rows(), 0);
+        assert_eq!(result.num_columns(), 2);
+    }
+
+    #[test]
     fn node2vec_dispatch_resource_failures_are_structured_and_atomic() {
         let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1), (1, 2)]);
         let options = graphforge_core::embedding_options::Node2VecOptions {

@@ -1295,12 +1295,19 @@ fn append_created_node_output_cols(
 ) -> Result<(), GfError> {
     use arrow::array::{FixedSizeBinaryBuilder, UInt32Array};
 
-    let (uuids, node_ids, type_ids) = recorder.node_identities(spec.var).ok_or_else(|| {
-        GfError::Execution(format!(
-            "emit-rows CREATE did not record identities for var {}",
-            spec.var
-        ))
-    })?;
+    let empty_uuids: &[[u8; 16]] = &[];
+    let empty_node_ids: &[u64] = &[];
+    let empty_type_ids: &[u32] = &[];
+    let (uuids, node_ids, type_ids) = match recorder.node_identities(spec.var) {
+        Some(identities) => identities,
+        None if rows == 0 => (empty_uuids, empty_node_ids, empty_type_ids),
+        None => {
+            return Err(GfError::Execution(format!(
+                "emit-rows CREATE did not record identities for var {}",
+                spec.var
+            )));
+        }
+    };
     if uuids.len() != rows || node_ids.len() != rows || type_ids.len() != rows {
         return Err(GfError::Execution(format!(
             "created var {} has incomplete emitted identities",
@@ -5448,7 +5455,7 @@ mod tests {
             is_reference: false,
         };
         let mut out = Vec::new();
-        assert!(
+        assert_eq!(
             append_created_node_output_cols(
                 &spec,
                 1,
@@ -5457,8 +5464,8 @@ mod tests {
                 &mut out,
             )
             .unwrap_err()
-            .to_string()
-            .contains("did not record identities")
+            .to_string(),
+            "execution error: emit-rows CREATE did not record identities for var 7"
         );
 
         let mut recorder = write_driver::CreateRecorder::default();
@@ -5602,6 +5609,94 @@ mod tests {
         assert_eq!(emitted.num_rows(), 1);
         assert_eq!(emitted.num_columns(), 5);
         assert_eq!((tally.nodes_created, tally.properties_set), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn graph_create_exec_emits_rows_records_effects_and_preserves_empty_input() {
+        use datafusion_datasource::memory::MemorySourceConfig;
+        use graphforge_plan::ResolvedNodeSpec;
+
+        let run = |rows: usize| async move {
+            let dir = TempDir::new().unwrap();
+            // Keep a physical column in the frontier: DataFusion's in-memory
+            // source normalizes a zero-column batch to zero rows.
+            let input_schema = Arc::new(Schema::new(vec![arrow::datatypes::Field::new(
+                "frontier",
+                arrow::datatypes::DataType::UInt32,
+                false,
+            )]));
+            let batch = RecordBatch::try_new(
+                Arc::clone(&input_schema),
+                vec![Arc::new(arrow::array::UInt32Array::from_iter_values(
+                    0..rows as u32,
+                ))],
+            )
+            .unwrap();
+            let physical =
+                MemorySourceConfig::try_new_from_batches(Arc::clone(&input_schema), vec![batch])
+                    .unwrap();
+            let logical = Arc::new(LogicalPlanBuilder::empty(false).build().unwrap());
+            let item = Arc::new(arrow::datatypes::Field::new(
+                "item",
+                arrow::datatypes::DataType::UInt32,
+                false,
+            ));
+            let output_schema = Arc::new(Schema::new(vec![
+                arrow::datatypes::Field::new("frontier", arrow::datatypes::DataType::UInt32, false),
+                arrow::datatypes::Field::new(
+                    "node_uuid",
+                    arrow::datatypes::DataType::FixedSizeBinary(16),
+                    false,
+                ),
+                arrow::datatypes::Field::new("node_id", arrow::datatypes::DataType::UInt64, false),
+                arrow::datatypes::Field::new("type_id", arrow::datatypes::DataType::UInt32, false),
+                arrow::datatypes::Field::new(
+                    "type_ids",
+                    arrow::datatypes::DataType::List(item),
+                    false,
+                ),
+                arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
+            ]));
+            let node = GraphCreateNode::new_emitting(
+                logical,
+                vec![ResolvedNodeSpec {
+                    var: 1,
+                    label_ids: vec![7],
+                    label_names: vec!["Person".into()],
+                    properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
+                    computed_properties: vec![],
+                    is_reference: false,
+                }],
+                vec![],
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+                Arc::new(DFSchema::try_from(output_schema.as_ref().clone()).unwrap()),
+            );
+            let exec = Arc::new(GraphCreateExec::new(&node, physical));
+            assert!(exec.emits_rows());
+            let batches = collect(exec.clone(), SessionContext::new().task_ctx())
+                .await
+                .unwrap();
+            (batches, exec.effects(), dir)
+        };
+
+        let (batches, effects, project) = run(1).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        assert_eq!((effects.nodes_created, effects.properties_set), (1, 1));
+        assert_eq!(persisted_node_ids(project.path()).unwrap().len(), 1);
+
+        let (empty, effects, _) = run(0).await;
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].num_rows(), 0);
+        assert_eq!(
+            (
+                effects.nodes_created,
+                effects.edges_created,
+                effects.properties_set,
+                effects.labels_added,
+            ),
+            (0, 0, 0, 0)
+        );
     }
 
     fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {
@@ -6239,6 +6334,103 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_planner_builds_scan_backed_expand_variants_and_optional_join() {
+        let dir = TempDir::new().unwrap();
+        let (input, physical) = empty_write_input();
+        let expand = graphforge_plan::ExpandNode::new(
+            input.clone(),
+            "KNOWS",
+            1,
+            2,
+            3,
+            graphforge_ir::Direction::Out,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+            vec![],
+            vec![],
+            vec![],
+        );
+        let var_len = VarLenExpandNode::new(
+            input.clone(),
+            "KNOWS",
+            1,
+            Some(2),
+            1,
+            2,
+            3,
+            graphforge_ir::Direction::Out,
+            None,
+            dir.path().to_path_buf(),
+            OntologyMode::Exploratory,
+            vec![],
+            graphforge_plan::var_len_edge_list_field(&[]),
+        );
+        let optional = OptionalMatchNode::new(input.clone(), input, vec![], vec![]);
+        let state = SessionContext::new().state();
+        let planner = DefaultPhysicalPlanner::default();
+
+        let physical_expand = GraphForgeExtensionPlanner
+            .plan_extension(
+                &planner,
+                &expand,
+                &[],
+                std::slice::from_ref(&physical),
+                &state,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(physical_expand.name(), "ExpandExec");
+        let physical_var_len = GraphForgeExtensionPlanner
+            .plan_extension(
+                &planner,
+                &var_len,
+                &[],
+                std::slice::from_ref(&physical),
+                &state,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(physical_var_len.name(), "VarLenExpandExec");
+        let physical_optional = GraphForgeExtensionPlanner
+            .plan_extension(
+                &planner,
+                &optional,
+                &[],
+                &[physical.clone(), physical.clone()],
+                &state,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(physical_optional.name(), "OptionalMatchExec");
+
+        for node in [
+            &expand as &dyn UserDefinedLogicalNode,
+            &var_len as &dyn UserDefinedLogicalNode,
+        ] {
+            assert!(
+                GraphForgeExtensionPlanner
+                    .plan_extension(&planner, node, &[], &[], &state)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires one physical input")
+            );
+        }
+        assert!(
+            GraphForgeExtensionPlanner
+                .plan_extension(&planner, &optional, &[], &[physical], &state)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("requires two physical inputs")
         );
     }
 

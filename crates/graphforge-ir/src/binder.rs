@@ -8945,4 +8945,47 @@ mod tests {
             let _ = binder.bind(&ast);
         }
     }
+
+    #[test]
+    fn binder_query_matrix_freezes_union_write_and_predicate_boundaries() {
+        let cases = [
+            ("RETURN 1 AS x UNION RETURN 2 AS x", true),
+            ("RETURN 1 AS x UNION ALL RETURN 2 AS x", true),
+            (
+                "RETURN 1 AS x UNION RETURN 2 AS x UNION ALL RETURN 3 AS x",
+                false,
+            ),
+            ("RETURN 1 AS x UNION RETURN 2 AS y", false),
+            (
+                "MERGE (n:Person {id: 1}) ON CREATE SET n.name = 'Ada' ON MATCH SET n.name = 'Grace' RETURN n",
+                true,
+            ),
+            (
+                "MATCH (n:Person) SET n += {score: 1}, n:Employee RETURN n",
+                true,
+            ),
+            ("MATCH (n:Person) SET n = {score: 1} RETURN n", true),
+            ("MATCH (n:Person) REMOVE n.score, n:Employee RETURN n", true),
+            ("MATCH (n:Person) WHERE n:Employee RETURN n", true),
+            ("MATCH (a)-[r:KNOWS]->(b) WHERE r:LIKES RETURN r", true),
+            ("UNWIND [1, 2] AS x RETURN all(y IN [x] WHERE y > 0)", true),
+            (
+                "MATCH (n) RETURN [x IN [1, 2] WHERE x > 1 | x + 1] AS values",
+                true,
+            ),
+            ("MATCH (n) RETURN n:Person", true),
+            ("WITH 1 AS x RETURN x:Person", false),
+        ];
+
+        for (query, should_bind) in cases {
+            let ast = parse(query).unwrap_or_else(|error| panic!("query={query}: {error}"));
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let result = binder.bind(&ast);
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
+        }
+    }
 }

@@ -2904,6 +2904,29 @@ mod tests {
     }
 
     #[test]
+    fn gomory_hu_public_validation_rejects_positional_and_directed_requests() {
+        let positional = PathsOptions {
+            by: PathAlgorithm::GomoryHuTree,
+            ..PathsOptions::default()
+        };
+        assert!(matches!(
+            validate_path_options(Some(uuid(0)), None, &positional),
+            Err(GfError::Validation(message))
+                if message.contains("does not accept positional source or target")
+        ));
+
+        let directed = PathsOptions {
+            by: PathAlgorithm::GomoryHuTree,
+            directed: true,
+            ..PathsOptions::default()
+        };
+        assert!(matches!(
+            validate_path_options(None, None, &directed),
+            Err(GfError::Validation(message)) if message == "gomory_hu_tree requires directed=false"
+        ));
+    }
+
+    #[test]
     fn minimum_steiner_dispatch_preserves_atomic_shared_controls() {
         let graph = AdjacencyGraph::with_test_undirected_multigraph(
             4,

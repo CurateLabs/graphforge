@@ -3696,13 +3696,13 @@ mod tests {
             projection: Some(case),
         });
 
-        let mut vars = HashSet::new();
-        collect_expr_vars(&arena, comprehension, &mut vars, &mut HashSet::new());
-        assert_eq!(vars, HashSet::from([VarId(0), VarId(1), VarId(2)]));
+        let mut collected = HashSet::new();
+        collect_expr_vars(&arena, comprehension, &mut collected, &mut HashSet::new());
+        assert_eq!(collected, HashSet::from([VarId(0), VarId(1), VarId(2)]));
 
-        collect_expr_vars(&arena, comprehension, &mut vars, &mut HashSet::new());
+        collect_expr_vars(&arena, comprehension, &mut collected, &mut HashSet::new());
         assert_eq!(
-            vars.len(),
+            collected.len(),
             3,
             "revisiting expressions does not duplicate vars"
         );
@@ -3959,6 +3959,77 @@ mod tests {
         assert_eq!(input_schema, schema);
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 0);
+    }
+
+    #[test]
+    fn terminal_global_count_handles_nullable_columns_aliases_and_fallthrough() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion::logical_expr::{EmptyRelation, LogicalPlan, LogicalPlanBuilder, col, lit};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let df_schema = Arc::new(DFSchema::try_from(schema.as_ref().clone()).unwrap());
+        let frontier = Frontier {
+            df_schema: df_schema.as_ref().clone(),
+            batches: vec![
+                RecordBatch::try_new(
+                    Arc::clone(&schema),
+                    vec![Arc::new(StringArray::from(vec![
+                        Some("a"),
+                        None,
+                        Some("b"),
+                    ]))],
+                )
+                .unwrap(),
+            ],
+        };
+        let input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: df_schema,
+        });
+        let aggregate = LogicalPlanBuilder::from(input)
+            .aggregate(
+                Vec::<DfExpr>::new(),
+                vec![count(col("x")).alias("present"), count(lit(1_i64))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let batch = terminal_global_count(&aggregate, &frontier)
+            .unwrap()
+            .unwrap();
+        let present = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let all = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!((present.value(0), all.value(0)), (2, 3));
+
+        let grouped = LogicalPlanBuilder::from(LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(schema.as_ref().clone()).unwrap()),
+        }))
+        .aggregate(vec![col("x")], vec![count(lit(1_i64))])
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            terminal_global_count(&grouped, &frontier)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            terminal_global_count(
+                &LogicalPlanBuilder::empty(false).build().unwrap(),
+                &frontier
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     fn nullable_uuids(values: &[Option<[u8; 16]>]) -> ArrayRef {

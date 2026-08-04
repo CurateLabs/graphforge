@@ -4657,4 +4657,100 @@ mod tests {
             "GF_NOT_FOUND"
         );
     }
+
+    #[test]
+    fn stale_facade_rejects_each_knowledge_publication_without_partial_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let bootstrap = GraphForge::new(root.path().to_str()).unwrap();
+        bootstrap.set_clock_for_test(|| Ok(100));
+        enable(&bootstrap, CapabilityId::Provenance, 220);
+        enable(&bootstrap, CapabilityId::Knowledge, 221);
+        enable(&bootstrap, CapabilityId::Epistemic, 222);
+        let assertion_uuid = uuid7(223);
+        let provenance_uuid = assertion_fixture(&bootstrap, assertion_uuid, 224);
+        drop(bootstrap);
+
+        let stale = GraphForge::new(root.path().to_str()).unwrap();
+        stale.set_clock_for_test(|| Ok(200));
+        let concurrent = GraphForge::new(root.path().to_str()).unwrap();
+        concurrent.add_node("Concurrent", &HashMap::new()).unwrap();
+        let durable_generation = graphforge_storage::resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+
+        let confidence_uuid = uuid7(225);
+        let confidence = stale
+            .assess_confidence(AssessConfidenceRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(226)),
+                    actor_uuid: None,
+                },
+                confidence_uuid,
+                assertion_uuid,
+                policy: ConfidencePolicyRequest::Explicit { value: 0.75 },
+            })
+            .unwrap_err();
+        assert_eq!(confidence.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let reasoning_uuid = uuid7(227);
+        let reasoning = stale
+            .record_reasoning(RecordReasoningRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(228)),
+                    actor_uuid: None,
+                },
+                reasoning_uuid,
+                assertion_uuid,
+                kind: ReasoningKind::DecisionRationale,
+                content_format: ReasoningContentFormat::TextPlain,
+                content: b"stale reasoning".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err();
+        assert_eq!(reasoning.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        let status = stale
+            .record_assertion_status(RecordAssertionStatusRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(229)),
+                    actor_uuid: None,
+                },
+                status_event_uuid: uuid7(230),
+                assertion_uuid,
+                status: AssertionStatus::Hypothesis,
+                confidence_uuid: None,
+                reasoning_uuid: None,
+                provenance_uuid,
+            })
+            .unwrap_err();
+        assert_eq!(status.code(), "GF_IDEMPOTENCY_CONFLICT");
+
+        assert_eq!(
+            graphforge_storage::resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            durable_generation
+        );
+        let reopened = GraphForge::new(root.path().to_str()).unwrap();
+        assert_eq!(
+            reopened
+                .confidence_assessment(confidence_uuid, None)
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            reopened.reasoning(reasoning_uuid, None).unwrap_err().code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            reopened
+                .assertion_status(assertion_uuid)
+                .unwrap()
+                .stats
+                .rows_produced,
+            0
+        );
+    }
 }

@@ -9061,6 +9061,102 @@ mod tests {
     }
 
     #[test]
+    fn neutral_descriptors_reject_writeback_and_detect_projection_changes() {
+        let graph = GraphForge::new(None).unwrap();
+        let alice = graph
+            .add_node(
+                "Person",
+                &HashMap::from([("name".into(), PropValue::Str("Alice".into()))]),
+            )
+            .unwrap();
+        let bob = graph
+            .add_node(
+                "Person",
+                &HashMap::from([("name".into(), PropValue::Str("Bob".into()))]),
+            )
+            .unwrap();
+        graph
+            .add_edge(&alice, "KNOWS", &bob, &HashMap::new())
+            .unwrap();
+
+        let mut rank_options = degree_options(false, Some("KNOWS"));
+        rank_options.write_property = Some("rank".into());
+        let error = graph
+            .prepare_rank_invocation("Person", &rank_options)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        assert_eq!(
+            error.to_string(),
+            "invalid invocation descriptor: rank write_property is not part of a neutral invocation"
+        );
+
+        let mut cluster_options = components_options(false, Some("KNOWS"));
+        cluster_options.write_property = Some("community".into());
+        let error = graph
+            .prepare_cluster_invocation("Person", &cluster_options)
+            .unwrap_err();
+        assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        assert_eq!(
+            error.to_string(),
+            "invalid invocation descriptor: cluster write_property is not part of a neutral invocation"
+        );
+
+        let rank = graph
+            .prepare_rank_invocation("Person", &degree_options(false, Some("KNOWS")))
+            .unwrap();
+        let cluster = graph
+            .prepare_cluster_invocation("Person", &components_options(false, Some("KNOWS")))
+            .unwrap();
+        let similar = graph
+            .prepare_similar_invocation("Person", &node_similarity_options(2, Some("KNOWS")))
+            .unwrap();
+        let analyze = graph
+            .prepare_analyze_invocation(None, &is_dag_options(true, Some("KNOWS")))
+            .unwrap();
+        let source = NodeSelector::Handle(alice);
+        let target = NodeSelector::Handle(bob);
+        let paths = graph
+            .prepare_paths_invocation(
+                Some(&source),
+                Some(&target),
+                &bfs_options(true, Some("KNOWS")),
+            )
+            .unwrap();
+
+        graph.add_node("Person", &HashMap::new()).unwrap();
+        for error in [
+            graph.invoke_rank_descriptor(&rank).unwrap_err(),
+            graph.invoke_cluster_descriptor(&cluster).unwrap_err(),
+            graph.invoke_similar_descriptor(&similar).unwrap_err(),
+            graph.invoke_analyze_descriptor(&analyze).unwrap_err(),
+            graph.invoke_paths_descriptor(&paths).unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "GF_PROJECTION_CHANGED");
+            assert_eq!(
+                error.to_string(),
+                "the graph projection changed after descriptor preparation"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_guard_blocks_inside_and_outside_an_ambient_runtime() {
+        let graph = GraphForge::new(None).unwrap();
+        let (_, _, guard) = graph
+            .execute_stream_owned("RETURN 1 AS value", &HashMap::new())
+            .unwrap();
+        assert_eq!(guard.block_on(async { 41 + 1 }), 42);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            assert_eq!(guard.block_on(async { 20 + 22 }), 42);
+        });
+    }
+
+    #[test]
     fn descriptor_preparation_materializes_optional_analysis_and_path_parameters() {
         let graph = GraphForge::new(None).unwrap();
         let analyze = AnalyzeOptions {

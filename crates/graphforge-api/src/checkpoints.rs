@@ -2686,13 +2686,65 @@ mod tests {
                     }],
                 };
                 if shape == "m21" {
-                    graph
+                    let assertion_result = graph
                         .create_assertion_with_status(crate::CreateAssertionWithStatusRequest {
                             assertion,
                             first_status: crate::FirstAssertionStatusInput {
                                 status_event_uuid: uuid7(111),
                                 status: AssertionStatus::Hypothesis,
                             },
+                        })
+                        .unwrap();
+                    let provenance_uuid = Uuid::from_slice(
+                        assertion_result.batches[0]
+                            .column_by_name("provenance_uuid")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<FixedSizeBinaryArray>()
+                            .unwrap()
+                            .value(0),
+                    )
+                    .unwrap();
+                    let confidence_uuid = uuid7(112);
+                    graph
+                        .assess_confidence(crate::AssessConfidenceRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_112),
+                                actor_uuid: None,
+                            },
+                            confidence_uuid,
+                            assertion_uuid: uuid7(110),
+                            policy: crate::ConfidencePolicyRequest::Explicit { value: 0.8 },
+                        })
+                        .unwrap();
+                    let reasoning_uuid = uuid7(113);
+                    graph
+                        .record_reasoning(crate::RecordReasoningRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_113),
+                                actor_uuid: None,
+                            },
+                            reasoning_uuid,
+                            assertion_uuid: uuid7(110),
+                            kind: graphforge_knowledge::ReasoningKind::EvidenceInterpretation,
+                            content_format: graphforge_knowledge::ReasoningContentFormat::TextPlain,
+                            content: b"checkpoint rationale".to_vec(),
+                            supersedes_reasoning_uuid: None,
+                            provenance_uuid,
+                        })
+                        .unwrap();
+                    graph
+                        .record_assertion_status(crate::RecordAssertionStatusRequest {
+                            context: crate::WriteContext {
+                                operation_uuid: operation(2_114),
+                                actor_uuid: None,
+                            },
+                            status_event_uuid: uuid7(114),
+                            assertion_uuid: uuid7(110),
+                            status: AssertionStatus::Supported,
+                            confidence_uuid: Some(confidence_uuid),
+                            reasoning_uuid: Some(reasoning_uuid),
+                            provenance_uuid,
                         })
                         .unwrap();
                 } else {
@@ -2738,6 +2790,22 @@ mod tests {
                 assert_eq!(
                     reopened
                         .assertion_status(uuid7(110))
+                        .unwrap()
+                        .stats
+                        .rows_produced,
+                    1
+                );
+                assert_eq!(
+                    reopened
+                        .confidence_assessment(uuid7(112), None)
+                        .unwrap()
+                        .stats
+                        .rows_produced,
+                    1
+                );
+                assert_eq!(
+                    reopened
+                        .reasoning(uuid7(113), None)
                         .unwrap()
                         .stats
                         .rows_produced,
