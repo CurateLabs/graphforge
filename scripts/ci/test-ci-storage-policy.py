@@ -68,6 +68,11 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "M1-Release-Candidate-npm-${{ steps.source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-crates-${{ steps.source.outputs.release_sha }}": 1,
         "M1-Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -258,16 +263,31 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 assert field(step, "repository") == "${{ github.repository }}", (
                     f"cross-run artifact repository drift: {name}"
                 )
-                expected_run_id = {
-                    "non-cypher-evidence": "${{ inputs.rust_run_id }}",
-                    "binding-rc-aggregate": "${{ inputs.binding_rc_run_id }}",
-                    "candidate": "${{ steps.candidate.outputs.run_id }}",
-                    "candidate/release-artifacts/python": ("${{ steps.candidate.outputs.run_id }}"),
-                    "candidate/release-artifacts/npm": "${{ steps.candidate.outputs.run_id }}",
-                    "candidate/release-artifacts/crates": ("${{ steps.candidate.outputs.run_id }}"),
-                    "candidate/release-artifacts": "${{ steps.candidate.outputs.run_id }}",
+                expected_run_ids = {
+                    "non-cypher-evidence": {"${{ inputs.rust_run_id }}"},
+                    "binding-rc-aggregate": {"${{ inputs.binding_rc_run_id }}"},
+                    "candidate": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/python": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/npm": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts/crates": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
+                    "candidate/release-artifacts": {
+                        "${{ steps.candidate.outputs.run_id }}",
+                        "${{ needs.locate_candidate.outputs.candidate_run_id }}",
+                    },
                 }[path]
-                assert field(step, "run-id") == expected_run_id, (
+                assert field(step, "run-id") in expected_run_ids, (
                     f"cross-run artifact run ID drift: {name}"
                 )
             else:

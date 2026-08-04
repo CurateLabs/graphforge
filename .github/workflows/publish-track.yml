@@ -1,0 +1,239 @@
+name: Publish Track
+
+on:
+  schedule:
+    # Certify the reviewed main tip without coupling frequent publication to M1.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Current 40-character main SHA to certify (blank resolves main)
+        required: false
+        type: string
+      create_release:
+        description: Create the immutable GitHub Release identity after candidate validation
+        required: true
+        default: false
+        type: boolean
+      confirm_registry_publish:
+        description: Required with create_release; the published Release triggers publish.yaml
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: Exact v<root-version> tag; required only when creating the Release
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: publish-track-${{ inputs.commit_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve_source:
+    name: Resolve exact main source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      release_sha: ${{ steps.source.outputs.release_sha }}
+      release_version: ${{ steps.source.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Require current main SHA and aligned release version
+        id: source
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.commit_sha || '' }}
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            +refs/heads/main:refs/remotes/origin/main
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if test -n "$REQUESTED_SHA"; then
+            [[ "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+            test "$REQUESTED_SHA" = "$main_sha"
+          fi
+          git checkout --detach "$main_sha"
+          python3 scripts/set_release_version.py --check
+          release_version="$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version = "([^"]+)"$', text)
+          if match is None:
+              raise SystemExit("workspace release version is missing")
+          print(match.group(1))
+          PY
+          )"
+          case "$release_version" in
+            *dev*) echo "publish-track requires a non-development version" >&2; exit 1 ;;
+          esac
+          printf 'release_sha=%s\n' "$main_sha" >> "$GITHUB_OUTPUT"
+          printf 'release_version=%s\n' "$release_version" >> "$GITHUB_OUTPUT"
+
+  locate_candidate:
+    name: Locate complete retained candidate
+    needs: resolve_source
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      candidate_run_id: ${{ steps.candidate.outputs.run_id }}
+    steps:
+      - name: Require one unexpired partition per candidate group
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.resolve_source.outputs.release_sha }}
+        run: |
+          run_id="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/binding-release-candidate.yml/runs?event=workflow_dispatch&status=success&head_sha=$RELEASE_SHA&per_page=100" \
+            --jq '.workflow_runs | map(select(.head_sha == env.RELEASE_SHA)) | first | .id // empty')"
+          if test -z "$run_id"; then
+            exit 0
+          fi
+          for group in manifest python npm crates evidence; do
+            artifact_name="M1-Release-Candidate-$group-$RELEASE_SHA"
+            count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length")"
+            if test "$count" != 1; then
+              printf 'candidate_state=incomplete group=%s count=%s\n' "$group" "$count"
+              exit 0
+            fi
+          done
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
+
+  validate_candidate:
+    name: Validate retained candidate bytes
+    needs: [resolve_source, locate_candidate]
+    if: needs.locate_candidate.outputs.candidate_run_id != ''
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve_source.outputs.release_sha }}
+      - name: Download candidate manifest
+        uses: actions/download-artifact@v8
+        with:
+          name: M1-Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}
+          path: candidate
+          run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Download Python partition
+        uses: actions/download-artifact@v8
+        with:
+          name: M1-Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}
+          path: candidate/release-artifacts/python
+          run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Download npm partition
+        uses: actions/download-artifact@v8
+        with:
+          name: M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}
+          path: candidate/release-artifacts/npm
+          run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Download crates partition
+        uses: actions/download-artifact@v8
+        with:
+          name: M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}
+          path: candidate/release-artifacts/crates
+          run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Download evidence partition
+        uses: actions/download-artifact@v8
+        with:
+          name: M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}
+          path: candidate/release-artifacts
+          run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+      - name: Reassemble and revalidate exact candidate
+        shell: bash
+        env:
+          RELEASE_SHA: ${{ needs.resolve_source.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.resolve_source.outputs.release_version }}
+        run: |
+          python3 scripts/ci/release-candidate.py validate \
+            --record "candidate/v${RELEASE_VERSION}-artifacts.json" \
+            --artifacts-dir candidate/release-artifacts \
+            --expected-sha "$RELEASE_SHA" \
+            --version "$RELEASE_VERSION"
+
+  dispatch_binding_rc:
+    name: Dispatch Binding RC when needed
+    needs: [resolve_source, locate_candidate, validate_candidate]
+    if: >-
+      always() &&
+      needs.locate_candidate.result == 'success' &&
+      needs.validate_candidate.result != 'success' &&
+      !(github.event_name == 'workflow_dispatch' && inputs.create_release)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch exact-main Binding RC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.resolve_source.outputs.release_sha }}
+        run: |
+          gh workflow run binding-release-candidate.yml \
+            --ref main \
+            -f "commit_sha=$RELEASE_SHA"
+
+  create_release:
+    name: Create identity and trigger publish
+    needs: [resolve_source, validate_candidate]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.create_release &&
+      inputs.confirm_registry_publish &&
+      needs.validate_candidate.result == 'success'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Create only the exact immutable Release identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.resolve_source.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.resolve_source.outputs.release_version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          git fetch --tags --force origin
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG^{}" >/dev/null; then
+            test "$(git rev-parse "$RELEASE_TAG^{}")" = "$RELEASE_SHA"
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release identity already exists; use publish.yaml recovery dispatch" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --target "$RELEASE_SHA" \
+            --generate-notes \
+            --title "GraphForge $RELEASE_TAG"
+          printf '%s\n' \
+            "Published release identity triggers publish.yaml; its retained-byte preflight remains authoritative." \
+            >> "$GITHUB_STEP_SUMMARY"

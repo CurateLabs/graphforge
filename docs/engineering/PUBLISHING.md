@@ -20,6 +20,16 @@ Wall-clock targets: Binding RC ≤20m p50 warm / ≤35m cold; publish-track
 (M1 load, checkpoint, m20/m21 surface aggregates) on top of publish-track honesty.
 Those gates must not block every publish-track run.
 
+`Publish Track` schedules exact-`main` Binding RC dispatch every six hours and
+reuses a complete, unexpired 30-day candidate for the same SHA. It does not
+create a tag or publish by schedule. A maintainer must dispatch it with both
+`create_release` and `confirm_registry_publish`, plus the exact
+`v<root-version>` tag; that published GitHub Release triggers the existing
+`publish.yaml`. Any missing/expired partition, manifest validation failure,
+mixed SHA, existing release identity, or registry conflict stops the path.
+See [`publication-order.md`](../development/publication-order.md) for the
+operational sequence and recovery boundary.
+
 ## Artifacts and destinations
 
 | Artifact | Destination | Versioned by | Owner |
