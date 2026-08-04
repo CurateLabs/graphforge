@@ -1430,6 +1430,14 @@ mod tests {
         let available = root.path().join("available.gfx");
         assert!(reject_export_destination(&available).is_ok());
         assert!(!available.exists());
+
+        let import_file = root.path().join("import-target");
+        std::fs::write(&import_file, b"caller bytes").unwrap();
+        assert_eq!(
+            prepare_import_target(&import_file).unwrap_err().code(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT"
+        );
+        assert_eq!(std::fs::read(&import_file).unwrap(), b"caller bytes");
     }
 
     #[test]
@@ -1449,10 +1457,33 @@ mod tests {
         );
         std::fs::remove_file(&extra).unwrap();
 
+        let generations = root.path().join("generations");
+        let extra_generation = generations.join(Uuid::now_v7().hyphenated().to_string());
+        std::fs::create_dir(&extra_generation).unwrap();
+        assert!(!has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+        std::fs::remove_dir(&extra_generation).unwrap();
+
         let generation = root
             .path()
             .join("generations")
             .join(resolved.generation_uuid().hyphenated().to_string());
+        let extra_generation_entry = generation.join("caller-file");
+        std::fs::write(&extra_generation_entry, b"preserve").unwrap();
+        assert!(!has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+        std::fs::remove_file(&extra_generation_entry).unwrap();
+
+        let participants = generation.join("participants");
+        let extra_participant = participants.join("caller-domain");
+        std::fs::create_dir(&extra_participant).unwrap();
+        assert!(!has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+        std::fs::remove_dir(&extra_participant).unwrap();
+
+        let workspace = participants.join("workspace");
+        let extra_workspace = workspace.join("caller.json");
+        std::fs::write(&extra_workspace, b"preserve").unwrap();
+        assert!(!has_exact_pristine_layout(root.path(), resolved.generation_uuid()).unwrap());
+        std::fs::remove_file(&extra_workspace).unwrap();
+
         let participant = generation.join("participants/workspace/configuration.json");
         let stable = std::fs::read(&participant).unwrap();
         std::fs::write(&participant, b"different").unwrap();

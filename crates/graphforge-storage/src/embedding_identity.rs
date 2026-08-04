@@ -875,6 +875,9 @@ mod tests {
         for invalid in ["", " space", "space ", ".", "..", "a/b", "a\\b", "a\n"] {
             assert!(EmbeddingDisplayName::new(invalid).is_err(), "{invalid:?}");
         }
+        assert!(
+            EmbeddingDisplayName::new(&"x".repeat(MAX_EMBEDDING_DISPLAY_NAME_BYTES + 1)).is_err()
+        );
     }
 
     #[test]
@@ -1081,6 +1084,57 @@ mod tests {
             Value::String("must-not-persist".to_owned()),
         );
         assert!(EmbeddingCompatibilityDescriptor::new(secret).is_err());
+
+        let mut zero_tokenizer = input(caller());
+        let mut zero_tokenizer_contract = tokenizer();
+        zero_tokenizer_contract.max_input_tokens = 0;
+        zero_tokenizer.tokenizer = Some(zero_tokenizer_contract);
+        assert!(EmbeddingCompatibilityDescriptor::new(zero_tokenizer).is_err());
+
+        let mut oversized_chunk = input(caller());
+        oversized_chunk.tokenizer = Some(tokenizer());
+        oversized_chunk.chunking = Some(ChunkingIdentity {
+            chunk_size_tokens: 8_193,
+            overlap_tokens: 0,
+            aggregation: "mean-v1".to_owned(),
+            truncation_policy: "reject".to_owned(),
+        });
+        assert!(EmbeddingCompatibilityDescriptor::new(oversized_chunk).is_err());
+
+        let mut silent_truncation = input(caller());
+        silent_truncation.tokenizer = Some(tokenizer());
+        silent_truncation.chunking = Some(ChunkingIdentity {
+            chunk_size_tokens: 512,
+            overlap_tokens: 0,
+            aggregation: "mean-v1".to_owned(),
+            truncation_policy: "truncate".to_owned(),
+        });
+        assert!(EmbeddingCompatibilityDescriptor::new(silent_truncation).is_err());
+
+        for invalid_text in ["", " surrounded ", "line\nbreak"] {
+            let mut invalid_identity = input(caller());
+            invalid_identity
+                .hyperparameters
+                .insert("value".to_owned(), Value::String(invalid_text.to_owned()));
+            assert!(EmbeddingCompatibilityDescriptor::new(invalid_identity).is_err());
+        }
+
+        let mut oversized_identity = input(caller());
+        oversized_identity.hyperparameters.insert(
+            "value".to_owned(),
+            Value::String("x".repeat(MAX_IDENTITY_TEXT_BYTES + 1)),
+        );
+        assert!(EmbeddingCompatibilityDescriptor::new(oversized_identity).is_err());
+
+        let mut nested = Value::Null;
+        for _ in 0..=MAX_IDENTITY_JSON_DEPTH {
+            nested = Value::Array(vec![nested]);
+        }
+        let mut excessive_depth = input(caller());
+        excessive_depth
+            .hyperparameters
+            .insert("nested".to_owned(), nested);
+        assert!(EmbeddingCompatibilityDescriptor::new(excessive_depth).is_err());
     }
 
     #[test]

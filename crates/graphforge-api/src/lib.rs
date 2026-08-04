@@ -18116,4 +18116,44 @@ mod tests {
              SkipParam { name: \"missing\" }"
         );
     }
+
+    #[test]
+    fn private_wire_and_row_count_boundaries_match_public_error_domains() {
+        for encoding in ["parquet", "arrow", "json"] {
+            assert!(participant_encoding(encoding).is_ok());
+        }
+        let encoding = participant_encoding("PARQUET").unwrap_err();
+        assert_eq!(encoding.code(), "GF_VALIDATION");
+        assert_eq!(
+            encoding.to_string(),
+            "validation error: committed participant has unsupported encoding"
+        );
+
+        let mut params = HashMap::new();
+        params.insert("count".to_owned(), IrLiteral::Int(7));
+        assert_eq!(row_count_param_value("LIMIT", "count", &params).unwrap(), 7);
+
+        params.insert("count".to_owned(), IrLiteral::Int(-1));
+        let negative = row_count_param_value("LIMIT", "count", &params).unwrap_err();
+        assert_eq!(negative.code(), "GF_EXECUTION");
+        assert_eq!(
+            negative.to_string(),
+            "execution error: LIMIT parameter `$count` must be a non-negative integer"
+        );
+
+        params.insert("count".to_owned(), IrLiteral::Str("7".to_owned()));
+        let wrong_type = row_count_param_value("SKIP", "count", &params).unwrap_err();
+        assert_eq!(wrong_type.code(), "GF_EXECUTION");
+        assert_eq!(
+            wrong_type.to_string(),
+            "execution error: SKIP parameter `$count` must be an integer"
+        );
+
+        let missing = row_count_param_value("LIMIT", "absent", &params).unwrap_err();
+        assert_eq!(missing.code(), "GF_EXECUTION");
+        assert_eq!(
+            missing.to_string(),
+            "execution error: missing query parameter `$absent` for LIMIT"
+        );
+    }
 }

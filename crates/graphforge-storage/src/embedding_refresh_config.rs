@@ -1610,6 +1610,61 @@ mod tests {
     }
 
     #[test]
+    fn limits_and_cleanup_bounds_are_exact_and_side_effect_free() {
+        for limits in [
+            EmbeddingRefreshConfigLimits {
+                metadata_bytes: 0,
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+            EmbeddingRefreshConfigLimits {
+                entries: 0,
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+            EmbeddingRefreshConfigLimits {
+                coordination: SearchCoordinationLimits {
+                    cleanup_entries: 0,
+                    ..SearchCoordinationLimits::default()
+                },
+                ..EmbeddingRefreshConfigLimits::default()
+            },
+        ] {
+            assert!(validate_limits(limits).is_err());
+        }
+
+        let config = EmbeddingRefreshConfig::default();
+        assert!(matches!(
+            config.to_canonical_json(EmbeddingRefreshConfigLimits {
+                metadata_bytes: 1,
+                ..EmbeddingRefreshConfigLimits::default()
+            }),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_config_bytes",
+                ..
+            })
+        ));
+
+        let cleanup = tempfile::tempdir().unwrap();
+        std::fs::write(cleanup.path().join("caller"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_temps(cleanup.path(), 0),
+            Err(SearchArtifactError::InvalidSelector { .. })
+        ));
+        assert!(matches!(cleanup_abandoned_temps(cleanup.path(), 1), Ok(0)));
+        std::fs::write(cleanup.path().join("caller-two"), b"preserve").unwrap();
+        assert!(matches!(
+            cleanup_abandoned_temps(cleanup.path(), 1),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_refresh_cleanup_entries",
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(cleanup.path().join("caller")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
     fn policy_and_wire_validation_matrix_is_exact_and_side_effect_free() {
         for debounce in [
             Duration::ZERO,

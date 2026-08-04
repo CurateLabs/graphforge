@@ -2260,6 +2260,14 @@ mod tests {
             created,
             create_checkpoint(directory.path(), &request).unwrap()
         );
+        let changed_replay = create_request(operation, "Release 1.1");
+        assert_eq!(
+            create_checkpoint(directory.path(), &changed_replay)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert!(list_checkpoints(directory.path()).unwrap().is_empty());
     }
 
     #[test]

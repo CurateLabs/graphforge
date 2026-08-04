@@ -1307,6 +1307,7 @@ mod tests {
                             "side".to_owned(),
                             IrLiteral::Str(if index < 2.0 { "left" } else { "right" }.into()),
                         ),
+                        ("score".to_owned(), IrLiteral::Float(index + 1.0)),
                     ]),
                 )
                 .unwrap();
@@ -1684,6 +1685,7 @@ mod tests {
         assert!(graph.is_empty());
         assert!(graph.neighbors(42).is_empty());
         load_node_vectors(&mut graph, dir.path(), &[], "features").unwrap();
+        load_node_feature_properties(&mut graph, dir.path(), &["features".into()]).unwrap();
     }
 
     #[test]
@@ -1752,6 +1754,42 @@ mod tests {
                 .map(|&node_id| graph.node_vector(node_id).unwrap().to_vec())
                 .collect::<Vec<_>>(),
             before
+        );
+    }
+
+    #[test]
+    fn scalar_feature_loader_is_ordered_and_rejects_invalid_or_missing_values() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+
+        load_node_scalar_features(&mut graph, fixture.dir.path(), &["score".into()]).unwrap();
+        for (index, &node_id) in fixture.ids.iter().enumerate() {
+            let index = f64::from(u32::try_from(index).unwrap());
+            assert_eq!(graph.node_vector(node_id), Some([index + 1.0].as_slice()));
+        }
+        assert!(matches!(
+            load_node_numeric_property(&graph, fixture.dir.path(), "side"),
+            Err(GfError::Validation(_))
+        ));
+        assert!(matches!(
+            load_node_numeric_property(&graph, fixture.dir.path(), "missing"),
+            Err(GfError::Validation(_))
+        ));
+
+        load_node_scalar_features(&mut graph, fixture.dir.path(), &[]).unwrap();
+        assert!(
+            fixture
+                .ids
+                .iter()
+                .all(|&node_id| graph.node_vector(node_id).is_none())
         );
     }
 

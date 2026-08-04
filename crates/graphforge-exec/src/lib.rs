@@ -6593,6 +6593,124 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn public_create_set_remove_params_persist_across_session_reopen() {
+        use graphforge_ir::{
+            CreateNodeSpec, CreatePattern, LabelItem, RemovePropItem, SetMapItem, SetPropItem,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let open_session = || {
+            let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
+            ExecutionSession::new_with_target(
+                catalog,
+                None,
+                dir.path().to_path_buf(),
+                OntologyMode::Exploratory,
+            )
+            .unwrap()
+        };
+
+        let create = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Create {
+                pattern: CreatePattern {
+                    nodes: vec![CreateNodeSpec {
+                        var: VarId(0),
+                        labels: vec![],
+                        properties: None,
+                        is_reference: false,
+                    }],
+                    edges: vec![],
+                },
+            })
+            .build();
+        let session = open_session();
+        let created = session.execute_create(&create).await.unwrap();
+        assert_eq!(created.side_effects.unwrap().nodes_created, 1);
+        drop(session);
+
+        let mut map_set = GraphPlan::builder("openCypher");
+        let name = map_set.push_expr(IrExpr::Literal(IrLiteral::Str("Ada".into())));
+        let active = map_set.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
+        let map = map_set.push_expr(IrExpr::MapLiteral(vec![
+            ("name".into(), name),
+            ("active".into(), active),
+        ]));
+        let map_set = map_set
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Set {
+                items: vec![],
+                map_items: vec![SetMapItem {
+                    target: VarId(0),
+                    map,
+                    replace: false,
+                }],
+                label_items: vec![LabelItem {
+                    target: VarId(0),
+                    labels: vec![graphforge_core::TypeId(7)],
+                }],
+            })
+            .build();
+        let session = open_session();
+        let map_result = session.execute_set(&map_set).await.unwrap();
+        let map_effects = map_result.side_effects.unwrap();
+        assert_eq!(map_effects.properties_set, 2);
+        assert_eq!(map_effects.labels_added, 1);
+        drop(session);
+
+        let mut set = GraphPlan::builder("openCypher");
+        let score = set.push_expr(IrExpr::Parameter("score".into()));
+        let set = set
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Set {
+                items: vec![SetPropItem {
+                    target: VarId(0),
+                    prop: graphforge_core::PropId(0),
+                    prop_name: "score".into(),
+                    value: score,
+                }],
+                map_items: vec![],
+                label_items: vec![],
+            })
+            .build();
+        let session = open_session();
+        let set_result = session
+            .execute_set_with_params(&set, &HashMap::from([("score".into(), IrLiteral::Int(42))]))
+            .await
+            .unwrap();
+        assert_eq!(set_result.side_effects.unwrap().properties_set, 1);
+        drop(session);
+
+        let remove = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Remove {
+                items: vec![RemovePropItem {
+                    target: VarId(0),
+                    prop: graphforge_core::PropId(0),
+                    prop_name: "score".into(),
+                }],
+                label_items: vec![LabelItem {
+                    target: VarId(0),
+                    labels: vec![graphforge_core::TypeId(7)],
+                }],
+            })
+            .build();
+        let session = open_session();
+        let removed = session.execute_remove(&remove).await.unwrap();
+        let removed = removed.side_effects.unwrap();
+        assert_eq!(removed.properties_removed, 1);
+        assert_eq!(removed.labels_removed, 1);
+    }
+
     #[test]
     fn context_exposes_graph_catalog() {
         let session = make_session();

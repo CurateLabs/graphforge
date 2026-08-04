@@ -1689,6 +1689,66 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_initialization_rejects_unknown_layout_entries_without_mutation() {
+        fn partial_project() -> (tempfile::TempDir, PathBuf) {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join(FORMAT_FILE), PROJECT_FORMAT_BYTES).unwrap();
+            let generation = root
+                .path()
+                .join("generations")
+                .join(Uuid::now_v7().hyphenated().to_string());
+            fs::create_dir_all(&generation).unwrap();
+            (root, generation)
+        }
+
+        let (root, _) = partial_project();
+        fs::write(root.path().join("caller-data"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(root.path().join("caller-data")).unwrap(),
+            b"preserve"
+        );
+
+        let (root, generation) = partial_project();
+        fs::write(generation.join("caller-data"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(generation.join("caller-data")).unwrap(),
+            b"preserve"
+        );
+
+        let (root, generation) = partial_project();
+        let participants = generation.join(PARTICIPANTS_DIR);
+        fs::create_dir(&participants).unwrap();
+        fs::write(participants.join("unknown"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(fs::read(participants.join("unknown")).unwrap(), b"preserve");
+
+        let (root, generation) = partial_project();
+        let workspace = generation.join(PARTICIPANTS_DIR).join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("configuration.json"), b"{}").unwrap();
+        fs::write(workspace.join("unknown.json"), b"preserve").unwrap();
+        assert_code(
+            open_or_initialize_project(root.path()).unwrap_err(),
+            "GF_UNSUPPORTED_PROJECT_FORMAT",
+        );
+        assert_eq!(
+            fs::read(workspace.join("unknown.json")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[test]
     fn existing_resolution_remains_pinned_after_current_changes() {
         let (root, first) = project();
         let old_reader = resolve_project_generation(root.path()).unwrap();
@@ -2044,6 +2104,33 @@ mod tests {
                 .unwrap()
                 .generation_uuid(),
             generation_uuid
+        );
+    }
+
+    #[test]
+    fn participant_snapshot_rejects_same_length_content_tampering_after_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let resolved = open_or_initialize_project(root.path()).unwrap();
+        let generation_uuid = resolved.generation_uuid();
+        let snapshot = resolved
+            .participant_snapshot("workspace", "configuration")
+            .unwrap()
+            .unwrap();
+        let path = resolved
+            .participant_path("workspace", "configuration")
+            .unwrap();
+        let mut tampered = snapshot.bytes.clone();
+        tampered[0] ^= 1;
+        fs::write(&path, tampered).unwrap();
+        drop(resolved);
+
+        let reopened = resolve_project_generation(root.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), generation_uuid);
+        assert_code(
+            reopened
+                .participant_snapshot("workspace", "configuration")
+                .unwrap_err(),
+            "GF_PROJECT_CORRUPT",
         );
     }
 }

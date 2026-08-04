@@ -2071,9 +2071,9 @@ mod tests {
         let parent = resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();
-        let request = request(vec![participant("graph", "nodes", b"original")]);
+        let initial_request = request(vec![participant("graph", "nodes", b"original")]);
         let ProjectStageOutcome::Staged(staged) =
-            stage_project_generation(root.path(), &request).unwrap()
+            stage_project_generation(root.path(), &initial_request).unwrap()
         else {
             panic!("new request unexpectedly replayed");
         };
@@ -2096,6 +2096,69 @@ mod tests {
             .expect("tampered bytes must fail validation");
 
         assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+
+        let request = request(vec![participant("graph", "nodes", b"original")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed");
+        };
+        let path = staged
+            .generation_root
+            .join(PARTICIPANTS_DIR)
+            .join(&staged.participants[0].relative_path);
+        std::fs::write(path, b"short").unwrap();
+        assert_eq!(
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .err()
+                .expect("truncated staged bytes must fail")
+                .code(),
+            "GF_PUBLICATION_FAILED"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_participant_hard_link_fails_before_current_mutation() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let request = request(vec![participant("graph", "nodes", b"stable")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("unexpected replay")
+        };
+        let path = staged
+            .generation_root
+            .join(PARTICIPANTS_DIR)
+            .join(&staged.participants[0].relative_path);
+        let external = root.path().join("external-participant");
+        fs::rename(&path, &external).unwrap();
+        fs::hard_link(&external, &path).unwrap();
+
+        assert_eq!(
+            staged
+                .validate(|_| Ok(()), |_, _| Ok(()))
+                .err()
+                .expect("hard-linked staged bytes must fail")
+                .code(),
+            "GF_PUBLICATION_FAILED"
+        );
         assert_eq!(
             resolve_project_generation(root.path())
                 .unwrap()

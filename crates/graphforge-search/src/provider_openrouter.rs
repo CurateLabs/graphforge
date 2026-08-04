@@ -1100,6 +1100,38 @@ mod tests {
             .class(),
             ProviderFailureClass::Authentication
         );
+        for credential in ["contains space", "line\nbreak"] {
+            assert_eq!(
+                OpenRouterAdapter::new(
+                    &contract,
+                    credential,
+                    &mut transport,
+                    OpenRouterWireLimits::default(),
+                )
+                .err()
+                .unwrap()
+                .class(),
+                ProviderFailureClass::Authentication
+            );
+        }
+        for limits in [
+            OpenRouterWireLimits {
+                request_bytes: 0,
+                response_bytes: 1,
+            },
+            OpenRouterWireLimits {
+                request_bytes: 1,
+                response_bytes: 0,
+            },
+        ] {
+            assert_eq!(
+                OpenRouterAdapter::new(&contract, "token", &mut transport, limits)
+                    .err()
+                    .unwrap()
+                    .class(),
+                ProviderFailureClass::InvalidRequest
+            );
+        }
 
         struct FailingTransport(OpenRouterTransportError);
         impl OpenRouterTransport for FailingTransport {

@@ -16248,4 +16248,182 @@ mod tests {
             .contains("cypher_value_access")
         );
     }
+
+    #[test]
+    fn aggregate_accumulators_cover_update_merge_state_and_empty_contracts() {
+        use datafusion::arrow::array::{
+            ArrayRef, Float64Array, Int64Array, ListArray, StringArray,
+        };
+        use datafusion::logical_expr::Accumulator;
+
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(4), None, Some(-2), Some(9)]));
+        for (is_max, expected) in [(true, 9), (false, -2)] {
+            let mut acc = ExtremeAcc {
+                is_max,
+                dtype: DataType::Int64,
+                best: None,
+            };
+            assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(None));
+            acc.update_batch(std::slice::from_ref(&ints)).unwrap();
+            assert_eq!(acc.evaluate().unwrap(), ScalarValue::Int64(Some(expected)));
+            assert_eq!(
+                acc.state().unwrap(),
+                vec![ScalarValue::Int64(Some(expected))]
+            );
+            assert!(acc.size() >= std::mem::size_of::<ExtremeAcc>());
+            let merged: ArrayRef =
+                Arc::new(Int64Array::from(vec![Some(if is_max { 12 } else { -7 })]));
+            acc.merge_batch(&[merged]).unwrap();
+            assert_eq!(
+                acc.evaluate().unwrap(),
+                ScalarValue::Int64(Some(if is_max { 12 } else { -7 }))
+            );
+        }
+
+        for distinct in [false, true] {
+            let mut acc = CollectAcc {
+                distinct,
+                elem_type: DataType::Int64,
+                values: Vec::new(),
+            };
+            acc.update_batch(std::slice::from_ref(&ints)).unwrap();
+            let merge: ArrayRef = Arc::new(ListArray::from_iter_primitive::<
+                datafusion::arrow::datatypes::Int64Type,
+                _,
+                _,
+            >([Some(vec![Some(4), Some(11)])]));
+            acc.merge_batch(&[merge]).unwrap();
+            let ScalarValue::List(values) = acc.evaluate().unwrap() else {
+                panic!("collect must return a list")
+            };
+            let expected_len = if distinct { 4 } else { 5 };
+            assert_eq!(values.value(0).len(), expected_len);
+            assert_eq!(acc.state().unwrap().len(), 1);
+            assert!(acc.size() >= std::mem::size_of::<CollectAcc>());
+            let bad: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+            assert!(
+                acc.merge_batch(&[bad])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be a list")
+            );
+        }
+
+        for continuous in [false, true] {
+            let mut acc = PercentileAcc {
+                continuous,
+                value_type: DataType::Int64,
+                result_type: if continuous {
+                    DataType::Float64
+                } else {
+                    DataType::Int64
+                },
+                values: Vec::new(),
+                percentile: None,
+            };
+            assert!(acc.evaluate().unwrap().is_null());
+            let p: ArrayRef = Arc::new(Float64Array::from(vec![Some(0.5); 4]));
+            acc.update_batch(&[Arc::clone(&ints), p]).unwrap();
+            assert_eq!(
+                acc.evaluate().unwrap(),
+                if continuous {
+                    ScalarValue::Float64(Some(4.0))
+                } else {
+                    ScalarValue::Int64(Some(4))
+                }
+            );
+            assert_eq!(acc.state().unwrap().len(), 2);
+            assert!(acc.size() >= std::mem::size_of::<PercentileAcc>());
+            assert!(acc.observe_percentile(Some(f64::NAN)).is_err());
+            assert!(acc.observe_percentile(Some(0.75)).is_err());
+            let bad_values: ArrayRef = Arc::new(StringArray::from(vec!["not-list"]));
+            let good_p: ArrayRef = Arc::new(Float64Array::from(vec![0.5]));
+            assert!(
+                acc.merge_batch(&[bad_values, good_p])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must be a list")
+            );
+        }
+    }
+
+    #[test]
+    fn duration_and_temporal_runtime_udfs_cover_each_value_family_and_nulls() {
+        let d1 = crate::temporal::DurationValue {
+            months: 1,
+            days: 2,
+            seconds: 3,
+            nanos: 750_000_000,
+        };
+        let d2 = crate::temporal::DurationValue {
+            months: 2,
+            days: 3,
+            seconds: 4,
+            nanos: 500_000_000,
+        };
+        let d1 = duration_scalar(Some(d1));
+        let d2 = duration_scalar(Some(d2));
+
+        let parsed = invoke_test_udf(
+            &CypherDurationParse::new(),
+            vec![ScalarValue::Utf8(Some("P1M2DT3.5S".into()))],
+        )
+        .unwrap();
+        assert!(duration_struct_parts(parsed.as_any().downcast_ref().unwrap(), 0).is_some());
+        let invalid = invoke_test_udf(
+            &CypherDurationParse::new(),
+            vec![ScalarValue::Utf8(Some("invalid".into()))],
+        )
+        .unwrap();
+        assert!(duration_struct_parts(invalid.as_any().downcast_ref().unwrap(), 0).is_none());
+
+        for sign in [1, -1] {
+            let out = invoke_test_udf(
+                &CypherDurationAdd::new(),
+                vec![d1.clone(), d2.clone(), ScalarValue::Int64(Some(sign))],
+            )
+            .unwrap();
+            assert!(duration_struct_parts(out.as_any().downcast_ref().unwrap(), 0).is_some());
+        }
+        for (factor, divide) in [(2.0, false), (2.0, true)] {
+            let out = invoke_test_udf(
+                &CypherDurationScale::new(),
+                vec![
+                    d1.clone(),
+                    ScalarValue::Float64(Some(factor)),
+                    ScalarValue::Boolean(Some(divide)),
+                ],
+            )
+            .unwrap();
+            assert!(duration_struct_parts(out.as_any().downcast_ref().unwrap(), 0).is_some());
+        }
+
+        let temporal_values = [
+            date_scalar(Some(20_000)),
+            ScalarValue::Time64Nanosecond(Some(10)),
+            time_scalar(Some((10, 3_600))),
+            localdatetime_scalar(Some((20_000, 10))),
+            datetime_scalar(Some((20_000, 10, 0, Some("UTC".into())))),
+        ];
+        for temporal in temporal_values {
+            for sign in [1, -1] {
+                let out = invoke_test_udf(
+                    &CypherTemporalArith::new(),
+                    vec![temporal.clone(), d1.clone(), ScalarValue::Int64(Some(sign))],
+                )
+                .unwrap();
+                assert_eq!(out.data_type(), &temporal.data_type());
+                assert!(!out.is_null(0));
+            }
+        }
+        assert!(
+            invoke_test_udf(
+                &CypherTemporalArith::new(),
+                vec![ScalarValue::Int64(Some(1)), d1, ScalarValue::Int64(Some(1))],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not a temporal value")
+        );
+    }
 }

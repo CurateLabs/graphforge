@@ -986,6 +986,41 @@ mod tests {
     }
 
     #[test]
+    fn atomic_update_requires_replace_and_cannot_reuse_missing_publication() {
+        let dir = TempDir::new().unwrap();
+        let key = key();
+        let error = coordinate_search_update(
+            dir.path(),
+            plan(&key, SearchPublicationMode::ReuseFresh),
+            SearchCoordinationLimits::default(),
+            || Ok(snapshot(1)),
+            |_, _, _, _| Ok(SearchUpdateBuild::Publish),
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SearchArtifactError::Build(reason) if reason.contains("replacement mode"))
+        );
+
+        let error = coordinate_search_update(
+            dir.path(),
+            plan(&key, SearchPublicationMode::Replace),
+            SearchCoordinationLimits::default(),
+            || Ok(snapshot(1)),
+            |current, _, _, _| {
+                assert!(current.is_none());
+                Ok(SearchUpdateBuild::ReuseCurrent)
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SearchArtifactError::Build(reason) if reason.contains("without a current artifact"))
+        );
+        assert!(current_search_artifact(dir.path(), &key).unwrap().is_none());
+    }
+
+    #[test]
     fn same_key_requests_serialize_and_share_one_lazy_build() {
         let dir = Arc::new(TempDir::new().unwrap());
         let key = Arc::new(key());

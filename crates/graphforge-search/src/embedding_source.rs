@@ -272,6 +272,84 @@ mod tests {
     }
 
     #[test]
+    fn capture_limit_and_fingerprint_wire_validation_is_exact() {
+        let project = tempfile::tempdir().unwrap();
+        for limits in [
+            EmbeddingSourceCaptureLimits {
+                parts: 0,
+                ..EmbeddingSourceCaptureLimits::default()
+            },
+            EmbeddingSourceCaptureLimits {
+                bytes: 0,
+                ..EmbeddingSourceCaptureLimits::default()
+            },
+            EmbeddingSourceCaptureLimits {
+                eligible_uuids: 0,
+                ..EmbeddingSourceCaptureLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                capture_embedding_source(project.path(), &[], &[], 0, limits, || Ok(())),
+                Err(SearchArtifactError::InvalidSelector { .. })
+            ));
+        }
+
+        let limits = EmbeddingSourceCaptureLimits {
+            parts: 1,
+            bytes: 2,
+            eligible_uuids: 1,
+        };
+        assert!(matches!(
+            capture_embedding_source(project.path(), &[], &[], 2, limits, || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_source_eligible_uuids",
+                limit: 1
+            })
+        ));
+        assert!(matches!(
+            capture_embedding_source(
+                project.path(),
+                &[part("a", b"a"), part("b", b"b")],
+                &[],
+                1,
+                limits,
+                || Ok(())
+            ),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_source_parts",
+                limit: 1
+            })
+        ));
+        assert!(matches!(
+            capture_embedding_source(project.path(), &[part("ab", b"c")], &[], 1, limits, || Ok(
+                ()
+            )),
+            Err(SearchArtifactError::ResourceExhausted {
+                resource: "embedding_source_bytes",
+                limit: 2
+            })
+        ));
+
+        for malformed in [
+            "wrong:0000000000000000000000000000000000000000000000000000000000000000",
+            "gf-fnv1a256:00",
+            "gf-fnv1a256:GG00000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            assert!(matches!(
+                fingerprint_bytes(malformed),
+                Err(SearchArtifactError::SourceSnapshot { .. })
+            ));
+        }
+        assert_eq!(
+            fingerprint_bytes(
+                "gf-fnv1a256:0000000000000000000000000000000000000000000000000000000000000000"
+            )
+            .unwrap(),
+            [0; 32]
+        );
+    }
+
+    #[test]
     fn committed_node_and_property_changes_advance_but_edges_do_not() {
         let project = tempfile::tempdir().unwrap();
         let node_a = new_v7();

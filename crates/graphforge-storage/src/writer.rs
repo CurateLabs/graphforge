@@ -3251,6 +3251,7 @@ mod tests {
     fn every_persisted_property_family_round_trips_through_parquet_reopen() {
         let dir = TempDir::new().unwrap();
         let node = new_v7();
+        let propertyless = new_v7();
         let values = HashMap::from([
             ("int".into(), IrLiteral::Int(-7)),
             ("float".into(), IrLiteral::Float(2.5)),
@@ -3313,6 +3314,7 @@ mod tests {
         ]);
         let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
         writer.create_node(node, TypeId(0)).unwrap();
+        writer.create_node(propertyless, TypeId(0)).unwrap();
         writer.set_properties(&node, None, values.clone()).unwrap();
         writer.flush().unwrap();
 
@@ -3327,6 +3329,11 @@ mod tests {
                 assert_eq!(actual.get(name), Some(expected), "property {name}");
             }
         }
+        assert!(
+            reopened
+                .get(&to_bytes(&propertyless))
+                .is_none_or(HashMap::is_empty)
+        );
     }
 
     #[test]

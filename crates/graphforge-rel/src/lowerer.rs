@@ -6267,4 +6267,152 @@ mod tests {
             "expected an unbound-variable error, got {err:?}"
         );
     }
+
+    #[test]
+    fn pure_lowering_helpers_cover_constants_collections_and_aggregate_contracts() {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        use datafusion::common::DFSchema;
+        use datafusion::logical_expr::expr_fn::col;
+        use datafusion::logical_expr::{Operator, lit};
+        use datafusion::scalar::ScalarValue;
+
+        assert_eq!(
+            const_eval_scalar(&lit(ScalarValue::Int64(Some(7)))),
+            Some(ScalarValue::Int64(Some(7)))
+        );
+        assert_eq!(
+            const_eval_scalar(&DfExpr::BinaryExpr(
+                datafusion::logical_expr::BinaryExpr::new(
+                    Box::new(lit(ScalarValue::Int64(Some(2)))),
+                    Operator::Plus,
+                    Box::new(lit(ScalarValue::Int64(Some(3)))),
+                )
+            )),
+            Some(ScalarValue::Int64(Some(5)))
+        );
+        assert_eq!(const_eval_scalar(&col("missing")), None);
+
+        for literal in [
+            IrLiteral::Null,
+            IrLiteral::Int(1),
+            IrLiteral::List(vec![IrLiteral::Int(1)]),
+        ] {
+            assert!(!contains_map_literal(&literal));
+            reject_map_property_value("safe", &literal).unwrap();
+        }
+        for literal in [
+            IrLiteral::Map(vec![]),
+            IrLiteral::List(vec![IrLiteral::Map(vec![])]),
+        ] {
+            assert!(contains_map_literal(&literal));
+            assert!(
+                reject_map_property_value("nested", &literal)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot store map values")
+            );
+        }
+        assert_eq!(var_alias(VarId(42)), "var_42");
+        assert!(build_type_id_map(None).is_empty());
+        assert!(build_entity_id_map(None).is_empty());
+        assert!(build_inference_rules(None).is_empty());
+
+        let schema = Arc::new(
+            DFSchema::try_from(Schema::new(vec![
+                Field::new("small", DataType::new_list(DataType::Utf8, true), true),
+                Field::new(
+                    "large",
+                    DataType::new_large_list(DataType::Int32, true),
+                    true,
+                ),
+                Field::new(
+                    "fixed",
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new_list_field(DataType::Boolean, true)),
+                        2,
+                    ),
+                    true,
+                ),
+            ]))
+            .unwrap(),
+        );
+        for (name, expected) in [
+            ("small", DataType::Utf8),
+            ("large", DataType::Int32),
+            ("fixed", DataType::Boolean),
+        ] {
+            assert_eq!(
+                unwind_element_field(&col(name), &schema, std::iter::empty::<&str>()).data_type(),
+                &expected
+            );
+        }
+        let unknown = unwind_element_field(&col("unknown"), &schema, ["z", "a", "a"]);
+        let DataType::Struct(fields) = unknown.data_type() else {
+            panic!("unknown typed UNWIND must expose a map-shaped element")
+        };
+        assert_eq!(
+            fields.iter().map(|f| f.name().as_str()).collect::<Vec<_>>(),
+            ["a", "z"]
+        );
+
+        let value = Some(col("value"));
+        for function in [
+            AggFunc::Count,
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+        ] {
+            assert!(
+                lower_agg_func(function, value.clone(), None, Some(&DataType::Int64)).is_ok(),
+                "{function:?}"
+            );
+        }
+        for function in [AggFunc::PercentileDisc, AggFunc::PercentileCont] {
+            assert!(
+                lower_agg_func(
+                    function,
+                    value.clone(),
+                    Some(lit(ScalarValue::Float64(Some(0.5)))),
+                    Some(&DataType::Int64),
+                )
+                .is_ok()
+            );
+        }
+        assert!(lower_agg_func(AggFunc::Count, None, None, None).is_ok());
+        for function in [
+            AggFunc::CountDistinct,
+            AggFunc::Sum,
+            AggFunc::SumDistinct,
+            AggFunc::Avg,
+            AggFunc::AvgDistinct,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::Collect,
+            AggFunc::CollectDistinct,
+            AggFunc::PercentileDisc,
+            AggFunc::PercentileCont,
+        ] {
+            assert!(
+                lower_agg_func(function, None, None, None).is_err(),
+                "{function:?}"
+            );
+        }
+        for function in [AggFunc::Min, AggFunc::Max] {
+            let heterogeneous =
+                DataType::Struct(vec![Field::new("__het_tag", DataType::Int8, false)].into());
+            assert!(
+                format!(
+                    "{}",
+                    lower_agg_func(function, value.clone(), None, Some(&heterogeneous),).unwrap()
+                )
+                .contains("cypher_")
+            );
+        }
+    }
 }
