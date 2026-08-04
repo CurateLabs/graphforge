@@ -2059,7 +2059,7 @@ mod tests {
 
         let root = TempDir::new().unwrap();
         let path = root.path().join("wrong-schema.arrow");
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
             "wrong",
             DataType::UInt64,
             false,
@@ -2069,7 +2069,7 @@ mod tests {
             vec![Arc::new(UInt64Array::from(vec![1]))],
         )
         .unwrap();
-        let file = File::create(&path).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
         let mut writer = FileWriter::try_new(file, &schema).unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
