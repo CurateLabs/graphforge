@@ -719,4 +719,57 @@ mod tests {
         assert!(!rendered.contains("credential"));
         assert!(!rendered.contains("source text"));
     }
+
+    #[test]
+    fn standard_runtime_and_retry_boundaries_are_exact() {
+        let mut runtime = StandardProviderExecutionRuntime::default();
+        let mut checkpoints = 0;
+        runtime
+            .wait(Duration::ZERO, &mut || {
+                checkpoints += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(checkpoints, 1);
+
+        let error = runtime
+            .wait(Duration::from_millis(1), &mut || {
+                Err(failure(&contract(), ProviderFailureClass::Cancelled))
+            })
+            .unwrap_err();
+        assert_eq!(error.class(), ProviderFailureClass::Cancelled);
+
+        let contract = contract();
+        assert_eq!(
+            check_deadline(
+                &contract,
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+            )
+            .unwrap_err()
+            .class(),
+            ProviderFailureClass::InvalidRequest
+        );
+        assert_eq!(
+            check_deadline(
+                &contract,
+                Duration::ZERO,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+            )
+            .unwrap_err()
+            .class(),
+            ProviderFailureClass::Timeout
+        );
+
+        let limits = ProviderExecutionLimits {
+            retry_backoff: Duration::from_secs(2),
+            maximum_retry_backoff: Duration::from_secs(5),
+            ..ProviderExecutionLimits::default()
+        };
+        assert_eq!(retry_delay(limits, 0), Duration::ZERO);
+        assert_eq!(retry_delay(limits, 1), Duration::from_secs(2));
+        assert_eq!(retry_delay(limits, 4), Duration::from_secs(5));
+    }
 }

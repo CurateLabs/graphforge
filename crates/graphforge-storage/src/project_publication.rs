@@ -2736,4 +2736,40 @@ mod tests {
         );
         assert!(lock.is_dir());
     }
+
+    #[test]
+    fn public_transaction_probe_distinguishes_absent_staged_and_durable_publication() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"rows")]);
+
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
+        );
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("fresh transaction unexpectedly replayed");
+        };
+        assert!(
+            published_project_transaction(root.path(), request.transaction_uuid)
+                .unwrap()
+                .is_none()
+        );
+        let receipt = staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let reopened = published_project_transaction(root.path(), request.transaction_uuid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.generation_uuid, receipt.generation_uuid);
+        assert_eq!(
+            reopened.generation_manifest_sha256,
+            receipt.generation_manifest_sha256
+        );
+        assert!(reopened.idempotent_replay);
+    }
 }

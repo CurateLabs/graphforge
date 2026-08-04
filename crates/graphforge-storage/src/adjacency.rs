@@ -1152,6 +1152,51 @@ mod tests {
             neighbor_ids: vec![9],
         };
         assert!(entries_from_out_csr(&descending).is_none());
+
+        let mismatched_columns = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![7],
+            neighbor_ids: vec![],
+        };
+        assert!(entries_from_out_csr(&mismatched_columns).is_none());
+
+        let missing_offsets = CsrIndex {
+            offsets: vec![],
+            edge_ids: vec![],
+            neighbor_ids: vec![],
+        };
+        assert_eq!(entries_from_out_csr(&missing_offsets), Some(Vec::new()));
+    }
+
+    #[test]
+    fn public_csr_writer_rejects_every_inconsistent_topology_shape_without_file() {
+        let dir = TempDir::new().unwrap();
+        let path = csr_path(dir.path(), "BROKEN", Direction::Out);
+        for malformed in [
+            CsrIndex {
+                offsets: vec![],
+                edge_ids: vec![],
+                neighbor_ids: vec![],
+            },
+            CsrIndex {
+                offsets: vec![0, 2],
+                edge_ids: vec![1],
+                neighbor_ids: vec![2],
+            },
+            CsrIndex {
+                offsets: vec![0, 1],
+                edge_ids: vec![1],
+                neighbor_ids: vec![],
+            },
+            CsrIndex {
+                offsets: vec![1],
+                edge_ids: vec![],
+                neighbor_ids: vec![],
+            },
+        ] {
+            assert_eq!(write_csr(&path, &malformed).unwrap_err().code(), "GF_IO");
+            assert!(!path.exists());
+        }
     }
 
     #[test]

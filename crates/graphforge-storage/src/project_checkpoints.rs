@@ -3357,4 +3357,43 @@ mod tests {
         );
         assert_eq!(read_registry(&root).unwrap(), stable);
     }
+
+    #[test]
+    fn public_checkpoint_operations_reject_cross_kind_uuid_reuse_after_reopen() {
+        let root = tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let operation = Uuid::now_v7();
+        create_checkpoint(root.path(), &create_request(operation, "release")).unwrap();
+
+        let delete = CheckpointDeleteRequest {
+            operation_uuid: operation,
+            name: "release".into(),
+            actor_uuid: None,
+        };
+        assert_eq!(
+            delete_checkpoint(root.path(), &delete).unwrap_err().code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+
+        let delete_operation = Uuid::now_v7();
+        delete_checkpoint(
+            root.path(),
+            &CheckpointDeleteRequest {
+                operation_uuid: delete_operation,
+                name: "release".into(),
+                actor_uuid: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            create_checkpoint(
+                root.path(),
+                &create_request(delete_operation, "replacement")
+            )
+            .unwrap_err()
+            .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        assert!(list_checkpoints(root.path()).unwrap().is_empty());
+    }
 }

@@ -2019,4 +2019,31 @@ mod tests {
         assert_eq!(std::fs::read(&oversized).unwrap(), b"12345");
         assert_eq!(read_bounded_regular_file(&oversized, 5).unwrap(), b"12345");
     }
+
+    #[test]
+    fn verified_reopen_rejects_wrong_digest_and_missing_generation_without_current_mutation() {
+        let (root, generation_uuid) = project();
+        let current = resolve_project_generation(root.path()).unwrap();
+        let current_bytes = std::fs::read(root.path().join(CURRENT_FILE)).unwrap();
+
+        assert_code(
+            resolve_verified_generation(root.path(), generation_uuid, [0x55; 32]).unwrap_err(),
+            "GF_PROJECT_CORRUPT",
+        );
+        assert_code(
+            resolve_verified_generation(root.path(), Uuid::now_v7(), current.manifest_sha256())
+                .unwrap_err(),
+            "GF_PROJECT_CORRUPT",
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(CURRENT_FILE)).unwrap(),
+            current_bytes
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            generation_uuid
+        );
+    }
 }

@@ -1567,4 +1567,34 @@ mod tests {
         ));
         assert!(!project.path().join("embeddings").exists());
     }
+
+    #[test]
+    fn public_reopen_distinguishes_absent_space_and_absent_active_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor("absent", 2);
+        assert!(
+            current_embedding_generation(
+                dir.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(())
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let compatibility_id = descriptor.compatibility_id().unwrap();
+        let root = space_root(dir.path(), compatibility_id);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            current_embedding_generation(
+                dir.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(())
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
 }

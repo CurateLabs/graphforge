@@ -8775,11 +8775,7 @@ impl ScalarUDFImpl for CypherDurationBetween {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let mode_arr = cast(&cols[2], &DataType::Utf8).map_err(DataFusionError::from)?;
         let modes = mode_arr.as_any().downcast_ref::<StringArray>();
 
@@ -8869,11 +8865,7 @@ impl ScalarUDFImpl for CypherTemporalArith {
         use datafusion::arrow::datatypes::TimeUnit;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let temporal = &cols[0];
         let dur = cols[1].as_any().downcast_ref::<StructArray>();
         let signs = cols[2].as_any().downcast_ref::<Int64Array>();
@@ -9089,11 +9081,7 @@ impl ScalarUDFImpl for CypherDurationAdd {
         use datafusion::arrow::array::{Array, Int64Array, StructArray};
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let a = cols[0].as_any().downcast_ref::<StructArray>();
         let b = cols[1].as_any().downcast_ref::<StructArray>();
         let signs = cols[2].as_any().downcast_ref::<Int64Array>();
@@ -9172,11 +9160,7 @@ impl ScalarUDFImpl for CypherDurationScale {
         use datafusion::arrow::compute::cast;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let dur = cols[0].as_any().downcast_ref::<StructArray>();
         // The numeric factor may arrive as any int/float width — cast to f64.
         let num = cast(&cols[1], &DataType::Float64)?;
@@ -9836,6 +9820,25 @@ impl ScalarUDFImpl for CypherListComp {
 // cypher_date_project UDF
 // ---------------------------------------------------------------------------
 
+fn udf_argument_arrays(
+    args: &ScalarFunctionArgs,
+) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
+    args.args
+        .iter()
+        .map(|value| value.to_array(args.number_rows))
+        .collect()
+}
+
+fn cast_argument_arrays(
+    arrays: &[datafusion::arrow::array::ArrayRef],
+    data_type: &DataType,
+) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
+    arrays
+        .iter()
+        .map(|array| datafusion::arrow::compute::cast(array, data_type).map_err(Into::into))
+        .collect()
+}
+
 /// `date`-from-value projection (`Temporal3`): `date(base)` / `date({date: base,
 /// …overrides})`. Args are `[base, year, month, day, week, dayOfWeek,
 /// ordinalDay, quarter, dayOfQuarter]` — `base` is a `Date32` or an ISO date/
@@ -9885,11 +9888,7 @@ impl ScalarUDFImpl for CypherDateProject {
         use datafusion::arrow::compute::cast;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // A typed temporal-struct base (date / localdatetime / time / datetime) is
         // read directly; a string base is cast to `Utf8` (handling `Utf8View`).
         let base = if is_date_struct(cols[0].data_type())
@@ -10008,11 +10007,7 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // A `Time64(Nanosecond)` or `localdatetime`-struct base is read directly;
         // any other (string) base is cast to `Utf8` (handling `Utf8View`).
         let base: ArrayRef =
@@ -10025,11 +10020,7 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
             } else {
                 cast(&cols[0], &DataType::Utf8).map_err(DataFusionError::from)?
             };
-        let ov: Vec<_> = cols[1..7]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[1..7], &DataType::Int64)?;
 
         let base_nanos = |i: usize| -> Option<i64> {
             if base.is_null(i) {
@@ -10133,11 +10124,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_localdatetime_struct(cols[0].data_type())
@@ -10150,11 +10137,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..8]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..8], &DataType::Int64)?;
 
         let base_nanos = |i: usize| -> Option<i64> {
             if base.is_null(i) {
@@ -10504,11 +10487,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // Typed sources (`date`/`localdatetime`/`time`/`datetime` struct or
         // `Time64`) are read directly; a string source is cast to `Utf8`
         // (handling `Utf8View`).
@@ -10526,11 +10505,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
         };
         let date_src = typed_or_utf8(&cols[0])?;
         let time_src = typed_or_utf8(&cols[1])?;
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if date_src.is_null(i) {
@@ -10680,11 +10655,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
         let value: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
@@ -10699,11 +10670,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if value.is_null(i) {
@@ -10909,11 +10876,7 @@ impl ScalarUDFImpl for CypherTimeProject {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_time_struct(cols[0].data_type())
@@ -10924,11 +10887,7 @@ impl ScalarUDFImpl for CypherTimeProject {
             } else {
                 cast(&cols[0], &DataType::Utf8).map_err(DataFusionError::from)?
             };
-        let ov: Vec<_> = cols[1..7]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[1..7], &DataType::Int64)?;
         let tz_arr = cast(&cols[7], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11050,11 +11009,7 @@ impl ScalarUDFImpl for CypherTimeTruncate {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let base: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_time_struct(cols[0].data_type())
@@ -11067,11 +11022,7 @@ impl ScalarUDFImpl for CypherTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..8]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..8], &DataType::Int64)?;
         let tz_arr = cast(&cols[8], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11291,11 +11242,7 @@ impl ScalarUDFImpl for CypherDateTimeProject {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         let typed_or_utf8 = |a: &ArrayRef| -> datafusion::error::Result<ArrayRef> {
             if matches!(a.data_type(), DataType::Time64(TimeUnit::Nanosecond))
                 || is_date_struct(a.data_type())
@@ -11310,11 +11257,7 @@ impl ScalarUDFImpl for CypherDateTimeProject {
         };
         let date_src = typed_or_utf8(&cols[0])?;
         let time_src = typed_or_utf8(&cols[1])?;
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
         let tz_arr = cast(&cols[16], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11476,11 +11419,7 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // One `value` source feeds both the date and time components.
         let value: ArrayRef =
             if matches!(cols[0].data_type(), DataType::Time64(TimeUnit::Nanosecond))
@@ -11495,11 +11434,7 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
             };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..16]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..16], &DataType::Int64)?;
         let tz_arr = cast(&cols[16], &DataType::Utf8).map_err(DataFusionError::from)?;
         let tz = tz_arr.as_any().downcast_ref::<StringArray>();
 
@@ -11870,11 +11805,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
         use datafusion::error::DataFusionError;
 
         let rows = args.number_rows;
-        let cols: Vec<_> = args
-            .args
-            .iter()
-            .map(|a| a.to_array(rows))
-            .collect::<datafusion::error::Result<_>>()?;
+        let cols = udf_argument_arrays(&args)?;
         // DataFusion emits `Utf8View` for string *columns* by default (string
         // literals stay `Utf8`), and our downcasts target `StringArray` — cast
         // string inputs to `Utf8` so a column-typed value/unit isn't silently
@@ -11890,11 +11821,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
         };
         let units_arr = cast(&cols[1], &DataType::Utf8).map_err(DataFusionError::from)?;
         let units = units_arr.as_any().downcast_ref::<StringArray>();
-        let ov: Vec<_> = cols[2..10]
-            .iter()
-            .map(|c| cast(c, &DataType::Int64))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(DataFusionError::from)?;
+        let ov = cast_argument_arrays(&cols[2..10], &DataType::Int64)?;
 
         let base_date = |i: usize| -> Option<i64> {
             if value.is_null(i) {
@@ -12867,6 +12794,127 @@ mod tests {
                 .map(|row| ScalarValue::try_from_array(&values, row).unwrap())
                 .collect::<Vec<_>>(),
             vec![ScalarValue::Int64(Some(5)), ScalarValue::Int64(Some(7))]
+        );
+    }
+
+    #[test]
+    fn percentile_and_comparison_error_contract_matrix_is_exact() {
+        use datafusion::logical_expr::AggregateUDFImpl;
+
+        let continuous = CypherPercentile::new(true);
+        assert_eq!(
+            continuous.return_type(&[]).unwrap_err().to_string(),
+            "Error during planning: percentile aggregate requires value and percentile arguments"
+        );
+        assert_eq!(
+            continuous
+                .return_type(&[DataType::Utf8, DataType::Float64])
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: percentile value expression must be numeric, got Utf8"
+        );
+        assert_eq!(
+            continuous
+                .return_type(&[DataType::Int32, DataType::Float64])
+                .unwrap(),
+            DataType::Float64
+        );
+        assert_eq!(
+            CypherPercentile::new(false)
+                .return_type(&[DataType::Int32, DataType::Float64])
+                .unwrap(),
+            DataType::Int32
+        );
+
+        let mut accumulator = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: vec![],
+            percentile: None,
+        };
+        accumulator.push_value(ScalarValue::Null).unwrap();
+        assert_eq!(
+            accumulator
+                .push_value(ScalarValue::Utf8(Some("bad".into())))
+                .unwrap_err()
+                .to_string(),
+            "Execution error: percentile value expression must be numeric, got Utf8"
+        );
+        for invalid in [f64::NAN, -0.1, 1.1] {
+            assert!(
+                accumulator
+                    .observe_percentile(Some(invalid))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finite number between 0.0 and 1.0")
+            );
+        }
+        accumulator.observe_percentile(Some(0.25)).unwrap();
+        assert_eq!(
+            accumulator
+                .observe_percentile(Some(0.75))
+                .unwrap_err()
+                .to_string(),
+            "Execution error: percentile argument must be constant within an aggregate group"
+        );
+
+        assert_eq!(scalar_as_i8(&ScalarValue::Int8(Some(-7))).unwrap(), -7);
+        assert_eq!(scalar_as_i8(&ScalarValue::Int64(Some(7))).unwrap(), 7);
+        assert!(
+            scalar_as_i8(&ScalarValue::Int64(Some(128)))
+                .unwrap_err()
+                .to_string()
+                .contains("outside i8 range")
+        );
+        assert_eq!(
+            scalar_as_i8(&ScalarValue::Utf8(Some("1".into())))
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: comparison opcode must be an integer, got Utf8(\"1\")"
+        );
+    }
+
+    #[test]
+    fn shared_temporal_cast_helper_preserves_arrow_values_nulls_and_error() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int32Array, Int64Array};
+
+        let integers: ArrayRef = Arc::new(Int32Array::from(vec![Some(7), None]));
+        let casted = cast_argument_arrays(&[integers], &DataType::Int64).unwrap();
+        let casted = casted[0]
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Int64");
+        assert_eq!(casted.value(0), 7);
+        assert!(casted.is_null(1));
+
+        let invalid = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Int64(Some(1))],
+            &DataType::Int64,
+            true,
+        ))
+        .to_array_of_size(1)
+        .unwrap();
+        let direct_error = datafusion::arrow::compute::cast(&invalid, &DataType::Int64)
+            .map_err(datafusion::error::DataFusionError::from)
+            .unwrap_err()
+            .to_string();
+        let helper_error = cast_argument_arrays(&[invalid], &DataType::Int64)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(helper_error, direct_error);
+    }
+
+    #[test]
+    fn list_comprehension_rejects_non_list_input_through_public_udf_contract() {
+        let udf = CypherListComp::new(None, None, "__gf_elem".into(), vec![]);
+        let error = invoke_test_udf(&udf, vec![ScalarValue::Int64(Some(1))]).unwrap_err();
+        let datafusion::error::DataFusionError::Internal(message) = error else {
+            panic!("expected DataFusion internal contract error")
+        };
+        assert_eq!(
+            message,
+            "cypher_list_comprehension: first argument is not a list"
         );
     }
 

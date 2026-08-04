@@ -1462,4 +1462,51 @@ mod tests {
         let non_project = tempfile::tempdir().unwrap();
         assert!(!is_pristine_initialized_target(non_project.path()).unwrap());
     }
+
+    #[test]
+    fn public_import_replay_fails_closed_after_reopen_without_extra_publication() {
+        let source = tempfile::tempdir().unwrap();
+        let source_generation = open_or_initialize_project(source.path()).unwrap();
+        let limits = PortableProjectLimits::default();
+        let (envelope, _) = encode_portable_project(&source_generation, limits).unwrap();
+        let target_parent = tempfile::tempdir().unwrap();
+        let target = target_parent.path().join("replayed-import");
+        let transaction_uuid = Uuid::now_v7();
+        let generation_uuid = Uuid::now_v7();
+        let capabilities = supported(&source_generation);
+
+        let first = import_portable_project(
+            &envelope,
+            &target,
+            transaction_uuid,
+            generation_uuid,
+            &capabilities,
+            limits,
+        )
+        .unwrap();
+        let second = import_portable_project(
+            &envelope,
+            &target,
+            transaction_uuid,
+            generation_uuid,
+            &capabilities,
+            limits,
+        )
+        .unwrap_err();
+        assert_eq!(first.publication.generation_uuid, generation_uuid);
+        assert_eq!(second.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
+        assert_eq!(
+            resolve_project_generation(&target)
+                .unwrap()
+                .generation_uuid(),
+            generation_uuid
+        );
+        assert_eq!(
+            crate::published_project_transaction(&target, transaction_uuid)
+                .unwrap()
+                .unwrap()
+                .generation_uuid,
+            generation_uuid
+        );
+    }
 }
