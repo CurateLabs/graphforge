@@ -2,15 +2,39 @@
 
 GraphForge proves shippable behavior with deterministic Rust and binding tests,
 the openCypher TCK as the language oracle, and contract inventories for non-Cypher
-surfaces. Correctness beats performance; skips, sleeps, retries-as-green, and
-weakened assertions do not satisfy gates (`AGENTS.md`,
+surfaces. Correctness and registry honesty are non-negotiable; skips, sleeps,
+retries-as-green, and weakened assertions do not satisfy gates (`AGENTS.md`,
 [`../development/testing.md`](../development/testing.md)).
+
+**Speed is a first-class engineering value alongside honesty.** Every surface
+has a wall-clock target, sheds work that is not required for its objective, and
+parallelizes the rest. Frequent publishing uses the **publish-track**, not a
+separately named “nightly” product. Full `llvm-cov` / `make coverage-rust` is a
+local (or coverage-sensitive) honesty tool — **PR CI does not run full coverage**.
 
 This page is the **v0.5.0 / release-prep testing strategy** that shipped on
 `main`: how layers compose, what each gate proves, and what does not count as
 end-to-end evidence. Command recipes and historical suite layout live in
 [`../development/testing.md`](../development/testing.md). Workflow mechanics live
 in [`.github/workflows/README.md`](../../.github/workflows/README.md).
+
+## Dual-track objectives (PR / publish-track / human close)
+
+| Surface | Objective | Required when | Wall-clock target | Must keep | Shed / defer |
+| --- | --- | --- | --- | --- | --- |
+| `pre-push-fast` | Policy/format | Local habit | ~30s | lint/license/workflow | Full coverage |
+| PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
+| `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default; CI enforcement |
+| Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
+| **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | M1, checkpoint, m20/m21, full clean-env |
+| **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** M1 / surface gates as documented | — |
+| Unchanged-SHA reuse | Skip redundant RC | Same `main` tip + unexpired candidate | RC ~0; publish-only ≤15m | Candidate completeness checks | Rebuilding identical bytes |
+| Fuzz / stress / viz | Diagnostic | Schedule/manual | N/A | Not merge or publish-track blockers | — |
+
+**publish-track** is Binding RC → tag / release identity → `publish.yaml` on
+retained bytes. M1 load, checkpoint recovery, and m20/m21 surface aggregates remain
+**human-close / milestone** evidence — they are not registry-honesty inputs and
+must not block every publish.
 
 ## Ownership
 
@@ -70,15 +94,15 @@ layers are SHA-bound release certification.
 | Unit + workspace | Rust (or classified) changes | Crate logic and `cargo test --workspace` pass with Clippy `-D warnings` |
 | Binding acceptance (PR) | Binding / classified changes | One same-SHA Linux Python wheel and Node addon; native contracts; short concurrency matrix |
 | Language oracle | Workspace / TCK entrypoints | openCypher TCK runnable scenarios pass (currently **3897/3897**) |
-| Binding release candidate | Manual, exact `main` SHA | Clean-install native proof on Linux, macOS, and Windows; fail-closed aggregate |
-| Surface / recovery / load certification | Manual, exact SHA | Non-Cypher inventory + facade matrix, checkpoint recovery, XS–XL load ledger as publication evidence |
-| Publication | Human release path | `publish.yaml` / registry artifacts for the certified SHA |
+| Binding release candidate | publish-track and human close; exact `main` SHA | Clean-install multi-OS natives + offline rehearsal; fail-closed aggregate; retained publish bytes |
+| publish-track publication | Scheduled or on-demand publish | Binding RC retained bytes → tag → `publish.yaml` (no rebuild-on-write) |
+| Surface / recovery / load certification | Human release close (optional / milestone) | Non-Cypher inventory, checkpoint recovery, XS–XL load ledger — **not** publish-track blockers |
+| Human publication close | Coordinated GA / milestone | publish-track honesty **plus** documented human-close gates |
 
 Ordinary implementation issues close on acceptance-criteria outcomes and green
-checks for the **changed surface**. They do **not** require the full
-release-certification cascade (Binding RC → surface aggregate → publish). Exact
-SHA pairing and downloadable artifacts are publication evidence — see
-`AGENTS.md` § Issue close.
+checks for the **changed surface**. They do **not** require Binding RC,
+publish-track, or the human-close cascade. Exact SHA pairing and downloadable
+artifacts are publication evidence — see `AGENTS.md` § Issue close.
 
 ### Pull-request contract (Test Suite + CI Gate)
 
@@ -143,7 +167,8 @@ docs surfaces; it does not prove runtime behavior.
 | Persistence / reopen | Facade lifecycle + kill-reopen / recovery suites | “Wrote Parquet files” without reopen readback |
 | Binding parity | Same-SHA clean-install wheel/addon; Arrow/IPC and error-code equality | Import smoke or stubbed natives |
 | Concurrency contract | Frozen short matrix in PR CI; stress lane is diagnostic | Stress retries used as the merge gate |
-| Release publication | Exact SHA + same-SHA Binding RC / surface artifacts + publish path | Green PR CI on an unrelated SHA |
+| publish-track publication | Exact SHA + same-SHA Binding RC retained bytes + `publish.yaml` no-rebuild | Green PR CI on an unrelated SHA; M1/checkpoint alone |
+| Human release close | publish-track honesty **plus** documented M1 / surface gates when required | Treating every human-close gate as a publish-track blocker |
 
 Failure handling for matrix or RC failures: let safe lanes finish, census
 symptoms, group by root cause, fix with earlier regression coverage, freeze a
@@ -164,6 +189,11 @@ weakened assertions (`AGENTS.md`).
 | Policy / docs | Format, lint, license, docs build | `make pre-push`, `.github/workflows/docs.yml` |
 
 ## Behavior coverage
+
+PR CI does **not** enforce full `llvm-cov` floors. Use `make coverage-rust`
+locally (or when claiming floor changes). Default maintainer loop is
+`make pre-push-fast`; run full `make coverage` / `make pre-push` when the changed
+surface needs coverage honesty.
 
 ### Rust coverage evidence
 
@@ -232,11 +262,18 @@ unfiltered because their functional runtime suites are the measured surface.
 ## Running the tests
 
 ```bash
-# Default maintainer loop
+# Default maintainer loop (policy/format; ~30s)
+make pre-push-fast
+
+# Changed-surface validation
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 make test-tck
+
+# Coverage-sensitive changes / floor claims (local; not PR CI)
+make coverage-rust
+# Full local gate when needed
 make pre-push
 
 # Non-Cypher surface (Rust)
@@ -265,15 +302,15 @@ identifiers; they are not product milestone labels.
 
 | Workflow surface | Role |
 | --- | --- |
-| `.github/workflows/test.yml` (Test Suite + CI Gate) | Classified PR/`main` policy, Rust, bindings, concurrency short matrix |
-| `.github/workflows/binding-release-candidate.yml` | Manual multi-OS clean-install Binding RC for an exact SHA |
-| Non-Cypher / recovery / load gate workflows | SHA-bound publication evidence (inventory, recovery, XS–XL load) |
+| `.github/workflows/test.yml` (Test Suite + CI Gate) | Classified PR/`main` policy, Rust, bindings, concurrency short matrix (not full llvm-cov) |
+| `.github/workflows/binding-release-candidate.yml` | Multi-OS Binding RC for publish-track and human close (exact SHA) |
+| Non-Cypher / recovery / load gate workflows | Human-close / milestone publication evidence (not publish-track blockers) |
 | `.github/workflows/docs.yml` | Starlight `pnpm docs:build` |
-| `.github/workflows/publish.yaml` | Human publication path |
+| `.github/workflows/publish.yaml` | publish-track and human publication path (retained Binding RC bytes; no rebuild) |
 
-Merge requires green required checks and CI Gate at the exact head SHA. Manual
-SHA-bound release workflows certify publication; they are not close rituals for
-ordinary implementation issues. Details:
+Merge requires green required checks and CI Gate at the exact head SHA.
+publish-track and human-close workflows certify registry publication; they are
+not close rituals for ordinary implementation issues. Details:
 [`.github/workflows/README.md`](../../.github/workflows/README.md).
 
 ## Test data & environments

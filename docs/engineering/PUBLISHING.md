@@ -9,6 +9,17 @@ multi-tenant service. Operational detail:
 [`../development/release-workflows.md`](../development/release-workflows.md), and
 `.github/workflows/publish.yaml`.
 
+**Speed is a first-class value alongside registry honesty.** Prefer the
+**publish-track** for frequent publishes (scheduled or on-demand): Binding RC →
+tag / release identity → `publish.yaml` on retained bytes (no rebuild-on-write).
+Wall-clock targets: Binding RC ≤20m p50 warm / ≤35m cold; publish-track
+≤35m p50 / ≤50m cold; unchanged-SHA publish-only ≤15m. Dual-track table:
+[`TESTING.md`](TESTING.md).
+
+**Human release close** (milestone / coordinated GA) adds optional evidence gates
+(M1 load, checkpoint, m20/m21 surface aggregates) on top of publish-track honesty.
+Those gates must not block every publish-track run.
+
 ## Artifacts and destinations
 
 | Artifact | Destination | Versioned by | Owner |
@@ -71,9 +82,10 @@ must be green on the **same SHA** that is tagged for publication.
 
 | From | To | Required evidence / approval |
 | --- | --- | --- |
-| PR branch | `main` | Focused PR, green CI Gate, clean review threads |
-| `main` SHA | Release candidate | Complete v0.5.1 candidate manifest and offline rehearsal (tracker [#192](https://github.com/CurateLabs/graphforge/issues/192)) |
-| Release candidate | Registries + GitHub Release | Dry-runs, checksums/SBOM where configured, human release execution |
+| PR branch | `main` | Focused PR, green CI Gate, clean review threads (not Binding RC / M1) |
+| `main` SHA | Binding RC candidate | Same-SHA multi-OS retained partitions + offline rehearsal |
+| Binding RC candidate | Registries (publish-track) | Tag / release identity + `publish.yaml` retained bytes; M1/checkpoint/m20/m21 **not** required |
+| publish-track success | Human release close (optional) | Documented M1 / surface gates when the milestone runbook requires them |
 | Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
 
