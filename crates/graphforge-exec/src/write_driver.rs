@@ -3537,6 +3537,118 @@ mod tests {
     use super::*;
 
     #[test]
+    fn computed_columns_report_missing_and_misaligned_results() {
+        let empty: Vec<crate::CreateComputed> = Vec::new();
+        assert_eq!(computed_type(&empty, 3, "score"), DataType::Null);
+        let error = computed_array(&empty, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("was not evaluated"));
+
+        let missing = vec![HashMap::from([(3, Vec::new())])];
+        assert_eq!(computed_type(&missing, 3, "score"), DataType::Null);
+        let error = computed_array(&missing, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("was not evaluated"));
+
+        let values = Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef;
+        let computed = vec![HashMap::from([(3, vec![("score".into(), values)])])];
+        assert_eq!(computed_type(&computed, 3, "score"), DataType::Int64);
+        let error = computed_array(&computed, 0, 3, "score", 1).unwrap_err();
+        assert!(error.to_string().contains("2 rows, expected 1"));
+        assert_eq!(
+            computed_array(&computed, 0, 3, "score", 2).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn create_recorder_exposes_node_identity_slices() {
+        let mut recorder = CreateRecorder::default();
+        assert!(recorder.node_identities(8).is_none());
+        recorder.record_node(8, [1; 16], 9, 10);
+        recorder.record_node(8, [2; 16], 11, 12);
+        let (uuids, node_ids, type_ids) = recorder.node_identities(8).unwrap();
+        assert_eq!(uuids, &[[1; 16], [2; 16]]);
+        assert_eq!(node_ids, &[9, 11]);
+        assert_eq!(type_ids, &[10, 12]);
+    }
+
+    #[test]
+    fn frontier_property_overlay_validates_batch_alignment() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "seed",
+            DataType::Int64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let mut frontier = Frontier {
+            df_schema: DFSchema::try_from(schema.as_ref().clone()).unwrap(),
+            batches: vec![batch],
+        };
+        let error = frontier
+            .overlay_property(VarId(1), "score", vec![])
+            .unwrap_err();
+        assert!(error.to_string().contains("batch count"));
+        let error = frontier
+            .overlay_property(VarId(1), "score", vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap_err();
+        assert!(error.to_string().contains("1 rows, expected 2"));
+        frontier
+            .overlay_property(
+                VarId(1),
+                "score",
+                vec![Arc::new(Int64Array::from(vec![3, 4]))],
+            )
+            .unwrap();
+        assert_eq!(frontier.batches[0].num_columns(), 2);
+        frontier.take_rows(&[1]).unwrap();
+        assert_eq!(frontier.num_rows(), 1);
+    }
+
+    #[test]
+    fn map_replacement_math_and_pending_routing_are_exact() {
+        let present = HashSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        let updates = HashMap::from([
+            ("a".to_owned(), IrLiteral::Int(1)),
+            ("d".to_owned(), IrLiteral::Int(4)),
+        ]);
+        let nulls = HashSet::from(["b".to_owned(), "z".to_owned()]);
+        let (removals, replaced) = map_removals(false, &present, &updates, &nulls);
+        assert_eq!(removals, HashSet::from(["b".to_owned()]));
+        assert_eq!(replaced, 2);
+        let (removals, replaced) = map_removals(true, &present, &updates, &nulls);
+        assert_eq!(removals, HashSet::from(["b".to_owned(), "c".to_owned()]));
+        assert_eq!(replaced, 3);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        let node = [7_u8; 16];
+        let uuid = graphforge_core::uuid::from_bytes(&node);
+        ctx.writer.create_node_with_labels(uuid, &[]).unwrap();
+        apply_map_updates(&mut ctx, false, &node, "Person", updates.clone());
+        remove_map_complement(&mut ctx, false, &node, "Person", &removals);
+
+        let committed = [8_u8; 16];
+        apply_map_updates(&mut ctx, false, &committed, "Person", updates);
+        remove_map_complement(&mut ctx, false, &committed, "Person", &removals);
+        assert!(!ctx.set_acc.nodes.is_empty());
+        assert!(!ctx.remove_acc.nodes.is_empty());
+    }
+
+    #[test]
+    fn delete_scalar_accepts_null_and_rejects_scalar_values() {
+        let mut nodes = HashSet::new();
+        let mut edges = HashSet::new();
+        collect_delete_scalar(&ScalarValue::Null, &mut nodes, &mut edges).unwrap();
+        assert!(nodes.is_empty() && edges.is_empty());
+        let error = collect_delete_scalar(&ScalarValue::Int64(Some(1)), &mut nodes, &mut edges)
+            .unwrap_err();
+        assert!(error.to_string().contains("node, relationship, or path"));
+    }
+
+    #[test]
     fn recreating_a_removed_label_token_cancels_its_removal() {
         let dir = tempfile::tempdir().unwrap();
         let mut ctx = StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();

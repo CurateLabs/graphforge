@@ -1676,6 +1676,110 @@ mod tests {
     }
 
     #[test]
+    fn packaged_skill_loader_accepts_exact_manifest_and_rejects_malformed_shapes() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("graphforge-bootstrap")).unwrap();
+        fs::write(root.path().join("graphforge-bootstrap/SKILL.md"), b"skill").unwrap();
+        write_loader_manifest(root.path(), &["graphforge-bootstrap/SKILL.md".into()]);
+        let loaded = load_skill_bundle(root.path()).unwrap();
+        assert_eq!(loaded.files.len(), 1);
+        assert_eq!(loaded.files[0].path, "graphforge-bootstrap/SKILL.md");
+        assert_eq!(loaded.files[0].bytes, b"skill");
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), b"not json").unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), br#"{}"#).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("manifest.json"), br#"{"files":[{}]}"#).unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("manifest.json"),
+            br#"{"files":[{"path":"../escape"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load_skill_bundle(root.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(matches!(
+            load_skill_bundle(file.path()),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+        assert!(matches!(
+            read_bounded_file(root.path(), 10, "not a file"),
+            Err(graphforge_api::GfError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn reusable_execution_covers_default_info_and_runtime_error_vocabulary() {
+        let default = execute(std::iter::empty::<&str>());
+        assert_eq!(default.exit_code, 0);
+        assert_eq!(
+            default.stdout,
+            "GraphForge — use --help for options\n".as_bytes()
+        );
+
+        let info = execute(["graphforge", "--info"]);
+        assert_eq!(info.exit_code, 0);
+        assert!(
+            String::from_utf8(info.stdout)
+                .unwrap()
+                .starts_with("graphforge ")
+        );
+
+        let cases = [
+            (
+                graphforge_api::GfError::NotImplemented("test"),
+                "not_implemented",
+            ),
+            (graphforge_api::GfError::Plan("test".into()), "plan"),
+            (
+                graphforge_api::GfError::Execution("test".into()),
+                "execution",
+            ),
+            (
+                graphforge_api::GfError::Provider {
+                    class: "transport".into(),
+                    provider: "provider".into(),
+                    model: "model".into(),
+                },
+                "provider",
+            ),
+            (
+                graphforge_api::GfError::Lifecycle("test".into()),
+                "lifecycle",
+            ),
+            (graphforge_api::GfError::Ontology("test".into()), "ontology"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(runtime_error_kind(&error), expected);
+            assert_eq!(error_exit_code(&error), 1);
+            let mut output = Vec::new();
+            write_error(&error, false, &mut output).unwrap();
+            assert!(!output.is_empty());
+        }
+    }
+
+    #[test]
     fn no_skills_init_does_not_load_the_distribution_bundle() {
         let project = tempdir().unwrap();
         let missing_bundle = project.path().join("missing-bundle");
@@ -1726,6 +1830,64 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&remove.stderr)
         );
+    }
+
+    #[test]
+    fn repository_commands_execute_through_json_and_plain_dispatch() {
+        let project = tempdir().unwrap();
+        let root = project.path().to_string_lossy().into_owned();
+        let init = execute([
+            "graphforge".to_owned(),
+            "--json".to_owned(),
+            "--project-dir".to_owned(),
+            root.clone(),
+            "init".to_owned(),
+            "--no-skills".to_owned(),
+        ]);
+        assert_eq!(
+            init.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let init_json: serde_json::Value = serde_json::from_slice(&init.stdout).unwrap();
+        assert_eq!(init_json["root"], ".");
+
+        for tail in [
+            vec!["config", "resolve"],
+            vec!["config", "validate"],
+            vec!["sync", "--check"],
+        ] {
+            let mut args = vec![
+                "graphforge".to_owned(),
+                "--json".to_owned(),
+                "--project-dir".to_owned(),
+                root.clone(),
+            ];
+            args.extend(tail.into_iter().map(str::to_owned));
+            let result = execute(args);
+            assert!(
+                result.exit_code == 0 || result.exit_code == OUT_OF_SYNC_EXIT_CODE,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(serde_json::from_slice::<serde_json::Value>(&result.stdout).is_ok());
+        }
+
+        let remove = execute([
+            "graphforge".to_owned(),
+            "--project-dir".to_owned(),
+            root,
+            "remove".to_owned(),
+            "--yes".to_owned(),
+        ]);
+        assert_eq!(
+            remove.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&remove.stderr)
+        );
+        assert_eq!(remove.stdout, b"ok\n");
     }
 
     #[test]

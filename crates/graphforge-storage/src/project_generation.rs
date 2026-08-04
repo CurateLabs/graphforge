@@ -1960,12 +1960,49 @@ mod tests {
             Box::new(|manifest| manifest.transaction_uuid = "bad".into()),
             Box::new(|manifest| manifest.capabilities[0].capability_id = "Upper".into()),
             Box::new(|manifest| manifest.capabilities[0].capability_version = 0),
+            Box::new(|manifest| manifest.capabilities.push(manifest.capabilities[0].clone())),
         ];
         for mutate in mutations {
             let mut manifest = base.clone();
             mutate(&mut manifest);
             assert!(validate_manifest(&manifest, expected).is_err());
         }
+
+        let participant = ParticipantDescriptor {
+            capability_id: "graph".into(),
+            capability_version: 1,
+            record_family_id: "topology".into(),
+            record_version: 1,
+            relative_path: "topology/nodes.parquet".into(),
+            encoding: "parquet".into(),
+            byte_length: 0,
+            row_count: 0,
+            schema_fingerprint: "0".repeat(64),
+            content_sha256: "0".repeat(64),
+        };
+        let participant_mutations: Vec<Box<dyn Fn(&mut ParticipantDescriptor)>> = vec![
+            Box::new(|entry| entry.capability_id = "missing".into()),
+            Box::new(|entry| entry.capability_version = 2),
+            Box::new(|entry| entry.record_family_id = "Upper".into()),
+            Box::new(|entry| entry.record_version = 0),
+            Box::new(|entry| entry.relative_path = "/absolute".into()),
+            Box::new(|entry| entry.relative_path = "../escape".into()),
+            Box::new(|entry| entry.schema_fingerprint = "short".into()),
+            Box::new(|entry| entry.content_sha256 = "GG".repeat(32)),
+        ];
+        for mutate in participant_mutations {
+            let mut manifest = base.clone();
+            let mut entry = participant.clone();
+            mutate(&mut entry);
+            manifest.participants.push(entry);
+            assert!(validate_manifest(&manifest, expected).is_err());
+        }
+
+        let mut valid = base.clone();
+        valid.participants.push(participant.clone());
+        assert!(validate_manifest(&valid, expected).is_ok());
+        valid.participants.push(participant);
+        assert!(validate_manifest(&valid, expected).is_err());
     }
 
     #[test]

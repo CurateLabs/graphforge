@@ -1182,6 +1182,44 @@ mod tests {
 
     const TS: i64 = 1_700_000_000_000_000;
 
+    #[test]
+    fn graph_feature_matrix_and_numeric_conversion_boundaries_are_exact() {
+        let mut graph = AdjacencyGraph::from_resolved_projection(ResolvedGraphProjection {
+            directed: true,
+            nodes: vec![[1; 16], [2; 16]],
+            edges: vec![ResolvedGraphEdge {
+                edge_uuid: [3; 16],
+                source_uuid: [1; 16],
+                target_uuid: [2; 16],
+                weight: 1.0,
+            }],
+        })
+        .unwrap();
+        assert_eq!(graph.node_ids(), &[0, 1]);
+        assert_eq!(graph.node_id(&[1; 16]), Some(0));
+        assert_eq!(graph.node_uuid(1), Some([2; 16]));
+        assert!(graph.node_vector(0).is_none());
+        assert!(!graph.is_empty());
+        assert_eq!(graph.edge_entry_count(), 1);
+
+        let error = graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0])]))
+            .unwrap_err();
+        assert!(error.to_string().contains("feature matrix"));
+        graph
+            .replace_node_vectors(HashMap::from([(0, vec![1.0]), (1, vec![2.0])]))
+            .unwrap();
+        assert_eq!(graph.node_vector(1), Some([2.0].as_slice()));
+
+        let exact = 1_i64 << 53;
+        assert_eq!(exact_i64_as_f64(exact), Some(exact as f64));
+        assert_eq!(exact_i64_as_f64(-exact), Some(-(exact as f64)));
+        assert_eq!(exact_i64_as_f64(exact + 1), None);
+        assert_eq!(exact_u64_as_f64(1_u64 << 53), Some((1_u64 << 53) as f64));
+        assert_eq!(exact_u64_as_f64((1_u64 << 53) + 1), None);
+        assert!(storage_error("sentinel").to_string().contains("sentinel"));
+    }
+
     struct Fixture {
         dir: TempDir,
         uuids: [Uuid; 4],

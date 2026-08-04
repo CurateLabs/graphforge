@@ -2867,6 +2867,49 @@ fn bridge_node_uuid(graph: &AdjacencyGraph, node: u64) -> Result<[u8; 16], Algor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linear_analyzers_checkpoint_on_large_deterministic_projection() {
+        let graph = AdjacencyGraph::from_resolved_projection(
+            crate::algorithm_graph::ResolvedGraphProjection {
+                directed: true,
+                nodes: (0_u32..4_097)
+                    .map(|value| {
+                        let mut uuid = [0_u8; 16];
+                        uuid[12..].copy_from_slice(&value.to_be_bytes());
+                        uuid
+                    })
+                    .collect(),
+                edges: Vec::new(),
+            },
+        )
+        .unwrap();
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let analyzers: Vec<Box<dyn RustAlgorithm>> = vec![
+            Box::new(TriangleCount),
+            Box::new(Transitivity),
+            Box::new(IsPlanar),
+            Box::new(TriadCensus),
+            Box::new(DyadCensus),
+            Box::new(ArticulationPoints),
+            Box::new(Bridges),
+            Box::new(TopologicalSort),
+            Box::new(IsDag { directed: true }),
+            Box::new(FindCycles { directed: true }),
+            Box::new(HasEulerCircuit { directed: true }),
+            Box::new(HasEulerPath { directed: true }),
+            Box::new(DagLongestPath),
+        ];
+        for analyzer in analyzers {
+            analyzer.execute(&graph, &control).unwrap_or_else(|error| {
+                panic!(
+                    "{:?} failed on an edgeless projection: {error}",
+                    analyzer.capability().algorithm
+                )
+            });
+        }
+    }
     use crate::algorithm_partition::PartitionValue;
 
     fn node2vec_invocation(

@@ -15609,4 +15609,192 @@ mod tests {
         assert!(cypher_order_key(&S::Binary(Some(vec![1]))).starts_with("98:other"));
         assert!(cypher_order_key(&one).starts_with("40:list"));
     }
+
+    #[test]
+    fn expression_lowering_error_and_static_access_matrix_reaches_contract_branches() {
+        let lower_call = |name: &str, args: Vec<IrExpr>| {
+            let mut arena = ExprArena::new();
+            let args = args
+                .into_iter()
+                .map(|expr| arena.push(expr))
+                .collect::<Vec<_>>();
+            let call = arena.push(IrExpr::FunctionCall {
+                name: name.into(),
+                args,
+            });
+            make_lowerer(&arena, &VarMap::new()).lower(call)
+        };
+
+        for (name, expected) in [
+            ("_subscript", "expects two arguments"),
+            ("_node_struct", "expects at least one argument"),
+            (
+                "_node_struct_list",
+                "expects two nodes and one relationship",
+            ),
+            ("_rel_struct", "expects an edge variable"),
+            ("_rel_struct_list", "expects an edge variable"),
+            ("keys", "expects one argument"),
+            ("properties", "expects one argument"),
+            ("labels", "expects one argument"),
+        ] {
+            assert!(
+                lower_call(name, vec![])
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected),
+                "{name}"
+            );
+        }
+        for name in ["nodes", "relationships"] {
+            assert!(
+                lower_call(name, vec![])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expects one path argument")
+            );
+        }
+
+        assert!(
+            lower_call("_node_struct", vec![IrExpr::Literal(IrLiteral::Int(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("must be a node variable")
+        );
+        assert!(
+            lower_call("_rel_struct", vec![IrExpr::Literal(IrLiteral::Int(1))])
+                .unwrap_err()
+                .to_string()
+                .contains("must be a relationship variable")
+        );
+        assert!(
+            lower_call(
+                "_node_struct_list",
+                vec![
+                    IrExpr::Literal(IrLiteral::Int(1)),
+                    IrExpr::Literal(IrLiteral::Int(2)),
+                    IrExpr::Literal(IrLiteral::Null),
+                ],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("node arguments must be variables")
+        );
+
+        for name in ["keys", "properties"] {
+            assert!(
+                lower_call(name, vec![IrExpr::ListLiteral(vec![])],)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("requires a map, node, relationship, or null")
+            );
+            assert!(lower_call(name, vec![IrExpr::Literal(IrLiteral::Null)]).is_ok());
+            assert!(lower_call(name, vec![IrExpr::MapLiteral(vec![])],).is_ok());
+        }
+        assert!(lower_call("labels", vec![IrExpr::Literal(IrLiteral::Null)]).is_ok());
+
+        let mut arena = ExprArena::new();
+        let null = arena.push(IrExpr::Literal(IrLiteral::Null));
+        let null_key = arena.push(IrExpr::Literal(IrLiteral::Null));
+        let access = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![null, null_key],
+        });
+        let null_access = make_lowerer(&arena, &VarMap::new()).lower(access).unwrap();
+        assert!(format!("{null_access}").contains("cypher_value_access"));
+
+        let mut arena = ExprArena::new();
+        let answer = arena.push(IrExpr::Literal(IrLiteral::Int(42)));
+        let map = arena.push(IrExpr::MapLiteral(vec![("answer".into(), answer)]));
+        let key = arena.push(IrExpr::Literal(IrLiteral::Str("answer".into())));
+        let missing = arena.push(IrExpr::Literal(IrLiteral::Str("missing".into())));
+        let found = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![map, key],
+        });
+        let absent = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![map, missing],
+        });
+        assert_eq!(
+            format!(
+                "{}",
+                make_lowerer(&arena, &VarMap::new()).lower(found).unwrap()
+            ),
+            "Int64(42)"
+        );
+        assert!(matches!(
+            make_lowerer(&arena, &VarMap::new()).lower(absent).unwrap(),
+            DfExpr::Literal(ScalarValue::Null, _)
+        ));
+
+        let mut arena = ExprArena::new();
+        let scalar = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let index = arena.push(IrExpr::Literal(IrLiteral::Int(0)));
+        let invalid = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![scalar, index],
+        });
+        assert!(
+            make_lowerer(&arena, &VarMap::new())
+                .lower(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("subscript requires a list")
+        );
+
+        for argument in [
+            IrExpr::Literal(IrLiteral::Str("abc".into())),
+            IrExpr::ListLiteral(vec![]),
+            IrExpr::Parameter("value".into()),
+        ] {
+            assert!(lower_call("reverse", vec![argument]).is_ok());
+        }
+    }
+
+    #[test]
+    fn static_nested_list_map_access_handles_negative_oob_and_nonliteral_indices() {
+        let mut arena = ExprArena::new();
+        let one = arena.push(IrExpr::Literal(IrLiteral::Int(1)));
+        let two = arena.push(IrExpr::Literal(IrLiteral::Int(2)));
+        let first_map = arena.push(IrExpr::MapLiteral(vec![("value".into(), one)]));
+        let second_map = arena.push(IrExpr::MapLiteral(vec![("value".into(), two)]));
+        let list = arena.push(IrExpr::ListLiteral(vec![first_map, second_map]));
+        let negative = arena.push(IrExpr::Literal(IrLiteral::Int(-1)));
+        let oob = arena.push(IrExpr::Literal(IrLiteral::Int(9)));
+        let dynamic = arena.push(IrExpr::Parameter("index".into()));
+        let key = arena.push(IrExpr::Literal(IrLiteral::Str("value".into())));
+
+        for (index, expected) in [(negative, Some("Int64(2)")), (oob, None)] {
+            let indexed = arena.push(IrExpr::FunctionCall {
+                name: "_subscript".into(),
+                args: vec![list, index],
+            });
+            let field = arena.push(IrExpr::FunctionCall {
+                name: "_subscript".into(),
+                args: vec![indexed, key],
+            });
+            let lowered = make_lowerer(&arena, &VarMap::new()).lower(field).unwrap();
+            match expected {
+                Some(expected) => assert_eq!(format!("{lowered}"), expected),
+                None => assert!(matches!(lowered, DfExpr::Literal(ScalarValue::Null, _))),
+            }
+        }
+
+        let indexed = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![list, dynamic],
+        });
+        let field = arena.push(IrExpr::FunctionCall {
+            name: "_subscript".into(),
+            args: vec![indexed, key],
+        });
+        assert!(
+            format!(
+                "{}",
+                make_lowerer(&arena, &VarMap::new()).lower(field).unwrap()
+            )
+            .contains("cypher_value_access")
+        );
+    }
 }

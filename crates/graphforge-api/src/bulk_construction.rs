@@ -1931,6 +1931,38 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(nullable.reason, BulkValidationReason::NullabilityMismatch);
+
+        for supported in [
+            DataType::Boolean,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::LargeUtf8,
+            DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
+            DataType::LargeList(Arc::new(Field::new("item", DataType::Utf8, true))),
+        ] {
+            validate_property_type(BulkInputKind::Node, "property", &supported).unwrap();
+        }
+        for unsupported in [
+            DataType::UInt64,
+            DataType::Binary,
+            DataType::Date32,
+            DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
+        ] {
+            assert_eq!(
+                validate_property_type(BulkInputKind::Edge, "property", &unsupported)
+                    .unwrap_err()
+                    .reason,
+                BulkValidationReason::UnsupportedPropertyType
+            );
+        }
     }
 
     #[test]
@@ -1980,6 +2012,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.reason, BulkValidationReason::GenerationMismatch);
         assert_eq!(error.kind, BulkInputKind::Edge);
+
+        let null_uuid = FixedSizeBinaryArray::new_null(16, 1);
+        assert_eq!(
+            uuid_at(
+                &null_uuid,
+                0,
+                BulkInputKind::Node,
+                3,
+                "node_uuid",
+                operation_id,
+            )
+            .unwrap(),
+            generated_uuid(operation_id, BulkInputKind::Node, 3)
+        );
+        assert_eq!(
+            explicit_uuid_at(&null_uuid, 0, BulkInputKind::Edge, 4, "source_uuid")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        let v4 = FixedSizeBinaryArray::try_from_iter(
+            [Uuid::from_u128(1).as_bytes().as_slice()].into_iter(),
+        )
+        .unwrap();
+        assert_eq!(
+            uuid_at(&v4, 0, BulkInputKind::Node, 5, "node_uuid", operation_id,)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        assert_eq!(
+            explicit_uuid_at(&v4, 0, BulkInputKind::Edge, 6, "target_uuid")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
+        let short =
+            FixedSizeBinaryArray::try_from_iter([b"12345678".as_slice()].into_iter()).unwrap();
+        assert_eq!(
+            uuid_at(&short, 0, BulkInputKind::Node, 7, "node_uuid", operation_id,)
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::InvalidUuid
+        );
     }
 
     #[test]

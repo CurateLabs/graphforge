@@ -3171,6 +3171,166 @@ mod tests {
             assert!(!error.to_string().is_empty());
         }
     }
+
+    #[test]
+    fn algorithm_run_validation_rejects_every_malformed_identity_and_transition() {
+        let run = AlgorithmRun::new(
+            uuid7(40),
+            "pagerank".into(),
+            1,
+            1,
+            vec![1],
+            [2; 32],
+            uuid7(41),
+            100,
+        )
+        .unwrap();
+        for invalid_run in [
+            AlgorithmRun {
+                algorithm: String::new(),
+                ..run.clone()
+            },
+            AlgorithmRun {
+                algorithm_version: 2,
+                ..run.clone()
+            },
+            AlgorithmRun {
+                descriptor_version: 2,
+                ..run.clone()
+            },
+            AlgorithmRun {
+                descriptor: Vec::new(),
+                ..run.clone()
+            },
+            AlgorithmRun {
+                contract_version: 2,
+                ..run.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_algorithm_run(&invalid_run),
+                Err(KnowledgeError::Invalid { .. })
+            ));
+        }
+
+        let start = AlgorithmRunEvent::new(
+            uuid7(42),
+            run.run_uuid,
+            AlgorithmRunState::Started,
+            None,
+            None,
+            100,
+            run.provenance_uuid,
+        )
+        .unwrap();
+        let completed = AlgorithmRunEvent::new(
+            uuid7(43),
+            run.run_uuid,
+            AlgorithmRunState::Completed,
+            Some([3; 32]),
+            None,
+            101,
+            uuid7(44),
+        )
+        .unwrap();
+        assert_eq!(
+            AlgorithmRunLedger::new(vec![run.clone()], vec![start.clone(), completed.clone()])
+                .unwrap()
+                .events_for(run.run_uuid)
+                .len(),
+            2
+        );
+        assert!(matches!(
+            validate_algorithm_run_event(&AlgorithmRunEvent {
+                contract_version: 2,
+                ..start.clone()
+            }),
+            Err(KnowledgeError::Invalid { .. })
+        ));
+        for event in [
+            AlgorithmRunEvent {
+                result_fingerprint: Some([1; 32]),
+                ..start.clone()
+            },
+            AlgorithmRunEvent {
+                result_fingerprint: None,
+                ..completed.clone()
+            },
+            AlgorithmRunEvent {
+                state: AlgorithmRunState::Failed,
+                result_fingerprint: None,
+                error_code: None,
+                ..completed.clone()
+            },
+            AlgorithmRunEvent {
+                state: AlgorithmRunState::Failed,
+                result_fingerprint: None,
+                error_code: Some("bad".into()),
+                ..completed.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_algorithm_run_event(&event),
+                Err(KnowledgeError::Invalid { .. })
+            ));
+        }
+
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone(), run.clone()], vec![start.clone()]),
+            Err(KnowledgeError::Duplicate("run_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone()], vec![start.clone(), start.clone()]),
+            Err(KnowledgeError::Duplicate("event_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run.clone()],
+                vec![AlgorithmRunEvent {
+                    run_uuid: uuid7(50),
+                    ..start.clone()
+                }]
+            ),
+            Err(KnowledgeError::Dangling("run_uuid"))
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run.clone()],
+                vec![AlgorithmRunEvent {
+                    recorded_at_micros: 99,
+                    ..start.clone()
+                }]
+            ),
+            Err(KnowledgeError::Invalid {
+                field: "recorded_at",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(vec![run.clone()], Vec::new()),
+            Err(KnowledgeError::Invalid {
+                field: "started",
+                ..
+            })
+        ));
+        assert!(matches!(
+            AlgorithmRunLedger::new(
+                vec![run],
+                vec![
+                    start,
+                    completed.clone(),
+                    AlgorithmRunEvent {
+                        event_uuid: uuid7(51),
+                        ..completed
+                    },
+                ]
+            ),
+            Err(KnowledgeError::Invalid {
+                field: "terminal",
+                ..
+            })
+        ));
+    }
 }
 pub use belief_projection::{
     ALGORITHM_INTERPRETATION_ATTACHMENT_SCHEMA, BELIEF_PROJECTION_ATTACHMENT_CONTRACT_VERSION,

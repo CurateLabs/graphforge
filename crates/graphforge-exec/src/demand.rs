@@ -795,6 +795,7 @@ impl RecordBatchStream for DemandGuardStream {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::task::Context;
 
     use arrow::datatypes::Schema;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -803,6 +804,145 @@ mod tests {
     use datafusion::physical_plan::stream::EmptyRecordBatchStream;
 
     use super::*;
+
+    #[test]
+    fn capture_accounts_for_every_hop_filter_and_storage_outcome() {
+        use graphforge_storage::io_stats::{
+            FilteredReadObserver, FilteredReadPruning, FilteredReadStrategy, FilteredReadTable,
+        };
+
+        reset();
+        record_input(12, 3);
+        record_candidates(12, 7);
+        record_emitted(12, 2);
+        record_filter(4, true, true, 7);
+        record_filter(4, true, false, 2);
+
+        let observer = HopReadObserver::new(12);
+        for table in [FilteredReadTable::Edge, FilteredReadTable::Node] {
+            observer.read_started(table);
+            observer.rows_scanned(table, 11);
+            observer.read_completed(table, 5, true);
+            observer.read_failed(table);
+        }
+        for strategy in [
+            FilteredReadStrategy::DenseRowSelection,
+            FilteredReadStrategy::RowGroupPredicate,
+            FilteredReadStrategy::FullFallback,
+        ] {
+            observer.pruning(
+                FilteredReadTable::Node,
+                FilteredReadPruning {
+                    strategy,
+                    row_groups_considered: 9,
+                    row_groups_selected: 4,
+                    pages_considered: 8,
+                    pages_selected: 3,
+                    exact_rows_selected: 2,
+                    metadata_fallbacks: 1,
+                    validation_fallbacks: 1,
+                },
+            );
+        }
+        observer.pruning(
+            FilteredReadTable::Edge,
+            FilteredReadPruning {
+                strategy: FilteredReadStrategy::DenseRowSelection,
+                row_groups_considered: 99,
+                row_groups_selected: 99,
+                pages_considered: 99,
+                pages_selected: 99,
+                exact_rows_selected: 99,
+                metadata_fallbacks: 99,
+                validation_fallbacks: 99,
+            },
+        );
+
+        let captured = snapshot();
+        let hop = &captured.hops[&12];
+        assert_eq!((hop.input_batches, hop.input_rows), (1, 3));
+        assert_eq!((hop.candidates_generated, hop.rows_emitted), (7, 2));
+        assert_eq!(
+            (
+                hop.edge_reads_started,
+                hop.edge_reads_completed,
+                hop.edge_reads_failed
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_reads_started,
+                hop.node_reads_completed,
+                hop.node_reads_failed
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            (
+                hop.edge_rows_scanned,
+                hop.edge_rows_returned,
+                hop.edge_full_reads
+            ),
+            (11, 5, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_rows_scanned,
+                hop.node_rows_returned,
+                hop.node_full_reads
+            ),
+            (11, 5, 1)
+        );
+        assert_eq!(
+            (
+                hop.node_dense_row_selection_reads,
+                hop.node_row_group_predicate_reads
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            (hop.node_row_groups_considered, hop.node_row_groups_selected),
+            (27, 12)
+        );
+        assert_eq!(
+            (hop.node_pages_considered, hop.node_pages_selected),
+            (24, 9)
+        );
+        assert_eq!(
+            (
+                hop.node_exact_rows_selected,
+                hop.node_metadata_fallbacks,
+                hop.node_validation_fallbacks
+            ),
+            (6, 3, 3)
+        );
+        assert_eq!(
+            (
+                captured.filters[&4].input_rows,
+                captured.filters[&4].output_rows
+            ),
+            (7, 2)
+        );
+
+        disable();
+        record_input(12, 100);
+        assert_eq!(snapshot(), captured);
+    }
+
+    #[test]
+    fn quiescence_tracks_live_permits_and_output_thresholds() {
+        let demand = Arc::new(QueryDemand::new());
+        assert!(!demand.observe_output(2, 3));
+        assert!(demand.observe_output(1, 3));
+
+        let permit = demand.begin_read(1).unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(demand.poll_quiescent(&mut cx), Poll::Pending));
+        drop(permit);
+        assert!(matches!(demand.poll_quiescent(&mut cx), Poll::Ready(())));
+    }
 
     #[test]
     fn read_permit_double_check_rejects_post_cancellation_work() {

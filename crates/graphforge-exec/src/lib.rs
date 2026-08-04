@@ -5215,6 +5215,57 @@ mod tests {
         ExecutionSession::new(catalog, None).unwrap()
     }
 
+    #[test]
+    fn persisted_read_detection_recurses_through_every_nested_plan_shape() {
+        let scan = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(1),
+                ty: None,
+            })
+            .build();
+        let empty = GraphPlan::builder("openCypher").build();
+        assert!(plan_reads_persisted_data(&scan));
+        assert!(!plan_reads_persisted_data(&empty));
+
+        let nested = [
+            GraphOp::Optional {
+                child: Box::new(scan.clone()),
+            },
+            GraphOp::Exists {
+                child: Box::new(scan.clone()),
+                negated: false,
+            },
+            GraphOp::PatternComprehension {
+                child: Box::new(scan.clone()),
+                output: VarId(2),
+            },
+            GraphOp::ListElementPatternComprehension {
+                list_expr: ExprId(0),
+                loop_var: VarId(3),
+                child: Box::new(scan.clone()),
+                pattern_output: VarId(4),
+                filter: None,
+                projection: None,
+                output: VarId(5),
+            },
+            GraphOp::Union {
+                all: true,
+                inputs: vec![empty.clone(), scan.clone()],
+            },
+        ];
+        for op in nested {
+            let plan = GraphPlan::builder("openCypher").push_op(op).build();
+            assert!(plan_reads_persisted_data(&plan));
+        }
+        let union = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::Union {
+                all: false,
+                inputs: vec![empty],
+            })
+            .build();
+        assert!(!plan_reads_persisted_data(&union));
+    }
+
     fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {
         let logical = Arc::new(LogicalPlanBuilder::empty(false).build().unwrap());
         let physical: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(

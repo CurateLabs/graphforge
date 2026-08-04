@@ -9003,6 +9003,64 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_dispatch_rejects_every_cross_verb_and_invalid_graphsage_aggregator() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {score: 1.0})").unwrap();
+        let rank = graph
+            .prepare_rank_invocation("Person", &degree_options(false, None))
+            .unwrap();
+        for error in [
+            graph.invoke_cluster_descriptor(&rank).unwrap_err(),
+            graph.invoke_similar_descriptor(&rank).unwrap_err(),
+            graph.invoke_embedding_descriptor(&rank).unwrap_err(),
+            graph.invoke_analyze_descriptor(&rank).unwrap_err(),
+            graph.invoke_paths_descriptor(&rank).unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        }
+
+        let options = EmbeddingAnalyzeOptions {
+            by: AnalyzeAlgorithm::GraphSage,
+            via: None,
+            directed: false,
+            weight: None,
+            options: EmbeddingOptions::GraphSage(GraphSageOptions {
+                dimensions: 2,
+                hidden_dimensions: 2,
+                layers: 1,
+                sample_sizes: vec![1],
+                epochs: 1,
+                negative_samples: 1,
+                learning_rate: 0.01,
+                feature_properties: vec!["score".into()],
+                seed: 7,
+                ..GraphSageOptions::default()
+            }),
+        };
+        let descriptor = graph
+            .prepare_embedding_invocation(Some("Person"), &options)
+            .unwrap();
+        let mut parameters = descriptor.parameters().clone();
+        parameters.insert(
+            "aggregator".into(),
+            InvocationParameter::Utf8("unsupported".into()),
+        );
+        let malformed = InvocationDescriptor::new(
+            descriptor.algorithm(),
+            *descriptor.projection_fingerprint(),
+            parameters,
+        )
+        .unwrap();
+        let error = graph.invoke_embedding_descriptor(&malformed).unwrap_err();
+        assert_eq!(error.code(), "GF_DESCRIPTOR_INVALID");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported GraphSAGE aggregator")
+        );
+    }
+
+    #[test]
     fn graphsage_executes_through_typed_api_with_scalar_and_list_features() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();

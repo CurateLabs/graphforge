@@ -920,6 +920,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> SearchArt
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
 
     use serde_json::json;
 
@@ -1401,6 +1402,123 @@ mod tests {
         );
         assert!(!marker.exists());
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn publication_filesystem_and_error_boundaries_are_fail_closed() {
+        let project = tempfile::tempdir().unwrap();
+        let compatibility = EmbeddingCompatibilityId::from_hex(&"22".repeat(32)).unwrap();
+        let first = EmbeddingWriterLock::acquire(
+            project.path(),
+            compatibility,
+            SearchCoordinationLimits::default(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let limits = SearchCoordinationLimits {
+            lock_timeout: Duration::ZERO,
+            lock_poll_interval: Duration::ZERO,
+            ..SearchCoordinationLimits::default()
+        };
+        assert!(matches!(
+            EmbeddingWriterLock::acquire(project.path(), compatibility, limits, &mut || Ok(())),
+            Err(SearchArtifactError::Lock { .. })
+        ));
+        drop(first);
+
+        let tree = project.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::create_dir(tree.join("nested")).unwrap();
+        std::fs::write(tree.join("nested/data"), b"payload").unwrap();
+        sync_tree(&tree).unwrap();
+        assert!(ensure_owned_directory(&tree).is_ok());
+        assert!(ensure_existing_directory(&tree).is_ok());
+        assert!(ensure_regular_file(&tree.join("nested/data")).is_ok());
+        assert!(path_exists(&tree.join("nested/data")).unwrap());
+        assert!(!path_exists(&tree.join("absent")).unwrap());
+
+        assert!(matches!(
+            read_bounded_file(&tree.join("nested/data"), 1),
+            Err(SearchArtifactError::ResourceExhausted { .. })
+        ));
+        assert!(matches!(
+            hash_file(&tree.join("nested/data"), 1, &mut || Ok(())),
+            Err(SearchArtifactError::ResourceExhausted { .. })
+        ));
+        assert!(matches!(
+            hash_file(&tree.join("nested/data"), 100, &mut || Err(
+                SearchArtifactError::Cancelled
+            )),
+            Err(SearchArtifactError::Cancelled)
+        ));
+        assert!(matches!(
+            ensure_existing_directory(&tree.join("nested/data")),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            ensure_regular_file(&tree),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+
+        let mapped = primary_from(
+            &tree,
+            SearchArtifactError::InvalidSelector {
+                field: "test",
+                reason: "invalid".into(),
+            },
+        );
+        assert!(matches!(
+            mapped,
+            SearchArtifactError::CorruptPrimaryVectors { .. }
+        ));
+        for error in [
+            SearchArtifactError::Cancelled,
+            SearchArtifactError::ResourceExhausted {
+                resource: "test",
+                limit: 1,
+            },
+        ] {
+            assert!(matches!(
+                primary_from(&tree, error),
+                SearchArtifactError::Cancelled | SearchArtifactError::ResourceExhausted { .. }
+            ));
+        }
+        assert!(matches!(
+            io(
+                "test operation",
+                &tree,
+                std::io::Error::new(std::io::ErrorKind::Other, "failure")
+            ),
+            SearchArtifactError::Io { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_tree_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let tree = project.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        symlink(project.path(), tree.join("link")).unwrap();
+        assert!(matches!(
+            sync_tree(&tree),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(matches!(
+            ensure_owned_directory(&tree.join("link")),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+
+        std::fs::remove_file(tree.join("link")).unwrap();
+        std::fs::write(tree.join(MANIFEST_FILE), b"manifest").unwrap();
+        std::fs::write(tree.join(VECTOR_DATA_FILE), b"vectors").unwrap();
+        symlink(project.path(), tree.join("link")).unwrap();
+        assert!(matches!(
+            validate_generation_layout(&tree),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
     }
 
     #[cfg(unix)]
