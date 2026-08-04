@@ -9197,7 +9197,101 @@ mod tests {
             "GF_VALIDATION"
         );
 
-        let source = graph.add_node("Person", &HashMap::new()).unwrap();
+        let source = graph
+            .add_node(
+                "Person",
+                &HashMap::from([
+                    ("weight".into(), PropValue::Float(1.0)),
+                    ("partition".into(), PropValue::Int(0)),
+                    ("heuristic".into(), PropValue::Float(1.0)),
+                ]),
+            )
+            .unwrap();
+        let analyze_descriptor = graph
+            .prepare_analyze_invocation(
+                Some("Person"),
+                &AnalyzeOptions {
+                    by: AnalyzeAlgorithm::MinimumKSpanningTree,
+                    via: Some("KNOWS".into()),
+                    directed: false,
+                    weight: Some("weight".into()),
+                    k: Some(3),
+                    partition_property: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            analyze_descriptor.parameters()["weight"],
+            InvocationParameter::Utf8("weight".into())
+        );
+        assert_eq!(
+            analyze_descriptor.parameters()["k"],
+            InvocationParameter::U64(3)
+        );
+        let modularity_descriptor = graph
+            .prepare_analyze_invocation(
+                Some("Person"),
+                &AnalyzeOptions {
+                    by: AnalyzeAlgorithm::Modularity,
+                    via: Some("KNOWS".into()),
+                    directed: false,
+                    weight: Some("weight".into()),
+                    k: None,
+                    partition_property: Some("partition".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            modularity_descriptor.parameters()["partition_property"],
+            InvocationParameter::Utf8("partition".into())
+        );
+        let target = graph
+            .add_node(
+                "Person",
+                &HashMap::from([("heuristic".into(), PropValue::Float(0.0))]),
+            )
+            .unwrap();
+        graph
+            .add_edge(
+                &source,
+                "KNOWS",
+                &target,
+                &HashMap::from([
+                    ("weight".into(), PropValue::Float(1.0)),
+                    ("capacity".into(), PropValue::Float(2.0)),
+                    ("cost".into(), PropValue::Float(3.0)),
+                ]),
+            )
+            .unwrap();
+        let weighted_paths = PathsOptions {
+            by: PathAlgorithm::AStar,
+            directed: true,
+            k: 1,
+            via: Some("KNOWS".into()),
+            weight: Some("weight".into()),
+            capacity_property: None,
+            cost_property: None,
+            heuristic: Some("heuristic".into()),
+            walk_length: None,
+            seed: None,
+            terminal_uuids: Vec::new(),
+            prize_property: None,
+        };
+        let weighted_descriptor = graph
+            .prepare_paths_invocation(
+                Some(&NodeSelector::Handle(source.clone())),
+                Some(&NodeSelector::Handle(target)),
+                &weighted_paths,
+            )
+            .unwrap();
+        assert_eq!(
+            weighted_descriptor.parameters()["weight"],
+            InvocationParameter::Utf8("weight".into())
+        );
+        assert_eq!(
+            weighted_descriptor.parameters()["heuristic"],
+            InvocationParameter::Utf8("heuristic".into())
+        );
         let source = NodeSelector::Handle(source);
 
         let random_walk = PathsOptions {

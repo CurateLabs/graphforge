@@ -1113,6 +1113,130 @@ mod tests {
     }
 
     #[test]
+    fn canonical_manifest_identity_and_dimension_mismatches_fail_closed() {
+        let descriptor = descriptor("model-a", 2);
+        let compatibility = descriptor.compatibility_id().unwrap();
+        let vectors = batch(&[1.0, 2.0]);
+        for case in ["compatibility", "generation", "dimension"] {
+            let dir = tempfile::tempdir().unwrap();
+            let published = publish(dir.path(), &descriptor, source(1), &vectors, 20);
+            let original = &published.publication().manifest;
+            let manifest = EmbeddingGenerationManifest::new(EmbeddingGenerationManifestInput {
+                compatibility_id: if case == "compatibility" {
+                    EmbeddingCompatibilityId::from_hex(&"11".repeat(32)).unwrap()
+                } else {
+                    compatibility
+                },
+                source: if case == "generation" {
+                    source(2)
+                } else {
+                    source(1)
+                },
+                content_digest: vectors.content_digest(),
+                vector_count: 1,
+                dimension: if case == "dimension" { 3 } else { 2 },
+                generated_at_micros: 10,
+                committed_at_micros: 20,
+                publication_fingerprint: original.publication_fingerprint(),
+            })
+            .unwrap();
+            std::fs::write(
+                published.publication().path.join(MANIFEST_FILE),
+                manifest.to_canonical_json().unwrap(),
+            )
+            .unwrap();
+            let error = current_embedding_generation(
+                dir.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(()),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                SearchArtifactError::CorruptPrimaryVectors { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_manifest_rejects_vector_row_count_and_content_drift() {
+        let descriptor = descriptor("model-a", 2);
+        let compatibility = descriptor.compatibility_id().unwrap();
+        let original_vectors = batch(&[1.0, 2.0]);
+        for case in ["row-count", "content"] {
+            let dir = tempfile::tempdir().unwrap();
+            let published = publish(dir.path(), &descriptor, source(1), &original_vectors, 20);
+            let generation = &published.publication().path;
+            let replacement = batch(&[3.0, 4.0]);
+            let replacement_rows = replacement
+                .rows()
+                .iter()
+                .map(|row| StoredVector {
+                    node_uuid: row.node_uuid,
+                    vector: row.vector.clone(),
+                    updated_at_micros: 10,
+                })
+                .collect::<Vec<_>>();
+            let rows: &[StoredVector] = if case == "row-count" {
+                &[]
+            } else {
+                &replacement_rows
+            };
+            let vector_path =
+                write_vector_snapshot(generation, rows, 2, VectorStoreLimits::default(), || Ok(()))
+                    .unwrap();
+            let fingerprint = hash_file(
+                &vector_path,
+                VectorStoreLimits::default().parquet_bytes,
+                &mut || Ok(()),
+            )
+            .unwrap();
+            let manifest = EmbeddingGenerationManifest::new(EmbeddingGenerationManifestInput {
+                compatibility_id: compatibility,
+                source: source(1),
+                content_digest: original_vectors.content_digest(),
+                vector_count: 1,
+                dimension: 2,
+                generated_at_micros: 10,
+                committed_at_micros: 20,
+                publication_fingerprint: fingerprint,
+            })
+            .unwrap();
+            std::fs::write(
+                generation.join(MANIFEST_FILE),
+                manifest.to_canonical_json().unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                current_embedding_generation(
+                    dir.path(),
+                    &descriptor,
+                    VectorStoreLimits::default(),
+                    || Ok(()),
+                ),
+                Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn persisted_descriptor_must_match_the_exact_requested_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let expected_descriptor = descriptor("model-a", 2);
+        let vectors = batch(&[1.0, 2.0]);
+        publish(dir.path(), &expected_descriptor, source(1), &vectors, 20);
+        let compatibility = expected_descriptor.compatibility_id().unwrap();
+        let root = space_root(dir.path(), compatibility);
+        let other = descriptor("model-b", 2);
+        assert!(matches!(
+            read_descriptor(&root, &other, compatibility),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+        assert!(root.join(SPACE_FILE).is_file());
+    }
+
+    #[test]
     fn private_and_traversal_like_trees_are_never_visible() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor("model-a", 2);
@@ -1195,6 +1319,48 @@ mod tests {
             assert_eq!(std::fs::read(&active).unwrap(), before);
             assert!(generation.is_dir());
         }
+    }
+
+    #[test]
+    fn canonical_active_pointer_identity_and_encoding_mismatches_fail_closed() {
+        let descriptor = descriptor("model-a", 2);
+        let compatibility = descriptor.compatibility_id().unwrap();
+        let vectors = batch(&[1.0, 2.0]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let published = publish(dir.path(), &descriptor, source(1), &vectors, 20);
+        let active = space_root(dir.path(), compatibility).join(ACTIVE_FILE);
+        let other = EmbeddingCompatibilityId::from_hex(&"11".repeat(32)).unwrap();
+        std::fs::write(
+            &active,
+            active_pointer_bytes(other, published.publication().manifest.generation_id()).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            current_embedding_generation(
+                dir.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(()),
+            ),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        publish(dir.path(), &descriptor, source(1), &vectors, 20);
+        let active = space_root(dir.path(), compatibility).join(ACTIVE_FILE);
+        let mut noncanonical = vec![b' '];
+        noncanonical.extend_from_slice(&std::fs::read(&active).unwrap());
+        std::fs::write(&active, noncanonical).unwrap();
+        assert!(matches!(
+            current_embedding_generation(
+                dir.path(),
+                &descriptor,
+                VectorStoreLimits::default(),
+                || Ok(()),
+            ),
+            Err(SearchArtifactError::CorruptPrimaryVectors { .. })
+        ));
     }
 
     #[test]

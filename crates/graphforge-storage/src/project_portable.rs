@@ -1438,6 +1438,22 @@ mod tests {
             "GF_UNSUPPORTED_PROJECT_FORMAT"
         );
         assert_eq!(std::fs::read(&import_file).unwrap(), b"caller bytes");
+
+        let relative = Path::new("missing-wave7-parent/out.gfx");
+        assert_eq!(
+            reject_export_destination(relative).unwrap_err().code(),
+            "GF_IO"
+        );
+
+        let non_directory_parent = root.path().join("parent-file");
+        std::fs::write(&non_directory_parent, b"preserve").unwrap();
+        assert_eq!(
+            reject_export_destination(&non_directory_parent.join("out.gfx"))
+                .unwrap_err()
+                .code(),
+            "GF_IO"
+        );
+        assert_eq!(std::fs::read(&non_directory_parent).unwrap(), b"preserve");
     }
 
     #[test]

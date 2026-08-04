@@ -3316,6 +3316,16 @@ mod tests {
         writer.create_node(node, TypeId(0)).unwrap();
         writer.create_node(propertyless, TypeId(0)).unwrap();
         writer.set_properties(&node, None, values.clone()).unwrap();
+        writer
+            .set_properties(
+                &propertyless,
+                None,
+                values
+                    .keys()
+                    .map(|name| (name.clone(), IrLiteral::Null))
+                    .collect(),
+            )
+            .unwrap();
         writer.flush().unwrap();
 
         let reopened = read_node_props(dir.path(), "_untyped");
@@ -3410,5 +3420,28 @@ mod tests {
                 "GF_IO"
             );
         }
+    }
+
+    #[test]
+    fn persisted_property_decoder_rejects_unsupported_shape_type_and_dynamic_array() {
+        use arrow::array::{Int32Array, Int64Array, StructArray, UInt8Array};
+        use arrow::datatypes::{DataType, Field, Fields};
+
+        let unsupported: arrow::array::ArrayRef = Arc::new(UInt8Array::from(vec![1]));
+        let unsupported_field = Field::new("unsupported", DataType::UInt8, false);
+        assert!(decode_value(&unsupported, &unsupported_field, 0).is_err());
+
+        let fields: Fields = vec![Field::new("other", DataType::Int32, false)].into();
+        let structure: arrow::array::ArrayRef = Arc::new(StructArray::new(
+            fields.clone(),
+            vec![Arc::new(Int32Array::from(vec![1]))],
+            None,
+        ));
+        let structure_field = Field::new("structure", DataType::Struct(fields), false);
+        assert!(decode_value(&structure, &structure_field, 0).is_err());
+
+        let wrong_dynamic: arrow::array::ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let declared = Field::new("declared", DataType::UInt64, false);
+        assert!(decode_value(&wrong_dynamic, &declared, 0).is_err());
     }
 }

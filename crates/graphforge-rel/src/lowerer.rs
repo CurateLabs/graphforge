@@ -6415,4 +6415,55 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn exact_zero_var_len_unknown_relation_and_directional_join_paths() {
+        let unknown = GraphPlan::builder("openCypher")
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::Expand {
+                src: VarId(0),
+                edge: VarId(1),
+                dst: VarId(2),
+                rel_ty: Some(TypeId(999_999)),
+                dir: Direction::Out,
+                min_hops: 1,
+                max_hops: Some(3),
+            })
+            .build();
+        assert!(
+            GraphPlanLowerer::new(None, None)
+                .lower_plan(&unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("has no known relation name")
+        );
+
+        for direction in [Direction::In, Direction::Undirected] {
+            let plan = GraphPlan::builder("openCypher")
+                .push_op(GraphOp::NodeScan {
+                    var: VarId(0),
+                    ty: None,
+                })
+                .push_op(GraphOp::NodeScan {
+                    var: VarId(2),
+                    ty: None,
+                })
+                .push_op(GraphOp::Expand {
+                    src: VarId(0),
+                    edge: VarId(1),
+                    dst: VarId(2),
+                    rel_ty: None,
+                    dir: direction,
+                    min_hops: 1,
+                    max_hops: Some(1),
+                })
+                .build();
+            let lowered = GraphPlanLowerer::new(None, None).lower_plan(&plan).unwrap();
+            let rendered = lowered.display_indent_schema().to_string();
+            assert!(rendered.contains("Filter"), "{direction:?}: {rendered}");
+        }
+    }
 }

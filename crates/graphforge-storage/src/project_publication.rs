@@ -1987,6 +1987,38 @@ mod tests {
     }
 
     #[test]
+    fn durable_install_io_failure_is_wrapped_before_current_changes() {
+        let root = project();
+        let parent = resolve_project_generation(root.path())
+            .unwrap()
+            .generation_uuid();
+        let request = request(vec![participant("graph", "nodes", b"new")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &request).unwrap()
+        else {
+            panic!("new request unexpectedly replayed")
+        };
+        let validated = staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
+        fs::remove_file(
+            validated
+                .0
+                .generation_root
+                .join(PARTICIPANTS_DIR)
+                .join(&validated.0.participants[0].relative_path),
+        )
+        .unwrap();
+        let error = validated.publish().unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("phase=DURABLE committed=false"));
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
+    }
+
+    #[test]
     fn journal_records_each_deterministic_publication_phase() {
         let root = project();
         let request = request(vec![participant("graph", "nodes", b"new")]);
@@ -2212,6 +2244,60 @@ mod tests {
             .expect("conflicting replay must fail");
 
         assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+    }
+
+    #[test]
+    fn interrupted_stage_and_tampered_published_replay_are_exactly_classified() {
+        let root = project();
+        let staged_request = request(vec![participant("graph", "nodes", b"staged")]);
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation(root.path(), &staged_request).unwrap()
+        else {
+            panic!("fresh transaction unexpectedly replayed")
+        };
+        drop(staged);
+        let interrupted = stage_project_generation(root.path(), &staged_request)
+            .err()
+            .expect("interrupted stage must fail");
+        assert_eq!(interrupted.code(), "GF_PUBLICATION_FAILED");
+        assert!(interrupted.to_string().contains("requires recovery"));
+
+        let published_request = request(vec![participant("graph", "nodes", b"published")]);
+        let receipt = publish(root.path(), published_request.clone());
+        let manifest = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(receipt.generation_uuid.hyphenated().to_string())
+            .join(MANIFEST_FILE);
+        fs::write(&manifest, b"tampered\n").unwrap();
+        assert_eq!(
+            stage_project_generation(root.path(), &published_request)
+                .err()
+                .expect("tampered published replay must fail")
+                .code(),
+            "GF_PROJECT_CORRUPT"
+        );
+    }
+
+    #[test]
+    fn optimistic_promotion_refuses_an_existing_generation_destination() {
+        let root = project();
+        let request = request(vec![participant("graph", "nodes", b"optimistic")]);
+        let operation: [u8; 32] = Sha256::digest(b"wave7-existing-destination").into();
+        let ProjectStageOutcome::Staged(staged) =
+            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
+        else {
+            panic!("fresh optimistic transaction unexpectedly replayed")
+        };
+        let destination = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(request.generation_uuid.hyphenated().to_string());
+        fs::create_dir(&destination).unwrap();
+        let error = promote_optimistic_generation(&staged).unwrap_err();
+        assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
+        assert!(error.to_string().contains("generation_exists"));
+        assert!(staged.generation_root.is_dir());
     }
 
     #[test]

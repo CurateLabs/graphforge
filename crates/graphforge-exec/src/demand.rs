@@ -1051,4 +1051,56 @@ mod tests {
         assert!(demand.is_cancelled());
         assert_eq!(demand.in_flight_reads.load(Ordering::Acquire), 0);
     }
+
+    #[tokio::test]
+    async fn demand_wrappers_expose_diagnostics_and_cancel_on_child_error() {
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+        use futures::StreamExt;
+
+        let schema = Arc::new(Schema::empty());
+        let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
+        let probe = ProbeExec::new(Arc::clone(&child), 3, true, true);
+        assert_eq!(probe.name(), "DemandProbeExec");
+        assert!(probe.as_any().is::<ProbeExec>());
+        assert!(format!("{probe:?}").contains("ordinal: 3"));
+        assert!(
+            format!(
+                "{}",
+                datafusion::physical_plan::displayable(&probe).one_line()
+            )
+            .contains("side=input")
+        );
+        assert_eq!(probe.children().len(), 1);
+        assert_eq!(probe.schema(), schema);
+
+        let demand = Arc::new(QueryDemand::new());
+        let guard = DemandGuardExec::new(child, Arc::clone(&demand), 2);
+        assert!(guard.as_any().is::<DemandGuardExec>());
+        assert!(format!("{guard:?}").contains("cancel_after: 2"));
+        assert!(
+            format!(
+                "{}",
+                datafusion::physical_plan::displayable(&guard).one_line()
+            )
+            .contains("cancel_after=2")
+        );
+
+        let error = DataFusionError::Execution("sentinel child failure".into());
+        let inner = RecordBatchStreamAdapter::new(
+            Arc::clone(&schema),
+            futures::stream::iter(vec![Err(error)]),
+        );
+        let mut stream = DemandGuardStream {
+            schema: Arc::clone(&schema),
+            inner: Some(Box::pin(inner)),
+            demand: Arc::clone(&demand),
+            cancel_after: 2,
+            finishing: false,
+        };
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("sentinel child failure"));
+        assert!(demand.is_cancelled());
+        assert!(stream.inner.is_none());
+        assert_eq!(stream.schema(), schema);
+    }
 }

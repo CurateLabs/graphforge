@@ -4300,4 +4300,175 @@ mod tests {
         );
         assert_eq!(pending_ctx.counters, WriteCounters::default());
     }
+
+    #[test]
+    fn write_kind_and_pending_remove_paths_fail_closed_and_route_exactly() {
+        let qualifier = TableReference::bare("var_1");
+        let unknown = DFSchema::empty();
+        let error = resolve_kind(&unknown, VarId(1), "SET").unwrap_err();
+        assert!(error.to_string().contains("must be bound"));
+        let untyped_edge = DFSchema::new_with_metadata(
+            vec![(
+                Some(qualifier),
+                Arc::new(Field::new(
+                    "edge_uuid",
+                    DataType::FixedSizeBinary(16),
+                    false,
+                )),
+            )],
+            HashMap::new(),
+        )
+        .unwrap();
+        let error = resolve_kind(&untyped_edge, VarId(1), "REMOVE").unwrap_err();
+        assert!(error.to_string().contains("known relation type"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let lowerer =
+            GraphPlanLowerer::new_for_writes(None, None, dir.path(), OntologyMode::Exploratory);
+        let exprs = ExprArena::new();
+        let params = HashMap::new();
+        let env = phase_env(&lowerer, &exprs, dir.path(), &params);
+        for is_edge in [false, true] {
+            let mut frontier = write_frontier(is_edge);
+            let mut ctx =
+                StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+            if is_edge {
+                let src = graphforge_core::uuid::new_v7();
+                let dst = graphforge_core::uuid::new_v7();
+                ctx.writer
+                    .create_node(src, graphforge_core::TypeId(1))
+                    .unwrap();
+                ctx.writer
+                    .create_node(dst, graphforge_core::TypeId(1))
+                    .unwrap();
+                ctx.writer
+                    .create_edge(
+                        graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                        "KNOWS",
+                        &src,
+                        &dst,
+                    )
+                    .unwrap();
+                ctx.writer.merge_pending_edge_props(
+                    &[7; 16],
+                    Some("KNOWS"),
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                );
+            } else {
+                ctx.writer
+                    .create_node(
+                        graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                        graphforge_core::TypeId(1),
+                    )
+                    .unwrap();
+                ctx.writer.merge_pending_node_props(
+                    &[7; 16],
+                    None,
+                    HashMap::from([("score".into(), IrLiteral::Int(1))]),
+                );
+            }
+            run_remove_phase(
+                &env,
+                &[RemovePropItem {
+                    target: VarId(1),
+                    prop: PropId(9),
+                    prop_name: "score".into(),
+                }],
+                &mut frontier,
+                &mut ctx,
+            )
+            .unwrap();
+            assert_eq!(ctx.counters.properties_removed, 2);
+        }
+    }
+
+    #[test]
+    fn label_phase_routes_pending_cancellation_and_deleted_entities() {
+        let make_frontier = || {
+            let fields = vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new(
+                    "type_ids",
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                    false,
+                ),
+            ];
+            let schema = Arc::new(Schema::new(fields.clone()));
+            let labels = ListArray::from_iter_primitive::<UInt32Type, _, _>([
+                Some(vec![Some(1)]),
+                Some(vec![Some(1)]),
+            ]);
+            let labels = ListArray::new(
+                Arc::new(Field::new("item", DataType::UInt32, false)),
+                labels.offsets().clone(),
+                labels.values().clone(),
+                labels.nulls().cloned(),
+            );
+            let qualifier = TableReference::bare("var_1");
+            Frontier {
+                df_schema: DFSchema::new_with_metadata(
+                    fields
+                        .into_iter()
+                        .map(|field| (Some(qualifier.clone()), Arc::new(field)))
+                        .collect(),
+                    HashMap::new(),
+                )
+                .unwrap(),
+                batches: vec![
+                    RecordBatch::try_new(
+                        schema,
+                        vec![
+                            nullable_uuids(&[Some([7; 16]), Some([7; 16])]),
+                            Arc::new(labels),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+            }
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let add = graphforge_ir::LabelItem {
+            target: VarId(1),
+            labels: vec![graphforge_core::TypeId(2)],
+        };
+        let remove = graphforge_ir::LabelItem {
+            target: VarId(1),
+            labels: vec![graphforge_core::TypeId(1)],
+        };
+
+        let mut pending =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        pending
+            .writer
+            .create_node(
+                graphforge_core::uuid::Uuid::from_bytes([7; 16]),
+                graphforge_core::TypeId(1),
+            )
+            .unwrap();
+        run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut pending).unwrap();
+        run_label_phase(&[remove.clone()], false, &mut make_frontier(), &mut pending).unwrap();
+
+        let mut persisted =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        persisted.label_removals.insert([7; 16], HashSet::from([2]));
+        run_label_phase(&[add.clone()], true, &mut make_frontier(), &mut persisted).unwrap();
+        assert!(persisted.label_removals[&[7; 16]].is_empty());
+        persisted
+            .label_additions
+            .insert([7; 16], HashSet::from([1]));
+        run_label_phase(
+            &[remove.clone()],
+            false,
+            &mut make_frontier(),
+            &mut persisted,
+        )
+        .unwrap();
+        assert!(persisted.label_additions[&[7; 16]].is_empty());
+
+        let mut deleted =
+            StatementWriteContext::new(dir.path(), OntologyMode::Exploratory).unwrap();
+        deleted.deleted.insert([7; 16]);
+        let error = run_label_phase(&[add], true, &mut make_frontier(), &mut deleted).unwrap_err();
+        assert!(error.to_string().contains("deleted in this statement"));
+    }
 }

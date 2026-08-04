@@ -2186,6 +2186,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn property_normalization_and_strict_owner_failures_keep_bulk_context() {
+        let field = Field::new("when", DataType::Date32, false);
+        let array: ArrayRef = Arc::new(arrow::array::Date32Array::from(vec![1]));
+        let columns = [(&field, &array)];
+        let unsupported =
+            normalize_properties(BulkInputKind::Node, 9, 0, &columns, |_, _| Ok(())).unwrap_err();
+        assert_eq!(
+            unsupported.reason,
+            BulkValidationReason::UnsupportedPropertyType
+        );
+        assert_eq!(unsupported.row_ordinal, Some(9));
+        assert_eq!(unsupported.field.as_deref(), Some("when"));
+
+        let owner_error = normalize_properties(BulkInputKind::Edge, 11, 0, &columns, |name, _| {
+            Err(row_error(
+                BulkInputKind::Edge,
+                BulkValidationReason::UnknownOntologyProperty,
+                11,
+                name,
+                "owner rejected property",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(
+            owner_error.reason,
+            BulkValidationReason::UnknownOntologyProperty
+        );
+
+        let mut graph = GraphForge::new(None).unwrap();
+        graph.ontology_mode = OntologyMode::Strict;
+        graph.ontology = None;
+        for error in [
+            validate_node_owner(&graph, 1, "Person").unwrap_err(),
+            validate_edge_owner(&graph, 2, "KNOWS").unwrap_err(),
+        ] {
+            assert_eq!(error.reason, BulkValidationReason::UnknownOntologyType);
+        }
+        let property_field = Field::new("name", DataType::Utf8, true);
+        for error in [
+            validate_node_property(&graph, 3, "Person", "name", &property_field).unwrap_err(),
+            validate_edge_property(&graph, 4, "KNOWS", "weight", &property_field).unwrap_err(),
+        ] {
+            assert_eq!(error.reason, BulkValidationReason::ProjectState);
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "wrong",
+            DataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        assert_eq!(
+            uuid_column(&batch, BulkInputKind::Node, "wrong")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::SchemaMismatch
+        );
+        assert_eq!(
+            string_column(&batch, BulkInputKind::Edge, "wrong")
+                .unwrap_err()
+                .reason,
+            BulkValidationReason::SchemaMismatch
+        );
+    }
+
     fn node_batch(ids: &[Uuid], labels: &[&str], names: &[Option<&str>]) -> RecordBatch {
         let schema =
             bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, true)]).unwrap();

@@ -1758,6 +1758,114 @@ mod tests {
     }
 
     #[test]
+    fn graph_native_loaders_reject_conflicting_stems_and_ragged_features() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            fixture.dir.path(),
+            "Other",
+            &HashMap::from([(
+                to_bytes(&fixture.uuids[0]),
+                HashMap::from([
+                    (
+                        "features".into(),
+                        IrLiteral::List(vec![IrLiteral::Float(99.0)]),
+                    ),
+                    ("score".into(), IrLiteral::Float(99.0)),
+                ]),
+            )]),
+        )
+        .unwrap();
+
+        for error in [
+            load_node_vectors(
+                &mut graph,
+                fixture.dir.path(),
+                &["Person".into(), "Other".into()],
+                "features",
+            )
+            .unwrap_err(),
+            load_node_numeric_property(&graph, fixture.dir.path(), "score").unwrap_err(),
+            load_node_feature_properties(&mut graph, fixture.dir.path(), &["features".into()])
+                .unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("conflicting"), "{error}");
+        }
+
+        let ragged = self::fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(ragged.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut ragged_graph = export_adjacency(
+            &provider,
+            ragged.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            ragged.dir.path(),
+            "Person",
+            &HashMap::from([(
+                to_bytes(&ragged.uuids[1]),
+                HashMap::from([(
+                    "features".into(),
+                    IrLiteral::List(vec![IrLiteral::Float(1.0)]),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let error = load_node_feature_properties(
+            &mut ragged_graph,
+            ragged.dir.path(),
+            &["features".into()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("width"), "{error}");
+    }
+
+    #[test]
+    fn vector_loader_ignores_property_rows_for_unselected_nodes() {
+        let fixture = fixture();
+        let provider =
+            ScanBuildAdjacencyProvider::new(fixture.dir.path().to_path_buf(), OntologyMode::Strict);
+        let mut graph = export_adjacency(
+            &provider,
+            fixture.dir.path(),
+            OntologyMode::Strict,
+            selection(Direction::Out),
+        )
+        .unwrap();
+        graphforge_storage::set_node_properties(
+            fixture.dir.path(),
+            "Foreign",
+            &HashMap::from([(
+                to_bytes(&new_v7()),
+                HashMap::from([(
+                    "foreign".into(),
+                    IrLiteral::List(vec![IrLiteral::Float(1.0)]),
+                )]),
+            )]),
+        )
+        .unwrap();
+        let error = load_node_vectors(
+            &mut graph,
+            fixture.dir.path(),
+            &["Foreign".into()],
+            "foreign",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing vector property"));
+    }
+
+    #[test]
     fn scalar_feature_loader_is_ordered_and_rejects_invalid_or_missing_values() {
         let fixture = fixture();
         let provider =

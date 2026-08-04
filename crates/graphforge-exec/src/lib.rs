@@ -5493,6 +5493,139 @@ mod tests {
     }
 
     #[test]
+    fn create_writer_fails_closed_for_unbound_or_unpersisted_references() {
+        use graphforge_plan::{ResolvedEdgeSpec, ResolvedNodeSpec};
+
+        let dir = TempDir::new().unwrap();
+        let schema = Arc::new(Schema::empty());
+        let empty = RecordBatch::try_new_with_options(
+            Arc::clone(&schema),
+            vec![],
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        let reference = ResolvedNodeSpec {
+            var: 1,
+            label_ids: vec![],
+            label_names: vec![],
+            properties: vec![],
+            computed_properties: vec![],
+            is_reference: true,
+        };
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
+                .unwrap();
+        let cfg = CreateConfig {
+            nodes: vec![reference.clone()],
+            edges: vec![],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: Arc::clone(&schema),
+        };
+        let error = write_batch_creates(
+            &cfg,
+            &mut writer,
+            &empty,
+            &HashMap::new(),
+            CreateExtras::default(),
+            &mut CreateTally::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not found in the input schema"));
+
+        let mut uuid_builder = FixedSizeBinaryBuilder::with_capacity(1, 16);
+        uuid_builder.append_value([7; 16]).unwrap();
+        let uuid = Arc::new(uuid_builder.finish()) as ArrayRef;
+        let node_ids = Arc::new(UInt64Array::from(vec![None])) as ArrayRef;
+        let bound =
+            RecordBatch::try_from_iter([("node_uuid", Arc::clone(&uuid)), ("node_id", node_ids)])
+                .unwrap();
+        let cols = RefNodeCols {
+            var: 1,
+            uuid_idx: 0,
+            uuid_child_idx: None,
+            node_id_idx: Some(1),
+        };
+        let refs = HashMap::from([(1, &cols)]);
+        let error = write_batch_creates(
+            &cfg,
+            &mut writer,
+            &bound,
+            &refs,
+            CreateExtras::default(),
+            &mut CreateTally::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("node_id is null"));
+
+        let node_ids = Arc::new(UInt64Array::from(vec![Some(99)])) as ArrayRef;
+        let uuid_only =
+            RecordBatch::try_from_iter([("node_uuid", uuid), ("node_id", node_ids)]).unwrap();
+        let refs = HashMap::from([(1, &cols)]);
+        let deleted = HashSet::from([[7; 16]]);
+        let error = write_batch_creates(
+            &cfg,
+            &mut writer,
+            &uuid_only,
+            &refs,
+            CreateExtras {
+                deleted: Some(&deleted),
+                ..CreateExtras::default()
+            },
+            &mut CreateTally::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("deleted earlier"));
+
+        let edge = ResolvedEdgeSpec {
+            var: 3,
+            src: 1,
+            dst: 2,
+            rel_type_id: Some(9),
+            rel_type_name: Some("KNOWS".into()),
+            direction: graphforge_ir::Direction::Out,
+            properties: vec![],
+            computed_properties: vec![],
+        };
+        let mut edge_cfg = CreateConfig {
+            nodes: vec![],
+            edges: vec![edge.clone()],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: Arc::clone(&schema),
+        };
+        let error = write_batch_creates(
+            &edge_cfg,
+            &mut writer,
+            &empty,
+            &HashMap::new(),
+            CreateExtras::default(),
+            &mut CreateTally::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unbound src"));
+        edge_cfg.nodes.push(ResolvedNodeSpec {
+            var: 1,
+            is_reference: false,
+            ..reference
+        });
+        let error = write_batch_creates(
+            &edge_cfg,
+            &mut writer,
+            &empty,
+            &HashMap::new(),
+            CreateExtras::default(),
+            &mut CreateTally::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unbound dst"));
+    }
+
+    #[test]
     fn set_and_remove_batch_contracts_route_rows_and_skip_null_identities() {
         let mut uuid_builder = FixedSizeBinaryBuilder::with_capacity(3, 16);
         uuid_builder.append_value([1; 16]).unwrap();
@@ -5677,6 +5810,10 @@ mod tests {
             let batches = collect(exec.clone(), SessionContext::new().task_ctx())
                 .await
                 .unwrap();
+            let physical: Arc<dyn ExecutionPlan> = exec.clone();
+            let discovered = create_tally_in_plan(&physical).unwrap();
+            assert_eq!(discovered.nodes_created, exec.effects().nodes_created);
+            assert_eq!(discovered.properties_set, exec.effects().properties_set);
             (batches, exec.effects(), dir)
         };
 
@@ -6220,6 +6357,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn delete_exec_enforces_bound_edge_and_detach_semantics() {
+        use arrow::datatypes::Field;
+        use datafusion_datasource::memory::MemorySourceConfig;
+        use graphforge_core::uuid::{new_v7, to_bytes};
+
+        let run = |detach: bool, include_edge: bool| async move {
+            let dir = TempDir::new().unwrap();
+            let node = new_v7();
+            let other = new_v7();
+            let edge = new_v7();
+            let mut writer =
+                graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
+                    .unwrap();
+            writer
+                .create_node(node, graphforge_core::TypeId(1))
+                .unwrap();
+            writer
+                .create_node(other, graphforge_core::TypeId(1))
+                .unwrap();
+            writer.create_edge(edge, "KNOWS", &node, &other).unwrap();
+            writer.flush().unwrap();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("edge_uuid", DataType::FixedSizeBinary(16), false),
+            ]));
+            let mut nodes = FixedSizeBinaryBuilder::with_capacity(1, 16);
+            nodes.append_value(to_bytes(&node)).unwrap();
+            let mut edges = FixedSizeBinaryBuilder::with_capacity(1, 16);
+            edges.append_value(to_bytes(&edge)).unwrap();
+            let batch = RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![Arc::new(nodes.finish()), Arc::new(edges.finish())],
+            )
+            .unwrap();
+            let input = MemorySourceConfig::try_new_from_batches(schema, vec![batch]).unwrap();
+            let summary = GraphDeleteNode::summary_schema();
+            let exec: Arc<dyn ExecutionPlan> = Arc::new(GraphDeleteExec {
+                input,
+                cols: if include_edge {
+                    vec![
+                        DeleteCol {
+                            uuid_idx: 0,
+                            is_edge: false,
+                        },
+                        DeleteCol {
+                            uuid_idx: 1,
+                            is_edge: true,
+                        },
+                    ]
+                } else {
+                    vec![DeleteCol {
+                        uuid_idx: 0,
+                        is_edge: false,
+                    }]
+                },
+                detach,
+                dir: dir.path().to_path_buf(),
+                schema: Arc::clone(&summary),
+                props: Arc::new(PlanProperties::new(
+                    EquivalenceProperties::new(summary),
+                    Partitioning::UnknownPartitioning(1),
+                    EmissionType::Incremental,
+                    Boundedness::Bounded,
+                )),
+            });
+            (collect(exec, SessionContext::new().task_ctx()).await, dir)
+        };
+
+        let (error, _) = run(false, false).await;
+        assert!(
+            error
+                .unwrap_err()
+                .to_string()
+                .contains("still has relationships")
+        );
+
+        let (batches, project) = run(false, true).await;
+        let effects = SideEffects::from_summary(&batches.unwrap());
+        assert_eq!(
+            (effects.nodes_deleted, effects.relationships_deleted),
+            (1, 1)
+        );
+        assert_eq!(persisted_node_ids(project.path()).unwrap().len(), 1);
+
+        let (batches, project) = run(true, false).await;
+        let effects = SideEffects::from_summary(&batches.unwrap());
+        assert_eq!(
+            (effects.nodes_deleted, effects.relationships_deleted),
+            (1, 1)
+        );
+        assert_eq!(persisted_node_ids(project.path()).unwrap().len(), 1);
     }
 
     #[tokio::test]

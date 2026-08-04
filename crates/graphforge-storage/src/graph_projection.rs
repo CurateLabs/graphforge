@@ -1525,6 +1525,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_projection_target_validation_rejects_nonregular_metadata_and_graph_entries() {
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join(graphforge_core::manifest::MANIFEST_FILE)).unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let target = TempDir::new().unwrap();
+        let properties = target.path().join("properties");
+        fs::create_dir(&properties).unwrap();
+        fs::write(properties.join("not-parquet.txt"), b"preserve").unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        assert_eq!(
+            fs::read(properties.join("not-parquet.txt")).unwrap(),
+            b"preserve"
+        );
+
+        let target = TempDir::new().unwrap();
+        let edges = target.path().join("topology/edges");
+        fs::create_dir_all(&edges).unwrap();
+        fs::create_dir(edges.join("nested.parquet")).unwrap();
+        assert_eq!(
+            validate_graph_empty_target(target.path())
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+    }
+
+    #[test]
     fn missing_identity_and_nonempty_target_fail_before_writing() {
         let (source, _, _) = fixture();
         let target = TempDir::new().unwrap();
@@ -1748,6 +1786,43 @@ mod tests {
             time64_value(&time, TimeUnit::Second, 0).unwrap_err().code(),
             "GF_VALIDATION"
         );
+    }
+
+    #[test]
+    fn canonical_value_encoding_traverses_every_supported_nested_arrow_shape() {
+        use arrow::array::{
+            FixedSizeListArray, Int32Array, LargeListArray, StringDictionaryBuilder, StructArray,
+        };
+        use arrow::datatypes::Int32Type;
+
+        let large: ArrayRef = Arc::new(LargeListArray::from_iter_primitive::<Int32Type, _, _>([
+            Some(vec![Some(1), None, Some(2)]),
+        ]));
+        let fixed: ArrayRef = Arc::new(FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(
+            [Some(vec![Some(3), Some(4)])],
+            2,
+        ));
+        let struct_fields: arrow::datatypes::Fields =
+            vec![Field::new("value", DataType::Int32, false)].into();
+        let structure: ArrayRef = Arc::new(StructArray::new(
+            struct_fields.clone(),
+            vec![Arc::new(Int32Array::from(vec![5]))],
+            None,
+        ));
+        let mut dictionary_builder = StringDictionaryBuilder::<Int32Type>::new();
+        dictionary_builder.append("six").unwrap();
+        let dictionary: ArrayRef = Arc::new(dictionary_builder.finish());
+
+        for (data_type, array) in [
+            (large.data_type().clone(), large),
+            (fixed.data_type().clone(), fixed),
+            (DataType::Struct(struct_fields), structure),
+            (dictionary.data_type().clone(), dictionary),
+        ] {
+            let mut writer = CanonicalWriter::new();
+            encode_present_value(&mut writer, &data_type, &array, 0).unwrap();
+            assert!(!writer.finish().is_empty());
+        }
     }
 
     #[test]

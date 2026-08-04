@@ -6527,19 +6527,35 @@ impl ScalarUDFImpl for CypherReverse {
         &self,
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
-        use datafusion::arrow::array::{Array, ListArray, StringArray, UInt32Array};
+        use datafusion::arrow::array::{
+            Array, LargeStringArray, ListArray, StringArray, UInt32Array,
+        };
         use datafusion::common::cast::as_list_array;
         use datafusion::error::DataFusionError;
         use std::sync::Arc;
 
         let array = args.args[0].to_array(args.number_rows)?;
         match array.data_type() {
-            DataType::Utf8 | DataType::LargeUtf8 => {
-                let s = datafusion::arrow::compute::cast(&array, &DataType::Utf8)?;
-                let s = s.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                    DataFusionError::Internal("cypher_reverse: not a string array".into())
-                })?;
+            DataType::Utf8 => {
+                let s = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("cypher_reverse: not a string array".into())
+                    })?;
                 let out: StringArray = (0..s.len())
+                    .map(|i| (!s.is_null(i)).then(|| s.value(i).chars().rev().collect::<String>()))
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(out)))
+            }
+            DataType::LargeUtf8 => {
+                let s = array
+                    .as_any()
+                    .downcast_ref::<LargeStringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Internal("cypher_reverse: not a large string array".into())
+                    })?;
+                let out: LargeStringArray = (0..s.len())
                     .map(|i| (!s.is_null(i)).then(|| s.value(i).chars().rev().collect::<String>()))
                     .collect();
                 Ok(ColumnarValue::Array(Arc::new(out)))
@@ -15309,7 +15325,7 @@ mod tests {
 
     #[test]
     fn cypher_reverse_runtime_dispatches_strings_lists_and_type_errors() {
-        use datafusion::arrow::array::{Array, ListArray, StringArray};
+        use datafusion::arrow::array::{Array, LargeStringArray, ListArray};
         use datafusion::arrow::datatypes::Field;
         use datafusion::config::ConfigOptions;
 
@@ -15329,7 +15345,7 @@ mod tests {
             ColumnarValue::Array(array) => array,
             ColumnarValue::Scalar(value) => value.to_array_of_size(1).unwrap(),
         };
-        let text = text.as_any().downcast_ref::<StringArray>().unwrap();
+        let text = text.as_any().downcast_ref::<LargeStringArray>().unwrap();
         assert_eq!(text.value(0), "ad́A");
 
         let list = ScalarValue::List(ScalarValue::new_list(
@@ -16425,5 +16441,246 @@ mod tests {
             .to_string()
             .contains("not a temporal value")
         );
+    }
+
+    #[test]
+    fn exact_zero_large_list_legacy_variant_order_and_percentile_branches() {
+        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, LargeListArray};
+        use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+        use datafusion::arrow::datatypes::{Field, Fields};
+        use datafusion::logical_expr::Accumulator;
+
+        let large = |values: Vec<i64>, valid: bool| {
+            let len = i64::try_from(values.len()).unwrap();
+            ScalarValue::LargeList(Arc::new(LargeListArray::new(
+                Arc::new(Field::new("item", DataType::Int64, true)),
+                OffsetBuffer::new(ScalarBuffer::from(vec![0, len])),
+                Arc::new(Int64Array::from(values)) as ArrayRef,
+                Some(NullBuffer::from(vec![valid])),
+            )))
+        };
+        assert_eq!(
+            scalar_list_elements(&large(vec![1, 2], true)).unwrap(),
+            Some(vec![
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(2))
+            ])
+        );
+        assert_eq!(scalar_list_elements(&large(vec![], false)).unwrap(), None);
+
+        let size = invoke_test_udf(&CypherSize::new(), vec![large(vec![1, 2, 3], true)]).unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&size, 0).unwrap(),
+            ScalarValue::Int64(Some(3))
+        );
+        let null_size = invoke_test_udf(&CypherSize::new(), vec![large(vec![], false)]).unwrap();
+        assert!(null_size.is_null(0));
+
+        let reversed = invoke_test_udf(
+            &CypherReverse::new(),
+            vec![ScalarValue::LargeUtf8(Some("a😀b".into()))],
+        )
+        .unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&reversed, 0).unwrap(),
+            ScalarValue::LargeUtf8(Some("b😀a".into()))
+        );
+
+        let shorter: ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
+        let longer: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        let different: ArrayRef = Arc::new(Int64Array::from(vec![1, 9]));
+        assert_eq!(
+            cypher_seq_order(&shorter, &longer),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            cypher_seq_order(&different, &shorter),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            cypher_seq_order(&shorter, &shorter),
+            std::cmp::Ordering::Equal
+        );
+
+        let legacy = DataType::Struct(Fields::from(vec![
+            Field::new("__het_tag", DataType::Int8, false),
+            Field::new("__het_int", DataType::Int64, true),
+            Field::new("__het_float", DataType::Float64, true),
+            Field::new("__het_str", DataType::Utf8, true),
+            Field::new("__het_bool", DataType::Boolean, true),
+        ]));
+        let return_type = list_plus_return_type(&[
+            DataType::new_list(legacy, true),
+            DataType::new_list(DataType::Int64, true),
+        ]);
+        let DataType::List(item) = return_type else {
+            panic!("list return")
+        };
+        let DataType::Struct(variants) = item.data_type() else {
+            panic!("variant struct")
+        };
+        assert!(
+            variants
+                .iter()
+                .any(|field| field.data_type() == &DataType::Int64)
+        );
+        assert!(
+            variants
+                .iter()
+                .any(|field| field.data_type() == &DataType::Utf8)
+        );
+
+        let mut percentile = PercentileAcc {
+            continuous: true,
+            value_type: DataType::Int64,
+            result_type: DataType::Float64,
+            values: Vec::new(),
+            percentile: None,
+        };
+        let values: ArrayRef = Arc::new(Int64Array::from(vec![1]));
+        let bad_percentile: ArrayRef =
+            Arc::new(datafusion::arrow::array::StringArray::from(vec!["half"]));
+        assert!(
+            percentile
+                .update_batch(&[values, bad_percentile])
+                .unwrap_err()
+                .to_string()
+                .contains("must be numeric")
+        );
+    }
+
+    #[test]
+    fn exact_zero_temporal_udf_metadata_contracts_are_total() {
+        fn check<U: ScalarUDFImpl + 'static>(udf: U) {
+            assert!(udf.as_any().is::<U>());
+            assert!(!udf.name().is_empty());
+            let _ = udf.signature();
+            assert!(udf.return_type(&[DataType::Null]).is_ok());
+        }
+
+        check(CypherDurationBetween::new());
+        check(CypherTemporalArith::new());
+        check(CypherDurationParse::new());
+        check(CypherDurationAdd::new());
+        check(CypherDurationScale::new());
+        check(CypherDateProject::new());
+        check(CypherLocalTimeProject::new());
+        check(CypherLocalTimeTruncate::new());
+        check(CypherLocalDateTimeProject::new());
+        check(CypherLocalDateTimeTruncate::new());
+        check(CypherTimeProject::new());
+        check(CypherTimeTruncate::new());
+        check(CypherDateTimeProject::new());
+        check(CypherDateTimeTruncate::new());
+        check(CypherToString::new());
+        check(CypherDateTruncate::new());
+    }
+
+    #[test]
+    fn exact_zero_access_map_metadata_and_type_helpers() {
+        use datafusion::arrow::datatypes::{Field, Fields};
+
+        let map = const_map_scalar(&[
+            ("k".into(), ScalarValue::Int64(Some(7))),
+            ("other".into(), ScalarValue::Int64(None)),
+        ])
+        .unwrap();
+        let accessed =
+            invoke_test_udf(&CypherStaticValueAccess::new("k".into()), vec![map.clone()]).unwrap();
+        assert_eq!(
+            ScalarValue::try_from_array(&accessed, 0).unwrap(),
+            ScalarValue::Int64(Some(7))
+        );
+        let missing = invoke_test_udf(
+            &CypherStaticValueAccess::new("missing".into()),
+            vec![map.clone()],
+        )
+        .unwrap();
+        assert!(ScalarValue::try_from_array(&missing, 0).unwrap().is_null());
+
+        let keys = invoke_test_udf(&CypherMapKeys::new(), vec![map]).unwrap();
+        let ScalarValue::List(keys) = ScalarValue::try_from_array(&keys, 0).unwrap() else {
+            panic!("keys must return a list")
+        };
+        assert_eq!(keys.value(0).len(), 2);
+
+        let props = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Boolean(Some(true)),
+                ScalarValue::Utf8(Some("k".into())),
+                ScalarValue::Int64(Some(7)),
+            ],
+        )
+        .unwrap();
+        assert!(!props.is_null(0));
+        let absent = invoke_test_udf(
+            &CypherEntityProperties::new(3),
+            vec![
+                ScalarValue::Boolean(Some(false)),
+                ScalarValue::Utf8(Some("k".into())),
+                ScalarValue::Int64(Some(7)),
+            ],
+        )
+        .unwrap();
+        assert!(absent.is_null(0));
+
+        let null_access = invoke_test_udf(
+            &CypherValueAccess::new(),
+            vec![ScalarValue::Null, ScalarValue::Utf8(Some("k".into()))],
+        )
+        .unwrap();
+        assert!(
+            ScalarValue::try_from_array(&null_access, 0)
+                .unwrap()
+                .is_null()
+        );
+
+        for (value, expected) in [
+            (ScalarValue::Int8(Some(-1)), Some(-1)),
+            (ScalarValue::Int16(Some(-2)), Some(-2)),
+            (ScalarValue::Int32(Some(-3)), Some(-3)),
+            (ScalarValue::Int64(Some(-4)), Some(-4)),
+            (ScalarValue::UInt8(Some(1)), Some(1)),
+            (ScalarValue::UInt16(Some(2)), Some(2)),
+            (ScalarValue::UInt32(Some(3)), Some(3)),
+            (ScalarValue::UInt64(Some(4)), Some(4)),
+            (ScalarValue::Int64(None), None),
+        ] {
+            assert_eq!(scalar_list_index(&value).unwrap(), expected);
+        }
+        assert!(scalar_list_index(&ScalarValue::UInt64(Some(u64::MAX))).is_err());
+        assert!(scalar_list_index(&ScalarValue::Utf8(Some("0".into()))).is_err());
+
+        let nested_a = DataType::Struct(Fields::from(vec![
+            Field::new("value", DataType::Int64, false),
+            Field::new("items", DataType::new_list(DataType::Utf8, true), true),
+        ]));
+        let nested_b = DataType::Struct(Fields::from(vec![
+            Field::new("value", DataType::Int64, true),
+            Field::new("items", DataType::new_list(DataType::Utf8, true), false),
+        ]));
+        assert!(graph_value_types_compatible(&nested_a, &nested_b));
+        assert!(!graph_value_types_compatible(&nested_a, &DataType::Int64));
+        assert!(!graph_value_types_compatible(
+            &nested_a,
+            &DataType::Struct(Fields::from(vec![Field::new(
+                "other",
+                DataType::Int64,
+                true
+            )]))
+        ));
+
+        for (name, value) in [
+            ("date", "2020-01-02"),
+            ("localtime", "12:34:56"),
+            ("time", "12:34:56Z"),
+            ("localdatetime", "2020-01-02T12:34:56"),
+            ("datetime", "2020-01-02T12:34:56Z"),
+            ("duration", "P1D"),
+        ] {
+            assert!(render_temporal(name, value).is_some());
+        }
+        assert_eq!(render_temporal("unknown", "P1D"), None);
     }
 }
