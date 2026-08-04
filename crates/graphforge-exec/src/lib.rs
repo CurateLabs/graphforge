@@ -5485,6 +5485,125 @@ mod tests {
         );
     }
 
+    #[test]
+    fn set_and_remove_batch_contracts_route_rows_and_skip_null_identities() {
+        let mut uuid_builder = FixedSizeBinaryBuilder::with_capacity(3, 16);
+        uuid_builder.append_value([1; 16]).unwrap();
+        uuid_builder.append_null();
+        uuid_builder.append_value([2; 16]).unwrap();
+        let batch = RecordBatch::try_from_iter([
+            ("node_uuid", Arc::new(uuid_builder.finish()) as ArrayRef),
+            (
+                "type_id",
+                Arc::new(arrow::array::UInt32Array::from(vec![7, 7, 8])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let df_schema = DFSchema::try_from(batch.schema().as_ref().clone()).unwrap();
+        let target = WriteCol {
+            prop_name: "score".into(),
+            uuid_idx: 0,
+            is_edge: false,
+            type_id_idx: Some(1),
+            rel_name_idx: None,
+        };
+        let logical_value = lit(42_i64);
+        let physical_value =
+            create_physical_expr(&logical_value, &df_schema, &ExecutionProps::new()).unwrap();
+        let type_map = HashMap::from([(7, "Person".into()), (8, "Employee".into())]);
+
+        let mut set = SetAccumulator::default();
+        accumulate_set_batch(
+            &batch,
+            &[(target.clone(), logical_value)],
+            &[physical_value],
+            OntologyMode::Strict,
+            &type_map,
+            &mut set,
+        )
+        .unwrap();
+        assert_eq!(set.nodes["Person"].len(), 1);
+        assert_eq!(set.nodes["Employee"].len(), 1);
+        assert!(!set.nodes.values().any(|rows| rows.contains_key(&[0; 16])));
+
+        let mut remove = RemoveAccumulator::default();
+        accumulate_remove_batch(
+            &batch,
+            &[target],
+            OntologyMode::Strict,
+            &type_map,
+            &mut remove,
+        )
+        .unwrap();
+        assert_eq!(remove.nodes["Person"].len(), 1);
+        assert_eq!(remove.nodes["Employee"].len(), 1);
+    }
+
+    #[test]
+    fn emit_rows_create_runs_the_writer_and_shapes_created_identity_columns() {
+        use graphforge_plan::ResolvedNodeSpec;
+
+        let dir = TempDir::new().unwrap();
+        let input_schema = Arc::new(Schema::empty());
+        let input = RecordBatch::try_new_with_options(
+            Arc::clone(&input_schema),
+            vec![],
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        let item = Arc::new(arrow::datatypes::Field::new(
+            "item",
+            arrow::datatypes::DataType::UInt32,
+            false,
+        ));
+        let output_schema = Arc::new(Schema::new(vec![
+            arrow::datatypes::Field::new(
+                "node_uuid",
+                arrow::datatypes::DataType::FixedSizeBinary(16),
+                false,
+            ),
+            arrow::datatypes::Field::new("node_id", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("type_id", arrow::datatypes::DataType::UInt32, false),
+            arrow::datatypes::Field::new("type_ids", arrow::datatypes::DataType::List(item), false),
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let cfg = CreateConfig {
+            nodes: vec![ResolvedNodeSpec {
+                var: 1,
+                label_ids: vec![7],
+                label_names: vec!["Person".into()],
+                properties: vec![("name".into(), IrLiteral::Str("Ada".into()))],
+                computed_properties: vec![],
+                is_reference: false,
+            }],
+            edges: vec![],
+            ref_cols: vec![],
+            in_df_schema: Arc::new(DFSchema::empty()),
+            dir: dir.path().to_path_buf(),
+            mode: OntologyMode::Exploratory,
+            out_schema: output_schema,
+        };
+        let mut writer =
+            graphforge_storage::GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 1)
+                .unwrap();
+        let mut tally = CreateTally::default();
+
+        let emitted = emit_batch_creates(
+            &cfg,
+            &mut writer,
+            &input,
+            &CreateComputed::new(),
+            &HashMap::new(),
+            None,
+            &mut tally,
+        )
+        .unwrap();
+
+        assert_eq!(emitted.num_rows(), 1);
+        assert_eq!(emitted.num_columns(), 5);
+        assert_eq!((tally.nodes_created, tally.properties_set), (1, 1));
+    }
+
     fn empty_write_input() -> (Arc<LogicalPlan>, Arc<dyn ExecutionPlan>) {
         let logical = Arc::new(LogicalPlanBuilder::empty(false).build().unwrap());
         let physical: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::new(

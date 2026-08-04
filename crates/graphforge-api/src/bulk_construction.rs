@@ -1465,28 +1465,9 @@ fn uuid_at(
     field: &str,
     operation_uuid: OperationId,
 ) -> Result<Uuid, BulkValidationError> {
-    if values.is_null(row) {
-        return Ok(generated_uuid(operation_uuid, kind, ordinal));
-    }
-    let uuid = Uuid::from_slice(values.value(row)).map_err(|_| {
-        row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "invalid UUID bytes",
-        )
-    })?;
-    if uuid.get_version_num() != 7 {
-        return Err(row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "value must be UUIDv7",
-        ));
-    }
-    Ok(uuid)
+    validated_uuid_at(values, row, kind, ordinal, field, || {
+        Ok(generated_uuid(operation_uuid, kind, ordinal))
+    })
 }
 
 fn explicit_uuid_at(
@@ -1496,34 +1477,48 @@ fn explicit_uuid_at(
     ordinal: u64,
     field: &str,
 ) -> Result<Uuid, BulkValidationError> {
-    if values.is_null(row) {
-        return Err(row_error(
+    validated_uuid_at(values, row, kind, ordinal, field, || {
+        Err(uuid_row_error(
             kind,
-            BulkValidationReason::InvalidUuid,
             ordinal,
             field,
             "endpoint UUID cannot be null",
-        ));
+        ))
+    })
+}
+
+fn validated_uuid_at(
+    values: &FixedSizeBinaryArray,
+    row: usize,
+    kind: BulkInputKind,
+    ordinal: u64,
+    field: &str,
+    on_null: impl FnOnce() -> Result<Uuid, BulkValidationError>,
+) -> Result<Uuid, BulkValidationError> {
+    if values.is_null(row) {
+        return on_null();
     }
-    let uuid = Uuid::from_slice(values.value(row)).map_err(|_| {
-        row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "invalid UUID bytes",
-        )
-    })?;
+    let uuid = Uuid::from_slice(values.value(row))
+        .map_err(|_| uuid_row_error(kind, ordinal, field, "invalid UUID bytes"))?;
     if uuid.get_version_num() != 7 {
-        return Err(row_error(
-            kind,
-            BulkValidationReason::InvalidUuid,
-            ordinal,
-            field,
-            "value must be UUIDv7",
-        ));
+        return Err(uuid_row_error(kind, ordinal, field, "value must be UUIDv7"));
     }
     Ok(uuid)
+}
+
+fn uuid_row_error(
+    kind: BulkInputKind,
+    ordinal: u64,
+    field: &str,
+    message: &str,
+) -> BulkValidationError {
+    row_error(
+        kind,
+        BulkValidationReason::InvalidUuid,
+        ordinal,
+        field,
+        message,
+    )
 }
 
 fn validate_operation_uuid(
@@ -1692,45 +1687,22 @@ fn node_receipt(
     operation_uuid: OperationId,
     generation_uuid: Uuid,
 ) -> Result<RecordBatch, super::GfError> {
-    if rows.is_empty() {
-        return Ok(RecordBatch::new_empty(bulk_receipt_schema()));
-    }
-    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.row_ordinal));
-    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|_| "node"));
-    let entity_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.node_uuid.as_bytes().as_slice()),
+    receipt(
+        rows.iter().map(|row| {
+            (
+                row.row_ordinal,
+                "node",
+                row.node_uuid,
+                Some(row.label.as_str()),
+                None,
+                None,
+                None,
+            )
+        }),
+        rows.len(),
+        operation_uuid,
+        generation_uuid,
     )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let labels = StringArray::from(
-        rows.iter()
-            .map(|row| Some(row.label.as_str()))
-            .collect::<Vec<_>>(),
-    );
-    let null_strings = StringArray::from(vec![None::<&str>; rows.len()]);
-    let null_uuids = FixedSizeBinaryArray::new_null(16, rows.len());
-    let operation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| operation_uuid.0.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let generation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| generation_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    RecordBatch::try_new(
-        bulk_receipt_schema(),
-        vec![
-            Arc::new(row_ordinals),
-            Arc::new(entity_kinds),
-            Arc::new(entity_uuids),
-            Arc::new(labels),
-            Arc::new(null_strings.clone()),
-            Arc::new(null_uuids.clone()),
-            Arc::new(null_uuids),
-            Arc::new(operation_uuids),
-            Arc::new(generation_uuids),
-        ],
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))
 }
 
 fn edge_receipt(
@@ -1738,46 +1710,76 @@ fn edge_receipt(
     operation_uuid: OperationId,
     generation_uuid: Uuid,
 ) -> Result<RecordBatch, super::GfError> {
-    if rows.is_empty() {
+    receipt(
+        rows.iter().map(|row| {
+            (
+                row.row_ordinal,
+                "edge",
+                row.edge_uuid,
+                None,
+                Some(row.rel_type.as_str()),
+                Some(row.source_uuid),
+                Some(row.target_uuid),
+            )
+        }),
+        rows.len(),
+        operation_uuid,
+        generation_uuid,
+    )
+}
+
+type ReceiptRow<'a> = (
+    u64,
+    &'static str,
+    Uuid,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<Uuid>,
+    Option<Uuid>,
+);
+
+fn receipt<'a>(
+    rows: impl Iterator<Item = ReceiptRow<'a>>,
+    len: usize,
+    operation_uuid: OperationId,
+    generation_uuid: Uuid,
+) -> Result<RecordBatch, super::GfError> {
+    if len == 0 {
         return Ok(RecordBatch::new_empty(bulk_receipt_schema()));
     }
-    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.row_ordinal));
-    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|_| "edge"));
-    let entity_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.edge_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let null_labels = StringArray::from(vec![None::<&str>; rows.len()]);
-    let rel_types = StringArray::from_iter_values(rows.iter().map(|row| row.rel_type.as_str()));
-    let source_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.source_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let target_uuids = FixedSizeBinaryArray::try_from_iter(
-        rows.iter().map(|row| row.target_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let operation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| operation_uuid.0.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
-    let generation_uuids = FixedSizeBinaryArray::try_from_iter(
-        (0..rows.len()).map(|_| generation_uuid.as_bytes().as_slice()),
-    )
-    .map_err(|error| super::GfError::Execution(error.to_string()))?;
+    let rows = rows.collect::<Vec<_>>();
+    let row_ordinals = UInt64Array::from_iter_values(rows.iter().map(|row| row.0));
+    let entity_kinds = StringArray::from_iter_values(rows.iter().map(|row| row.1));
+    let entity_uuids = uuid_array(rows.iter().map(|row| Some(row.2)))?;
+    let labels = rows.iter().map(|row| row.3).collect::<StringArray>();
+    let rel_types = rows.iter().map(|row| row.4).collect::<StringArray>();
+    let source_uuids = uuid_array(rows.iter().map(|row| row.5))?;
+    let target_uuids = uuid_array(rows.iter().map(|row| row.6))?;
+    let operation_uuids = uuid_array((0..len).map(|_| Some(operation_uuid.0)))?;
+    let generation_uuids = uuid_array((0..len).map(|_| Some(generation_uuid)))?;
     RecordBatch::try_new(
         bulk_receipt_schema(),
         vec![
             Arc::new(row_ordinals),
             Arc::new(entity_kinds),
             Arc::new(entity_uuids),
-            Arc::new(null_labels),
+            Arc::new(labels),
             Arc::new(rel_types),
             Arc::new(source_uuids),
             Arc::new(target_uuids),
             Arc::new(operation_uuids),
             Arc::new(generation_uuids),
         ],
+    )
+    .map_err(|error| super::GfError::Execution(error.to_string()))
+}
+
+fn uuid_array(
+    values: impl IntoIterator<Item = Option<Uuid>>,
+) -> Result<FixedSizeBinaryArray, super::GfError> {
+    FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+        values.into_iter().map(|value| value.map(Uuid::into_bytes)),
+        16,
     )
     .map_err(|error| super::GfError::Execution(error.to_string()))
 }

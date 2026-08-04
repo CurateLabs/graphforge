@@ -2879,7 +2879,22 @@ mod tests {
     fn containment_and_symlinks_fail_closed() {
         let root = tempdir().unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();
-        assert!(context.contained_path("../outside").is_err());
+        for path in ["../outside", "/absolute"] {
+            let error = context.contained_path(path).unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(
+                error.to_string(),
+                "validation error: path must be repository-relative and contained"
+            );
+        }
+        let missing = context.load_config().unwrap_err();
+        assert_eq!(missing.code(), "GF_IO");
+        assert!(missing.to_string().contains("cannot read"));
+        fs::create_dir_all(root.path().join(".graphforge")).unwrap();
+        fs::write(root.path().join(".graphforge/graphforge.yaml"), "[").unwrap();
+        let malformed = context.load_config().unwrap_err();
+        assert_eq!(malformed.code(), "GF_VALIDATION");
+        assert!(malformed.to_string().contains("invalid graphforge.yaml"));
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(root.path(), root.path().join("linked")).unwrap();

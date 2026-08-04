@@ -9881,7 +9881,7 @@ impl ScalarUDFImpl for CypherDateProject {
         args: ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         use crate::temporal::{DateOverrides, parse_date_or_datetime_prefix};
-        use datafusion::arrow::array::{Array, Int64Array, StringArray, StructArray};
+        use datafusion::arrow::array::{Array, StringArray, StructArray};
         use datafusion::arrow::compute::cast;
 
         let rows = args.number_rows;
@@ -9928,22 +9928,18 @@ impl ScalarUDFImpl for CypherDateProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Vec<Option<i64>> = (0..rows)
             .map(|i| {
                 let overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 crate::temporal::project_date(base_date(i)?, &overrides)
             })
@@ -10005,7 +10001,7 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
     ) -> datafusion::error::Result<ColumnarValue> {
         use crate::temporal::{LocalTimeOverrides, project_localtime, time_of_day_nanos_any};
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -10060,20 +10056,16 @@ impl ScalarUDFImpl for CypherLocalTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Time64NanosecondArray = (0..rows)
             .map(|i| {
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 project_localtime(base_nanos(i)?, &overrides)
             })
@@ -10134,7 +10126,7 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
             LocalTimeOverrides, project_localtime, time_of_day_nanos_any, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -10188,10 +10180,6 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Time64NanosecondArray = (0..rows)
             .map(|i| {
@@ -10201,12 +10189,12 @@ impl ScalarUDFImpl for CypherLocalTimeTruncate {
                 }
                 let truncated = truncate_time_nanos(base_nanos(i)?, u.value(i))?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 project_localtime(truncated, &overrides)
             })
@@ -10263,6 +10251,16 @@ fn date_struct_value(arr: &datafusion::arrow::array::StructArray, i: usize) -> O
     }
     let days = arr.column(0).as_any().downcast_ref::<Int64Array>()?;
     days.is_valid(i).then(|| days.value(i))
+}
+
+/// Read one nullable Int64 override from an already-normalized Arrow column.
+/// Temporal projectors cast override columns once before their row loop, so a
+/// failed physical downcast or a null row has the same absent-override meaning.
+fn optional_i64_at(array: &datafusion::arrow::array::ArrayRef, row: usize) -> Option<i64> {
+    use datafusion::arrow::array::{Array, Int64Array};
+
+    let values = array.as_any().downcast_ref::<Int64Array>()?;
+    (!values.is_null(row)).then(|| values.value(row))
 }
 
 /// The Arrow fields of a `localdatetime` value — `Struct{date: Int64, time:
@@ -10499,7 +10497,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
             project_localtime, time_of_day_nanos_any,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -10585,30 +10583,26 @@ impl ScalarUDFImpl for CypherLocalDateTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i64)>> = (0..rows)
             .map(|i| {
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(base_date(i)?, &date_overrides)?;
                 let time = project_localtime(base_time(i)?, &time_overrides)?;
@@ -10679,7 +10673,7 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
             project_localtime, time_of_day_nanos_any, truncate_date, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -10757,10 +10751,6 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i64)>> = (0..rows)
             .map(|i| {
@@ -10778,22 +10768,22 @@ impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
                     ),
                 };
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(date, &date_overrides)?;
                 let time = project_localtime(time, &time_overrides)?;
@@ -10912,7 +10902,7 @@ impl ScalarUDFImpl for CypherTimeProject {
             time_of_day_with_offset,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -10976,21 +10966,17 @@ impl ScalarUDFImpl for CypherTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i32)>> = (0..rows)
             .map(|i| {
                 let (base_nanos, base_offset) = base_parts(i)?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 let nanos = project_localtime(base_nanos, &overrides)?;
                 // A `timezone` override (offset string) re-zones the value.
@@ -11057,7 +11043,7 @@ impl ScalarUDFImpl for CypherTimeTruncate {
             time_of_day_with_offset, truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -11118,10 +11104,6 @@ impl ScalarUDFImpl for CypherTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<Option<(i64, i32)>> = (0..rows)
             .map(|i| {
@@ -11132,12 +11114,12 @@ impl ScalarUDFImpl for CypherTimeTruncate {
                 let (base_nanos, base_offset) = base_parts(i)?;
                 let truncated = truncate_time_nanos(base_nanos, u.value(i))?;
                 let overrides = LocalTimeOverrides {
-                    hour: field(0, i),
-                    minute: field(1, i),
-                    second: field(2, i),
-                    millisecond: field(3, i),
-                    microsecond: field(4, i),
-                    nanosecond: field(5, i),
+                    hour: optional_i64_at(&ov[0], i),
+                    minute: optional_i64_at(&ov[1], i),
+                    second: optional_i64_at(&ov[2], i),
+                    millisecond: optional_i64_at(&ov[3], i),
+                    microsecond: optional_i64_at(&ov[4], i),
+                    nanosecond: optional_i64_at(&ov[5], i),
                 };
                 let nanos = project_localtime(truncated, &overrides)?;
                 let new_offset = match tz {
@@ -11302,7 +11284,7 @@ impl ScalarUDFImpl for CypherDateTimeProject {
             project_datetime, project_localtime, time_offset_zone,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -11393,30 +11375,26 @@ impl ScalarUDFImpl for CypherDateTimeProject {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<DateTimeRow> = (0..rows)
             .map(|i| {
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let (base_nanos, src_offset, src_zone) = base_time(i)?;
                 let date = project_date(base_date(i)?, &date_overrides)?;
@@ -11491,7 +11469,7 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
             truncate_time_nanos,
         };
         use datafusion::arrow::array::{
-            Array, ArrayRef, Int64Array, StringArray, StructArray, Time64NanosecondArray,
+            Array, ArrayRef, StringArray, StructArray, Time64NanosecondArray,
         };
         use datafusion::arrow::compute::cast;
         use datafusion::arrow::datatypes::TimeUnit;
@@ -11580,10 +11558,6 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let parts: Vec<DateTimeRow> = (0..rows)
             .map(|i| {
@@ -11599,22 +11573,22 @@ impl ScalarUDFImpl for CypherDateTimeTruncate {
                     None => (base_date(i)?, truncate_time_nanos(bt_nanos, u.value(i))?),
                 };
                 let date_overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 let time_overrides = LocalTimeOverrides {
-                    hour: field(8, i),
-                    minute: field(9, i),
-                    second: field(10, i),
-                    millisecond: field(11, i),
-                    microsecond: field(12, i),
-                    nanosecond: field(13, i),
+                    hour: optional_i64_at(&ov[8], i),
+                    minute: optional_i64_at(&ov[9], i),
+                    second: optional_i64_at(&ov[10], i),
+                    millisecond: optional_i64_at(&ov[11], i),
+                    microsecond: optional_i64_at(&ov[12], i),
+                    nanosecond: optional_i64_at(&ov[13], i),
                 };
                 let date = project_date(date0, &date_overrides)?;
                 let nanos = project_localtime(nanos0, &time_overrides)?;
@@ -11891,7 +11865,7 @@ impl ScalarUDFImpl for CypherDateTruncate {
         use crate::temporal::{
             DateOverrides, parse_date_or_datetime_prefix, project_date, truncate_date,
         };
-        use datafusion::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+        use datafusion::arrow::array::{Array, ArrayRef, StringArray, StructArray};
         use datafusion::arrow::compute::cast;
         use datafusion::error::DataFusionError;
 
@@ -11942,10 +11916,6 @@ impl ScalarUDFImpl for CypherDateTruncate {
                 _ => None,
             }
         };
-        let field = |idx: usize, i: usize| -> Option<i64> {
-            let a = ov[idx].as_any().downcast_ref::<Int64Array>()?;
-            (!a.is_null(i)).then(|| a.value(i))
-        };
 
         let out: Vec<Option<i64>> = (0..rows)
             .map(|i| {
@@ -11955,14 +11925,14 @@ impl ScalarUDFImpl for CypherDateTruncate {
                 }
                 let truncated = truncate_date(base_date(i)?, u.value(i))?;
                 let overrides = DateOverrides {
-                    year: field(0, i),
-                    month: field(1, i),
-                    day: field(2, i),
-                    week: field(3, i),
-                    day_of_week: field(4, i),
-                    ordinal_day: field(5, i),
-                    quarter: field(6, i),
-                    day_of_quarter: field(7, i),
+                    year: optional_i64_at(&ov[0], i),
+                    month: optional_i64_at(&ov[1], i),
+                    day: optional_i64_at(&ov[2], i),
+                    week: optional_i64_at(&ov[3], i),
+                    day_of_week: optional_i64_at(&ov[4], i),
+                    ordinal_day: optional_i64_at(&ov[5], i),
+                    quarter: optional_i64_at(&ov[6], i),
+                    day_of_quarter: optional_i64_at(&ov[7], i),
                 };
                 project_date(truncated, &overrides)
             })
@@ -12510,6 +12480,15 @@ mod tests {
         let wrong_children: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![Some(1)]))];
         let wrong_date = StructArray::new(wrong_fields, wrong_children, None);
         assert_eq!(date_struct_value(&wrong_date, 0), None);
+
+        let overrides: ArrayRef = Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+            Some(8),
+            None,
+        ]));
+        assert_eq!(optional_i64_at(&overrides, 0), Some(8));
+        assert_eq!(optional_i64_at(&overrides, 1), None);
+        let wrong_override: ArrayRef = Arc::new(Int32Array::from(vec![Some(8)]));
+        assert_eq!(optional_i64_at(&wrong_override, 0), None);
     }
 
     #[test]

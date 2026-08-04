@@ -9150,6 +9150,87 @@ mod tests {
     }
 
     #[test]
+    fn vector_descriptor_preparation_requires_and_routes_declared_properties() {
+        let graph = GraphForge::new(None).unwrap();
+        for by in [ClusterAlgorithm::Hdbscan, ClusterAlgorithm::KMeans] {
+            let options = ClusterOptions {
+                by,
+                vector_property: None,
+                via: Some("IGNORED".into()),
+                directed: true,
+                write_property: None,
+            };
+            let error = graph
+                .prepare_cluster_invocation("Person", &options)
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(
+                error.to_string(),
+                format!("validation error: cluster.{by} requires vector_property")
+            );
+        }
+
+        for by in [
+            SimilarAlgorithm::Knn,
+            SimilarAlgorithm::FilteredKnn,
+            SimilarAlgorithm::Cosine,
+        ] {
+            let options = SimilarOptions {
+                by,
+                k: 3,
+                vector_property: None,
+                via: Some("KNOWS".into()),
+            };
+            let error = graph
+                .prepare_similar_invocation("Person", &options)
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+            assert_eq!(
+                error.to_string(),
+                format!("validation error: similar.{by} requires vector_property")
+            );
+        }
+
+        let cluster = graph
+            .prepare_cluster_invocation(
+                "Person",
+                &ClusterOptions {
+                    by: ClusterAlgorithm::KMeans,
+                    vector_property: Some("embedding".into()),
+                    via: None,
+                    directed: true,
+                    write_property: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            cluster.parameters()["vector_property"],
+            InvocationParameter::Utf8("embedding".into())
+        );
+        assert!(!cluster.parameters().contains_key("via"));
+
+        let similar = graph
+            .prepare_similar_invocation(
+                "Person",
+                &SimilarOptions {
+                    by: SimilarAlgorithm::FilteredKnn,
+                    k: 3,
+                    vector_property: Some("embedding".into()),
+                    via: Some("KNOWS".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            similar.parameters()["vector_property"],
+            InvocationParameter::Utf8("embedding".into())
+        );
+        assert_eq!(
+            similar.parameters()["via"],
+            InvocationParameter::Utf8("KNOWS".into())
+        );
+    }
+
+    #[test]
     fn graphsage_executes_through_typed_api_with_scalar_and_list_features() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();

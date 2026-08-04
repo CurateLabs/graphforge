@@ -1959,6 +1959,53 @@ mod tests {
             assert!(!result.stdout.is_empty());
         }
 
+        for scope in [
+            "graph",
+            "ontology",
+            "configuration",
+            "capabilities",
+            "provenance",
+            "knowledge",
+            "epistemic",
+            "all",
+        ] {
+            let result = invoke(&[
+                "checkpoint",
+                "diff",
+                "--from",
+                "baseline",
+                "--to-current",
+                "--scope",
+                scope,
+                "--detail",
+                "records",
+            ]);
+            assert_eq!(
+                result.exit_code,
+                0,
+                "scope={scope}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+
+        let revert_id = Uuid::now_v7().to_string();
+        let revert = invoke(&[
+            "checkpoint",
+            "revert",
+            "baseline",
+            "--reason",
+            "coverage contract",
+            "--idempotency-key",
+            &revert_id,
+            "--yes",
+        ]);
+        assert_eq!(
+            revert.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&revert.stderr)
+        );
+
         let envelope = project.path().join("baseline.gfportable");
         let envelope_text = envelope.to_string_lossy().into_owned();
         let export = invoke(&[

@@ -4460,6 +4460,74 @@ mod tests {
     }
 
     #[test]
+    fn with_where_scalar_alias_uses_projected_scope_then_drops_inputs() {
+        let (_dir, catalog, _rc) = make_catalog_and_lowerer();
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let mut builder = GraphPlan::builder("openCypher");
+        let value = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
+        let predicate = builder.push_expr(IrExpr::VarRef(VarId(9)));
+        let plan = builder
+            .push_op(GraphOp::With {
+                items: vec![ProjectItem {
+                    expr: value,
+                    alias: Some("keep".into()),
+                    out_var: Some(VarId(9)),
+                }],
+                distinct: false,
+                where_predicate: Some(predicate),
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(final_projection) = lowered else {
+            panic!("expected final WITH projection");
+        };
+        assert_eq!(final_projection.schema.fields().len(), 1);
+        assert_eq!(final_projection.schema.field(0).name(), "keep");
+        assert!(matches!(
+            final_projection.input.as_ref(),
+            DfLogicalPlan::Filter(_)
+        ));
+    }
+
+    #[test]
+    fn with_where_forwards_complete_node_shape_through_new_scope() {
+        let (_dir, catalog, _rc) = make_catalog_and_lowerer();
+        let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
+        let mut builder = GraphPlan::builder("openCypher");
+        let node = builder.push_expr(IrExpr::VarRef(VarId(0)));
+        let predicate = builder.push_expr(IrExpr::Literal(IrLiteral::Bool(true)));
+        let plan = builder
+            .push_op(GraphOp::NodeScan {
+                var: VarId(0),
+                ty: None,
+            })
+            .push_op(GraphOp::With {
+                items: vec![ProjectItem {
+                    expr: node,
+                    alias: Some("n".into()),
+                    out_var: Some(VarId(0)),
+                }],
+                distinct: false,
+                where_predicate: Some(predicate),
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(final_projection) = lowered else {
+            panic!("expected final WITH projection");
+        };
+        assert!(final_projection.schema.fields().len() >= 4);
+        assert!(final_projection.schema.iter().all(|(qualifier, _)| {
+            qualifier.is_some_and(|qualifier| qualifier.table() == "var_0")
+        }));
+        assert!(matches!(
+            final_projection.input.as_ref(),
+            DfLogicalPlan::Filter(_)
+        ));
+    }
+
+    #[test]
     fn aggregate_count_star() {
         let (_dir, catalog, _rc) = make_catalog_and_lowerer();
         let lowerer = GraphPlanLowerer::new(Some(&catalog), None);
@@ -5373,6 +5441,61 @@ mod tests {
         assert!(
             matches!(lp, DfLogicalPlan::Extension(_)),
             "expected Extension (GraphCreateNode), got {lp:?}"
+        );
+    }
+
+    #[test]
+    fn create_followed_by_read_emits_created_rows_for_real_pipeline() {
+        use graphforge_ir::CreateNodeSpec;
+        use graphforge_plan::GraphCreateNode;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let lowerer = GraphPlanLowerer::new_for_writes(
+            None,
+            None,
+            dir.path(),
+            graphforge_core::OntologyMode::Exploratory,
+        );
+        let mut builder = GraphPlan::builder("openCypher");
+        let returned = builder.push_expr(IrExpr::VarRef(VarId(0)));
+        let plan = builder
+            .push_op(GraphOp::Create {
+                pattern: CreatePattern {
+                    nodes: vec![CreateNodeSpec {
+                        var: VarId(0),
+                        labels: vec![],
+                        properties: None,
+                        is_reference: false,
+                    }],
+                    edges: vec![],
+                },
+            })
+            .push_op(GraphOp::Project {
+                items: vec![ProjectItem {
+                    expr: returned,
+                    alias: Some("created".into()),
+                    out_var: None,
+                }],
+                distinct: false,
+            })
+            .build();
+
+        let lowered = lowerer.lower_plan(&plan).unwrap();
+        let DfLogicalPlan::Projection(project) = lowered else {
+            panic!("expected trailing projection");
+        };
+        let DfLogicalPlan::Extension(create) = project.input.as_ref() else {
+            panic!("expected emitting CREATE input");
+        };
+        let create = create
+            .node
+            .as_any()
+            .downcast_ref::<GraphCreateNode>()
+            .expect("GraphCreateNode");
+        assert!(
+            !datafusion::logical_expr::UserDefinedLogicalNodeCore::schema(create)
+                .fields()
+                .is_empty()
         );
     }
 

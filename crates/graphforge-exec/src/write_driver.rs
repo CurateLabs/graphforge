@@ -402,6 +402,32 @@ pub(crate) struct Frontier {
     pub batches: Vec<RecordBatch>,
 }
 
+#[derive(Clone, Copy)]
+enum LabelRewrite {
+    Add,
+    Remove,
+}
+
+impl LabelRewrite {
+    const fn missing_column_error(self) -> &'static str {
+        match self {
+            Self::Add => "MERGE label target has no type_ids column",
+            Self::Remove => "REMOVE label target has no type_ids column",
+        }
+    }
+
+    fn apply(self, current: &mut Vec<u32>, labels: &[u32]) {
+        match self {
+            Self::Add => {
+                current.extend_from_slice(labels);
+                current.sort_unstable();
+                current.dedup();
+            }
+            Self::Remove => current.retain(|label| !labels.contains(label)),
+        }
+    }
+}
+
 impl Frontier {
     /// Total rows across the frontier's batches.
     pub(crate) fn num_rows(&self) -> usize {
@@ -951,60 +977,26 @@ impl Frontier {
                 "MERGE label mask does not match frontier rows".into(),
             ));
         }
-        let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
-        let index = self
-            .df_schema
-            .index_of_column_by_name(Some(&qualifier), "type_ids")
-            .ok_or_else(|| GfError::Plan("MERGE label target has no type_ids column".into()))?;
-        let mut rebuilt = Vec::with_capacity(self.batches.len());
-        let mut offset = 0usize;
-        for batch in &self.batches {
-            let current = batch
-                .column(index)
-                .as_any()
-                .downcast_ref::<ListArray>()
-                .ok_or_else(|| GfError::Execution("node type_ids are not a list".into()))?;
-            let mut rows = Vec::with_capacity(batch.num_rows());
-            for row in 0..batch.num_rows() {
-                let values = current.value(row);
-                let values = values
-                    .as_any()
-                    .downcast_ref::<UInt32Array>()
-                    .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut merged = values.values().to_vec();
-                if mask[offset + row] {
-                    merged.extend_from_slice(labels);
-                    merged.sort_unstable();
-                    merged.dedup();
-                }
-                rows.push(Some(merged.into_iter().map(Some).collect::<Vec<_>>()));
-            }
-            let nullable = ListArray::from_iter_primitive::<UInt32Type, _, _>(rows);
-            let list = ListArray::new(
-                Arc::new(Field::new("item", DataType::UInt32, false)),
-                nullable.offsets().clone(),
-                nullable.values().clone(),
-                nullable.nulls().cloned(),
-            );
-            let mut columns = batch.columns().to_vec();
-            columns[index] = Arc::new(list);
-            rebuilt.push(
-                RecordBatch::try_new(batch.schema(), columns)
-                    .map_err(|e| GfError::Execution(e.to_string()))?,
-            );
-            offset += batch.num_rows();
-        }
-        self.batches = rebuilt;
-        Ok(())
+        self.rewrite_node_labels(var, labels, mask, LabelRewrite::Add)
     }
 
     fn remove_node_labels(&mut self, var: VarId, labels: &[u32]) -> Result<(), GfError> {
         let mask = vec![true; self.num_rows()];
+        self.rewrite_node_labels(var, labels, &mask, LabelRewrite::Remove)
+    }
+
+    fn rewrite_node_labels(
+        &mut self,
+        var: VarId,
+        labels: &[u32],
+        mask: &[bool],
+        rewrite: LabelRewrite,
+    ) -> Result<(), GfError> {
         let qualifier = datafusion::common::TableReference::bare(format!("var_{}", var.0));
         let index = self
             .df_schema
             .index_of_column_by_name(Some(&qualifier), "type_ids")
-            .ok_or_else(|| GfError::Plan("REMOVE label target has no type_ids column".into()))?;
+            .ok_or_else(|| GfError::Plan(rewrite.missing_column_error().into()))?;
         let mut rebuilt = Vec::with_capacity(self.batches.len());
         let mut offset = 0usize;
         for batch in &self.batches {
@@ -1020,11 +1012,11 @@ impl Frontier {
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| GfError::Execution("node type_ids are not UInt32".into()))?;
-                let mut retained = values.values().to_vec();
+                let mut rewritten = values.values().to_vec();
                 if mask[offset + row] {
-                    retained.retain(|label| !labels.contains(label));
+                    rewrite.apply(&mut rewritten, labels);
                 }
-                rows.push(Some(retained.into_iter().map(Some).collect::<Vec<_>>()));
+                rows.push(Some(rewritten.into_iter().map(Some).collect::<Vec<_>>()));
             }
             let nullable = ListArray::from_iter_primitive::<UInt32Type, _, _>(rows);
             let list = ListArray::new(

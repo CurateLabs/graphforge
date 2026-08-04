@@ -1574,6 +1574,15 @@ mod tests {
                 policy: policy.clone(),
             })
             .unwrap();
+        assert_ne!(projection.source_generation_uuid(), Uuid::nil());
+        assert!(!projection.policy_bytes().is_empty());
+        assert_ne!(projection.policy_fingerprint(), [0; 32]);
+        assert_ne!(projection.snapshot_fingerprint(), [0; 32]);
+        assert_eq!(projection.transaction_cutoff_micros(), i64::MAX);
+        assert_eq!(projection.valid_time_micros(), None);
+        assert_eq!(projection.valid_time_fingerprint(), None);
+        assert_ne!(projection.graph_content_fingerprint(), [0; 32]);
+        assert_eq!(projection.source_record_uuids(), &[uuid7(5)]);
         assert_eq!(
             graphforge_storage::read_nodes(&projection.graph.dir)
                 .unwrap()
