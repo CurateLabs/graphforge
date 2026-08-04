@@ -8,8 +8,8 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.1", path = "../graphforge-core" }
-graphforge-storage = { version = "0.5.1", path = "../graphforge-storage" }
+graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
+graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 thiserror = { workspace = true }
 
 [lints]

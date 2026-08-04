@@ -23,10 +23,10 @@ def load_module():
 
 mod = load_module()
 sha = "a" * 40
-versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.1")
+versions = dict.fromkeys(("cargo", "python", "node", "cli", "skills"), "0.5.2")
 assert (
     mod.validate(
-        tag="v0.5.1",
+        tag="v0.5.2",
         expected_sha=sha,
         actual_sha=sha,
         versions=versions,
@@ -34,14 +34,14 @@ assert (
     == []
 )
 assert mod.validate(
-    tag="v0.5.1",
+    tag="v0.5.2",
     expected_sha=sha,
     actual_sha=sha,
-    versions={**versions, "skills": "0.5.2"},
+    versions={**versions, "skills": "0.5.3"},
 )
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
-assert "default: v0.5.1" in workflow
+assert "default: v0.5.2" in workflow
 assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
