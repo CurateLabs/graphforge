@@ -1314,6 +1314,45 @@ mod tests {
     }
 
     #[test]
+    fn bounded_file_and_skill_entry_validation_fail_before_payload_use() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("skill.md");
+        fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_bounded_file(&file, 4, "bounded").unwrap(), b"abcd");
+        assert!(matches!(
+            read_bounded_file(&file, 3, "bounded"),
+            Err(graphforge_api::GfError::Validation(message)) if message == "bounded"
+        ));
+        assert!(matches!(
+            read_bounded_file(root.path(), 100, "regular"),
+            Err(graphforge_api::GfError::Validation(message)) if message == "regular"
+        ));
+        assert!(matches!(
+            read_bounded_file(&root.path().join("absent"), 100, "missing"),
+            Err(graphforge_api::GfError::Storage(_))
+        ));
+
+        assert!(matches!(
+            load_skill_file(root.path(), &serde_json::json!({})),
+            Err(graphforge_api::GfError::Validation(message))
+                if message == "project skill file path is required"
+        ));
+        for path in ["", "../escape", "/absolute"] {
+            assert!(matches!(
+                load_skill_file(root.path(), &serde_json::json!({"path": path})),
+                Err(graphforge_api::GfError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            load_skill_file(
+                root.path(),
+                &serde_json::json!({"path": "missing/skill.md"})
+            ),
+            Err(graphforge_api::GfError::Storage(_))
+        ));
+    }
+
+    #[test]
     fn reusable_execution_normalizes_identity_and_captures_structured_errors() {
         let version = execute(["arbitrary-launcher", "--version"]);
         assert_eq!(version.exit_code, 0);

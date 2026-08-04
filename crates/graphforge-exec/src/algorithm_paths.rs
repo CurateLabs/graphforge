@@ -2809,6 +2809,108 @@ mod tests {
     }
 
     #[test]
+    fn min_cost_flow_public_options_require_exact_capacity_and_cost_contract() {
+        for by in [
+            PathAlgorithm::MinCostMaxFlow,
+            PathAlgorithm::MinCostMaxFlowEdges,
+        ] {
+            let validate = |options: PathsOptions| {
+                validate_path_options(Some(uuid(0)), Some(uuid(1)), &options)
+            };
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    weight: Some("weight".into()),
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == format!(
+                        "{by} uses capacity_property and cost_property instead of weight"
+                    )
+            ));
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some("capacity".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == format!("{by} requires a cost_property")
+            ));
+            assert!(matches!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some(" bad".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }),
+                Err(GfError::Validation(message))
+                    if message == "invalid paths capacity property \" bad\""
+            ));
+            assert!(
+                validate(PathsOptions {
+                    by,
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                })
+                .is_ok()
+            );
+        }
+
+        assert!(matches!(
+            validate_path_options(
+                Some(uuid(0)),
+                Some(uuid(1)),
+                &PathsOptions {
+                    by: PathAlgorithm::MaxFlow,
+                    capacity_property: Some("capacity".into()),
+                    cost_property: Some("cost".into()),
+                    ..PathsOptions::default()
+                }
+            ),
+            Err(GfError::Validation(message))
+                if message == "max_flow does not accept min-cost flow properties"
+        ));
+    }
+
+    #[test]
+    fn public_projection_fingerprint_is_stable_across_provider_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = PathsOptions {
+            by: PathAlgorithm::FloydWarshall,
+            ..PathsOptions::default()
+        };
+        let first_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let first = paths_projection_fingerprint(
+            &first_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            Some(uuid(0)),
+            None,
+            &options,
+        )
+        .unwrap();
+        drop(first_provider);
+        let reopened_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let reopened = paths_projection_fingerprint(
+            &reopened_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            Some(uuid(0)),
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(first, reopened);
+        assert_ne!(first, [0; 32]);
+    }
+
+    #[test]
     fn random_walk_options_normalize_defaults_and_preserve_explicit_controls() {
         assert_eq!(
             normalize_random_walk_options(None, 1, None, None).unwrap(),

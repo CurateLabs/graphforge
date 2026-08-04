@@ -460,6 +460,25 @@ mod tests {
     }
 
     #[test]
+    fn binary_signed_integer_and_declared_text_limit_contracts_are_exact() {
+        let mut writer = CanonicalWriter::new();
+        writer.i64(-7).unwrap();
+        writer.binary(&[1, 2, 3]).unwrap();
+        assert_eq!(
+            writer.finish(),
+            [
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf9, 0, 0, 0, 0, 0, 0, 0, 3, 1, 2, 3,
+            ]
+        );
+
+        let mut declared = (MAX_CANONICAL_TEXT_BYTES + 1).to_be_bytes().to_vec();
+        declared.extend_from_slice(b"unused");
+        let error = CanonicalReader::new(&declared).unwrap().text().unwrap_err();
+        assert_eq!(error.code(), "GF_CANONICAL_LIMIT");
+        assert!(matches!(error, CanonicalError::Limit { item: "text", .. }));
+    }
+
+    #[test]
     fn every_domain_and_error_code_has_a_frozen_external_spelling() {
         let domains = [
             (CanonicalDomain::Schema, "graphforge/schema"),

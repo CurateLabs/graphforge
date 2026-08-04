@@ -4214,6 +4214,39 @@ mod tests {
     }
 
     #[test]
+    fn public_projection_fingerprint_is_stable_across_provider_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = AnalyzeOptions {
+            by: AnalyzeAlgorithm::IsDag,
+            directed: true,
+            ..AnalyzeOptions::default()
+        };
+        let first_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let first = analyze_projection_fingerprint(
+            &first_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            None,
+            &options,
+        )
+        .unwrap();
+        drop(first_provider);
+        let reopened_provider =
+            crate::ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        let reopened = analyze_projection_fingerprint(
+            &reopened_provider,
+            dir.path(),
+            OntologyMode::Strict,
+            None,
+            &options,
+        )
+        .unwrap();
+        assert_eq!(first, reopened);
+        assert_ne!(first, [0; 32]);
+    }
+
+    #[test]
     fn modularity_rejects_directed_dispatch_before_storage_reads() {
         let dir = tempfile::tempdir().unwrap();
         let provider =

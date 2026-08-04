@@ -1201,7 +1201,12 @@ mod tests {
     fn generation_layout_and_metadata_limits_fail_closed_without_mutation() {
         let descriptor = descriptor("model-a", 2);
         let vectors = batch(&[1.0, 2.0]);
-        for case in ["missing-manifest", "directory-entry", "oversized-active"] {
+        for case in [
+            "missing-manifest",
+            "manifest-dimension",
+            "directory-entry",
+            "oversized-active",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let published = publish(dir.path(), &descriptor, source(1), &vectors, 20);
             let compatibility = descriptor.compatibility_id().unwrap();
@@ -1209,6 +1214,13 @@ mod tests {
             match case {
                 "missing-manifest" => {
                     std::fs::remove_file(published.publication().path.join(MANIFEST_FILE)).unwrap();
+                }
+                "manifest-dimension" => {
+                    let path = published.publication().path.join(MANIFEST_FILE);
+                    let mut manifest: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    manifest["dimension"] = serde_json::json!(3);
+                    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
                 }
                 "directory-entry" => {
                     std::fs::create_dir(published.publication().path.join("nested")).unwrap();

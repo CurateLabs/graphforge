@@ -18085,4 +18085,35 @@ mod tests {
             assert!(matches!(result, Err(GfError::Validation(_))));
         }
     }
+
+    #[test]
+    fn streaming_query_preflight_errors_are_exact_and_side_effect_free() {
+        let graph = GraphForge::new(None).unwrap();
+        let error =
+            |result: Result<graphforge_exec::SendableRecordBatchStream, GfError>| match result {
+                Ok(_) => panic!("expected streaming query to fail"),
+                Err(error) => error,
+            };
+
+        let empty = error(graph.execute_stream("   "));
+        assert_eq!(empty.code(), "GF_VALIDATION");
+        assert!(empty.to_string().contains("empty query"));
+
+        let comment = error(graph.execute_stream("// comment only"));
+        assert_eq!(comment.code(), "GF_VALIDATION");
+        assert!(comment.to_string().contains("empty query"));
+
+        let parse = error(graph.execute_stream("MATCH ("));
+        assert_eq!(parse.code(), "GF_PARSE");
+
+        let missing = error(
+            graph.execute_stream_with_params("MATCH (n) RETURN n SKIP $missing", &HashMap::new()),
+        );
+        assert_eq!(missing.code(), "GF_PLAN");
+        assert_eq!(
+            missing.to_string(),
+            "plan error: unsupported expression: operator not yet lowered (deferred to #577+): \
+             SkipParam { name: \"missing\" }"
+        );
+    }
 }

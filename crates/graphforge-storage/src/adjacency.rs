@@ -1731,6 +1731,42 @@ mod tests {
     }
 
     #[test]
+    fn inspection_distinguishes_manifest_union_absence_and_union_corruption_after_reopen() {
+        for case in ["manifest", "missing-union", "corrupt-union"] {
+            let dir = TempDir::new().unwrap();
+            write_diamond(dir.path());
+            build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+            match case {
+                "manifest" => std::fs::write(manifest_path(dir.path()), b"corrupt").unwrap(),
+                "missing-union" => {
+                    std::fs::remove_file(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out))
+                        .unwrap();
+                }
+                "corrupt-union" => {
+                    std::fs::write(
+                        csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out),
+                        b"corrupt",
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let inspection = inspect_adjacency_index(dir.path()).unwrap();
+            assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
+            assert_eq!(
+                inspection.reason,
+                Some(if case == "missing-union" {
+                    AdjacencyFreshnessReason::MissingCsr
+                } else {
+                    AdjacencyFreshnessReason::UnreadableArtifact
+                })
+            );
+            assert_eq!(inspection.artifact_fingerprint, None);
+        }
+    }
+
+    #[test]
     fn inspection_accepts_only_a_complete_delta_chain_as_current() {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());

@@ -900,6 +900,19 @@ mod tests {
         ));
         std::fs::write(
             &path,
+            b"{\"catalog_version\":1,\"default\":\"missing\",\"spaces\":[]}",
+        )
+        .unwrap();
+        assert!(matches!(
+            read_embedding_space_catalog(
+                project.path(),
+                EmbeddingSpaceCatalogLimits::default(),
+                || Ok(())
+            ),
+            Err(SearchArtifactError::CorruptManifest { .. })
+        ));
+        std::fs::write(
+            &path,
             format!(
                 "{{\"catalog_version\":1,\"default\":null,\"spaces\":[{{\"display_name\":\"duplicate\",\"compatibility_id\":\"{}\"}},{{\"display_name\":\"duplicate\",\"compatibility_id\":\"{}\"}}]}}",
                 id(1).to_hex(),

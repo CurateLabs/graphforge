@@ -844,7 +844,15 @@ mod tests {
 
     #[test]
     fn corruption_incompatible_versions_and_linkage_mismatch_fail_closed() {
-        let cases = ["duplicate", "unknown", "noncanonical", "version"];
+        let cases = [
+            "duplicate",
+            "unknown",
+            "noncanonical",
+            "version",
+            "source-fingerprint",
+            "predates",
+            "duplicate-changed-uuid",
+        ];
         for case in cases {
             let project = tempfile::tempdir().unwrap();
             let manifest = manifest(9);
@@ -871,6 +879,22 @@ mod tests {
                 "version" => {
                     let mut raw: Value = serde_json::from_slice(&canonical).unwrap();
                     raw["journal_version"] = json!(99);
+                    serde_json::to_vec(&raw).unwrap()
+                }
+                "source-fingerprint" => {
+                    let mut raw: Value = serde_json::from_slice(&canonical).unwrap();
+                    raw["current_source_fingerprint"] = json!("00".repeat(32));
+                    serde_json::to_vec(&raw).unwrap()
+                }
+                "predates" => {
+                    let mut raw: Value = serde_json::from_slice(&canonical).unwrap();
+                    raw["current_graph_generation"] = json!(9);
+                    raw["current_source_fingerprint"] = json!(source(9, 9).fingerprint().to_hex());
+                    serde_json::to_vec(&raw).unwrap()
+                }
+                "duplicate-changed-uuid" => {
+                    let mut raw: Value = serde_json::from_slice(&canonical).unwrap();
+                    raw["changed_uuids"] = json!([encode(&UUID_A), encode(&UUID_A)]);
                     serde_json::to_vec(&raw).unwrap()
                 }
                 _ => unreachable!(),
