@@ -158,7 +158,7 @@ mod external_tests;
         external_test_path = fixture_root / "crates/example/src/external_tests.rs"
         external_test_path.write_text("pub fn helper() {}\n", encoding="utf-8")
         fixture_records = {
-            "crates/example/src/lib.rs": {line: 1 for line in range(1, 18)},
+            "crates/example/src/lib.rs": dict.fromkeys(range(1, 18), 1),
             "crates/example/src/external_tests.rs": {1: 1},
             "crates/example/tests/integration.rs": {1: 1},
             "crates/example/benches/throughput.rs": {1: 1},
