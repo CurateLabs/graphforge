@@ -92,7 +92,7 @@ coverage:  ## Rust + Python + Node coverage with per-surface thresholds
 	@echo "━━━ Node JS surface coverage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage-node
 	@echo "━━━ Coverage complete ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "Rust:   build/coverage-rust/ (ledger + merged lcov + core HTML + summary)"
+	@echo "Rust:   build/coverage-rust/ (ledger + merged lcov + summary; set COVERAGE_RUST_HTML=1 for core HTML)"
 	@echo "Python: coverage.xml + htmlcov/"
 	@echo "Node:   crates/graphforge-bindings-node/coverage/"
 	@echo "✅ All surfaces collected; thresholds enforced per surface"
@@ -215,6 +215,7 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 pre-push:  ## Run local policy checks plus multi-surface coverage thresholds
 	@$(MAKE) pre-push-fast
 	@uv run --no-sync python scripts/ci/test-rust-coverage-ledger.py
+	@bash scripts/ci/test-coverage-rust.sh
 	@echo "━━━ Coverage + thresholds (Rust + Python + Node) ━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) coverage
 	@echo "━━━ Public API BDD mutation sentinels ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -252,6 +253,8 @@ cargo-test:  ## Run all Rust workspace tests
 #   cargo install cargo-llvm-cov
 #   rustup component add llvm-tools-preview
 # Prefer an isolated CARGO_TARGET_DIR when other builds are running (AGENTS.md).
+# Set COVERAGE_RUST_HTML=1 to write the optional core HTML report. Set
+# COVERAGE_RUST_RESUME=1 only to reuse same-SHA phase stamps and valid outputs.
 coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
 	@COVERAGE_FAIL_UNDER_RUST=$(COVERAGE_FAIL_UNDER_RUST) \
 		COVERAGE_FAIL_UNDER_RUST_CRATE=$(COVERAGE_FAIL_UNDER_RUST_CRATE) \
