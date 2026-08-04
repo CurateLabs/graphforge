@@ -84,9 +84,7 @@ def test_check_aligned_rejects_stale_path_pin(
         lambda: [(path, dependency, stale)],
     )
     errors = set_release_version.check_aligned()
-    assert any(dependency in error and stale in error and root in error for error in errors), (
-        errors
-    )
+    assert any(dependency in error and stale in error and root in error for error in errors), errors
 
 
 def test_apply_version_rewrites_path_pins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
