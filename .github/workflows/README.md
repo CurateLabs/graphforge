@@ -2,8 +2,17 @@
 
 GraphForge uses one stable required `CI Gate`. A deterministic classifier runs
 only the policy, language, and binding jobs relevant to the pull request.
-Release certification is manual and SHA-bound; `publish.yaml` consumes its
-retained candidate only after a GitHub Release is published.
+
+**Speed is a first-class value alongside honesty.** Surfaces shed work that is
+not required for their objective. PR CI does **not** run full `llvm-cov`.
+Frequent publishing uses the **publish-track** (Binding RC → tag →
+`publish.yaml` on retained bytes). M1 load, checkpoint, and m20/m21 remain
+**human-close / milestone** evidence and are not publish-track blockers.
+Wall-clock targets and the dual-track table live in
+[`docs/engineering/TESTING.md`](../../docs/engineering/TESTING.md).
+
+`publish.yaml` consumes a retained Binding RC candidate (no rebuild-on-write)
+after a GitHub Release / release identity exists for that SHA.
 
 Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. Native PR
 jobs use Blacksmith sticky disks for job-isolated Cargo `target/` directories,
@@ -12,6 +21,9 @@ while registry and pnpm dependencies use the colocated cache through upstream
 sticky disks; inactive disks expire under Blacksmith's retention policy.
 The M1 host-native release load matrix also mounts a sticky `target/` so maturin, Cargo,
 and napi share one build volume instead of a second root-disk tree.
+Binding RC is expected to use the same Blacksmith-first sticky + colocated-cache
+model (see storage policy tests); put `target/` on sticky disks, not in
+`actions/cache` blobs.
 
 ## Pull-request contract
 
@@ -152,6 +164,13 @@ candidate manifest for 30 days. Credential preflight verifies the npm/crates.io
 secret projections without publishing. The release-event workflow consumes the
 retained candidate; ordinary PRs do not repeat that certification.
 
+**publish-track** (registry-honest publish, scheduled or on-demand): successful
+same-SHA Binding RC → tag / release identity → `publish.yaml` writes retained
+bytes only. Skip re-RC when a complete unexpired candidate for the current
+`main` tip already exists. Target wall-clock: Binding RC ≤20m p50 warm /
+≤35m cold; publish-track ≤35m p50 / ≤50m cold (see TESTING.md). M1,
+checkpoint, and m20/m21 are **not** required on this path.
+
 ### `clean-env-verify.yml`
 
 Maintainer `workflow_dispatch` after section 6 publication. Installs from **public**
@@ -166,6 +185,9 @@ Repository Policy — they never claim clean-env success against missing package
 See [`docs/development/clean-environment-verification.md`](../../docs/development/clean-environment-verification.md).
 
 ## Local equivalents
+
+Default maintainer loop is `make pre-push-fast` (~30s). Run `make coverage-rust`
+when claiming coverage floors; PR CI does not enforce full llvm-cov.
 
 ```bash
 make pre-push-fast

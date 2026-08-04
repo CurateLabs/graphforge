@@ -11,14 +11,27 @@ This document describes the executable order in
 `.github/workflows/publish.yaml`. It does not authorize a tag, GitHub Release,
 or registry write.
 
+## Tracks
+
+| Track | Path | Required before registry write | Deferred |
+| --- | --- | --- | --- |
+| **publish-track** | Binding RC → tag / release identity → `publish.yaml` | Same-SHA retained candidate + offline rehearsal; no rebuild-on-write | M1 load, checkpoint, m20/m21, full clean-env |
+| **Human release close** | publish-track **plus** milestone evidence | Whatever the active runbook requires (may include M1 / surface gates) | — |
+
+M1, checkpoint recovery, and m20/m21 assemble human-close / milestone confidence.
+They are **not** registry-honesty inputs for `publish.yaml` and must not block
+every publish-track run. See [`../engineering/TESTING.md`](../engineering/TESTING.md)
+dual-track table and wall-clock targets.
+
 ## Candidate preconditions
 
-Before a maintainer authorizes publication:
+Before a maintainer authorizes publication (publish-track or human close):
 
 1. The intended tag resolves to the current reviewed `main` commit and the root
    version is aligned across Cargo, PyPI, Node/native npm, CLI, and agent skills.
 2. A successful same-SHA Binding Release Candidate run retains five 30-day
    artifacts: `manifest`, `python`, `npm`, `crates`, and `evidence`.
+   Skip re-RC when a complete unexpired candidate for that SHA already exists.
 3. The v2 manifest validates the complete file inventory and dependency graph.
    A matching checksum alone is not sufficient.
 4. `evidence/offline-rehearsal.json` proves the exact partitions passed clean
@@ -27,9 +40,9 @@ Before a maintainer authorizes publication:
 5. PyPI and crates.io trusted publishing are configured for
    `CurateLabs/graphforge` and `publish.yaml`; the npm token has scoped
    public-package write access and Bypass 2FA.
-6. The maintainer explicitly decides to create the immutable v0.5.1 tag and
-   GitHub Release. Implementation CI and ordinary issue close do not run a
-   release-certification cascade.
+6. The maintainer (or publish-track automation) creates the immutable tag and
+   GitHub Release identity that `publish.yaml` consumes. Implementation CI and
+   ordinary issue close do not run Binding RC or the human-close cascade.
 
 ## Planner-driven execution
 
