@@ -94,6 +94,23 @@ npm, and crates.io surfaces, records four non-overlapping artifact groups, and
 reopens every archive with `graphforge-release-candidate-v2` completeness
 validation. A checksum-valid archive with missing entrypoints, types, native
 modules, dependency metadata, or legal files is rejected.
+Linux Binding RC build cells mount a shared release-profile `target/` sticky
+disk keyed by repository, RC Linux target family, Rust 1.96.0, and `Cargo.lock`;
+the Python Ubuntu and Linux Node cells share it because their Cargo artifacts
+are target-qualified. The release-assembly cell has its own equivalent sticky
+disk. Registry and git dependencies use colocated `actions/cache@v6` on every
+RC OS; no cache action transfers `target/`. macOS and Windows use larger
+Blacksmith runners (12-vCPU macOS, 8-vCPU Windows) rather than sticky disks.
+
+RC is intentionally slimmer than the PR suite: PR CI owns broad Linux binding
+acceptance, while RC runs only clean-install smoke plus publish-critical native
+parity/error contracts on every retained platform, then verifies the exact
+retained partitions offline. This keeps multi-OS native evidence, offline
+rehearsal, and same-SHA fail-closed packing intact. During the first three
+comparable dispatches after this change, record the Actions duration in the PR
+ledger: target p50 is ≤20 minutes warm and ≤35 minutes cold. Treat warm p50
+above 25 minutes as a failed speed acceptance criterion and open a bounded
+follow-up before declaring the change complete.
 After the maturin wheel build, the workflow verifies that any inherited Rust
 compiler wrapper is still executable before Python contracts may launch Cargo;
 an unavailable wrapper is cleared without printing the job environment or PATH.

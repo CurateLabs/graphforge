@@ -43,13 +43,21 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 7,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
 EXPECTED_STICKY_KEYS = Counter(
     {
         "${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1": 5,
+        (
+            "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+        ): 2,
+        (
+            "${{ github.repository }}-release_candidate-rust-1.96.0-"
+            "${{ hashFiles('Cargo.lock') }}-release-target-v1"
+        ): 1,
         (
             "${{ github.repository }}-daily-fuzz-"
             "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
