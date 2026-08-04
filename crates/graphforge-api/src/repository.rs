@@ -2558,6 +2558,135 @@ mod tests {
         (manifest, files)
     }
 
+    fn staged_repository_snapshot(content_sha256: &str) -> graphforge_storage::StagedParticipant {
+        graphforge_storage::StagedParticipant {
+            capability_id: graphforge_storage::WORKSPACE_CAPABILITY_ID.into(),
+            capability_version: graphforge_storage::WORKSPACE_CAPABILITY_VERSION,
+            record_family_id: graphforge_storage::WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY.into(),
+            record_version: graphforge_storage::WORKSPACE_REPOSITORY_SNAPSHOT_VERSION,
+            relative_path: "workspace/repository_snapshot.json".into(),
+            encoding: "json".into(),
+            byte_length: 1,
+            row_count: 1,
+            schema_fingerprint: encode_hex(&Sha256::digest("workspace/repository_snapshot@1")),
+            content_sha256: content_sha256.into(),
+        }
+    }
+
+    #[test]
+    fn repository_snapshot_inventory_rejects_cardinality_and_metadata_drift() {
+        assert_eq!(
+            validate_repository_snapshot_inventory(&[], "content")
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        let valid = staged_repository_snapshot("content");
+        assert_eq!(
+            validate_repository_snapshot_inventory(&[valid.clone(), valid.clone()], "content")
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+        for malformed in [
+            graphforge_storage::StagedParticipant {
+                capability_version: u32::MAX,
+                ..valid.clone()
+            },
+            graphforge_storage::StagedParticipant {
+                encoding: "arrow".into(),
+                ..valid.clone()
+            },
+            graphforge_storage::StagedParticipant {
+                content_sha256: "wrong".into(),
+                ..valid
+            },
+        ] {
+            assert_eq!(
+                validate_repository_snapshot_inventory(&[malformed], "content")
+                    .unwrap_err()
+                    .code(),
+                "GF_VALIDATION"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_discovery_and_source_digest_conversion_preserve_inputs() {
+        let current = std::env::current_dir().unwrap();
+        let relative = tempfile::tempdir_in(&current).unwrap();
+        let name = relative.path().file_name().unwrap();
+        let context = RepositoryContext::discover(name).unwrap();
+        assert!(context.git);
+        assert!(relative.path().starts_with(&context.root));
+        let converted =
+            RepositorySourceDigest::from(graphforge_storage::WorkspaceRepositorySourceDigest {
+                source_id: "catalog".into(),
+                sha256: "a".repeat(64),
+            });
+        assert_eq!(converted.source_id, "catalog");
+        assert_eq!(converted.sha256, "a".repeat(64));
+    }
+
+    #[test]
+    fn skill_recovery_removes_orphan_staging_without_a_transaction_marker() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let context = RepositoryContext {
+            config_path: root.join("graphforge.yaml"),
+            state_path: root.join(".graphforge/state"),
+            root: root.clone(),
+            git: false,
+        };
+        for relative in [SKILLS_STAGE, SKILLS_BACKUP] {
+            let path = root.join(relative);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("orphan"), b"partial").unwrap();
+        }
+        context.recover_skill_transaction().unwrap();
+        assert!(!root.join(SKILLS_STAGE).exists());
+        assert!(!root.join(SKILLS_BACKUP).exists());
+    }
+
+    #[test]
+    fn skill_rollback_removes_a_target_that_was_absent_before_transaction() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let context = RepositoryContext {
+            config_path: root.join("graphforge.yaml"),
+            state_path: root.join(".graphforge/state"),
+            root: root.clone(),
+            git: false,
+        };
+        let name = MANAGED_SKILL_NAMES[0];
+        fs::create_dir_all(root.join(SKILLS_ROOT).join(name)).unwrap();
+        fs::create_dir_all(root.join(SKILLS_BACKUP)).unwrap();
+        fs::write(
+            root.join(SKILLS_BACKUP).join(format!(".missing-{name}")),
+            b"",
+        )
+        .unwrap();
+        fs::write(root.join(SKILLS_TRANSACTION), b"graphforge-skills/1\n").unwrap();
+        context.recover_skill_transaction().unwrap();
+        assert!(!root.join(SKILLS_ROOT).join(name).exists());
+        assert!(!root.join(SKILLS_TRANSACTION).exists());
+    }
+
+    #[test]
+    fn desired_snapshot_rejects_a_declared_missing_definition_directory() {
+        let dir = tempdir().unwrap();
+        let context = RepositoryContext::discover(dir.path()).unwrap();
+        context.init_without_skills().unwrap();
+        fs::remove_dir_all(dir.path().join(".graphforge/ontology")).unwrap();
+        let error = context.desired_repository_snapshot().unwrap_err();
+        assert_eq!(error.code(), "GF_VALIDATION");
+        assert!(
+            error
+                .to_string()
+                .contains("declared definition directory is missing")
+        );
+    }
+
     #[test]
     fn definition_documents_reject_every_malformed_contract_shape() {
         assert_validation_message(

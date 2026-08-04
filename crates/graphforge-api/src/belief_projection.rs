@@ -1393,7 +1393,7 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
-    use arrow::array::{FixedSizeBinaryBuilder, ListBuilder, StringBuilder};
+    use arrow::array::{FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, StringBuilder};
     use arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
@@ -1413,6 +1413,16 @@ mod tests {
 
     #[test]
     fn attachment_and_projection_helper_errors_are_exact_and_closed() {
+        let duplicate_policy = BeliefProjectionPolicyV1 {
+            included_statuses: vec![AssertionStatus::Supported, AssertionStatus::Supported],
+            statusless: StatuslessPolicyV1::Include,
+            supersession_branches: SupersessionBranchPolicyV1::Reject,
+            hypotheses: HypothesisSelectionPolicyV1::IncludeAllCurrentMembers,
+        };
+        assert_eq!(
+            duplicate_policy.canonical_bytes().unwrap_err().code(),
+            "GF_VALIDATION"
+        );
         let descriptor = InvocationDescriptor::new(
             graphforge_core::algorithms::Algorithm::Rank(
                 graphforge_core::algorithms::RankAlgorithm::Degree,
@@ -1497,6 +1507,116 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "GF_SCHEMA_MISMATCH"
+        );
+
+        let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert_eq!(
+            exact_fingerprint(
+                &empty,
+                &FixedSizeBinaryArray::try_from_iter([vec![0; 32]].into_iter()).unwrap(),
+            )
+            .unwrap_err()
+            .code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        for result in [
+            strings(&empty, "missing").map(|_| ()),
+            fixed(&empty, "missing").map(|_| ()),
+            lists(&empty, "missing").map(|_| ()),
+        ] {
+            assert_eq!(result.unwrap_err().code(), "GF_SCHEMA_MISMATCH");
+        }
+        let null_uuid =
+            FixedSizeBinaryArray::try_from_sparse_iter_with_size([None::<Vec<u8>>].into_iter(), 16)
+                .unwrap();
+        assert_eq!(
+            uuid_at(&null_uuid, 0, "assertion_uuid").unwrap_err().code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+        let fingerprints =
+            FixedSizeBinaryArray::try_from_iter([vec![1; 32], vec![2; 32]].into_iter()).unwrap();
+        let fingerprint_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "result_fingerprint",
+                DataType::FixedSizeBinary(32),
+                false,
+            )])),
+            vec![Arc::new(fingerprints.clone())],
+        )
+        .unwrap();
+        assert_eq!(
+            exact_fingerprint(&fingerprint_batch, &fingerprints)
+                .unwrap_err()
+                .code(),
+            "GF_SCHEMA_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn attachment_replay_requires_exact_resolved_content() {
+        let graph = GraphForge::new(None).unwrap();
+        let policy = BeliefProjectionPolicyV1 {
+            included_statuses: vec![AssertionStatus::Supported],
+            statusless: StatuslessPolicyV1::Include,
+            supersession_branches: SupersessionBranchPolicyV1::Reject,
+            hypotheses: HypothesisSelectionPolicyV1::IncludeAllCurrentMembers,
+        };
+        let (policy_bytes, policy_fingerprint) = policy_fingerprint(&policy).unwrap();
+        let descriptor = InvocationDescriptor::new(
+            graphforge_core::algorithms::Algorithm::Rank(
+                graphforge_core::algorithms::RankAlgorithm::Degree,
+            ),
+            [0; 32],
+            BTreeMap::from([
+                ("directed".into(), crate::InvocationParameter::Bool(false)),
+                (
+                    "label".into(),
+                    crate::InvocationParameter::Utf8("Person".into()),
+                ),
+                ("via".into(), crate::InvocationParameter::Utf8("*".into())),
+            ]),
+        )
+        .unwrap();
+        let projection = ResolvedBeliefProjection {
+            graph: Box::new(graph),
+            source_generation_uuid: uuid7(20),
+            transaction_cutoff_micros: 10,
+            valid_time_micros: None,
+            policy_bytes: policy_bytes.clone(),
+            policy_fingerprint,
+            snapshot_fingerprint: [1; 32],
+            valid_time_fingerprint: None,
+            graph_content_fingerprint: [2; 32],
+            source_record_uuids: vec![uuid7(21)],
+        };
+        let request = AttachResolvedRunRequest {
+            context: context(22),
+            attachment_uuid: uuid7(23),
+            run_uuid: uuid7(24),
+            descriptor,
+        };
+        let row = BeliefProjectionAttachment::new(
+            request.attachment_uuid,
+            uuid7(25),
+            projection.source_generation_uuid,
+            projection.transaction_cutoff_micros,
+            projection.valid_time_micros,
+            BELIEF_PROJECTION_POLICY_VERSION,
+            policy_bytes,
+            projection.snapshot_fingerprint,
+            projection.valid_time_fingerprint,
+            projection.graph_content_fingerprint,
+            *request.descriptor.fingerprint(),
+            projection.source_record_uuids.clone(),
+            uuid7(26),
+            11,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_existing_attachment(&row, &projection, &request)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
         );
     }
 

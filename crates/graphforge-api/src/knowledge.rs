@@ -4560,6 +4560,146 @@ mod tests {
     }
 
     #[test]
+    fn wave8_public_knowledge_bundle_and_reference_errors_are_exact() {
+        let graph = GraphForge::new(None).unwrap();
+        graph.set_clock_for_test(|| Ok(30));
+        enable(&graph, CapabilityId::Provenance, 150);
+        enable(&graph, CapabilityId::Knowledge, 151);
+        enable(&graph, CapabilityId::Epistemic, 152);
+        let node = graph.add_node("BoundarySubject", &HashMap::new()).unwrap();
+        let assertion_uuid = uuid7(153);
+        let request = CreateAssertionWithStatusRequest {
+            assertion: CreateAssertionRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(uuid7(154)),
+                    actor_uuid: None,
+                },
+                assertion_uuid,
+                claim: "bundle boundary".into(),
+                graph_refs: vec![AssertionGraphRefInput {
+                    graph_uuid: node.uuid,
+                    graph_kind: GraphObjectKind::Node,
+                    role: AssertionGraphRole::Subject,
+                    ordinal: 0,
+                }],
+            },
+            first_status: FirstAssertionStatusInput {
+                status_event_uuid: uuid7(155),
+                status: AssertionStatus::Hypothesis,
+            },
+        };
+        graph.create_assertion_with_status(request.clone()).unwrap();
+        let mut partial_replay = request.clone();
+        partial_replay.first_status.status_event_uuid = uuid7(156);
+        assert_eq!(
+            graph
+                .create_assertion_with_status(partial_replay)
+                .unwrap_err()
+                .code(),
+            "GF_IDEMPOTENCY_CONFLICT"
+        );
+        let mut superseded = request;
+        superseded.assertion.context.operation_uuid = OperationId(uuid7(157));
+        superseded.assertion.assertion_uuid = uuid7(158);
+        superseded.first_status.status_event_uuid = uuid7(159);
+        superseded.first_status.status = AssertionStatus::Superseded;
+        assert_eq!(
+            graph
+                .create_assertion_with_status(superseded)
+                .unwrap_err()
+                .code(),
+            "GF_VALIDATION"
+        );
+
+        let provenance_uuid = graph.assertion(assertion_uuid, None).unwrap().batches[0]
+            .column_by_name("provenance_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<FixedSizeBinaryArray>()
+            .and_then(|values| Uuid::from_slice(values.value(0)).ok())
+            .unwrap();
+        let reasoning = |reasoning_uuid, assertion_uuid, provenance_uuid, operation_uuid| {
+            RecordReasoningRequest {
+                context: WriteContext {
+                    operation_uuid: OperationId(operation_uuid),
+                    actor_uuid: None,
+                },
+                reasoning_uuid,
+                assertion_uuid,
+                kind: ReasoningKind::DecisionRationale,
+                content_format: ReasoningContentFormat::TextPlain,
+                content: b"boundary".to_vec(),
+                supersedes_reasoning_uuid: None,
+                provenance_uuid,
+            }
+        };
+        assert_eq!(
+            graph
+                .record_reasoning(reasoning(
+                    uuid7(160),
+                    uuid7(161),
+                    provenance_uuid,
+                    uuid7(162)
+                ))
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_eq!(
+            graph
+                .record_reasoning(reasoning(
+                    uuid7(163),
+                    assertion_uuid,
+                    Uuid::from_u128(999),
+                    uuid7(164)
+                ))
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+
+        let replacement = uuid7(165);
+        let replacement_provenance = assertion_fixture(&graph, replacement, 166);
+        let rationale = reasoning_fixture(&graph, assertion_uuid, provenance_uuid, 167, 168);
+        let base = SupersedeAssertionRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(169)),
+                actor_uuid: None,
+            },
+            supersession_uuid: uuid7(170),
+            prior_assertion_uuid: uuid7(171),
+            replacement_assertion_uuid: replacement,
+            status_event_uuid: uuid7(172),
+            reasoning_uuid: rationale,
+            provenance_uuid,
+        };
+        assert_eq!(
+            graph.supersede_assertion(base).unwrap_err().code(),
+            "GF_NOT_FOUND"
+        );
+        let missing_provenance = SupersedeAssertionRequest {
+            context: WriteContext {
+                operation_uuid: OperationId(uuid7(173)),
+                actor_uuid: None,
+            },
+            supersession_uuid: uuid7(174),
+            prior_assertion_uuid: assertion_uuid,
+            replacement_assertion_uuid: replacement,
+            status_event_uuid: uuid7(175),
+            reasoning_uuid: rationale,
+            provenance_uuid: Uuid::from_u128(999),
+        };
+        assert_eq!(
+            graph
+                .supersede_assertion(missing_provenance)
+                .unwrap_err()
+                .code(),
+            "GF_NOT_FOUND"
+        );
+        assert_ne!(replacement_provenance, Uuid::nil());
+    }
+
+    #[test]
     fn supersession_is_atomic_branch_preserving_idempotent_and_reopenable() {
         let root = tempfile::tempdir().unwrap();
         let graph = GraphForge::new(root.path().to_str()).unwrap();

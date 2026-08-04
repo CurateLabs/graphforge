@@ -2391,6 +2391,225 @@ mod tests {
     }
 
     #[test]
+    fn wave8_composite_reference_validation_identifies_every_knowledge_link_kind() {
+        use graphforge_knowledge::{
+            Assertion, AssertionGraphRef, AssertionLedger, AssertionStatusEvent,
+            AssertionStatusLedger, AssertionSupersession, AssertionSupersessionLedger,
+            ConfidenceLedger, EvidenceLedger, EvidenceLink, EvidenceRole, EvidenceSourceKind,
+            ReasoningContentFormat, ReasoningKind, ReasoningLedger, ReasoningRecord,
+        };
+
+        let event = graphforge_provenance::ProvenanceEvent::new(
+            Uuid::from_u128(10),
+            graphforge_provenance::EventKind::CreateAssertion,
+            None,
+            1,
+        )
+        .unwrap();
+        let provenance =
+            graphforge_provenance::ProvenanceLedger::new(vec![event.clone()], vec![]).unwrap();
+        let a1 = uuid7(41);
+        let a2 = uuid7(42);
+        let missing = uuid7(99);
+        let knowledge = AssertionLedger::new(
+            vec![
+                Assertion::new(a1, "first".into(), event.provenance_uuid, 1).unwrap(),
+                Assertion::new(a2, "second".into(), event.provenance_uuid, 1).unwrap(),
+            ],
+            vec![
+                AssertionGraphRef::new(
+                    a1,
+                    Uuid::from_u128(101),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+                AssertionGraphRef::new(
+                    a2,
+                    Uuid::from_u128(102),
+                    GraphObjectKind::Node,
+                    AssertionGraphRole::Subject,
+                    0,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let reasoning_id = uuid7(43);
+        let reasoning = ReasoningLedger::new(vec![
+            ReasoningRecord::new(
+                reasoning_id,
+                a1,
+                ReasoningKind::DecisionRationale,
+                ReasoningContentFormat::TextPlain,
+                b"because".to_vec(),
+                None,
+                event.provenance_uuid,
+                1,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let confidence_id = uuid7(44);
+        let confidence =
+            ConfidenceLedger::explicit(confidence_id, a1, 0.5, event.provenance_uuid, 1).unwrap();
+        let status_id = uuid7(45);
+        let statuses = AssertionStatusLedger::new(vec![
+            AssertionStatusEvent::new(
+                status_id,
+                a1,
+                AssertionStatus::Hypothesis,
+                Some(confidence_id),
+                Some(reasoning_id),
+                event.provenance_uuid,
+                1,
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+
+        for (assertion, provenance_uuid, expected) in [
+            (missing, event.provenance_uuid, "evidence assertion"),
+            (a1, Uuid::from_u128(999), "provenance"),
+        ] {
+            let evidence = EvidenceLedger::new(vec![
+                EvidenceLink::new(
+                    uuid7(46),
+                    assertion,
+                    Uuid::from_u128(7),
+                    EvidenceSourceKind::Document,
+                    EvidenceRole::Supports,
+                    None,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: None,
+                evidence: Some(&evidence),
+                reasoning: None,
+                statuses: None,
+                supersessions: None,
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for (assertion, provenance_uuid, expected) in [
+            (missing, event.provenance_uuid, "reasoning assertion"),
+            (a1, Uuid::from_u128(999), "provenance"),
+        ] {
+            let records = ReasoningLedger::new(vec![
+                ReasoningRecord::new(
+                    uuid7(47),
+                    assertion,
+                    ReasoningKind::DecisionRationale,
+                    ReasoningContentFormat::TextPlain,
+                    b"because".to_vec(),
+                    None,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: None,
+                evidence: None,
+                reasoning: Some(&records),
+                statuses: None,
+                supersessions: None,
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        for (prior, replacement, status, rationale, provenance_uuid, expected) in [
+            (
+                missing,
+                a2,
+                status_id,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession assertion",
+            ),
+            (
+                a1,
+                missing,
+                status_id,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession assertion",
+            ),
+            (
+                a1,
+                a2,
+                missing,
+                reasoning_id,
+                event.provenance_uuid,
+                "supersession status",
+            ),
+            (
+                a1,
+                a2,
+                status_id,
+                missing,
+                event.provenance_uuid,
+                "supersession reasoning",
+            ),
+            (
+                a1,
+                a2,
+                status_id,
+                reasoning_id,
+                Uuid::from_u128(999),
+                "provenance",
+            ),
+        ] {
+            let relation = AssertionSupersessionLedger::new(vec![
+                AssertionSupersession::new(
+                    uuid7(48),
+                    prior,
+                    replacement,
+                    status,
+                    rationale,
+                    provenance_uuid,
+                    1,
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+            let error = validate_composite_references(CompositeLedgers {
+                provenance: Some(&provenance),
+                knowledge: Some(&knowledge),
+                confidence: Some(&confidence),
+                evidence: None,
+                reasoning: Some(&reasoning),
+                statuses: Some(&statuses),
+                supersessions: Some(&relation),
+                hypotheses: None,
+                valid_time: None,
+                algorithm_runs: None,
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
+
+    #[test]
     fn revert_preview_is_non_mutating_and_receipt_identifies_prior_current() {
         let directory = tempdir().unwrap();
         let path = directory.path().to_str().unwrap();

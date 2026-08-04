@@ -6563,6 +6563,25 @@ mod tests {
         (binder, catalog)
     }
 
+    fn empty_state(mode: OntologyMode) -> BinderState {
+        BinderState {
+            vars: HashMap::new(),
+            path_vars: HashMap::new(),
+            node_vars: HashMap::new(),
+            edge_vars: HashMap::new(),
+            edge_rel_names: HashMap::new(),
+            scalar_list_edges: HashSet::new(),
+            var_kinds: HashMap::new(),
+            next_var: 0,
+            builder: GraphPlan::builder("openCypher").ontology_mode(mode),
+            errors: Vec::new(),
+            warnings: Vec::new(),
+            captured_pattern_comprehensions: None,
+            existential_depth: 0,
+            standalone_call: false,
+        }
+    }
+
     fn parsed_return_expr(source: &str) -> Expr {
         let ast =
             parse(source).unwrap_or_else(|error| panic!("failed to parse {source:?}: {error}"));
@@ -9018,5 +9037,242 @@ mod tests {
             error.kind == BindErrorKind::UnknownProperty
                 && error.message == "unknown property `unknown` (strict mode has no ontology)"
         }));
+    }
+
+    #[test]
+    fn exact_zero_binder_semantic_branches_have_public_query_oracles() {
+        let cases = [
+            ("RETURN 1 + 2 AS value", true),
+            ("RETURN count(*) AS x UNION RETURN count(*) AS x", true),
+            (
+                "MATCH p=(a)-[r]->(b) WITH p, count(*) AS total RETURN p, total",
+                true,
+            ),
+            (
+                "MATCH p=(a)-[r]->(b) WITH p, count(*) + 1 AS total RETURN p, total",
+                true,
+            ),
+            (
+                "MATCH (a)-[r]->(b) WITH r, count(*) + 1 AS total RETURN r, total",
+                true,
+            ),
+            (
+                "WITH 7 AS x RETURN any(x IN [1, 2] WHERE x > 1) AS found, x",
+                true,
+            ),
+        ];
+        for (query, should_bind) in cases {
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let result = binder.bind(&parse(query).unwrap());
+            assert_eq!(
+                result.is_ok(),
+                should_bind,
+                "query={query}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_zero_concat_ast_lowers_to_string_function() {
+        let mut expression = parsed_return_expr("RETURN 'left' + 'right'");
+        let Expr::BinaryOp(binary) = &mut expression else {
+            panic!("expected binary expression")
+        };
+        binary.op = AstBinOp::Concat;
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        let id = binder.lower_expr(&expression, expression.span(), &mut state);
+        assert!(state.errors.is_empty());
+        let plan = state.builder.build();
+        assert!(matches!(
+            plan.exprs.get(id),
+            IrExpr::FunctionCall { name, args } if name == "string.concat" && args.len() == 2
+        ));
+    }
+
+    #[test]
+    fn exact_zero_union_empty_branches_are_reported_without_panicking() {
+        let parsed = parse("RETURN 1 AS x").unwrap();
+        for clauses in [
+            vec![
+                AstClause::Union(graphforge_ast::UnionClause {
+                    all: false,
+                    span: Span::new(0, 5),
+                }),
+                parsed.clauses[0].clone(),
+            ],
+            vec![
+                parsed.clauses[0].clone(),
+                AstClause::Union(graphforge_ast::UnionClause {
+                    all: false,
+                    span: Span::new(10, 15),
+                }),
+            ],
+        ] {
+            let query = AstQuery {
+                dialect: parsed.dialect,
+                clauses,
+                span: Span::new(0, 15),
+            };
+            let (binder, _) = make_binder(OntologyMode::Exploratory);
+            let errors = binder
+                .bind(&query)
+                .expect_err("empty UNION branch must fail");
+            assert!(errors.iter().any(|error| {
+                error.kind == BindErrorKind::InvalidArgument
+                    && error.message == "UNION requires a query on both sides"
+            }));
+        }
+    }
+
+    #[test]
+    fn exact_zero_direct_property_guards_cover_path_identity_and_write_targets() {
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        state.path_vars.insert(
+            "p".into(),
+            PathBinding {
+                nodes: vec![VarId(0)],
+                segments: Vec::new(),
+            },
+        );
+        let path_property = parsed_return_expr("RETURN p.name");
+        binder.lower_expr(&path_property, path_property.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error.message.contains("not valid on a path")
+        }));
+
+        state.vars.insert("r".into(), VarId(1));
+        state.var_kinds.insert(VarId(1), VarKind::Relationship);
+        let wrong_identity = parsed_return_expr("RETURN r.node_uuid");
+        binder.lower_expr(&wrong_identity, wrong_identity.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error.message.contains("valid only on a node")
+        }));
+
+        let malformed = PropertyAccess {
+            object: Box::new(Expr::Literal(Literal::Int(1, Span::new(0, 1)))),
+            key: "name".into(),
+            span: Span::new(0, 6),
+        };
+        assert!(
+            binder
+                .resolve_write_target(&malformed, &mut state)
+                .is_none()
+        );
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidDeleteTarget
+                && error
+                    .message
+                    .contains("write target must be a bound variable")
+        }));
+    }
+
+    #[test]
+    fn exact_zero_embedded_pattern_predicate_shape_is_rejected() {
+        let ast = parse("MATCH (n) WHERE (n)-->(m) RETURN n").unwrap();
+        let AstClause::Match(match_clause) = &ast.clauses[0] else {
+            panic!("expected MATCH clause")
+        };
+        let where_clause = match_clause.where_clause.as_ref().expect("inline WHERE");
+        let predicate = Expr::BinaryOp(graphforge_ast::BinaryOp {
+            op: AstBinOp::Eq,
+            left: Box::new(where_clause.predicate.clone()),
+            right: Box::new(Expr::Literal(Literal::Bool(true, where_clause.span))),
+            span: where_clause.span,
+        });
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let mut state = empty_state(OntologyMode::Exploratory);
+        state.vars.insert("n".into(), VarId(0));
+        state.node_vars.insert(VarId(0), None);
+        state.var_kinds.insert(VarId(0), VarKind::Node);
+        binder.lower_where_predicate(&predicate, predicate.span(), &mut state);
+        assert!(state.errors.iter().any(|error| {
+            error.kind == BindErrorKind::InvalidArgument
+                && error
+                    .message
+                    .contains("supported only as single-relationship")
+        }));
+    }
+
+    #[test]
+    fn exact_zero_nested_pattern_comprehension_cardinality_is_rejected() {
+        let query = "MATCH (a) RETURN [x IN nodes([(a)-->(b) | a]) | [(x)-->(c) | c] + [(x)-->(d) | d]] AS values";
+        let (binder, _) = make_binder(OntologyMode::Exploratory);
+        let errors = binder
+            .bind(&parse(query).unwrap())
+            .expect_err("one list comprehension cannot capture multiple child patterns");
+        assert!(
+            errors.iter().any(|error| {
+                error.kind == BindErrorKind::InvalidArgument
+                    && error
+                        .message
+                        .contains("exactly one nested pattern comprehension")
+            }),
+            "errors={errors:?}"
+        );
+    }
+
+    #[test]
+    fn exact_zero_strict_property_owner_matrix_resolves_declared_properties() {
+        use graphforge_ontology::{
+            EntityTypeDef, OntologyCompiler, OntologyDoc, OntologyHandle, PropertyDef,
+            PropertyValueType, RelationTypeDef, SemanticFlags,
+        };
+
+        let doc = OntologyDoc {
+            ontology_id: "property-owner-test".into(),
+            version: "1.0".into(),
+            entity_types: vec![EntityTypeDef {
+                name: "Person".into(),
+                r#abstract: false,
+                parent: None,
+            }],
+            relation_types: vec![RelationTypeDef {
+                name: "KNOWS".into(),
+                src: "Person".into(),
+                dst: "Person".into(),
+                inverse: None,
+                semantic: SemanticFlags::default(),
+            }],
+            properties: vec![
+                PropertyDef {
+                    owner: "Person".into(),
+                    name: "name".into(),
+                    value_type: PropertyValueType::Utf8,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+                PropertyDef {
+                    owner: "KNOWS".into(),
+                    name: "since".into(),
+                    value_type: PropertyValueType::Int64,
+                    nullable: true,
+                    multivalued: false,
+                    default_json: None,
+                },
+            ],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let handle = OntologyHandle::new(OntologyCompiler::compile(&doc).unwrap());
+        for query in [
+            "MATCH (n:Person) RETURN n.name",
+            "MATCH (n) RETURN n.name",
+            "MATCH ()-[r:KNOWS]->() RETURN r.since",
+            "MATCH ()-[r]->() RETURN r.since",
+        ] {
+            let binder = Binder::new(
+                Some(handle.clone()),
+                Arc::new(Mutex::new(RuntimeCatalog::new())),
+                OntologyMode::Strict,
+            );
+            binder
+                .bind(&parse(query).unwrap())
+                .unwrap_or_else(|errors| panic!("query={query}, errors={errors:?}"));
+        }
     }
 }
