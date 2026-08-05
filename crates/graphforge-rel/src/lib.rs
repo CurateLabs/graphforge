@@ -115,3 +115,23 @@ pub fn explain_logical_with_catalog(
     let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
     Ok(final_plan.display_indent_schema().to_string())
 }
+
+/// Like [`explain_logical_with_catalog`] but lowers write terminals through
+/// [`GraphPlanLowerer::new_for_writes`] so EXPLAIN can render `CREATE` / `MERGE`
+/// / `DELETE` / `SET` / `REMOVE` without executing them.
+///
+/// # Errors
+///
+/// Returns [`GfError`] if the plan cannot be lowered.
+pub fn explain_logical_for_writes(
+    plan: &GraphPlan,
+    catalog: Option<&graphforge_storage::GraphCatalog>,
+    ontology: Option<&OntologyHandle>,
+    dir: &std::path::Path,
+    mode: graphforge_core::OntologyMode,
+) -> Result<String, GfError> {
+    let lowered = GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode).lower_plan(plan)?;
+    let ctx = datafusion::prelude::SessionContext::new();
+    let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
+    Ok(final_plan.display_indent_schema().to_string())
+}

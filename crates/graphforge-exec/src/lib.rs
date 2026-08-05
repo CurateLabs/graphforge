@@ -466,6 +466,25 @@ fn plan_reads_persisted_data(plan: &GraphPlan) -> bool {
     })
 }
 
+/// True when `plan` contains a write terminal that must lower via
+/// [`GraphPlanLowerer::new_for_writes`].
+fn plan_requires_writes(plan: &GraphPlan) -> bool {
+    use graphforge_ir::GraphOp;
+    plan.ops.iter().any(|op| match op {
+        GraphOp::Create { .. }
+        | GraphOp::Merge { .. }
+        | GraphOp::Delete { .. }
+        | GraphOp::Set { .. }
+        | GraphOp::Remove { .. } => true,
+        GraphOp::Optional { child }
+        | GraphOp::Exists { child, .. }
+        | GraphOp::PatternComprehension { child, .. }
+        | GraphOp::ListElementPatternComprehension { child, .. } => plan_requires_writes(child),
+        GraphOp::Union { inputs, .. } => inputs.iter().any(plan_requires_writes),
+        _ => false,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // GraphCreateExec — physical node for CREATE
 // ---------------------------------------------------------------------------
@@ -5048,8 +5067,13 @@ impl ExecutionSession {
             .map_err(|e| GfError::Execution(e.to_string()))
     }
 
-    /// Render the physical plan for a read [`GraphPlan`] (indented, one line
-    /// per node) without executing it.
+    /// Render the physical plan for a [`GraphPlan`] (indented, one line per
+    /// node) without executing it.
+    ///
+    /// Write plans (`CREATE` / `MERGE` / `DELETE` / `SET` / `REMOVE`) lower via
+    /// [`GraphPlanLowerer::new_for_writes`] and stop after
+    /// `create_physical_plan` — never `collect` — so EXPLAIN shows the write
+    /// path without publishing mutations. Read plans reuse [`Self::plan_physical`].
     ///
     /// This is the physical-plan inspection surface: node lines carry
     /// execution detail the logical stages cannot show, such as
@@ -5058,6 +5082,31 @@ impl ExecutionSession {
     /// # Errors
     /// Returns [`GfError`] if lowering or physical planning fails.
     pub async fn explain_physical(&self, plan: &GraphPlan) -> Result<String, GfError> {
+        if plan_requires_writes(plan) {
+            if self.dir.as_os_str().is_empty() {
+                return Err(GfError::Execution(
+                    "explain of a write plan requires a write target; \
+                     build the session with new_with_target"
+                        .into(),
+                ));
+            }
+            let lowerer = GraphPlanLowerer::new_for_writes(
+                Some(&self.catalog),
+                self.ontology.as_ref(),
+                &self.dir,
+                self.mode,
+            );
+            let logical = lowerer.lower_plan(plan)?;
+            let physical = self
+                .ctx
+                .state()
+                .create_physical_plan(&logical)
+                .await
+                .map_err(|e| GfError::Plan(e.to_string()))?;
+            return Ok(datafusion::physical_plan::displayable(physical.as_ref())
+                .indent(false)
+                .to_string());
+        }
         let (physical, _) = self.plan_physical(plan, &HashMap::new()).await?;
         Ok(datafusion::physical_plan::displayable(physical.as_ref())
             .indent(false)

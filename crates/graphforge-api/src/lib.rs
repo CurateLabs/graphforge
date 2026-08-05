@@ -2517,12 +2517,36 @@ impl GraphForge {
         // lower in the dir-backed physical stage, so the dir-less logical
         // renderer errors on them. Don't fail the whole EXPLAIN — the physical
         // section still shows the plan, including the inference rule_id (#605).
-        let logical = graphforge_rel::explain_logical_with_catalog(
-            &plan,
-            Some(&catalog),
-            self.ontology.as_ref(),
-        )
-        .unwrap_or_else(|e| format!("(logical plan unavailable: {e})"));
+        // Write terminals need `new_for_writes` so CREATE/MERGE/DELETE/SET/
+        // REMOVE render instead of failing as "requires a write target".
+        let logical = {
+            let needs_writes = plan.ops.iter().any(|op| {
+                matches!(
+                    op,
+                    GraphOp::Create { .. }
+                        | GraphOp::Merge { .. }
+                        | GraphOp::Delete { .. }
+                        | GraphOp::Set { .. }
+                        | GraphOp::Remove { .. }
+                )
+            });
+            let explained = if needs_writes {
+                graphforge_rel::explain_logical_for_writes(
+                    &plan,
+                    Some(&catalog),
+                    self.ontology.as_ref(),
+                    &self.dir,
+                    self.ontology_mode,
+                )
+            } else {
+                graphforge_rel::explain_logical_with_catalog(
+                    &plan,
+                    Some(&catalog),
+                    self.ontology.as_ref(),
+                )
+            };
+            explained.unwrap_or_else(|e| format!("(logical plan unavailable: {e})"))
+        };
 
         let session = graphforge_exec::ExecutionSession::new_with_target_and_provider(
             catalog,
