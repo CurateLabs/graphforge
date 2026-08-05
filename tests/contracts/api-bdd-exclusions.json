@@ -43,18 +43,6 @@
       "scenario": "explain does not execute the query",
       "issue": 354,
       "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Graph Construction API",
-      "scenario": "bulk add_nodes with a list of records",
-      "issue": 355,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Graph Construction API",
-      "scenario": "bulk add_nodes with Arrow Table",
-      "issue": 355,
-      "languages": ["rust", "python", "node"]
     }
   ]
 }

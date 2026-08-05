@@ -797,13 +797,17 @@ def when_add_edge_bad_dst(ctx):
 @when('I bulk add nodes with label "Person" and 2 records')
 def when_bulk_add_nodes_list(ctx):
     records = [{"name": "Alice"}, {"name": "Bob"}]
-    ctx.result, ctx.error = _catch(ctx.forge.add_nodes, "Person", records)
+    ctx.result, ctx.error = _catch(
+        ctx.forge.add_nodes, "Person", records, operation_uuid=_uuid7()
+    )
 
 
 @when('I bulk add nodes with label "Person" from an Arrow Table of 5 rows')
 def when_bulk_add_nodes_arrow(ctx):
     table = pa.table({"name": ["A", "B", "C", "D", "E"]})
-    ctx.result, ctx.error = _catch(ctx.forge.add_nodes, "Person", table)
+    ctx.result, ctx.error = _catch(
+        ctx.forge.add_nodes, "Person", table, operation_uuid=_uuid7()
+    )
 
 
 @when(
