@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal fetch-wdc-hyperlink native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal fetch-wdc-hyperlink sync-wdc-mirror native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -277,8 +277,11 @@ bench-fixed-hop-livejournal:  ## Run the #1269/#1271 cached LiveJournal LIMIT ma
 	@test -n "$$GF_LIVEJOURNAL_PROJECT" || (echo "GF_LIVEJOURNAL_PROJECT is required" && exit 2)
 	cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
 
-fetch-wdc-hyperlink:  ## Fetch WDC Hyperlink Graph artifacts (#399); ARTIFACT=example|pld-2012|…
+fetch-wdc-hyperlink:  ## Fetch WDC Hyperlink Graph artifacts (#399); ARTIFACT=example|pld-2012|…; optional GF_WDC_MIRROR_BASE / GF_WDC_SOURCE
 	python3 scripts/datasets/fetch_wdc_hyperlink.py --artifact $${ARTIFACT:-example}
+
+sync-wdc-mirror:  ## Dry-run sync of verified WDC cache → R2/S3; EXECUTE=1 to upload (needs GF_WDC_MIRROR_*)
+	python3 scripts/datasets/sync_wdc_mirror.py --tier-min $${EXECUTE:+--execute}
 
 native-consumers:  ## Run audited M18/M19 consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py

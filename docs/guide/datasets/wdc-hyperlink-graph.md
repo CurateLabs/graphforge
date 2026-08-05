@@ -3,7 +3,9 @@
 > **Status:** Research / scale-validation track — not a shipped `graphforge.datasets`
 > catalog loader. Use the retrieval helper and construction APIs below. Related
 > issues: [#399](https://github.com/CurateLabs/graphforge/issues/399) (this guide +
-> retrieval), [#400](https://github.com/CurateLabs/graphforge/issues/400) (ingest),
+> retrieval), [#406](https://github.com/CurateLabs/graphforge/issues/406) (R2 mirror
+> provision), [#407](https://github.com/CurateLabs/graphforge/issues/407) (scale-runner
+> runbook), [#400](https://github.com/CurateLabs/graphforge/issues/400) (ingest),
 > [#401](https://github.com/CurateLabs/graphforge/issues/401) (first-fail ladder spike),
 > [#402](https://github.com/CurateLabs/graphforge/issues/402) (CSR/reopen costs),
 > [#403](https://github.com/CurateLabs/graphforge/issues/403) (Host T5),
@@ -181,6 +183,11 @@ Use the checked-in helper. It resumes interrupted downloads (`curl -C -`),
 verifies `Content-Length` when the server provides it, and checks published
 MD5 sums where WDC publishes them.
 
+**Not part of normal CI.** WDC PLD+/Host/Page packs are too large for GitHub
+Actions / LFS / Release assets. Fetch + ladder runs happen on dedicated scale
+runners (or maintainer machines) against a CurateLabs-controlled mirror when
+available, with optional WDC origin fallback.
+
 ### Quick start
 
 ```bash
@@ -202,6 +209,124 @@ python3 scripts/datasets/fetch_wdc_hyperlink.py --verify-urls
 ```
 
 Default cache root: `${GF_WDC_CACHE:-$HOME/.cache/graphforge/wdc-hyperlink}`.
+
+### Controlled mirror (recommended for scale runners)
+
+WDC origin hosts are public research infrastructure: they can rate-limit, require
+a Referer, or become slow for multi-GiB resumes. GraphForge/CurateLabs should
+host a **flat object-storage mirror** of the ladder artifacts we actually run,
+so first-fail spikes ([#401](https://github.com/CurateLabs/graphforge/issues/401))
+have a reliable fetch path under our control.
+
+**Provider:** prefer **Cloudflare R2** (S3-compatible API, **zero egress** to the
+internet, public custom domain or `r2.dev` for anonymous `curl`). AWS S3 is a
+fallback but egress (~$0.09/GB) dominates once Host (~9 GiB) or Page (tens–hundreds
+of GB) are pulled repeatedly. Railway Buckets match R2 on storage (~$0.015/GB-month)
+and free bucket egress, but are **private-only** (presigned URLs / proxy) — worse
+fit for simple resume downloads on arbitrary runners. Do **not** put these blobs
+in git, GitHub LFS, or Release assets.
+
+**Bucket layout:** object keys mirror the local cache relpaths (no WDC hostname
+prefix):
+
+```text
+s3://graphforge-wdc/wdc-hyperlink/
+  example/example_index
+  example/example_arcs
+  2012-08/pld-index.gz
+  2012-08/pld-arc.gz
+  2014-03/webgraph/…
+  page-2014/index.list.txt
+  …
+```
+
+Public base URL example: `https://wdc.<your-domain>/wdc-hyperlink` → set as
+`GF_WDC_MIRROR_BASE`.
+
+**Checksum policy:** preserve WDC `Content-Length` and published MD5 values from
+the helper catalog. Maintainers must verify locally (size/md5/line-count) **before**
+upload; the sync helper refuses to plan an upload for failing files. After mirror
+fetch, runners re-verify the same catalog checks.
+
+**Access model:** public read on the mirror prefix is fine for these already-public
+research corpora (still subject to Common Crawl / WDC terms). Prefer anonymous
+HTTPS over signed URLs so scale runners need only `GF_WDC_MIRROR_BASE`. If the
+bucket must stay private, generate short-lived signed URLs and pass each as an
+override — not the default path.
+
+#### Environment variables
+
+| Variable | Role |
+|----------|------|
+| `GF_WDC_CACHE` | Local cache root (default `~/.cache/graphforge/wdc-hyperlink`) |
+| `GF_WDC_MIRROR_BASE` | HTTPS base for the controlled mirror (keys = cache relpaths) |
+| `GF_WDC_SOURCE` | `mirror-first` (default when mirror set), `mirror-only`, or `origin` |
+| `GF_WDC_MIRROR_S3_URI` | Maintainer upload dest, e.g. `s3://graphforge-wdc/wdc-hyperlink` |
+| `GF_WDC_MIRROR_ENDPOINT` | S3 API endpoint (R2: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`) |
+
+#### Scale-runner fetch (mirror-only)
+
+```bash
+export GF_WDC_CACHE="${GF_WDC_CACHE:-$HOME/.cache/graphforge/wdc-hyperlink}"
+export GF_WDC_MIRROR_BASE="https://wdc.<your-domain>/wdc-hyperlink"
+export GF_WDC_SOURCE=mirror-only
+
+# T0 smoke
+python3 scripts/datasets/fetch_wdc_hyperlink.py --artifact example
+
+# Ladder PLD packs (only when the runner is executing those tiers)
+python3 scripts/datasets/fetch_wdc_hyperlink.py \
+  --artifact pld-2014-webgraph --artifact pld-2012
+
+# HEAD-check mirror objects + expected Content-Length
+python3 scripts/datasets/fetch_wdc_hyperlink.py --verify-urls \
+  --artifact example --artifact pld-2012
+```
+
+`mirror-first` tries the mirror, then falls back to WDC origin (with Referer).
+Use `mirror-only` on controlled scale runs so a missing mirror object fails loud
+instead of silently pulling terabytes from Mannheim.
+
+#### Maintainer sync (bootstrap once, refresh as needed)
+
+Human ops — **not** automated in CI. Minimum bootstrap for T0–T3 ladder work:
+`example`, `pld-2014-webgraph`, `pld-2012` (~3.3 GiB compressed). Host/Page packs
+are later ladder steps; mirror them only when [#401](https://github.com/CurateLabs/graphforge/issues/401)
+escalation requires them (bucket provision: [#406](https://github.com/CurateLabs/graphforge/issues/406);
+runner runbook: [#407](https://github.com/CurateLabs/graphforge/issues/407)).
+
+```bash
+# 1) Pull from WDC origin into local cache (verify size/md5)
+GF_WDC_SOURCE=origin python3 scripts/datasets/fetch_wdc_hyperlink.py --tier-min
+# (or: --artifact example --artifact pld-2014-webgraph --artifact pld-2012)
+
+# 2) Dry-run: re-verify cache, print aws/rclone commands
+python3 scripts/datasets/sync_wdc_mirror.py --tier-min
+
+# 3) Upload (requires R2 API token in AWS_* env vars)
+export GF_WDC_MIRROR_S3_URI=s3://graphforge-wdc/wdc-hyperlink
+export GF_WDC_MIRROR_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+python3 scripts/datasets/sync_wdc_mirror.py --tier-min --execute
+```
+
+Approximate compressed footprint / storage (R2 ~$0.015/GB-month; egress $0):
+
+| Pack | Compressed | Notes |
+|------|-----------:|-------|
+| T0 example | ~2.5 KB | Always mirror |
+| 2014 PLD WebGraph | ~321 MB | T3 |
+| 2012 PLD Index/Arc | ~3.0 GiB | T4 (also used for T1/T2 capped samples) |
+| 2014 Host | ~660 MB | T5a — mirror when ladder reaches it |
+| 2012 Host | ~9.4 GiB | T5b |
+| Page shards | tens–hundreds of GB | T6 — do not bootstrap “just in case” |
+
+#### Cost / bandwidth notes
+
+- **R2 / Railway bucket egress:** $0 for object reads. Storage for T0–T4 mirror
+  ≈ 3.3 GiB → on the order of **$0.05/month**.
+- **AWS S3 Standard egress:** ~$0.09/GB → one full 2012 Host pull ≈ **$0.85**;
+  repeated Page pulls dominate — avoid for runner downloads.
+- **Normal CI:** must not download WDC packs. Keep this track on dedicated runners.
 
 ### Recommended cache layout
 
