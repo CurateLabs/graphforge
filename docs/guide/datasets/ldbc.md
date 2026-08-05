@@ -7,25 +7,18 @@
 > Convenience catalog loaders (`graphforge.datasets`) remain a planned extension
 > ([Datasets overview](overview.md)); this page is the workload **contract**,
 > not a shipped loader.
+>
+> Shared evaluation policy (spec vs harness boundary, completeness vs first-fail,
+> evidence schema, pinned identity):
+> [Scale Evaluation](../../reference/scale-evaluation.md). Size labeling:
+> [GSI](../../reference/graph-scale-index.md). Disk-limited framing:
+> [Scale Limits](../../reference/scale-limits.md).
 
 The [Graph Data Council (GDC)](https://ldbcouncil.org/) (formerly Linked Data
 Benchmark Council / LDBC) maintains the **LDBC benchmark suite**. Workloads
 remain branded “LDBC benchmarks” after the 2025 rename. This document inventories
 the **full official suite** as published on [ldbcouncil.org/benchmarks](https://ldbcouncil.org/benchmarks/)
 and defines how GraphForge treats it at **spec level**.
-
-## Spec vs harness
-
-| Concern | GraphForge (this repo) | External scale harness |
-|---|---|---|
-| Which benchmarks constitute the suite | This page | Follows this inventory |
-| Dataset / SF / algorithm contracts | This page + links to GDC specs | Runs official generators/drivers |
-| Pass criteria / validation / auditing concepts | Spec-level summary below | Implements drivers + validation |
-| Size labeling | [GSI](../../reference/graph-scale-index.md) after load | Emits GSI on evidence |
-| Normal CI | Must **not** run full suite | Optional dedicated runners |
-
-Do **not** bulk-add LDBC Spark/Hadoop generators or JDBC/driver stacks into
-GraphForge core.
 
 ---
 
@@ -73,7 +66,7 @@ are owned by the SNB specification — do not invent alternate schemas for
 
 SF is defined by **serialized CSV size in GiB** (not GSI Size Tags). Authoritative
 SF lists live in the current SNB specification PDF — disclose the **spec version**
-used in evidence ([pinned identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)).
+used in evidence ([pinned identity](../../reference/scale-evaluation.md#pinned-generator--driver-identity)).
 
 | Run class | Typical SF set | Notes |
 |---|---|---|
@@ -105,8 +98,8 @@ used in evidence ([pinned identity](../../reference/graph-scale-index.md#pinned-
   outside core**.
 - **Identity:** every engineering or audited claim **must disclose** Datagen and
   driver commit/release plus SNB **spec version** — see
-  [Pinned generator / driver identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)
-  and the [evidence schema](../../reference/graph-scale-index.md#evidence-artifact-schema).
+  [Pinned generator / driver identity](../../reference/scale-evaluation.md#pinned-generator--driver-identity)
+  and the [evidence schema](../../reference/scale-evaluation.md#evidence-artifact-schema).
 
 ### Pass criteria / validation (spec-level)
 
@@ -144,7 +137,7 @@ GraphBLAS, …). Consists of:
 - Optional large synthetic graphs (including Graph500-class sizes) where the
   Graphalytics rules allow.
 
-#### GraphForge-facing dataset shortlist (ordered)
+### GraphForge-facing dataset shortlist (ordered)
 
 Harnesses targeting GraphForge should prefer this ordered shortlist unless a
 full Graphalytics standard-benchmark job composition is explicitly claimed.
@@ -183,9 +176,9 @@ harness — not a one-off Python script.
 
 **Relation to GSI / Graph500:** Graphalytics dataset sizes and optional
 Graph500-class graphs should be labeled with GSI after load. The **Official**
-Graph500 size ladder on GSI remains the progressive synthetic size track; the
-**Derived** SCALE×density matrix is a separate density probe (not a Graph500
-submission). Graphalytics is the **algorithm workload** track.
+Graph500 size ladder and **Derived** density matrix are separate tracks — see
+[Scale Evaluation](../../reference/scale-evaluation.md#graph500-on-the-gsi-axis).
+Graphalytics is the **algorithm workload** track.
 
 ---
 
@@ -203,7 +196,7 @@ patterns.
 | **Transaction** | Defined — OLTP-style complex reads + continuous insert/delete |
 | **Analytics** | Future work (not yet a required GraphForge harness lane) |
 
-#### Scale factors (Transaction)
+### Scale factors (Transaction)
 
 Per FinBench specification (v0.2.0-alpha class; **disclose the exact spec
 version** used). SF ≈ serialized CSV GiB; default temporal window three years
@@ -250,37 +243,6 @@ RDF/SPARQL workload based on a media-publishing ontology.
 
 ---
 
-## Workload completeness vs Graph500 first-fail
-
-Two independent control policies:
-
-| Policy | Applies to | Rule |
-|---|---|---|
-| **Progressive / first-fail on GSI** | **Official** Graph500 SCALE notches (ef=16) | Stop at first red size notch ([policy](../../reference/graph-scale-index.md#progressive--first-fail-policy-official-graph500--gsi)) |
-| **Derived density matrix** | Graph500-derived `(SCALE, ef)` cells | Independent XS/small density probes — not official submissions ([matrix](../../reference/graph-scale-index.md#2-graph500-derived-scale--density-matrix)) |
-| **Workload completeness** | LDBC benchmarks | At a declared SF/dataset, run the **full** query/algorithm set for that workload (or label the run as a partial engineering subset) |
-
-A harness may:
-
-1. Climb **Official** Graph500 notches under first-fail for **size** evidence,
-2. Optionally run the **Derived** SCALE×density matrix at feasible SCALEs, and
-3. Separately require complete SNB Interactive / BI / Graphalytics / FinBench
-   Transaction coverage at chosen SFs.
-
-M4 close is **not** blocked on full LDBC audit completion unless a milestone
-plan explicitly widens that gate.
-
----
-
-## Disk-limited DataFusion framing
-
-Large SNB/FinBench/Graphalytics loads are **disk-limited** under DataFusion +
-Parquet: RAM holds working sets. Prefer SF0.003–SF0.1 (and small Graphalytics
-datasets) for developer laptops; SF1+ and FinBench large scales belong on
-dedicated harness machines with pre-declared envelopes.
-
----
-
 ## Planned convenience API (not the suite)
 
 Future `graphforge.datasets` helpers may load small SNB slices for tutorials.
@@ -305,11 +267,10 @@ Official compliance requires the external harness + LDBC drivers.
 - [SNB](https://ldbcouncil.org/benchmarks/snb/) · [Graphalytics](https://ldbcouncil.org/benchmarks/graphalytics/) · [FinBench](https://ldbcouncil.org/benchmarks/finbench/)
 - [LDBC GitHub org](https://github.com/ldbc)
 - [Graph Scale Index](../../reference/graph-scale-index.md) — size axis + SF crosswalk
-- [Evidence artifact schema](../../reference/graph-scale-index.md#evidence-artifact-schema) · [Pinned identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)
+- [Scale Evaluation](../../reference/scale-evaluation.md) — harness contract, evidence schema, pinned identity, completeness vs first-fail
 - [Scale limits](../../reference/scale-limits.md) — product envelopes
 
 ## Related
 
 - [Dataset overview](overview.md)
-- [Graph500 × GSI (Official + Derived)](../../reference/graph-scale-index.md#graph500-on-the-gsi-axis)
-- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) — retired from the scale harness
+- [Scale Evaluation — Graph500 tracks](../../reference/scale-evaluation.md#graph500-on-the-gsi-axis)

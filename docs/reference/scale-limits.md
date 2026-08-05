@@ -13,8 +13,9 @@ machines without matching hardware and graph layout.
 With DataFusion over Parquet, large-graph work is **disk-limited** (RAM for
 working sets). Escalation past Levels 01–06 (Graph500 SCALE ≥ 24 / GSI `07`+)
 is a **spec + external harness** track — see
-[Graph500 on the GSI axis](graph-scale-index.md#graph500-on-the-gsi-axis) and the
-[LDBC full suite](../guide/datasets/ldbc.md) — not normal GraphForge CI.
+[Scale Evaluation](scale-evaluation.md) (Official Graph500 + Derived density
+matrix + harness contract) and the [LDBC full suite](../guide/datasets/ldbc.md)
+— not normal GraphForge CI.
 
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 
@@ -139,9 +140,9 @@ artifact. Until then that page stays an explicit pending placeholder.
 
 ## Further Reading
 
-- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis; Official Graph500 + Derived density matrix; harness contract
+- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis (node band + density)
+- [Scale Evaluation](scale-evaluation.md) — Official Graph500 + Derived density matrix; harness contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB / Graphalytics / FinBench / SPB (spec; execution external)
-- [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — retired from the scale harness
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
 - [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce

@@ -63,7 +63,6 @@ const PAGES = [
   'guide/datasets/neo4j-examples.md',
   'guide/datasets/networkrepository.md',
   'guide/datasets/snap.md',
-  'guide/datasets/wdc-hyperlink-graph.md',
   'guide/datasets/cypher-script-loading.md',
   // Book — architecture, research, deeper usage
   'book/README.md',
@@ -102,6 +101,7 @@ const PAGES = [
   'reference/tck-compliance.md',
   'reference/scale-limits.md',
   'reference/graph-scale-index.md',
+  'reference/scale-evaluation.md',
   'reference/load-matrix-results.md',
   'reference/column-naming-behavior.md',
   'development/contributing.md',

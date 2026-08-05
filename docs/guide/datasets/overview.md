@@ -36,7 +36,8 @@ Real-world network datasets from Stanford, covering social networks, web graphs,
 Official Graph Data Council / LDBC portfolio: SNB (Interactive + BI),
 Graphalytics, FinBench, and SPB — **spec** for datasets, workloads, and
 validation. Generators/drivers run in an **external scale harness**, not
-GraphForge core CI.
+GraphForge core CI. Shared harness contract:
+[Scale Evaluation](../../reference/scale-evaluation.md).
 
 **Use cases:** Standard DBMS and analytics workload completeness; SF → GSI
 crosswalk after load
@@ -47,9 +48,10 @@ Large collection of diverse network datasets.
 **Use cases:** Network analysis, algorithm testing, research
 
 #### Scale size ladder (Graph500 × GSI)
-Synthetic scale work uses two Graph500 tracks on the
-[Graph Scale Index](../../reference/graph-scale-index.md) — not a separate
-dataset catalog page:
+Synthetic scale work uses two Graph500 tracks — not a separate dataset catalog
+page. Size labeling: [GSI](../../reference/graph-scale-index.md). Evaluation
+contract (Official + Derived tracks, first-fail, evidence schema):
+[Scale Evaluation](../../reference/scale-evaluation.md).
 
 1. **Official Graph500** — standard parameters with normative **ef=16** for GSI
    size notches / community comparability; progressive / first-fail in the harness.
@@ -58,10 +60,6 @@ dataset catalog page:
    Graph500 submissions.
 
 Both tracks execute in the external harness; this repo is spec only.
-
-#### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) (retired from scale harness)
-Formerly considered for a T0–T6 web-graph ladder. **Not used** for GraphForge
-scale testing; kept only to redirect readers to Graph500 × GSI and LDBC.
 
 
 ## Quick Start
@@ -226,12 +224,12 @@ If dataset import fails:
 
 ## Related Documentation
 
-- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Official Graph500 + Derived density matrix; harness contract
+- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis (node band + density)
+- [Scale Evaluation](../../reference/scale-evaluation.md) — Official Graph500 + Derived density matrix; harness contract
 - [Cypher Script Loading](cypher-script-loading.md) - Planned .cypher / .cql script loading
 - [SNAP Datasets](snap.md) - Planned SNAP catalog
 - [LDBC full suite](ldbc.md) - Spec for SNB / Graphalytics / FinBench / SPB
 - [NetworkRepository Datasets](networkrepository.md) - Planned
-- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Retired from scale harness
 - [API Reference](../../reference/api.md)
 
 ## License Information
@@ -243,4 +241,4 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 - Explore [SNAP](snap.md) for research and network analysis datasets
 - Read the [LDBC full suite](ldbc.md) **spec** (execution in external harness)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
-- See [GSI × Graph500](../../reference/graph-scale-index.md#graph500-on-the-gsi-axis) for Official + Derived track **specs**
+- See [Scale Evaluation](../../reference/scale-evaluation.md#graph500-on-the-gsi-axis) for Official + Derived track **specs**
