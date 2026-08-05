@@ -27,14 +27,15 @@ work. Companion workload specs:
 | Track | Spec home | Role |
 |---|---|---|
 | **GSI** | This page | Size axis (node band + density) |
-| **Graph500** | [Graph500 ladder](#graph500-on-the-gsi-axis) below | Synthetic size ladder filling GSI bottom→top |
+| **Official Graph500** | [Official track](#1-official-graph500-gsi-size-ladder) | Standard ef=16 Kronecker/R-MAT notches for GSI size ladder / community comparability |
+| **Graph500-derived matrix** | [Derived track](#2-graph500-derived-scale--density-matrix) | Same generator family, parameterized `edgefactor` to hit GSI density tiers — **not** official Graph500 submissions |
 | **LDBC suite** | [LDBC full suite](../guide/datasets/ldbc.md) | Official workload completeness (SNB, Graphalytics, FinBench, SPB) |
 
 **Execution is not a GraphForge core CI or Makefile product.** An **external
 scale harness** (separate repository) owns generators, drivers, orchestration,
-evidence packaging, and progressive / first-fail reporting. This repo may ship
-thin **reference clients** only when useful; it must **not** bulk-add Graph500
-or LDBC generators.
+evidence packaging, and progressive / first-fail reporting for **both** Graph500
+tracks. This repo may ship thin **reference clients** only when useful; it must
+**not** bulk-add Graph500 or LDBC generators.
 
 See [External scale harness](#external-scale-harness-contract).
 
@@ -153,21 +154,55 @@ guarantees and measured envelopes remain in [scale limits](scale-limits.md).
 
 ## Graph500 on the GSI axis
 
-**One size axis (GSI).** Graph500 is the **synthetic size ladder** that fills
-GSI from bottom to top. Do not invent a parallel size taxonomy for Graph500
-classes alone.
+**One size axis (GSI).** Graph500 generators supply synthetic instances; they do
+**not** invent a parallel size taxonomy. GSI still labels every instance.
 
-Graph500 definition ([benchmark specification](https://graph500.org/?page_id=12)):
+There are **two distinct tracks**. Label evidence with the track name — never
+treat a parameterized-`edgefactor` density cell as an official Graph500
+submission.
+
+| Track | Parameters | Purpose | Official Graph500? |
+|---|---|---|---|
+| **Official Graph500** | Spec-default generator (typically `edgefactor = 16`), undirected Kronecker / R-MAT | GSI size-ladder notches; comparability with Graph500 community / ranking classes | **Yes** (when run per [Graph500 spec](https://graph500.org/?page_id=12)) |
+| **Graph500-derived SCALE×density matrix** | Same generator **family**, free `SCALE` + `edgefactor` to hit GSI density tiers | Probe GSI density bands (D00–09 … D90–100) at feasible SCALEs | **No** — derived only |
+
+Shared generator math ([Graph500 specification](https://graph500.org/?page_id=12)):
 
 - `V = 2^SCALE`
-- `E = edgefactor × V` (default `edgefactor = 16`)
-- Kronecker / R-MAT-style generator (undirected edge list for BFS ranking)
+- `E = edgefactor × V` (denote `edgefactor` as `ef`)
+- Kronecker / R-MAT-style undirected edge list
 - Profile instances with `GU-…` (undirected)
 
-### Representative SCALE notches (bottom → top)
+**Harness-elsewhere:** both tracks are executed in the external scale harness.
+This repo is **spec only** — no Graph500 generator as product surface.
+
+### Density ↔ edgefactor (GU)
+
+Undirected GSI density (same as [Density quantification](#density-quantification)):
+
+- `d = 2|E| / (|V| × (|V| − 1))`
+
+With Graph500’s `E = ef × V` and `V = 2^SCALE`:
+
+- `ef ≈ d · (V − 1) / 2`
+
+Exact when the generator emits exactly `ef × V` undirected edges after
+dedup/self-loop policy; harnesses should re-profile `|E|` and emit the measured
+GSI.
+
+---
+
+### 1. Official Graph500 (GSI size ladder)
+
+Use **standard Graph500 parameters** — typically `ef = 16`, undirected
+Kronecker/R-MAT as specified by Graph500 — for bottom→top **size** notches on
+GSI and for community-comparable runs (including ranking classes when the
+harness opts in).
+
+#### Representative SCALE notches (bottom → top)
 
 One power-of-two near the middle of each GSI node band. Density uses the
-undirected formula; at large SCALE it rounds to `D00`.
+undirected formula; at large SCALE with `ef = 16` it rounds to `D00`.
 
 | GSI Scale / Size | Node band (V) | Graph500 SCALE (rep) | V = 2^SCALE | E (ef=16) | Example GSI |
 |---|---|---:|---:|---:|---|
@@ -194,13 +229,10 @@ Official Graph500 ranking classes (Toy/Mini/Small/Medium/Large/Huge at SCALE
 26/29/32/36/39/42) map to GSI `07`/`08`/`09`/`10`/`11`/`12` respectively —
 useful labels, but the table above is the full bottom-to-top GSI coverage.
 
-This repo does **not** ship a Graph500 generator as product surface. The
-external harness may generate or cache edge lists; docs only define the SCALE
-notches and acceptance framing.
+#### Progressive / first-fail policy (Official Graph500 × GSI)
 
-### Progressive / first-fail policy (Graph500 × GSI)
-
-Applies when the harness escalates Graph500 SCALE notches on the GSI axis:
+Applies when the harness escalates **Official** Graph500 SCALE notches on the
+GSI axis:
 
 1. Attempt representative notches in ascending GSI Scale Code order
    (`01`→`**`, or the subset declared for the run).
@@ -211,9 +243,78 @@ Applies when the harness escalates Graph500 SCALE notches on the GSI axis:
 5. Official ranking classes (Toy+) remain on the ladder; first-fail — not
    pretend pass — governs whether they run.
 
-Typical green signals for a Graph500 notch: generate/load + reopen counts,
-fixed-hop Cypher with `LIMIT` (and/or Graph500 BFS kernel when the harness
-implements it), resource ledger within the operator’s declared machine envelope.
+Typical green signals for an Official Graph500 notch: generate/load + reopen
+counts, fixed-hop Cypher with `LIMIT` (and/or Graph500 BFS kernel when the
+harness implements it), resource ledger within the operator’s declared machine
+envelope.
+
+---
+
+### 2. Graph500-derived SCALE × density matrix
+
+**Not official Graph500.** Same generator family (Kronecker / R-MAT style,
+`V = 2^SCALE`, `E = ef · V`), but `edgefactor` is chosen to land in GSI’s five
+density tiers. Evidence must say **derived** / **density matrix** — never
+“Graph500 submission” or ranking-class claims.
+
+#### Recommended mid-bucket density targets
+
+| Density tier | Mid-bucket target `d` | Role |
+|---|---:|---|
+| D00–D09 (very low) | **0.05** | Sparse / list-friendly |
+| D10–D29 (low) | **0.20** | Low-density traversals |
+| D30–D69 (medium) | **0.50** | Matrix / medium fill |
+| D70–D89 (high) | **0.80** | High fill |
+| D90–D100 (very high) | **0.95** | Near-complete |
+
+Solve `ef ≈ d · (V − 1) / 2` with `V = 2^SCALE`, then re-profile after
+generation.
+
+#### Demo tables (small SCALE)
+
+**SCALE 6** (`V = 64`, GSI Level `01` / XS) — harness smoke / density demos:
+
+| Density tier | Target `d` | `ef ≈ d·(V−1)/2` | E ≈ ef·V | Example GSI |
+|---|---:|---:|---:|---|
+| D00–D09 | 0.05 | 1.575 | ~101 | `GU-01-XS-D05` |
+| D10–D29 | 0.20 | 6.3 | ~403 | `GU-01-XS-D20` |
+| D30–D69 | 0.50 | 15.75 | ~1,008 | `GU-01-XS-D50` |
+| D70–D89 | 0.80 | 25.2 | ~1,613 | `GU-01-XS-D80` |
+| D90–D100 | 0.95 | 29.925 | ~1,915 | `GU-01-XS-D95` |
+
+**SCALE 12** (`V = 4,096`, GSI Level `03` / XS):
+
+| Density tier | Target `d` | `ef ≈ d·(V−1)/2` | E ≈ ef·V | Example GSI |
+|---|---:|---:|---:|---|
+| D00–D09 | 0.05 | 102.375 | ~419K | `GU-03-XS-D05` |
+| D10–D29 | 0.20 | 409.5 | ~1.68M | `GU-03-XS-D20` |
+| D30–D69 | 0.50 | 1,023.75 | ~4.19M | `GU-03-XS-D50` |
+| D70–D89 | 0.80 | 1,638 | ~6.71M | `GU-03-XS-D80` |
+| D90–D100 | 0.95 | 1,945.125 | ~7.97M | `GU-03-XS-D95` |
+
+Harnesses may round `ef` to convenient integers; always emit measured GSI.
+
+#### Feasibility / in-scope cells
+
+Edge count for a fixed density grows as Θ(V²). Official `ef = 16` already
+yields `D00` by SCALE **15–18**. Hitting mid/high density at those SCALEs means
+tens of millions to billions of edges — usually **out-of-scope** for the
+progressive harness.
+
+| SCALE band | Official ef=16 | Derived D00–09 (d≈0.05) | Derived D10+ (d≥0.20) |
+|---|---|---|---|
+| ≤ 12 (XS demos) | In-scope (size ladder) | **In-scope** (demo matrix) | **In-scope** (demo matrix) |
+| 13–14 | In-scope | Marginal — declare disk/time envelope | Usually **out-of-scope** unless envelope allows |
+| ≥ 15–18 | In-scope → `D00` size notches | Often impractical (Θ(V²)) | **Out-of-scope** by default |
+| ≥ 22 (MD+) | Size ladder only | **Out-of-scope** for density matrix | **Out-of-scope** |
+
+**Default harness posture for the derived matrix:** exercise the five density
+tiers at **XS / small** SCALEs (e.g. 6 and 12, optionally a few neighbors). Do
+**not** require a full SCALE×density cartesian product at SM+ bands. Document
+any cell attempted outside that default as an explicit envelope exception.
+
+The derived matrix does **not** use Official first-fail across SCALEs; operators
+may run a fixed small set of `(SCALE, density-tier)` cells independently.
 
 ---
 
@@ -250,8 +351,9 @@ with `GU-…`.
 
 LDBC workloads have their own **completeness** requirements (query sets,
 throughput/latency rules, validation/auditing). Those are independent of
-Graph500 first-fail: a harness may run progressive Graph500 notches **and**
-require full LDBC workload coverage at each declared SF.
+Official Graph500 first-fail: a harness may run progressive Official notches
+**and** require full LDBC workload coverage at each declared SF. The Derived
+density matrix is independent of that climb.
 
 ---
 
@@ -266,9 +368,10 @@ until published.
 
 | Concern | External harness | GraphForge core |
 |---|---|---|
-| Orchestrate Graph500 SCALE notches on GSI | Yes | Spec only |
+| Orchestrate **Official** Graph500 SCALE notches (ef=16) on GSI | Yes | Spec only |
+| Run **Derived** SCALE×density matrix cells (parameterized ef) | Yes | Spec only |
 | Run LDBC generators / drivers / validation | Yes | Spec only ([LDBC](../guide/datasets/ldbc.md)) |
-| Progressive / first-fail stop + evidence artifacts | Yes | Spec + issue links for product claims |
+| Progressive / first-fail stop + evidence artifacts (Official track) | Yes | Spec + issue links for product claims |
 | Dedicated runners / disk budgets | Yes | No |
 | Normal GitHub Actions CI for Graph500 Toy+ / LDBC SF≥1 | No | Must not |
 | Thin reference clients | May call | Optional only; no bulk generators |
@@ -279,13 +382,16 @@ until published.
 | Input | Role |
 |---|---|
 | GSI Scale Code / Size Tag or full GSI | Select band; label evidence |
-| Graph500 `SCALE` (+ `edgefactor`, default 16) | Synthetic size-ladder instance |
+| Track id: `official` \| `derived` | Separates community-comparable vs density-matrix runs |
+| Graph500 `SCALE` (+ `edgefactor`; Official default 16) | Synthetic instance |
+| Derived density tier or target `d` | Required for derived matrix cells |
 | LDBC benchmark id + SF / dataset name | Workload suite instance |
 | Machine envelope | Pre-declared disk/RSS/time stop conditions |
 
 ### Expected outputs (per attempted step)
 
-- SCALE / LDBC id and approximate GSI
+- Track id (`official` / `derived`), SCALE / LDBC id, and approximate GSI
+- For derived cells: target `d` / density tier and chosen `edgefactor`
 - Green/red disposition and stop reason if red
 - Node/edge (or entity) counts, project bytes, peak RSS, optional CSR timings
 - Workload metrics required by the LDBC or Graph500 spec being executed
@@ -294,8 +400,9 @@ until published.
 ### What this repo must not do
 
 - Add Graph500 or LDBC generators/drivers as product surface
-- Wire full Graph500 / LDBC suites into normal CI
+- Wire full Graph500 / LDBC suites (Official or Derived) into normal CI
 - Recommend WDC Hyperlink Graphs as the scale harness path
+- Present Derived density-matrix cells as official Graph500 submissions
 
 ---
 
@@ -351,7 +458,8 @@ concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
 | Fixed-hop LIMIT bench (10M edges) | 625,000 / 10,000,000 | `GD-05-SM-D00` |
 | SNAP web-Google | 876K / 5.1M | `GD-05-SM-D00` |
 | LiveJournal release bench | 4.0M / 34.7M | `GD-06-MD-D00` |
-| Graph500 SCALE 22 | 4.19M / 67.1M | `GU-06-MD-D00` |
+| Graph500 SCALE 22 (Official, ef=16) | 4.19M / 67.1M | `GU-06-MD-D00` |
+| Graph500-derived SCALE 6, d=0.50 | 64 / ~1,008 | `GU-01-XS-D50` |
 | LDBC SNB SF1 (approx. total entities) | ~3M–10M / schema-dependent | `GD-06-MD-D00` (re-profile) |
 
 ---
@@ -364,5 +472,6 @@ concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — CI size/density taxonomy (distinct from GSI)
 - [Load Matrix Results](load-matrix-results.md) — accepted matrix evidence
 - [Datasets overview](../guide/datasets/overview.md) — planned public dataset catalogs
-- [Graph500 benchmark specification](https://graph500.org/?page_id=12) — SCALE / edgefactor definition
+- [Graph500 benchmark specification](https://graph500.org/?page_id=12) — SCALE / edgefactor definition (Official track)
+- [Official Graph500 notches](#1-official-graph500-gsi-size-ladder) · [Derived density matrix](#2-graph500-derived-scale--density-matrix)
 - [Graph Data Council / LDBC](https://ldbcouncil.org/) — official benchmark suite home

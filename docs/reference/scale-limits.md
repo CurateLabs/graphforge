@@ -139,7 +139,7 @@ artifact. Until then that page stays an explicit pending placeholder.
 
 ## Further Reading
 
-- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis, Graph500 notches, external harness contract
+- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis; Official Graph500 + Derived density matrix; harness contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB / Graphalytics / FinBench / SPB (spec; execution external)
 - [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — retired from the scale harness
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)

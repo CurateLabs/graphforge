@@ -146,9 +146,10 @@ result claim requires the official driver/validation path in the external
 harness — not a one-off Python script.
 
 **Relation to GSI / Graph500:** Graphalytics dataset sizes and optional
-Graph500-class graphs should be labeled with GSI after load. The Graph500
-**size ladder** on GSI remains the progressive synthetic track; Graphalytics is
-the **algorithm workload** track.
+Graph500-class graphs should be labeled with GSI after load. The **Official**
+Graph500 size ladder on GSI remains the progressive synthetic size track; the
+**Derived** SCALE×density matrix is a separate density probe (not a Graph500
+submission). Graphalytics is the **algorithm workload** track.
 
 ---
 
@@ -199,13 +200,15 @@ Two independent control policies:
 
 | Policy | Applies to | Rule |
 |---|---|---|
-| **Progressive / first-fail on GSI** | Graph500 SCALE notches | Stop at first red size notch ([GSI](../../reference/graph-scale-index.md#progressive--first-fail-policy-graph500--gsi)) |
+| **Progressive / first-fail on GSI** | **Official** Graph500 SCALE notches (ef=16) | Stop at first red size notch ([policy](../../reference/graph-scale-index.md#progressive--first-fail-policy-official-graph500--gsi)) |
+| **Derived density matrix** | Graph500-derived `(SCALE, ef)` cells | Independent XS/small density probes — not official submissions ([matrix](../../reference/graph-scale-index.md#2-graph500-derived-scale--density-matrix)) |
 | **Workload completeness** | LDBC benchmarks | At a declared SF/dataset, run the **full** query/algorithm set for that workload (or label the run as a partial engineering subset) |
 
 A harness may:
 
-1. Climb Graph500 notches under first-fail for **size** evidence, and
-2. Separately require complete SNB Interactive / BI / Graphalytics / FinBench
+1. Climb **Official** Graph500 notches under first-fail for **size** evidence,
+2. Optionally run the **Derived** SCALE×density matrix at feasible SCALEs, and
+3. Separately require complete SNB Interactive / BI / Graphalytics / FinBench
    Transaction coverage at chosen SFs.
 
 M4 close is **not** blocked on full LDBC audit completion unless a milestone
@@ -251,5 +254,5 @@ Official compliance requires the external harness + LDBC drivers.
 ## Related
 
 - [Dataset overview](overview.md)
-- [Graph500 × GSI ladder](../../reference/graph-scale-index.md#graph500-on-the-gsi-axis)
+- [Graph500 × GSI (Official + Derived)](../../reference/graph-scale-index.md#graph500-on-the-gsi-axis)
 - [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) — retired from the scale harness

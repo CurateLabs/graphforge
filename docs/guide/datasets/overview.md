@@ -47,10 +47,17 @@ Large collection of diverse network datasets.
 **Use cases:** Network analysis, algorithm testing, research
 
 #### Scale size ladder (Graph500 × GSI)
-Synthetic size escalation uses **Graph500 SCALE notches** on the
+Synthetic scale work uses two Graph500 tracks on the
 [Graph Scale Index](../../reference/graph-scale-index.md) — not a separate
-dataset catalog page. Progressive / first-fail execution lives in the external
-harness.
+dataset catalog page:
+
+1. **Official Graph500** — standard parameters (typically ef=16) for GSI size
+   notches / community comparability; progressive / first-fail in the harness.
+2. **Graph500-derived SCALE×density matrix** — parameterized `edgefactor` to
+   hit GSI density tiers at feasible (usually XS) SCALEs; **not** official
+   Graph500 submissions.
+
+Both tracks execute in the external harness; this repo is spec only.
 
 #### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) (retired from scale harness)
 Formerly considered for a T0–T6 web-graph ladder. **Not used** for GraphForge
@@ -219,7 +226,7 @@ If dataset import fails:
 
 ## Related Documentation
 
-- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Graph500 notches; external harness contract
+- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Official Graph500 + Derived density matrix; harness contract
 - [Cypher Script Loading](cypher-script-loading.md) - Planned .cypher / .cql script loading
 - [SNAP Datasets](snap.md) - Planned SNAP catalog
 - [LDBC full suite](ldbc.md) - Spec for SNB / Graphalytics / FinBench / SPB
@@ -236,4 +243,4 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 - Explore [SNAP](snap.md) for research and network analysis datasets
 - Read the [LDBC full suite](ldbc.md) **spec** (execution in external harness)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
-- See [GSI × Graph500](../../reference/graph-scale-index.md) for the synthetic size ladder **spec**
+- See [GSI × Graph500](../../reference/graph-scale-index.md#graph500-on-the-gsi-axis) for Official + Derived track **specs**

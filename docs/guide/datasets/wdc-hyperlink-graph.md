@@ -45,7 +45,7 @@ wire them into new scale runbooks.
 | Need | Document |
 |---|---|
 | Size axis + Graph500 SCALE notches | [Graph Scale Index](../../reference/graph-scale-index.md) |
-| Progressive / first-fail on size | [Graph500 first-fail policy](../../reference/graph-scale-index.md#progressive--first-fail-policy-graph500--gsi) |
+| Progressive / first-fail on size | [Official Graph500 first-fail policy](../../reference/graph-scale-index.md#progressive--first-fail-policy-official-graph500--gsi) |
 | SNB / Graphalytics / FinBench / SPB | [LDBC full suite](ldbc.md) |
 | Product envelopes | [Scale limits](../../reference/scale-limits.md) |
 | Harness boundary | [External scale harness contract](../../reference/graph-scale-index.md#external-scale-harness-contract) |
