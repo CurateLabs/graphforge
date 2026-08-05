@@ -165,6 +165,7 @@ export default defineConfig({
                 { label: 'Neo4j Examples', slug: 'guide/datasets/neo4j-examples' },
                 { label: 'NetworkRepository', slug: 'guide/datasets/networkrepository' },
                 { label: 'SNAP', slug: 'guide/datasets/snap' },
+                { label: 'WDC Hyperlink Graphs', slug: 'guide/datasets/wdc-hyperlink-graph' },
                 { label: 'Cypher Script Loading', slug: 'guide/datasets/cypher-script-loading' },
               ],
             },

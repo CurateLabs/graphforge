@@ -42,6 +42,14 @@ Large collection of diverse network datasets.
 
 **Use cases:** Network analysis, algorithm testing, research
 
+#### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md)
+Public Common Crawl hyperlink graphs (2012/2014) at Page / Host / PLD aggregation.
+Research and scale-validation track with a tiered escalation strategy and a
+resumable retrieval helper — not a shipped catalog loader.
+
+**Use cases:** External scale escalation beyond LiveJournal; LIMIT/reopen evidence
+
+
 ## Quick Start
 
 ### Loading a Dataset
@@ -208,6 +216,7 @@ If dataset import fails:
 - [SNAP Datasets](snap.md) - Planned SNAP catalog
 - [LDBC Datasets](ldbc.md) - Planned
 - [NetworkRepository Datasets](networkrepository.md) - Planned
+- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Research scale track
 - [API Reference](../../reference/api.md)
 
 ## License Information
@@ -219,3 +228,4 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 - Explore [SNAP](snap.md) for research and network analysis datasets
 - Try [LDBC](ldbc.md) for benchmarking (coming soon)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
+- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) for tiered web-scale escalation
