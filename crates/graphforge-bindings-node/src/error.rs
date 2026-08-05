@@ -10,9 +10,22 @@
 //! the `PlanError` domain).
 
 use graphforge_api::GfError;
+use napi::Env;
 
 /// A napi error whose `status` string surfaces as the JS `error.code`.
 pub type NodeError = napi::Error<String>;
+
+/// Throw a real JavaScript `TypeError`, then return a `PendingException` sentinel
+/// so the `#[napi]` wrapper does not overwrite it with a generic `Error`.
+///
+/// Use this for binding coercion failures (bad handles, unsupported property
+/// types). Do **not** use it for Rust-owned [`GfError`] domains — those continue
+/// to go through [`to_napi_err`].
+pub fn type_error(env: &Env, message: impl Into<String>) -> NodeError {
+    let message = message.into();
+    let _ = env.throw_type_error(&message, Some("InvalidArg"));
+    napi::Error::new("PendingException".to_owned(), message)
+}
 
 /// The JS `error.code` for each [`GfError`] fault domain.
 fn error_code(err: &GfError) -> &'static str {
