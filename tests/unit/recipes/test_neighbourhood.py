@@ -35,6 +35,19 @@ def test_neighbourhood_returns_arrow_table() -> None:
     assert table.num_rows >= 1
     assert "canonical" in table.column_names
     assert "name" in table.column_names
+    assert len(table.column_names) == len(set(table.column_names))
+
+
+def test_neighbourhood_name_canonical_prop_has_no_duplicate_columns() -> None:
+    forge = GraphForge()
+    forge.execute(
+        "CREATE (:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob'})"
+    )
+    table = neighbourhood(
+        forge, "Alice", hops=1, label="Person", canonical_prop="name"
+    )
+    assert table.column_names == ["name", "labels"]
+    assert table.column("name").to_pylist() == ["Bob"]
 
 
 def test_neighbourhood_hops_1_direct_only() -> None:
@@ -59,6 +72,13 @@ def test_neighbourhood_empty_for_isolated_node() -> None:
     assert table.num_rows == 0
 
 
+def test_neighbourhood_hops_0_returns_typed_empty_table() -> None:
+    forge = _person_graph()
+    table = neighbourhood(forge, "Alice", hops=0, label="Person")
+    assert table.num_rows == 0
+    assert table.column_names == ["canonical", "name", "labels"]
+
+
 def test_neighbourhood_rejects_invalid_label() -> None:
     forge = GraphForge()
     with pytest.raises(ValueError, match="label must be a valid identifier"):
@@ -71,9 +91,9 @@ def test_neighbourhood_rejects_invalid_canonical_prop() -> None:
         neighbourhood(forge, "Alice", label="Person", canonical_prop="name`")
 
 
-def test_neighbourhood_rejects_non_positive_hops() -> None:
+def test_neighbourhood_rejects_negative_and_bool_hops() -> None:
     forge = GraphForge()
-    with pytest.raises(ValueError, match="hops must be an integer >= 1"):
-        neighbourhood(forge, "Alice", hops=0, label="Person")
-    with pytest.raises(ValueError, match="hops must be an integer >= 1"):
+    with pytest.raises(ValueError, match="hops must be an integer >= 0"):
+        neighbourhood(forge, "Alice", hops=-1, label="Person")
+    with pytest.raises(ValueError, match="hops must be an integer >= 0"):
         neighbourhood(forge, "Alice", hops=True, label="Person")  # type: ignore[arg-type]
