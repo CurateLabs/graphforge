@@ -165,11 +165,14 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { label: 'Overview', slug: 'guide/datasets/overview' },
-                { label: 'LDBC', slug: 'guide/datasets/ldbc' },
+                { label: 'LDBC full suite', slug: 'guide/datasets/ldbc' },
                 { label: 'Neo4j Examples', slug: 'guide/datasets/neo4j-examples' },
                 { label: 'NetworkRepository', slug: 'guide/datasets/networkrepository' },
                 { label: 'SNAP', slug: 'guide/datasets/snap' },
-                { label: 'WDC Hyperlink Graphs', slug: 'guide/datasets/wdc-hyperlink-graph' },
+                {
+                  label: 'WDC Hyperlink Graphs (retired)',
+                  slug: 'guide/datasets/wdc-hyperlink-graph',
+                },
                 { label: 'Cypher Script Loading', slug: 'guide/datasets/cypher-script-loading' },
               ],
             },

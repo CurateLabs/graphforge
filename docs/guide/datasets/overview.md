@@ -32,25 +32,29 @@ Real-world network datasets from Stanford, covering social networks, web graphs,
 - `snap-web-google` - Google web graph (876K nodes, 5.1M edges)
 - `snap-twitter-combined` - Twitter social circles (81K nodes, 1.8M edges)
 
-#### [LDBC (Linked Data Benchmark Council)](ldbc.md)
-Standard benchmark datasets for graph database performance testing.
+#### [LDBC full suite](ldbc.md)
+Official Graph Data Council / LDBC portfolio: SNB (Interactive + BI),
+Graphalytics, FinBench, and SPB — **spec** for datasets, workloads, and
+validation. Generators/drivers run in an **external scale harness**, not
+GraphForge core CI.
 
-**Use cases:** Performance benchmarking, complex query testing
+**Use cases:** Standard DBMS and analytics workload completeness; SF → GSI
+crosswalk after load
 
 #### [NetworkRepository](networkrepository.md)
 Large collection of diverse network datasets.
 
 **Use cases:** Network analysis, algorithm testing, research
 
-#### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md)
-Public Common Crawl hyperlink graphs (2012/2014) at Page / Host / PLD aggregation.
-Research scale track: T0→T6 first-fail ladder **spec** mapped onto the
-[Graph Scale Index](../../reference/graph-scale-index.md), plus a thin
-reference fetch helper. Ladder orchestration runs in an **external scale
-harness** — not GraphForge core CI / not a shipped catalog loader.
+#### Scale size ladder (Graph500 × GSI)
+Synthetic size escalation uses **Graph500 SCALE notches** on the
+[Graph Scale Index](../../reference/graph-scale-index.md) — not a separate
+dataset catalog page. Progressive / first-fail execution lives in the external
+harness.
 
-**Use cases:** External scale escalation beyond LiveJournal; LIMIT/reopen evidence
-under first-fail (stop at the first tier that fails acceptance)
+#### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) (retired from scale harness)
+Formerly considered for a T0–T6 web-graph ladder. **Not used** for GraphForge
+scale testing; kept only to redirect readers to Graph500 × GSI and LDBC.
 
 
 ## Quick Start
@@ -215,12 +219,12 @@ If dataset import fails:
 
 ## Related Documentation
 
-- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Graph500 × WDC crosswalk; external harness contract
+- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Graph500 notches; external harness contract
 - [Cypher Script Loading](cypher-script-loading.md) - Planned .cypher / .cql script loading
 - [SNAP Datasets](snap.md) - Planned SNAP catalog
-- [LDBC Datasets](ldbc.md) - Planned
+- [LDBC full suite](ldbc.md) - Spec for SNB / Graphalytics / FinBench / SPB
 - [NetworkRepository Datasets](networkrepository.md) - Planned
-- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Research scale ladder spec + reference fetch
+- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Retired from scale harness
 - [API Reference](../../reference/api.md)
 
 ## License Information
@@ -230,6 +234,6 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 ## Next Steps
 
 - Explore [SNAP](snap.md) for research and network analysis datasets
-- Try [LDBC](ldbc.md) for benchmarking (coming soon)
+- Read the [LDBC full suite](ldbc.md) **spec** (execution in external harness)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
-- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) and [GSI](../../reference/graph-scale-index.md) for the T0→T6 / Graph500 scale ladder **spec** (execution elsewhere)
+- See [GSI × Graph500](../../reference/graph-scale-index.md) for the synthetic size ladder **spec**

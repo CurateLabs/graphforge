@@ -161,7 +161,7 @@ knowledge, checkpoint, and compatibility contracts.
 | [API reference](reference/api.md) | Look up engine, lifecycle, and analyst surfaces |
 | [Algorithm catalog](book/architecture/algorithms.md) | Choose rank, cluster, paths, analyze, or similar algorithms |
 | [OpenCypher compatibility](reference/opencypher-compatibility.md) | Inspect supported language behavior |
-| [Graph Scale Index (GSI)](reference/graph-scale-index.md) | Profile datasets by node band and density; Graph500 × WDC ladder |
+| [Graph Scale Index (GSI)](reference/graph-scale-index.md) | Profile datasets by node band and density; Graph500 size ladder |
 | [TCK compliance](reference/tck-compliance.md) | Review the 3,897 / 3,897 language gate |
 
 ---

@@ -277,10 +277,10 @@ bench-fixed-hop-livejournal:  ## Run the #1269/#1271 cached LiveJournal LIMIT ma
 	@test -n "$$GF_LIVEJOURNAL_PROJECT" || (echo "GF_LIVEJOURNAL_PROJECT is required" && exit 2)
 	cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
 
-fetch-wdc-hyperlink:  ## Fetch WDC Hyperlink Graph artifacts (#399); ARTIFACT=example|pld-2012|…; optional GF_WDC_MIRROR_BASE / GF_WDC_SOURCE
+fetch-wdc-hyperlink:  ## Legacy WDC fetch (not scale harness); ARTIFACT=example|pld-2012|…; prefer Graph500/LDBC in external harness
 	python3 scripts/datasets/fetch_wdc_hyperlink.py --artifact $${ARTIFACT:-example}
 
-sync-wdc-mirror:  ## Dry-run sync of verified WDC cache → R2/S3; EXECUTE=1 to upload (needs GF_WDC_MIRROR_*)
+sync-wdc-mirror:  ## Legacy WDC mirror sync (not scale harness); EXECUTE=1 to upload (needs GF_WDC_MIRROR_*)
 	python3 scripts/datasets/sync_wdc_mirror.py --tier-min $${EXECUTE:+--execute}
 
 native-consumers:  ## Run audited M18/M19 consumers against the installed native wheel
