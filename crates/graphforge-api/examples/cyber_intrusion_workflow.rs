@@ -447,7 +447,7 @@ fn main() {
         .unwrap()
         .value(0);
     let unknown = graph.add_node("UnknownAsset", &HashMap::new()).unwrap_err();
-    assert_eq!(unknown.code(), "GF_PLAN");
+    assert_eq!(unknown.code(), "GF_PARSE");
     let invalid_property = graph
         .add_node(
             "Host",

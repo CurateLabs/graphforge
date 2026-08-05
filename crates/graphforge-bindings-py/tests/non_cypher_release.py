@@ -341,7 +341,7 @@ def check_stable_error_code_matrix() -> None:
     parse = _expect_code(g.ParseError, "GF_PARSE", lambda: forge.execute("MATCH ("))
     assert parse.span == (7, 0)
     assert isinstance(parse, g.GraphForgeError)
-    _expect_code(g.PlanError, "GF_PLAN", lambda: forge.execute("RETURN absent"))
+    _expect_code(g.ParseError, "GF_PARSE", lambda: forge.execute("RETURN absent"))
     forge.execute("CREATE (:Vertex)-[:LINK]->(:Vertex)")
     _expect_code(
         g.ExecutionError,

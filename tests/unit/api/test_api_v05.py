@@ -183,12 +183,13 @@ class TestExecute:
         assert isinstance(err.span, tuple) and len(err.span) == 2
 
     def test_bind_error_has_span(self) -> None:
-        # A binder failure (undeclared variable) surfaces as PlanError but, like
-        # ParseError, carries a (offset, length) span pinpointing the token (#606).
-        with pytest.raises(g.PlanError) as excinfo:
+        # A binder failure (undeclared variable) surfaces as ParseError with a
+        # (offset, length) span pinpointing the token (#353 / #606).
+        with pytest.raises(g.ParseError) as excinfo:
             GraphForge().execute("RETURN missingVar")
         err = excinfo.value
         assert isinstance(err, g.GraphForgeError)
+        assert err.code == "GF_PARSE"
         assert isinstance(err.span, tuple) and len(err.span) == 2
         offset, length = err.span
         assert "RETURN missingVar"[offset : offset + length] == "missingVar"

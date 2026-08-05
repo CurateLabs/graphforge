@@ -96,22 +96,13 @@ create_exception!(
 );
 
 /// Convert a [`GfError`] into the matching Python exception. `ParseError` and
-/// binder failures (`PlanError`, from [`GfError::Bind`]) carry a `span`
-/// attribute — the `(offset, length)` of the offending token, per the shim's
-/// `ParseError` contract.
+/// binder failures ([`GfError::Bind`]) carry a `span` attribute — the
+/// `(offset, length)` of the offending token, per the shim's `ParseError`
+/// contract. Binder failures share the public `ParseError` / `GF_PARSE` domain.
 pub(crate) fn to_pyerr(py: Python<'_>, err: &GfError) -> PyErr {
     let error = match err {
-        GfError::Parse { msg, span } => {
+        GfError::Parse { msg, span } | GfError::Bind { msg, span } => {
             let e = PyErr::new::<ParseError, _>(msg.clone());
-            let _ = e
-                .value(py)
-                .setattr("span", (span.start, span.end.saturating_sub(span.start)));
-            e
-        }
-        GfError::Bind { msg, span } => {
-            // Binder failures share the `PlanError` domain but carry a span,
-            // surfaced like `ParseError.span` (#606).
-            let e = PyErr::new::<PlanError, _>(msg.clone());
             let _ = e
                 .value(py)
                 .setattr("span", (span.start, span.end.saturating_sub(span.start)));
