@@ -1,12 +1,15 @@
 # WDC Hyperlink Graphs
 
-> **Status:** Research / scale-validation track — not a shipped `graphforge.datasets`
-> catalog loader. Use the retrieval helper and construction APIs below. Related
-> issues: [#399](https://github.com/CurateLabs/graphforge/issues/399) (this guide +
+> **Status:** Research / scale-validation **spec** — not a shipped
+> `graphforge.datasets` catalog loader and **not** an in-repo ladder harness.
+> Use the reference retrieval helper and construction APIs below; execute T0→T6
+> in an external scale harness. Related issues:
+> [#399](https://github.com/CurateLabs/graphforge/issues/399) (this guide +
 > retrieval), [#406](https://github.com/CurateLabs/graphforge/issues/406) (R2 mirror
-> provision), [#407](https://github.com/CurateLabs/graphforge/issues/407) (scale-runner
-> runbook), [#400](https://github.com/CurateLabs/graphforge/issues/400) (ingest),
-> [#401](https://github.com/CurateLabs/graphforge/issues/401) (first-fail ladder spike),
+> provision), [#407](https://github.com/CurateLabs/graphforge/issues/407) (harness
+> operator runbook), [#400](https://github.com/CurateLabs/graphforge/issues/400)
+> (ingest), [#401](https://github.com/CurateLabs/graphforge/issues/401)
+> (first-fail ladder spike — external harness),
 > [#402](https://github.com/CurateLabs/graphforge/issues/402) (CSR/reopen costs),
 > [#403](https://github.com/CurateLabs/graphforge/issues/403) (Host T5),
 > [#404](https://github.com/CurateLabs/graphforge/issues/404) (Page T6).
@@ -18,11 +21,24 @@ stressing ingest, adjacency/CSR construction, reopen, and neighborhood-proportio
 Cypher with `LIMIT`.
 
 GraphForge is an embedded notebook/research workbench with a
-[Levels 01–06](../../reference/scale-limits.md) product posture (V &lt; 10M as the
-primary interactive band). Proven fixed-hop `LIMIT` evidence on the release path
-reaches LiveJournal (~4.0M nodes / ~34.7M edges). WDC is therefore an **external
-escalation ladder**, not a claim that GraphForge is a billion-edge analytics
-engine.
+[GSI Levels 01–06](../../reference/graph-scale-index.md) product posture
+(V &lt; 10M as the primary interactive band; see also
+[scale limits](../../reference/scale-limits.md)). Proven fixed-hop `LIMIT`
+evidence on the release path reaches LiveJournal (~4.0M nodes / ~34.7M edges,
+`GD-06-MD-D00`). WDC is therefore an **external escalation ladder on the GSI
+axis**, not a claim that GraphForge is a billion-edge analytics engine.
+
+**Disk-limited framing:** with DataFusion over Parquet, graph size is
+**disk-limited**; RAM holds working sets. Large-tier failures and optimization
+work are the point of the scale track — execute that track in an
+[external scale harness](../../reference/graph-scale-index.md#external-scale-harness-contract),
+not in GraphForge core CI.
+
+**Spec vs execution:** this guide plus the
+[Graph Scale Index](../../reference/graph-scale-index.md) define the **contract**
+(tiers, GSI placement, first-fail, acceptance, fetch/mirror expectations).
+Thin reference fetch/sync helpers may live in this repo; the **orchestrator /
+runner that executes T0→T6 belongs in an external scale harness repository**.
 
 **Ladder policy:** run the full ordered ladder **T0 → T6** from the beginning.
 Each tier must meet its acceptance criteria before the next is attempted. On the
@@ -123,17 +139,23 @@ PageRank as a pass criterion.
 
 ### Exact tier order
 
-| Step | Tier | Dataset (exact variant) | Approx. size | Format notes |
-|------|------|-------------------------|--------------|--------------|
-| 1 | **T0** | WDC example Index/Arc | 106 / 141 | Index/Arc |
-| 2 | **T1** | 2012 PLD Index/Arc **head sample** | ~100K nodes / ~0.5–2M arcs (cap) | Cap via ingest tool |
-| 3 | **T2** | 2012 PLD Index/Arc **larger shard** | ~1M nodes / ~5–15M arcs (cap) | Cap via ingest tool |
-| 4 | **T3** | Full **2014 PLD** | ~13M / ~56M | WebGraph → Arc conversion required |
-| 5 | **T4** | Full **2012 PLD** | ~43M / ~623M | Index/Arc published |
-| 6 | **T5a** | Full **2014 Host** | ~22M / ~123M | Index + WebGraph (no Index/Arc arcs) |
-| 7 | **T5b** | Full **2012 Host** | ~101M / ~2,043M | Index/Arc published |
-| 8 | **T6a** | Full **2014 Page** | ~1,727M / ~64,422M | Sharded Index/Arc (+ WebGraph) |
-| 9 | **T6b** | Full **2012 Page** | ~3,563M / ~128,736M | Sharded Index/Arc (+ WebGraph) |
+| Step | Tier | Dataset (exact variant) | Approx. size | GSI (approx.) | Format notes |
+|------|------|-------------------------|--------------|---------------|--------------|
+| 1 | **T0** | WDC example Index/Arc | 106 / 141 | `GD-02-XS-D01` | Index/Arc |
+| 2 | **T1** | 2012 PLD Index/Arc **head sample** | ~100K nodes / ~0.5–2M arcs (cap) | `GD-05-SM-D00` | Cap via ingest tool |
+| 3 | **T2** | 2012 PLD Index/Arc **larger shard** | ~1M nodes / ~5–15M arcs (cap) | `GD-06-MD-D00` | Cap via ingest tool |
+| 4 | **T3** | Full **2014 PLD** | ~13M / ~56M | `GD-07-LG-D00` | WebGraph → Arc conversion required |
+| 5 | **T4** | Full **2012 PLD** | ~43M / ~623M | `GD-07-LG-D00` | Index/Arc published |
+| 6 | **T5a** | Full **2014 Host** | ~22M / ~123M | `GD-07-LG-D00` | Index + WebGraph; **smaller V than T4** |
+| 7 | **T5b** | Full **2012 Host** | ~101M / ~2,043M | `GD-08-XL-D00` | Index/Arc published |
+| 8 | **T6a** | Full **2014 Page** | ~1,727M / ~64,422M | `GD-09-2XL-D00` | Sharded Index/Arc (+ WebGraph) |
+| 9 | **T6b** | Full **2012 Page** | ~3,563M / ~128,736M | `GD-09-2XL-D00` | Sharded Index/Arc (+ WebGraph) |
+
+GSI labels follow the [Graph Scale Index](../../reference/graph-scale-index.md)
+(directed `GD-…`). Ladder **order** is authoritative for first-fail escalation;
+GSI only profiles shape. T5a sits in the same `LG` band as T3/T4 but has fewer
+nodes than T4 — do not reorder by GSI Size Tag. Full crosswalk with Graph500
+SCALE notches: [GSI × Graph500 × WDC](../../reference/graph-scale-index.md#one-ladder-gsi--graph500--wdc).
 
 Treat **T5a → T5b** as ordered sub-steps of T5, and **T6a → T6b** as ordered
 sub-steps of T6: failing T5a stops before T5b; failing T6a stops before T6b.
@@ -179,14 +201,16 @@ product support.
 
 ## Retrieval (easy and reliable)
 
-Use the checked-in helper. It resumes interrupted downloads (`curl -C -`),
-verifies `Content-Length` when the server provides it, and checks published
-MD5 sums where WDC publishes them.
+Use the checked-in **reference** fetch helper. It resumes interrupted downloads
+(`curl -C -`), verifies `Content-Length` when the server provides it, and checks
+published MD5 sums where WDC publishes them. The helper is a client for the
+artifact contract — **not** the T0→T6 orchestrator.
 
 **Not part of normal CI.** WDC PLD+/Host/Page packs are too large for GitHub
-Actions / LFS / Release assets. Fetch + ladder runs happen on dedicated scale
-runners (or maintainer machines) against a CurateLabs-controlled mirror when
-available, with optional WDC origin fallback.
+Actions / LFS / Release assets. Ladder **execution** belongs in an
+[external scale harness](../../reference/graph-scale-index.md#external-scale-harness-contract)
+on dedicated runners (or maintainer machines), using a CurateLabs-controlled
+mirror when available, with optional WDC origin fallback.
 
 ### Quick start
 
@@ -210,13 +234,14 @@ python3 scripts/datasets/fetch_wdc_hyperlink.py --verify-urls
 
 Default cache root: `${GF_WDC_CACHE:-$HOME/.cache/graphforge/wdc-hyperlink}`.
 
-### Controlled mirror (recommended for scale runners)
+### Controlled mirror (recommended for the external harness)
 
 WDC origin hosts are public research infrastructure: they can rate-limit, require
 a Referer, or become slow for multi-GiB resumes. GraphForge/CurateLabs should
-host a **flat object-storage mirror** of the ladder artifacts we actually run,
-so first-fail spikes ([#401](https://github.com/CurateLabs/graphforge/issues/401))
-have a reliable fetch path under our control.
+host a **flat object-storage mirror** of the ladder artifacts the harness
+actually runs, so first-fail spikes
+([#401](https://github.com/CurateLabs/graphforge/issues/401), executed outside
+this repo) have a reliable fetch path under our control.
 
 **Provider:** prefer **Cloudflare R2** (S3-compatible API, **zero egress** to the
 internet, public custom domain or `r2.dev` for anonymous `curl`). AWS S3 is a
@@ -264,7 +289,10 @@ override — not the default path.
 | `GF_WDC_MIRROR_S3_URI` | Maintainer upload dest, e.g. `s3://graphforge-wdc/wdc-hyperlink` |
 | `GF_WDC_MIRROR_ENDPOINT` | S3 API endpoint (R2: `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`) |
 
-#### Scale-runner fetch (mirror-only)
+#### External-harness fetch (mirror-only)
+
+Copy-pasteable reference commands for an external harness or operator machine
+(orchestration, first-fail, and evidence packaging remain outside this repo):
 
 ```bash
 export GF_WDC_CACHE="${GF_WDC_CACHE:-$HOME/.cache/graphforge/wdc-hyperlink}"
@@ -274,7 +302,7 @@ export GF_WDC_SOURCE=mirror-only
 # T0 smoke
 python3 scripts/datasets/fetch_wdc_hyperlink.py --artifact example
 
-# Ladder PLD packs (only when the runner is executing those tiers)
+# Ladder PLD packs (only when the harness is executing those tiers)
 python3 scripts/datasets/fetch_wdc_hyperlink.py \
   --artifact pld-2014-webgraph --artifact pld-2012
 
@@ -284,8 +312,8 @@ python3 scripts/datasets/fetch_wdc_hyperlink.py --verify-urls \
 ```
 
 `mirror-first` tries the mirror, then falls back to WDC origin (with Referer).
-Use `mirror-only` on controlled scale runs so a missing mirror object fails loud
-instead of silently pulling terabytes from Mannheim.
+Use `mirror-only` on controlled harness runs so a missing mirror object fails
+loud instead of silently pulling terabytes from Mannheim.
 
 #### Maintainer sync (bootstrap once, refresh as needed)
 
@@ -326,7 +354,8 @@ Approximate compressed footprint / storage (R2 ~$0.015/GB-month; egress $0):
   ≈ 3.3 GiB → on the order of **$0.05/month**.
 - **AWS S3 Standard egress:** ~$0.09/GB → one full 2012 Host pull ≈ **$0.85**;
   repeated Page pulls dominate — avoid for runner downloads.
-- **Normal CI:** must not download WDC packs. Keep this track on dedicated runners.
+- **Normal CI (this repo):** must not download WDC packs or run the ladder.
+  Keep execution on the external scale harness / dedicated runners.
 
 ### Recommended cache layout
 
@@ -486,17 +515,19 @@ conversion when required; reopen count mismatch; LIMIT path unavailable after CS
 warm attempt; wall-time or RSS beyond the operator’s pre-declared machine
 envelope for that run.
 
-Attach per-tier green/red evidence to
+Attach per-tier green/red evidence (from the **external scale harness**) to
 [#401](https://github.com/CurateLabs/graphforge/issues/401) /
 [#402](https://github.com/CurateLabs/graphforge/issues/402). Optional for M4 exit
 [#345](https://github.com/CurateLabs/graphforge/issues/345); **not** required to
 close [#335](https://github.com/CurateLabs/graphforge/issues/335). First-fail stop
-at or before Host/Page is a valid outcome — not a documentation gap.
+at or before Host/Page is a valid outcome — not a documentation gap. Do not
+treat GraphForge core CI green as ladder evidence.
 
 ---
 
 ## Related documentation
 
+- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — canonical size axis; Graph500 × WDC crosswalk; external harness contract
 - [Scale limits](../../reference/scale-limits.md) — LIMIT contract and LiveJournal anchors
 - [Graph construction](../graph-construction.md) — bulk Arrow publish
 - [Exploratory analyst](../exploratory-analyst.md) — exploratory ontology mode

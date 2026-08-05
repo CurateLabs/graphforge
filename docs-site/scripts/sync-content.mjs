@@ -101,6 +101,7 @@ const PAGES = [
   'reference/opencypher-compatibility.md',
   'reference/tck-compliance.md',
   'reference/scale-limits.md',
+  'reference/graph-scale-index.md',
   'reference/load-matrix-results.md',
   'reference/column-naming-behavior.md',
   'development/contributing.md',

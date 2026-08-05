@@ -44,8 +44,10 @@ Large collection of diverse network datasets.
 
 #### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md)
 Public Common Crawl hyperlink graphs (2012/2014) at Page / Host / PLD aggregation.
-Research and scale-validation track with a full T0→T6 first-fail escalation ladder
-and a resumable retrieval helper — not a shipped catalog loader.
+Research scale track: T0→T6 first-fail ladder **spec** mapped onto the
+[Graph Scale Index](../../reference/graph-scale-index.md), plus a thin
+reference fetch helper. Ladder orchestration runs in an **external scale
+harness** — not GraphForge core CI / not a shipped catalog loader.
 
 **Use cases:** External scale escalation beyond LiveJournal; LIMIT/reopen evidence
 under first-fail (stop at the first tier that fails acceptance)
@@ -213,11 +215,12 @@ If dataset import fails:
 
 ## Related Documentation
 
+- [Graph Scale Index (GSI)](../../reference/graph-scale-index.md) — size axis; Graph500 × WDC crosswalk; external harness contract
 - [Cypher Script Loading](cypher-script-loading.md) - Planned .cypher / .cql script loading
 - [SNAP Datasets](snap.md) - Planned SNAP catalog
 - [LDBC Datasets](ldbc.md) - Planned
 - [NetworkRepository Datasets](networkrepository.md) - Planned
-- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Research scale track
+- [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) - Research scale ladder spec + reference fetch
 - [API Reference](../../reference/api.md)
 
 ## License Information
@@ -229,4 +232,4 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 - Explore [SNAP](snap.md) for research and network analysis datasets
 - Try [LDBC](ldbc.md) for benchmarking (coming soon)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
-- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) for the T0→T6 first-fail web-scale ladder
+- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) and [GSI](../../reference/graph-scale-index.md) for the T0→T6 / Graph500 scale ladder **spec** (execution elsewhere)

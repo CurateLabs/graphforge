@@ -151,6 +151,10 @@ export default defineConfig({
             { label: 'TCK Compliance', slug: 'reference/tck-compliance' },
             { label: 'Scale Limits', slug: 'reference/scale-limits' },
             {
+              label: 'Graph Scale Index (GSI)',
+              slug: 'reference/graph-scale-index',
+            },
+            {
               label: 'Load Matrix Results',
               slug: 'reference/load-matrix-results',
             },

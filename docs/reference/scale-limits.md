@@ -2,11 +2,19 @@
 
 **Last updated:** 2026-07-27 (v0.5.0)
 
-GraphForge is designed for research and notebook workflows on small-to-medium
-graphs. This document describes practical limits on the v0.5.0 Rust core,
-distinguishes between query types, and explains why **edge count matters more
-than node count** for most operations. Do not compare wall-clock numbers across
+GraphForge is designed for research and notebook workflows on
+[GSI](graph-scale-index.md) Levels **01–06** (`XS`–`MD`, V &lt; 10M). This
+document describes practical limits on the v0.5.0 Rust core, distinguishes
+between query types, and explains why **edge count matters more than node
+count** for most operations. Profile concrete datasets with a full Graph Scale
+Index (for example `GD-06-MD-D00`). Do not compare wall-clock numbers across
 machines without matching hardware and graph layout.
+
+With DataFusion over Parquet, large-graph work is **disk-limited** (RAM for
+working sets). Escalation past Levels 01–06 (WDC T3+, Graph500 SCALE ≥ 24) is a
+**spec + external harness** track — see
+[GSI × Graph500 × WDC](graph-scale-index.md#one-ladder-gsi--graph500--wdc) — not
+normal GraphForge CI.
 
 ## Rust 0.5.0 Fixed-Hop LIMIT Contract
 
@@ -131,7 +139,8 @@ artifact. Until then that page stays an explicit pending placeholder.
 
 ## Further Reading
 
-- [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — external web-graph ladder T0→T6 with first-fail stop (research track; Host/Page are later steps, not deferred non-goals)
+- [Graph Scale Index (GSI)](graph-scale-index.md) — size axis, Graph500 notches, WDC placement, external harness contract
+- [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — T0→T6 first-fail ladder spec + reference fetch (execution in external harness; Host/Page are later steps, not deferred non-goals)
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
 - [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce
