@@ -4,10 +4,10 @@
 > catalog loader. Use the retrieval helper and construction APIs below. Related
 > issues: [#399](https://github.com/CurateLabs/graphforge/issues/399) (this guide +
 > retrieval), [#400](https://github.com/CurateLabs/graphforge/issues/400) (ingest),
-> [#401](https://github.com/CurateLabs/graphforge/issues/401) (escalation spike),
-> [#402](https://github.com/CurateLabs/graphforge/issues/402) (CSR/reopen costs).
-> Host/Page full success is deferred ([#403](https://github.com/CurateLabs/graphforge/issues/403),
-> [#404](https://github.com/CurateLabs/graphforge/issues/404)).
+> [#401](https://github.com/CurateLabs/graphforge/issues/401) (first-fail ladder spike),
+> [#402](https://github.com/CurateLabs/graphforge/issues/402) (CSR/reopen costs),
+> [#403](https://github.com/CurateLabs/graphforge/issues/403) (Host T5),
+> [#404](https://github.com/CurateLabs/graphforge/issues/404) (Page T6).
 
 [Web Data Commons (WDC) Hyperlink Graphs](https://webdatacommons.org/hyperlinkgraph/)
 are public directed hyperlink graphs extracted from Common Crawl (2012 and 2014).
@@ -22,9 +22,12 @@ reaches LiveJournal (~4.0M nodes / ~34.7M edges). WDC is therefore an **external
 escalation ladder**, not a claim that GraphForge is a billion-edge analytics
 engine.
 
-**Primary stretch target:** 2014 Pay-Level-Domain (PLD) graph — ~13M nodes /
-~56M arcs. Full Host and Page success are explicit non-goals for the current
-posture.
+**Ladder policy:** run the full ordered ladder **T0 → T6** from the beginning.
+Each tier must meet its acceptance criteria before the next is attempted. On the
+**first failed tier**, stop escalation — do not proceed to larger tiers. Record
+which tier failed and why. Host (T5) and Page (T6) are **active later steps** in
+that ladder; first-fail is the control for resource risk, not a promise that
+Host/Page will pass.
 
 ---
 
@@ -81,8 +84,9 @@ tab-separated arcs without a WebGraph conversion step.
   understands BVGraph — see [#400](https://github.com/CurateLabs/graphforge/issues/400) /
   [#401](https://github.com/CurateLabs/graphforge/issues/401).
 - **2014 / 2012 Page:** Index/Arc shards via `index.list.txt` / `arc.list.txt`
-  (hundreds of parts). Use only as **sampling** material — never as a full-Page
-  success criterion ([#404](https://github.com/CurateLabs/graphforge/issues/404)).
+  (hundreds of parts). Full-Page ingest is ladder step **T6** and is attempted
+  only after T0–T5 are green; expect extreme disk/RSS risk and likely first-fail
+  stop ([#404](https://github.com/CurateLabs/graphforge/issues/404)).
 
 Tiny format samples from WDC (106 nodes / 141 arcs):
 
@@ -94,19 +98,56 @@ Tiny format samples from WDC (106 nodes / 141 arcs):
 
 ## Tiered scale escalation strategy
 
-Escalate only when the previous tier is green. Early-tier success means
-**neighborhood-proportional Cypher with `LIMIT`**, project **reopen**, and
-**disk/RSS** evidence — not full-graph PageRank or Host/Page completion.
+### First-fail policy (authoritative)
 
-| Tier | Dataset | Approx. size | Prerequisites / exit from prior | Supported workloads | Resource envelope (guidance) | Stop / non-goals |
-|------|---------|--------------|----------------------------------|---------------------|------------------------------|------------------|
-| **T0** | WDC example Index/Arc | 106 nodes / 141 arcs | None | Full LIMIT Cypher; smoke ingest; reopen | Seconds; &lt; 1 GB disk/RSS | Do not skip straight to PLD |
-| **T1** | Head sample of 2012 PLD Index/Arc | ~100K nodes / ~0.5–2M arcs (cap) | T0 green | LIMIT 1–2 hop; optional CSR warm | Low tens of GB disk headroom; RSS bounded by batching | No analyst full-graph verbs required |
-| **T2** | Larger 2012 PLD shard | ~1M nodes / ~5–15M arcs (cap) | T1 green LIMIT + reopen | LIMIT traversal; CSR warm; disk/RSS ledger | Comparable to mid LiveJournal path; expect multi-GB project | Stop if RSS/disk exceeds machine budget |
-| **T3** | Full **2014 PLD** | ~13M nodes / ~56M arcs | T2 green; WebGraph→Arc conversion path documented/executed | LIMIT Cypher stretch; reopen; CSR cost ([#402](https://github.com/CurateLabs/graphforge/issues/402)) | Beyond Levels 01–06 node band; multi-tens of GB likely; UUID map + Parquet dominate | **No** Host/Page; **no** page-scale PageRank as pass |
-| **T4** | Optional full **2012 PLD** | ~43M nodes / ~623M arcs | Explicit go after T3; #336/#338/#340 dispositions | LIMIT-only exploration if attempted | Far beyond current posture; arc download alone ~2.7 GiB compressed | Default **stop**; treat as research exception |
-| **T5** | **Host** (2014 then 2012) | 22M/123M → 101M/2B | Deferred [#403](https://github.com/CurateLabs/graphforge/issues/403) | N/A until posture change | — | **Non-goal** now |
-| **T6** | **Page** | 1.7B/64B → 3.5B/128B | Deferred [#404](https://github.com/CurateLabs/graphforge/issues/404) | Shard sampling only under T1-style caps | Page shard lists are multi-hundred files / hundreds of GB | **Non-goal** for full graph |
+1. **Order is fixed:** attempt tiers strictly **T0 → T1 → T2 → T3 → T4 → T5 → T6**
+   (year sub-order inside T5/T6 is fixed below). Do not skip ahead.
+2. **Prior green required:** a tier may start only after every earlier tier met its
+   acceptance criteria (see [Validation](#validation--acceptance-per-tier)).
+3. **Stop on first fail:** if a tier fails acceptance (ingest OOM, disk ceiling,
+   CSR/reopen failure, LIMIT contract miss, missing conversion path, or explicit
+   resource stop), **stop the ladder**. Do not attempt any larger tier.
+4. **Record the stop:** cite the failed tier id, failure class, and measured
+   disk/RSS/time (or the prerequisite that blocked start). Attach to
+   [#401](https://github.com/CurateLabs/graphforge/issues/401).
+5. **Honesty over ambition:** Host/Page remain on the ladder so escalation is not
+   artificially capped at PLD, but first-fail — not pretend pass — governs
+   whether they ever run. Resource envelopes below are guidance; machine budget
+   may force an earlier stop.
+
+Early- and mid-tier success means **neighborhood-proportional Cypher with
+`LIMIT`**, project **reopen**, and **disk/RSS** evidence — not full-graph
+PageRank as a pass criterion.
+
+### Exact tier order
+
+| Step | Tier | Dataset (exact variant) | Approx. size | Format notes |
+|------|------|-------------------------|--------------|--------------|
+| 1 | **T0** | WDC example Index/Arc | 106 / 141 | Index/Arc |
+| 2 | **T1** | 2012 PLD Index/Arc **head sample** | ~100K nodes / ~0.5–2M arcs (cap) | Cap via ingest tool |
+| 3 | **T2** | 2012 PLD Index/Arc **larger shard** | ~1M nodes / ~5–15M arcs (cap) | Cap via ingest tool |
+| 4 | **T3** | Full **2014 PLD** | ~13M / ~56M | WebGraph → Arc conversion required |
+| 5 | **T4** | Full **2012 PLD** | ~43M / ~623M | Index/Arc published |
+| 6 | **T5a** | Full **2014 Host** | ~22M / ~123M | Index + WebGraph (no Index/Arc arcs) |
+| 7 | **T5b** | Full **2012 Host** | ~101M / ~2,043M | Index/Arc published |
+| 8 | **T6a** | Full **2014 Page** | ~1,727M / ~64,422M | Sharded Index/Arc (+ WebGraph) |
+| 9 | **T6b** | Full **2012 Page** | ~3,563M / ~128,736M | Sharded Index/Arc (+ WebGraph) |
+
+Treat **T5a → T5b** as ordered sub-steps of T5, and **T6a → T6b** as ordered
+sub-steps of T6: failing T5a stops before T5b; failing T6a stops before T6b.
+Failing any PLD tier (T0–T4) stops before Host/Page.
+
+### Tier table (workloads and envelopes)
+
+| Tier | Prerequisites | Supported workloads | Resource envelope (guidance) | Failure / stop examples |
+|------|---------------|---------------------|------------------------------|-------------------------|
+| **T0** | None | LIMIT Cypher; smoke ingest; reopen | Seconds; &lt; 1 GB disk/RSS | Skip to PLD without T0 green |
+| **T1** | T0 green | LIMIT 1–2 hop; optional CSR warm | Low tens of GB disk headroom; RSS bounded by batching | Cap ingest fails; LIMIT/reopen miss |
+| **T2** | T1 green LIMIT + reopen | LIMIT traversal; CSR warm; disk/RSS ledger | Mid LiveJournal class; multi-GB project | RSS/disk over machine budget |
+| **T3** | T2 green; WebGraph→Arc path executed | LIMIT stretch; reopen; CSR cost ([#402](https://github.com/CurateLabs/graphforge/issues/402)) | Beyond V &lt; 10M band; multi-tens of GB likely | Conversion missing; CSR/reopen fail |
+| **T4** | T3 green | LIMIT-only exploration | Arc download ~2.7 GiB compressed; far beyond Levels 01–06 | Disk/RSS/time ceiling |
+| **T5a/b** | T4 green ([#403](https://github.com/CurateLabs/graphforge/issues/403)) | LIMIT + reopen if attempted | Extreme; 2012 Host arcs alone ~9 GiB compressed | First-fail stop expected if envelopes breach |
+| **T6a/b** | T5b green ([#404](https://github.com/CurateLabs/graphforge/issues/404)) | LIMIT + reopen if attempted | Hundreds of shard files; hundreds of GB–TB class | First-fail stop expected; do not claim success without evidence |
 
 ### Workload classes
 
@@ -129,6 +170,8 @@ From [scale limits](../../reference/scale-limits.md) (release fixed-hop `LIMIT 1
 
 WDC T2 should look operationally similar to the LiveJournal class for LIMIT work
 if ingest and CSR succeed. T3 is a deliberate stretch past the V &lt; 10M band.
+T5–T6 are on the ladder for completeness under first-fail; they are not implied
+product support.
 
 ---
 
@@ -220,7 +263,7 @@ Pages: [2012-08 download](https://webdatacommons.org/hyperlinkgraph/2012-08/down
 
 Pages: [2014-04 download](https://webdatacommons.org/hyperlinkgraph/2014-04/download.html).
 
-#### Page shard lists (sampling only)
+#### Page shard lists (T6; fetch only after T0–T5 green)
 
 ```bash
 # 2014: 52 index parts, 479 arc parts
@@ -233,6 +276,7 @@ wget -i http://webdatacommons.org/hyperlinkgraph/2012-08/data/arc.list.txt
 ```
 
 Or: `python3 scripts/datasets/fetch_wdc_hyperlink.py --artifact page-lists-2014`.
+Do not download full Page shards “just in case” before earlier tiers are green.
 
 ### Retry / resume
 
@@ -255,20 +299,24 @@ terms for the graph files themselves.
 There is **no** shipped WDC loader in `graphforge-io` today. Follow the public
 bulk construction path ([graph construction](../graph-construction.md)):
 
-1. **Retrieve** Index/Arc (T0–T2 from example / 2012 PLD; T3 after WebGraph→Arc).
+1. **Retrieve** artifacts for the **current** ladder tier only (T0–T2: example /
+   capped 2012 PLD Index/Arc; T3/T5a: WebGraph→Arc where Index/Arc arcs are
+   unpublished; T4/T5b: 2012 Index/Arc; T6: page shard lists after T5 green).
 2. **Offline convert** streaming TSV → Arrow `RecordBatch`es:
    - Nodes: label e.g. `PLD` / `Host` / `Page`; property `wdc_id` (int) and/or
      `name` (PLD string from index).
    - Edges: type e.g. `LINKS_TO`; endpoints as committed node UUIDs.
 3. **UUID mapping:** GraphForge identity is UUIDv7 at the API. Maintain a
    durable `wdc_id → uuid` map (memory-mapped or on-disk) — this dominates RAM
-   at PLD scale if held naïvely as a Python dict.
+   at PLD+ scale if held naïvely as a Python dict.
 4. **Publish** chunked batches via `publish_bulk_nodes` / `publish_bulk_edges`
    (or Python `add_nodes` / `add_edges`) with stable UUIDv7 `operation_uuid`s.
 5. **Ontology:** use **exploratory** mode for raw web graphs
    ([exploratory analyst](../exploratory-analyst.md)).
 6. **CSR warm:** `index_adjacency()` / inspect before LIMIT benches.
 7. **Reopen:** `GraphForge(project_dir)` and re-count nodes/edges.
+8. **Escalate or stop:** apply the [first-fail policy](#first-fail-policy-authoritative)
+   before fetching or ingesting the next tier.
 
 Tracked implementation: [#400](https://github.com/CurateLabs/graphforge/issues/400).
 
@@ -293,18 +341,32 @@ table = forge.execute("""
 
 ## Validation / acceptance per tier
 
-| Tier | Green means |
-|------|-------------|
-| T0 | Example fetched (106/141); ingest + reopen counts match; `LIMIT` query returns |
-| T1 | Capped 2012 PLD sample ingested with streaming batches; LIMIT 1-hop + 2-hop; RSS/disk recorded |
-| T2 | Larger shard; CSR warm completes or fails with explicit ceiling citation (#336); LIMIT evidence; reopen OK |
-| T3 | Full 2014 PLD only after conversion path; LIMIT + reopen + resource ledger; **no** Host/Page |
-| T4+ | Written exception + machine budget; default is **do not run** |
+A tier is **green** only when all rows below for that tier succeed. A **red**
+(fail) on any criterion ends the ladder at that tier (first-fail).
 
-Attach evidence to [#401](https://github.com/CurateLabs/graphforge/issues/401) /
+| Tier | Green (acceptance) criteria |
+|------|-----------------------------|
+| **T0** | Example fetched (106/141); ingest + reopen counts match; `LIMIT` query returns |
+| **T1** | Capped 2012 PLD sample ingested with streaming batches; LIMIT 1-hop + 2-hop; RSS/disk recorded |
+| **T2** | Larger shard; CSR warm completes **or** fails with explicit ceiling citation (#336) treated as tier fail; LIMIT evidence; reopen OK |
+| **T3** | Full 2014 PLD after conversion path; LIMIT + reopen + resource ledger; counts match published scale (± documented sample policy) |
+| **T4** | Full 2012 PLD; LIMIT + reopen + resource ledger within machine budget |
+| **T5a** | Full 2014 Host after conversion path; LIMIT + reopen + resource ledger |
+| **T5b** | Full 2012 Host Index/Arc; LIMIT + reopen + resource ledger |
+| **T6a** | Full 2014 Page (all shards or documented complete ingest); LIMIT + reopen + resource ledger |
+| **T6b** | Full 2012 Page; LIMIT + reopen + resource ledger |
+
+**Red / stop examples (any one):** OOM or disk exhaustion; missing WebGraph→Arc
+conversion when required; reopen count mismatch; LIMIT path unavailable after CSR
+warm attempt; wall-time or RSS beyond the operator’s pre-declared machine
+envelope for that run.
+
+Attach per-tier green/red evidence to
+[#401](https://github.com/CurateLabs/graphforge/issues/401) /
 [#402](https://github.com/CurateLabs/graphforge/issues/402). Optional for M4 exit
 [#345](https://github.com/CurateLabs/graphforge/issues/345); **not** required to
-close [#335](https://github.com/CurateLabs/graphforge/issues/335).
+close [#335](https://github.com/CurateLabs/graphforge/issues/335). First-fail stop
+at or before Host/Page is a valid outcome — not a documentation gap.
 
 ---
 

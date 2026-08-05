@@ -131,7 +131,7 @@ artifact. Until then that page stays an explicit pending placeholder.
 
 ## Further Reading
 
-- [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — tiered external web-graph escalation (research track)
+- [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — external web-graph ladder T0→T6 with first-fail stop (research track; Host/Page are later steps, not deferred non-goals)
 - [Install footprint](../guide/installation.md#install-footprint) — download and on-disk package sizes for Python/Node (not query scale)
 - [Release Load Matrix Results](load-matrix-results.md) — evidence landing for accepted matrix runs
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — contracts, executor, reproduce

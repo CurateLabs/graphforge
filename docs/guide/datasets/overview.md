@@ -44,10 +44,11 @@ Large collection of diverse network datasets.
 
 #### [WDC Hyperlink Graphs](wdc-hyperlink-graph.md)
 Public Common Crawl hyperlink graphs (2012/2014) at Page / Host / PLD aggregation.
-Research and scale-validation track with a tiered escalation strategy and a
-resumable retrieval helper — not a shipped catalog loader.
+Research and scale-validation track with a full T0→T6 first-fail escalation ladder
+and a resumable retrieval helper — not a shipped catalog loader.
 
 **Use cases:** External scale escalation beyond LiveJournal; LIMIT/reopen evidence
+under first-fail (stop at the first tier that fails acceptance)
 
 
 ## Quick Start
@@ -228,4 +229,4 @@ Each dataset has its own license. Always check the dataset metadata for licensin
 - Explore [SNAP](snap.md) for research and network analysis datasets
 - Try [LDBC](ldbc.md) for benchmarking (coming soon)
 - Check [NetworkRepository](networkrepository.md) for diverse networks (coming soon)
-- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) for tiered web-scale escalation
+- See [WDC Hyperlink Graphs](wdc-hyperlink-graph.md) for the T0→T6 first-fail web-scale ladder
