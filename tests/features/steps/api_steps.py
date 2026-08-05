@@ -901,9 +901,7 @@ def when_find_embedding(ctx, label, space):
 def when_find_text_vector(ctx, query_text, label):
     vec = ctx.extra.get("vector")
     space = ctx.extra.get("space", "sbert")
-    ctx.result, ctx.error = _catch(
-        ctx.forge.find, query_text, label=label, vector=vec, space=space
-    )
+    ctx.result, ctx.error = _catch(ctx.forge.find, query_text, label=label, vector=vec, space=space)
 
 
 @when('I find with no query and no vector in label "Paper"')
@@ -941,9 +939,7 @@ def when_find_wrong_dim(ctx, n, label):
     import numpy as np
 
     space = ctx.extra.get("space", "sbert")
-    ctx.result, ctx.error = _catch(
-        ctx.forge.find, label=label, vector=np.ones(n), space=space
-    )
+    ctx.result, ctx.error = _catch(ctx.forge.find, label=label, vector=np.ones(n), space=space)
 
 
 @when(parsers.parse('I index label "{label}" on properties "{p1}" and "{p2}"'))
