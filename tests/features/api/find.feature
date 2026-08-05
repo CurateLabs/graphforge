@@ -14,14 +14,12 @@ Feature: Find API
     And the table has column "matched_on"
     And the first row value for "matched_on" is "text"
 
-  @excluded-api-bdd @issue-352
   Scenario: find by vector returns score and matched_on set to vector
     Given a graph with a Paper node that has a stored vector embedding
     When I find by the stored vector in label "Paper"
     Then the table has column "score"
     And the first row value for "matched_on" is "vector"
 
-  @excluded-api-bdd @issue-352
   Scenario: find with text and vector returns matched_on set to text+vector for fused results
     Given a graph with a Paper node titled "Graph Neural Networks" and a stored vector embedding
     When I find "graph neural networks" with the stored vector in label "Paper"

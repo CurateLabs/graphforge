@@ -7,7 +7,6 @@ Feature: Index API
     And I find "neural networks" in label "Paper"
     Then the result is an Arrow Table with at least 1 row
 
-  @excluded-api-bdd @issue-352
   Scenario: index vector upsert stores a vector for a node
     Given a graph with a Paper node
     And I have stored the node id as "paper_id"
@@ -25,10 +24,9 @@ Feature: Index API
     Then no error is raised
     And find "paper" in label "Paper" returns the same results as after the first index call
 
-  @excluded-api-bdd @issue-352
   Scenario: find reflects nodes added after initial index build
     Given a graph with a Paper node titled "Graph Neural Networks"
-    And I index label "Paper" on property "title"
-    When I add a node with label "Paper" titled "Deep Graph Learning"
+    When I index label "Paper" on property "title"
+    And I add a node with label "Paper" titled "Deep Graph Learning"
     And I find "deep graph" in label "Paper"
     Then the result contains a row with title "Deep Graph Learning"

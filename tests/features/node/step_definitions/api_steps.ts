@@ -311,7 +311,10 @@ Given(
     this.forge = new GraphForge();
     const h = this.forge.addNode("Paper", { title: "Stub Paper" });
     this.nodes["Stub Paper"] = h;
-    this.extra["vector"] = new Array(128).fill(1.0);
+    const vector = new Array(128).fill(1.0);
+    this.extra["vector"] = vector;
+    this.extra["space"] = "sbert";
+    this.forge.index("Paper", { node: h, vector, space: "sbert" });
   },
 );
 
@@ -321,7 +324,10 @@ Given(
     this.forge = new GraphForge();
     const h = this.forge.addNode("Paper", { title });
     this.nodes[title] = h;
-    this.extra["vector"] = new Array(128).fill(1.0);
+    const vector = new Array(128).fill(1.0);
+    this.extra["vector"] = vector;
+    this.extra["space"] = "sbert";
+    this.forge.index("Paper", { node: h, vector, space: "sbert" });
   },
 );
 
@@ -425,7 +431,11 @@ Given(
     this.forge = new GraphForge();
     const h = this.forge.addNode("Paper", { title: "Stub" });
     this.nodes["paper"] = h;
-    this.extra["vector_dim"] = parseInt(nStr, 10);
+    const dims = parseInt(nStr, 10);
+    const vector = new Array(dims).fill(1.0);
+    this.extra["vector_dim"] = dims;
+    this.extra["space"] = "sbert";
+    this.forge.index("Paper", { node: h, vector, space: "sbert" });
   },
 );
 
@@ -914,7 +924,10 @@ When(
 
 When('I find by the stored vector in label "Paper"', function (this: GraphForgeWorld) {
   const vec = this.extra["vector"] as number[];
-  _catch(this, () => this.forge!.find(undefined, "Paper", vec));
+  const space = (this.extra["space"] as string | undefined) ?? "sbert";
+  _catch(this, () =>
+    this.forge!.find(undefined, "Paper", vec, undefined, undefined, undefined, space),
+  );
 });
 
 When(
@@ -931,7 +944,10 @@ When(
   /^I find "([^"]*)" with the stored vector in label "([^"]*)"$/,
   function (this: GraphForgeWorld, query: string, label: string) {
     const vec = this.extra["vector"] as number[];
-    _catch(this, () => this.forge!.find(query, label, vec));
+    const space = (this.extra["space"] as string | undefined) ?? "sbert";
+    _catch(this, () =>
+      this.forge!.find(query, label, vec, undefined, undefined, undefined, space),
+    );
   },
 );
 
@@ -955,7 +971,10 @@ When(
   /^I find by a (\d+)-dimensional vector in label "([^"]*)"$/,
   function (this: GraphForgeWorld, nStr: string, label: string) {
     const vec = new Array(parseInt(nStr, 10)).fill(1.0);
-    _catch(this, () => this.forge!.find(undefined, label, vec));
+    const space = (this.extra["space"] as string | undefined) ?? "sbert";
+    _catch(this, () =>
+      this.forge!.find(undefined, label, vec, undefined, undefined, undefined, space),
+    );
   },
 );
 
@@ -984,9 +1003,13 @@ When(
   function (this: GraphForgeWorld, label: string, nodeKey: string, space: string) {
     const vec = this.extra["embedding"] as number[];
     _catch(this, () => {
-      const nodeId = this.nodes[nodeKey]?.uuid ?? (this.extra[nodeKey] as string | undefined);
-      if (!nodeId) throw new Error(`unknown stored node identifier: ${nodeKey}`);
-      return this.forge!.index(label, { nodeId, vector: vec, space });
+      const node =
+        this.nodes[nodeKey] ??
+        this.nodes["paper"] ??
+        (this.extra[nodeKey] as string | undefined) ??
+        (this.extra["paper_id"] as string | undefined);
+      if (!node) throw new Error(`unknown stored node identifier: ${nodeKey}`);
+      return this.forge!.index(label, { node, vector: vec, space });
     });
   },
 );

@@ -78,16 +78,36 @@ async fn given_paper_node(world: &mut GraphForgeWorld, title: String) {
     let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
     let props = std::collections::HashMap::from([(
         "title".to_owned(),
-        graphforge_api::PropValue::Str(title),
+        graphforge_api::PropValue::Str(title.clone()),
     )]);
-    forge.add_node("Paper", &props).expect("Paper fixture");
+    let handle = forge.add_node("Paper", &props).expect("Paper fixture");
+    world.nodes.insert(title, handle);
     world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with a Paper node that has a stored vector embedding$"#)]
 async fn given_paper_with_vector(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let props = std::collections::HashMap::from([(
+        "title".to_owned(),
+        graphforge_api::PropValue::Str("Stub Paper".into()),
+    )]);
+    let handle = forge.add_node("Paper", &props).expect("Paper fixture");
+    let vector = vec![1.0_f32; 128];
+    forge
+        .index_search(
+            "Paper",
+            graphforge_api::SearchIndexOptions::Vector {
+                node: graphforge_api::NodeSelector::Handle(handle.clone()),
+                vector: vector.clone(),
+                space: "sbert".to_owned(),
+            },
+        )
+        .expect("vector upsert fixture");
+    world.nodes.insert("Stub Paper".into(), handle);
+    world.stored_vector = Some(vector);
+    world.stored_space = Some("sbert".into());
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with (\d+) Paper nodes with similar titles$"#)]
@@ -129,14 +149,21 @@ fn create_papers(world: &mut GraphForgeWorld, count: u32, similar: bool) {
     for index in 0..count {
         let title = if similar {
             format!("Graph paper {index}")
+        } else if count == 1 {
+            "Stub Paper".to_owned()
         } else {
             format!("Paper {index}")
         };
         let props = std::collections::HashMap::from([(
             "title".to_owned(),
-            graphforge_api::PropValue::Str(title),
+            graphforge_api::PropValue::Str(title.clone()),
         )]);
-        forge.add_node("Paper", &props).expect("Paper fixture");
+        let handle = forge.add_node("Paper", &props).expect("Paper fixture");
+        if count == 1 {
+            world.nodes.insert("paper".into(), handle.clone());
+            world.stored_paper_id = Some(handle.uuid.to_string());
+        }
+        world.nodes.insert(title, handle);
     }
     world.forge = Some(forge);
 }
@@ -273,9 +300,28 @@ async fn given_directed_cycle(world: &mut GraphForgeWorld) {
 }
 
 #[given(regex = r#"^a graph with Paper nodes indexed with (\d+)-dimensional vectors$"#)]
-async fn given_papers_with_vectors(world: &mut GraphForgeWorld, _dims: u32) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+async fn given_papers_with_vectors(world: &mut GraphForgeWorld, dims: u32) {
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let props = std::collections::HashMap::from([(
+        "title".to_owned(),
+        graphforge_api::PropValue::Str("Stub".into()),
+    )]);
+    let handle = forge.add_node("Paper", &props).expect("Paper fixture");
+    let vector = vec![1.0_f32; dims as usize];
+    forge
+        .index_search(
+            "Paper",
+            graphforge_api::SearchIndexOptions::Vector {
+                node: graphforge_api::NodeSelector::Handle(handle.clone()),
+                vector: vector.clone(),
+                space: "sbert".to_owned(),
+            },
+        )
+        .expect("vector upsert fixture");
+    world.nodes.insert("paper".into(), handle);
+    world.stored_vector = Some(vector);
+    world.stored_space = Some("sbert".into());
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a path that does not exist on disk$"#)]
@@ -463,9 +509,28 @@ async fn given_second_component(_world: &mut GraphForgeWorld) {
 }
 
 #[given(regex = r#"^a graph with a Paper node titled "([^"]+)" and a stored vector embedding$"#)]
-async fn given_paper_with_title_and_vector(world: &mut GraphForgeWorld, _title: String) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+async fn given_paper_with_title_and_vector(world: &mut GraphForgeWorld, title: String) {
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let props = std::collections::HashMap::from([(
+        "title".to_owned(),
+        graphforge_api::PropValue::Str(title.clone()),
+    )]);
+    let handle = forge.add_node("Paper", &props).expect("Paper fixture");
+    let vector = vec![1.0_f32; 128];
+    forge
+        .index_search(
+            "Paper",
+            graphforge_api::SearchIndexOptions::Vector {
+                node: graphforge_api::NodeSelector::Handle(handle.clone()),
+                vector: vector.clone(),
+                space: "sbert".to_owned(),
+            },
+        )
+        .expect("vector upsert fixture");
+    world.nodes.insert(title, handle);
+    world.stored_vector = Some(vector);
+    world.stored_space = Some("sbert".into());
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with 2 Person nodes with ids in columns "src_id" and "dst_id"$"#)]
@@ -880,7 +945,7 @@ fn run_cluster(
 
 #[when(regex = r#"^I find "([^"]+)" in label "([^"]+)"$"#)]
 async fn when_find_text(world: &mut GraphForgeWorld, query: String, label: String) {
-    run_find(world, Some(query), label, 10, None);
+    run_find(world, Some(query), label, 10, None, None);
 }
 
 #[when(regex = r#"^I find "([^"]+)" in label "([^"]+)" with limit (\d+)$"#)]
@@ -890,7 +955,7 @@ async fn when_find_text_limit(
     label: String,
     limit: u32,
 ) {
-    run_find(world, Some(query), label, limit as usize, None);
+    run_find(world, Some(query), label, limit as usize, None, None);
 }
 
 fn run_find(
@@ -899,11 +964,13 @@ fn run_find(
     label: String,
     limit: usize,
     vector: Option<Vec<f32>>,
+    space: Option<String>,
 ) {
     let options = graphforge_api::FindOptions {
         query,
         label: Some(label),
         vector,
+        space,
         limit,
         ..Default::default()
     };
@@ -921,24 +988,144 @@ fn run_find(
     }
 }
 
+#[when(regex = r#"^I find by the stored vector in label "Paper"$"#)]
+async fn when_find_stored_vector(world: &mut GraphForgeWorld) {
+    let vector = world.stored_vector.clone().expect("stored vector fixture");
+    let space = world
+        .stored_space
+        .clone()
+        .unwrap_or_else(|| "sbert".to_owned());
+    run_find(world, None, "Paper".into(), 10, Some(vector), Some(space));
+}
+
+#[when(regex = r#"^I find by the stored embedding in label "([^"]+)" in space "([^"]+)"$"#)]
+async fn when_find_stored_embedding(world: &mut GraphForgeWorld, label: String, space: String) {
+    let vector = world
+        .stored_vector
+        .clone()
+        .expect("stored embedding fixture");
+    run_find(world, None, label, 10, Some(vector), Some(space));
+}
+
+#[when(regex = r#"^I find "([^"]+)" with the stored vector in label "([^"]+)"$"#)]
+async fn when_find_text_and_stored_vector(
+    world: &mut GraphForgeWorld,
+    query: String,
+    label: String,
+) {
+    let vector = world.stored_vector.clone().expect("stored vector fixture");
+    let space = world
+        .stored_space
+        .clone()
+        .unwrap_or_else(|| "sbert".to_owned());
+    run_find(world, Some(query), label, 10, Some(vector), Some(space));
+}
+
+#[when(regex = r#"^I find by a (\d+)-dimensional vector in label "([^"]+)"$"#)]
+async fn when_find_wrong_dim(world: &mut GraphForgeWorld, dims: u32, label: String) {
+    let space = world
+        .stored_space
+        .clone()
+        .unwrap_or_else(|| "sbert".to_owned());
+    run_find(
+        world,
+        None,
+        label,
+        10,
+        Some(vec![1.0_f32; dims as usize]),
+        Some(space),
+    );
+}
+
 #[when(regex = r#"^I find with no query and no vector in label "([^"]+)"$"#)]
 async fn when_find_no_args(world: &mut GraphForgeWorld, _label: String) {
-    run_find(world, None, _label, 10, None);
+    run_find(world, None, _label, 10, None, None);
 }
 
 #[when(regex = r#"^I find by an empty vector in label "([^"]+)"$"#)]
 async fn when_find_empty_vector(world: &mut GraphForgeWorld, _label: String) {
-    run_find(world, None, _label, 10, Some(Vec::new()));
+    run_find(world, None, _label, 10, Some(Vec::new()), None);
 }
 
 #[when(regex = r#"^I find by a vector containing NaN in label "([^"]+)"$"#)]
 async fn when_find_nan_vector(world: &mut GraphForgeWorld, _label: String) {
-    run_find(world, None, _label, 10, Some(vec![f32::NAN]));
+    run_find(world, None, _label, 10, Some(vec![f32::NAN]), None);
 }
 
 #[when(regex = r#"^I find by a vector containing infinity in label "([^"]+)"$"#)]
 async fn when_find_inf_vector(world: &mut GraphForgeWorld, _label: String) {
-    run_find(world, None, _label, 10, Some(vec![f32::INFINITY]));
+    run_find(world, None, _label, 10, Some(vec![f32::INFINITY]), None);
+}
+
+#[given(regex = r#"^I have stored the node id as "paper_id"$"#)]
+async fn given_store_paper_id(world: &mut GraphForgeWorld) {
+    let handle = world
+        .nodes
+        .get("paper")
+        .or_else(|| world.nodes.values().next())
+        .expect("paper fixture node");
+    world.stored_paper_id = Some(handle.uuid.to_string());
+}
+
+#[given(regex = r#"^I have an embedding vector stored as "embedding"$"#)]
+async fn given_store_embedding(world: &mut GraphForgeWorld) {
+    world.stored_vector = Some(vec![1.0_f32; 128]);
+}
+
+#[when(
+    regex = r#"^I index label "([^"]+)" storing the vector for node "([^"]+)" in space "([^"]+)"$"#
+)]
+async fn when_index_vector(
+    world: &mut GraphForgeWorld,
+    label: String,
+    node_key: String,
+    space: String,
+) {
+    let handle = world
+        .nodes
+        .get(&node_key)
+        .or_else(|| world.nodes.get("paper"))
+        .cloned()
+        .expect("indexed node fixture");
+    let vector = world
+        .stored_vector
+        .clone()
+        .expect("stored embedding fixture");
+    world.stored_space = Some(space.clone());
+    match world.forge.as_ref().expect("index fixture").index_search(
+        &label,
+        graphforge_api::SearchIndexOptions::Vector {
+            node: graphforge_api::NodeSelector::Handle(handle),
+            vector,
+            space,
+        },
+    ) {
+        Ok(_) => {
+            world.index_calls += 1;
+            world.last_error = None;
+        }
+        Err(error) => world.last_error = Some(error.to_string()),
+    }
+}
+
+#[when(regex = r#"^I add a node with label "Paper" titled "Deep Graph Learning"$"#)]
+async fn when_add_deep_graph_paper(world: &mut GraphForgeWorld) {
+    let props = std::collections::HashMap::from([(
+        "title".to_owned(),
+        graphforge_api::PropValue::Str("Deep Graph Learning".into()),
+    )]);
+    match world
+        .forge
+        .as_ref()
+        .expect("open forge")
+        .add_node("Paper", &props)
+    {
+        Ok(handle) => {
+            world.nodes.insert("Deep Graph Learning".into(), handle);
+            world.last_error = None;
+        }
+        Err(error) => world.last_error = Some(error.to_string()),
+    }
 }
 
 #[when(regex = r#"^I index label "([^"]+)" on properties "([^"]+)" and "([^"]+)"$"#)]
@@ -1526,6 +1713,61 @@ async fn then_nonempty_string(world: &mut GraphForgeWorld) {
         let error = world.last_error.as_deref().expect("selector error");
         assert!(error.contains("validation error"), "{error}");
     }
+}
+
+#[then(regex = r#"^the result contains that node$"#)]
+async fn then_result_contains_that_node(world: &mut GraphForgeWorld) {
+    assert!(
+        world.last_error.is_none(),
+        "unexpected error: {:?}",
+        world.last_error
+    );
+    let expected = world
+        .stored_paper_id
+        .clone()
+        .or_else(|| {
+            world
+                .nodes
+                .get("paper")
+                .map(|handle| handle.uuid.to_string())
+        })
+        .expect("paper_id fixture")
+        .replace('-', "")
+        .to_ascii_lowercase();
+    let batch = result_batch(world);
+    let uuids = batch
+        .column_by_name("node_uuid")
+        .expect("node_uuid column")
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+        .expect("node_uuid FixedSizeBinary");
+    let found = (0..uuids.len()).any(|index| {
+        let actual = uuids
+            .value(index)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        actual == expected
+    });
+    assert!(found, "result omitted node {expected}");
+}
+
+#[then(regex = r#"^the result contains a row with title "([^"]+)"$"#)]
+async fn then_result_contains_title(world: &mut GraphForgeWorld, title: String) {
+    assert!(
+        world.last_error.is_none(),
+        "unexpected error: {:?}",
+        world.last_error
+    );
+    let batch = result_batch(world);
+    let titles = batch
+        .column_by_name("title")
+        .expect("title column")
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("title Utf8");
+    let found = (0..titles.len()).any(|index| titles.value(index) == title);
+    assert!(found, "result omitted title {title}");
 }
 
 #[then(regex = r#"^the result contains "([^"]+)"$"#)]

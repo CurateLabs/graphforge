@@ -77,9 +77,9 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         self.assert_rejected("invalid languages []")
 
     def test_issue_tag_must_match_inventory(self) -> None:
-        path = self.root / "tests/features/api/edge_cases.feature"
-        path.write_text(path.read_text().replace("@issue-352", "@issue-999", 1))
-        self.assert_rejected("missing @issue-352")
+        path = self.root / "tests/features/api/errors.feature"
+        path.write_text(path.read_text().replace("@issue-353", "@issue-999", 1))
+        self.assert_rejected("missing @issue-353")
 
     def test_stale_skip_tag_is_rejected(self) -> None:
         path = self.root / "tests/features/api/analyze.feature"

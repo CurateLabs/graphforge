@@ -205,7 +205,10 @@ def given_paper_with_vector():
     c.forge = GraphForge()
     h = c.forge.add_node("Paper", title="Stub Paper")
     c.nodes["Stub Paper"] = h
-    c.extra["vector"] = np.ones(128, dtype=float)
+    vector = np.ones(128, dtype=float)
+    c.extra["vector"] = vector
+    c.extra["space"] = "sbert"
+    c.forge.index("Paper", node=h, vector=vector.tolist(), space="sbert")
     return c
 
 
@@ -223,7 +226,10 @@ def given_paper_with_title_and_vector(title):
     c.forge = GraphForge()
     h = c.forge.add_node("Paper", title=title)
     c.nodes[title] = h
-    c.extra["vector"] = np.ones(128, dtype=float)
+    vector = np.ones(128, dtype=float)
+    c.extra["vector"] = vector
+    c.extra["space"] = "sbert"
+    c.forge.index("Paper", node=h, vector=vector.tolist(), space="sbert")
     return c
 
 
@@ -363,6 +369,7 @@ def given_persons_no_papers():
     target_fixture="ctx",
 )
 def given_paper_indexed_with_vectors(n):
+    import numpy as np
 
     c = _Ctx()
     c.nodes = {}
@@ -371,7 +378,10 @@ def given_paper_indexed_with_vectors(n):
     c.forge = GraphForge()
     h = c.forge.add_node("Paper", title="Stub")
     c.nodes["paper"] = h
+    vector = np.ones(n, dtype=float)
     c.extra["vector_dim"] = n
+    c.extra["space"] = "sbert"
+    c.forge.index("Paper", node=h, vector=vector.tolist(), space="sbert")
     return c
 
 
@@ -877,7 +887,8 @@ def when_find_text_limit(ctx, query_text, label, limit):
 @when('I find by the stored vector in label "Paper"')
 def when_find_vector(ctx):
     vec = ctx.extra.get("vector")
-    ctx.result, ctx.error = _catch(ctx.forge.find, label="Paper", vector=vec)
+    space = ctx.extra.get("space", "sbert")
+    ctx.result, ctx.error = _catch(ctx.forge.find, label="Paper", vector=vec, space=space)
 
 
 @when(parsers.parse('I find by the stored embedding in label "{label}" in space "{space}"'))
@@ -889,7 +900,10 @@ def when_find_embedding(ctx, label, space):
 @when(parsers.parse('I find "{query_text}" with the stored vector in label "{label}"'))
 def when_find_text_vector(ctx, query_text, label):
     vec = ctx.extra.get("vector")
-    ctx.result, ctx.error = _catch(ctx.forge.find, query_text, label=label, vector=vec)
+    space = ctx.extra.get("space", "sbert")
+    ctx.result, ctx.error = _catch(
+        ctx.forge.find, query_text, label=label, vector=vec, space=space
+    )
 
 
 @when('I find with no query and no vector in label "Paper"')
@@ -926,7 +940,10 @@ def when_find_inf_vector(ctx):
 def when_find_wrong_dim(ctx, n, label):
     import numpy as np
 
-    ctx.result, ctx.error = _catch(ctx.forge.find, label=label, vector=np.ones(n))
+    space = ctx.extra.get("space", "sbert")
+    ctx.result, ctx.error = _catch(
+        ctx.forge.find, label=label, vector=np.ones(n), space=space
+    )
 
 
 @when(parsers.parse('I index label "{label}" on properties "{p1}" and "{p2}"'))
@@ -954,9 +971,19 @@ def when_index_one_prop(ctx, label, prop):
     )
 )
 def when_index_vector(ctx, label, node_key, space):
-    node_id = ctx.extra.get("paper_id") or ctx.extra.get(node_key)
+    node = None
+    if node_key in ctx.nodes:
+        node = ctx.nodes[node_key]
+    elif "paper" in ctx.nodes:
+        node = ctx.nodes["paper"]
+    elif ctx.extra.get("paper_id") is not None:
+        node = ctx.extra["paper_id"]
+    elif ctx.extra.get(node_key) is not None:
+        node = ctx.extra[node_key]
+    elif ctx.nodes:
+        node = next(iter(ctx.nodes.values()))
     vec = ctx.extra.get("embedding")
-    ctx.result, ctx.error = _catch(ctx.forge.index, label, node_id=node_id, vector=vec, space=space)
+    ctx.result, ctx.error = _catch(ctx.forge.index, label, node=node, vector=vec, space=space)
 
 
 @when('I index label "Paper" on an empty properties list')
@@ -964,10 +991,10 @@ def when_index_empty_props(ctx):
     ctx.result, ctx.error = _catch(ctx.forge.index, "Paper", properties=[])
 
 
-@when('I add a node with label "Paper" titled "Deep Graph Learning"')
-def when_add_deep_graph_paper(ctx):
-    h = ctx.forge.add_node("Paper", title="Deep Graph Learning")
-    ctx.nodes["Deep Graph Learning"] = h
+@when(parsers.parse('I add a node with label "{label}" titled "{title}"'))
+def when_add_node_titled(ctx, label, title):
+    h = ctx.forge.add_node(label, title=title)
+    ctx.nodes[title] = h
 
 
 @when("I call schema")

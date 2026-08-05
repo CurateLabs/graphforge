@@ -57,6 +57,12 @@ pub struct GraphForgeWorld {
     pub last_edge_handle: Option<graphforge_api::EdgeHandle>,
     /// Number of explicit public index calls made in this scenario.
     pub index_calls: usize,
+    /// Stored query/index vector for find/index scenarios.
+    pub stored_vector: Option<Vec<f32>>,
+    /// Caller-defined vector space used by find/index fixtures.
+    pub stored_space: Option<String>,
+    /// Stored node UUID (hex or hyphenated) for index upsert scenarios.
+    pub stored_paper_id: Option<String>,
 }
 
 #[tokio::main]
