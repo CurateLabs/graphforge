@@ -51,8 +51,8 @@ Synthetic scale work uses two Graph500 tracks on the
 [Graph Scale Index](../../reference/graph-scale-index.md) — not a separate
 dataset catalog page:
 
-1. **Official Graph500** — standard parameters (typically ef=16) for GSI size
-   notches / community comparability; progressive / first-fail in the harness.
+1. **Official Graph500** — standard parameters with normative **ef=16** for GSI
+   size notches / community comparability; progressive / first-fail in the harness.
 2. **Graph500-derived SCALE×density matrix** — parameterized `edgefactor` to
    hit GSI density tiers at feasible (usually XS) SCALEs; **not** official
    Graph500 submissions.

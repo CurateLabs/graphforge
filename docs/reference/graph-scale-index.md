@@ -163,7 +163,7 @@ submission.
 
 | Track | Parameters | Purpose | Official Graph500? |
 |---|---|---|---|
-| **Official Graph500** | Spec-default generator (typically `edgefactor = 16`), undirected Kronecker / R-MAT | GSI size-ladder notches; comparability with Graph500 community / ranking classes | **Yes** (when run per [Graph500 spec](https://graph500.org/?page_id=12)) |
+| **Official Graph500** | Spec-default generator with **`edgefactor = 16`** (normative), undirected Kronecker / R-MAT | GSI size-ladder notches; comparability with Graph500 community / ranking classes | **Yes** (when run per [Graph500 spec](https://graph500.org/?page_id=12)) |
 | **Graph500-derived SCALE×density matrix** | Same generator **family**, free `SCALE` + `edgefactor` to hit GSI density tiers | Probe GSI density bands (D00–09 … D90–100) at feasible SCALEs | **No** — derived only |
 
 Shared generator math ([Graph500 specification](https://graph500.org/?page_id=12)):
@@ -194,10 +194,10 @@ GSI.
 
 ### 1. Official Graph500 (GSI size ladder)
 
-Use **standard Graph500 parameters** — typically `ef = 16`, undirected
+Use **standard Graph500 parameters** with normative **`ef = 16`**, undirected
 Kronecker/R-MAT as specified by Graph500 — for bottom→top **size** notches on
 GSI and for community-comparable runs (including ranking classes when the
-harness opts in).
+harness opts in). Any other `edgefactor` is **Derived track**, not Official.
 
 #### Representative SCALE notches (bottom → top)
 
@@ -243,10 +243,38 @@ GSI axis:
 5. Official ranking classes (Toy+) remain on the ladder; first-fail — not
    pretend pass — governs whether they run.
 
-Typical green signals for an Official Graph500 notch: generate/load + reopen
-counts, fixed-hop Cypher with `LIMIT` (and/or Graph500 BFS kernel when the
-harness implements it), resource ledger within the operator’s declared machine
-envelope.
+#### Official track — required workloads (green)
+
+For each attempted Official SCALE notch, the harness **must** complete this
+pipeline under the declared machine envelope:
+
+| Step | Required? | Contract |
+|---|---|---|
+| Generate edge list (Graph500 generator, `ef = 16`) | **Required** | Disclose generator identity ([Pinned identity](#pinned-generator--driver-identity)) |
+| Ingest into a GraphForge project (Parquet/Arrow path) | **Required** | Via published GraphForge APIs |
+| Reopen / recount | **Required** | Loaded `V`/`E` match expected band (post unique-edge / self-loop policy); emit measured GSI |
+| Fixed-hop Cypher with `LIMIT` | **Required** | At least one one-hop and one two-hop `MATCH … RETURN … LIMIT N` (N ≥ 1000 recommended) that finish green — GraphForge product scale signal |
+| Graph500 **BFS** kernel + validation | **Optional** for Official-track **engineering green** | Required only when claiming Graph500 community / ranking-class comparability or reporting TEPS |
+| TEPS / Graph500 result file fields | **Optional** | Report when BFS kernel runs; not required for GraphForge-only Official size-ladder green |
+
+**Official-track engineering green** = generate → ingest → reopen → required
+LIMIT Cypher, all within envelope, with correct counts. **Official-track
+Graph500-comparable green** additionally requires the reference BFS kernel path
+(validation on, TEPS disclosed per Graph500 reporting rules).
+
+#### Failure classes → red / stop (Official)
+
+| `error_class` | Meaning | Notch disposition | Ladder policy |
+|---|---|---|---|
+| `oom` | Process killed / allocator failure / RSS exceeds envelope | **Red** | **First-fail stop** — do not attempt larger notches |
+| `timeout` | Wall time exceeds declared envelope | **Red** | **First-fail stop** |
+| `incorrect_validation` | Count mismatch, Cypher wrong results, or BFS validation fail (when BFS claimed) | **Red** | **First-fail stop** |
+| `disk_exhaustion` | Project/cache disk full or write failure from space | **Red** | **First-fail stop** |
+| `harness_error` | Orchestration bug, missing binary, misconfiguration (not SUT) | **Red** for the attempt; may **retry** after fix **without** advancing the ladder | Do **not** skip to a larger notch; re-run the same notch after the harness fix |
+| `out_of_envelope_skip` | Operator pre-declares notch beyond machine envelope | **Skipped** (not green) with rationale | Larger notches remain blocked unless earlier notches are green |
+
+Progressive first-fail on SCALE notches remains **authoritative** for the
+Official size ladder ([policy above](#progressive--first-fail-policy-official-graph500--gsi)).
 
 ---
 
@@ -313,8 +341,33 @@ tiers at **XS / small** SCALEs (e.g. 6 and 12, optionally a few neighbors). Do
 **not** require a full SCALE×density cartesian product at SM+ bands. Document
 any cell attempted outside that default as an explicit envelope exception.
 
-The derived matrix does **not** use Official first-fail across SCALEs; operators
-may run a fixed small set of `(SCALE, density-tier)` cells independently.
+The derived matrix does **not** use Official first-fail across SCALEs or across
+density tiers. Each in-scope `(SCALE, density-tier)` cell is an **independent**
+pass/fail unit.
+
+#### Derived cell — required workloads (green)
+
+For each in-scope cell the harness declares (default: five mid-bucket tiers at
+SCALE 6 and 12):
+
+| Step | Required? | Contract |
+|---|---|---|
+| Generate with parameterized `edgefactor` for target `d` | **Required** | Same generator family as Official; disclose identity |
+| Unique-edge / self-loop filtering | **Required** | Apply generator/harness dedup policy, then **re-profile** `|V|`, `|E|`, density → measured `Dxx` / full GSI (target `d` is aspirational) |
+| Ingest + reopen | **Required** | Via GraphForge APIs; counts match post-filter edge list |
+| Fixed-hop Cypher with `LIMIT` | **Required** | Same minimum as Official engineering green |
+| Graph500 BFS / TEPS | **Optional** | Never claim as official Graph500 submission |
+
+#### Derived cell — pass / fail
+
+| Disposition | Rule |
+|---|---|
+| **Green** | All required steps succeed within that cell’s envelope; measured GSI recorded (may differ from target `Dxx` after unique-edge filtering) |
+| **Red** | Any required step fails (`oom`, `timeout`, `incorrect_validation`, `disk_exhaustion`, or unrecoverable `harness_error`) |
+| **Independent cells** | Red on one `(SCALE, density-tier)` does **not** automatically fail or block other density tiers or SCALEs |
+| **Out-of-scope** | Cells marked out-of-scope in the feasibility table are not required; if attempted, label as envelope exception |
+
+Evidence must label `track: "derived"` and never use ranking-class language.
 
 ---
 
@@ -390,12 +443,98 @@ until published.
 
 ### Expected outputs (per attempted step)
 
-- Track id (`official` / `derived`), SCALE / LDBC id, and approximate GSI
-- For derived cells: target `d` / density tier and chosen `edgefactor`
-- Green/red disposition and stop reason if red
-- Node/edge (or entity) counts, project bytes, peak RSS, optional CSR timings
-- Workload metrics required by the LDBC or Graph500 spec being executed
-- Pointer to cached artifacts (checksums) used for the run
+See [Evidence artifact schema](#evidence-artifact-schema) — field table is
+normative; path layout is harness-defined.
+
+### Evidence artifact schema
+
+Harnesses **must** emit one JSON object per attempted step (Official notch,
+Derived cell, or LDBC workload instance). Directory layout is
+**harness-defined**; field names below are **normative** for GraphForge scale
+evidence consumers.
+
+```json
+{
+  "schema_version": "1",
+  "track": "official",
+  "gsi": "GU-06-MD-D00",
+  "scale": 22,
+  "edgefactor": 16,
+  "density_tier": null,
+  "target_density": null,
+  "measured_density": 0.0,
+  "density_code": "D00",
+  "ldbc": null,
+  "workloads_run": ["generate", "ingest", "reopen", "cypher_limit_1hop", "cypher_limit_2hop"],
+  "pass": true,
+  "error_class": null,
+  "wall_time_s": 123.4,
+  "rss_peak_bytes": 8589934592,
+  "disk_used_bytes": 21474836480,
+  "artifact_checksums": {
+    "edges": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "project": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "generator": {
+    "name": "graph500",
+    "source": "https://github.com/graph500/graph500",
+    "version": "3.0.0",
+    "commit": "REPLACE_WITH_GIT_SHA"
+  },
+  "driver": null,
+  "sut": {"name": "graphforge", "version": "0.5.x", "git_sha": "REPLACE_WITH_GIT_SHA"},
+  "machine_envelope": {"disk_bytes": 1099511627776, "rss_bytes": 68719476736, "timeout_s": 3600},
+  "teps": null,
+  "notes": null
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `schema_version` | string | Yes | `"1"` for this contract |
+| `track` | string | Yes | `official` \| `derived` \| `ldbc` |
+| `gsi` | string | Yes | Measured full GSI after load (or best-effort before fail) |
+| `scale` | int \| null | Official/Derived | Graph500 `SCALE`; null for pure LDBC |
+| `edgefactor` | number \| null | Official/Derived | Official **must** be `16` |
+| `density_tier` | string \| null | Derived | e.g. `D00-D09`; null otherwise |
+| `target_density` | number \| null | Derived | Mid-bucket `d` (e.g. `0.05`) |
+| `measured_density` | number \| null | Yes when loaded | After unique-edge filtering |
+| `density_code` | string \| null | Yes when loaded | `Dxx` from measured density |
+| `ldbc` | object \| null | LDBC | `{ "benchmark", "workload", "sf_or_dataset", "spec_version" }` |
+| `workloads_run` | string[] | Yes | e.g. `generate`, `ingest`, `reopen`, `cypher_limit_*`, `graph500_bfs`, `snb_interactive`, … |
+| `pass` | bool | Yes | Green/red for this step |
+| `error_class` | string \| null | When `pass=false` | `oom` \| `timeout` \| `incorrect_validation` \| `disk_exhaustion` \| `harness_error` \| `out_of_envelope_skip` |
+| `wall_time_s` | number \| null | Recommended | End-to-end step wall time |
+| `rss_peak_bytes` | number \| null | Recommended | Peak RSS |
+| `disk_used_bytes` | number \| null | Recommended | Project + cache bytes attributable to the step |
+| `artifact_checksums` | object | Yes when artifacts retained | Map of logical name → `sha256:…` (or equivalent) |
+| `generator` | object | Yes when generation ran | See [Pinned identity](#pinned-generator--driver-identity) |
+| `driver` | object \| null | LDBC / BFS driver | Same disclosure shape as `generator` |
+| `sut` | object | Yes | GraphForge version / git SHA |
+| `machine_envelope` | object | Yes | Declared stop conditions for the run |
+| `teps` | number \| null | When BFS TEPS claimed | Graph500 harmonic-mean TEPS or documented equivalent |
+| `notes` | string \| null | Optional | Skips, envelope exceptions, partial LDBC labels |
+
+**Where reports land:** harness-chosen path (e.g. `evidence/<run_id>/<step>.json`).
+This repo does not prescribe object-storage layout — only the fields above.
+
+### Pinned generator / driver identity
+
+Upstream Graph500 and LDBC tooling moves; GraphForge does **not** invent fake
+frozen pins that bit-rot. Normative rule: **must disclose exact identity used**.
+
+| Tooling | Official home | Disclosure required in evidence |
+|---|---|---|
+| Graph500 reference impl | [github.com/graph500/graph500](https://github.com/graph500/graph500) · [graph500.org spec](https://graph500.org/?page_id=12) | `generator.name`, `source` URL, **tag or release** (e.g. `3.0.0`) **or** full git `commit`, plus configure flags if non-default |
+| LDBC SNB Datagen | [ldbc_snb_datagen_spark](https://github.com/ldbc/ldbc_snb_datagen_spark) | commit **or** release tag; serializer; SF |
+| LDBC SNB / BI drivers | [github.com/ldbc](https://github.com/ldbc) Interactive/BI driver repos | commit **or** release; workload (`interactive`/`bi`); SF |
+| Graphalytics driver + datasets | [ldbc_graphalytics](https://github.com/ldbc/ldbc_graphalytics) · [datasets repo](https://repository.surfsara.nl/datasets/cwi/graphalytics) | driver commit/release; dataset id (e.g. `wiki-Talk`); Graphalytics spec version |
+| FinBench datagen / driver | [FinBench home](https://ldbcouncil.org/benchmarks/finbench/) · GDC FinBench repos | commit/release; SF; Transaction workload |
+
+Also disclose **GDC/LDBC specification version** (PDF or docs tag) for any LDBC
+claim. Prefer tags when available; if only `main`, record the commit SHA.
+Re-runs that change generator/driver identity are different evidence — do not
+silently mix.
 
 ### What this repo must not do
 
@@ -468,6 +607,7 @@ concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
 
 - [Scale Limits](scale-limits.md) — GraphForge product envelopes and fixed-hop LIMIT contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB (spec-level)
+- [Evidence artifact schema](#evidence-artifact-schema) · [Pinned generator / driver identity](#pinned-generator--driver-identity)
 - [WDC Hyperlink Graphs](../guide/datasets/wdc-hyperlink-graph.md) — **not** used for the scale harness (retired track)
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — CI size/density taxonomy (distinct from GSI)
 - [Load Matrix Results](load-matrix-results.md) — accepted matrix evidence

@@ -71,16 +71,23 @@ are owned by the SNB specification — do not invent alternate schemas for
 
 ### Scale factors
 
-SF is defined by **serialized CSV size in GiB** (not GSI Size Tags). The
-specification publishes SF sets including small validation factors
-(`0.003`, `0.1`, `0.3`) and production factors
-(`1`, `3`, `10`, `30`, `100`, `300`, `1000`, `3000`, … — see current spec).
+SF is defined by **serialized CSV size in GiB** (not GSI Size Tags). Authoritative
+SF lists live in the current SNB specification PDF — disclose the **spec version**
+used in evidence ([pinned identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)).
+
+| Run class | Typical SF set | Notes |
+|---|---|---|
+| **Engineering / harness smoke** | `0.003`, `0.1`, `0.3` | Laptop-feasible; non-audited; preferred developer default |
+| **Engineering / dedicated harness** | `1`, `3`, `10` | Common published comparison class (esp. SF1); still not GDC-audited unless commissioned |
+| **Large harness-only** | `30`, `100`, `300`, `1000`, `3000`, … | Spec-published production factors; dedicated runners only |
+| **GDC audited certification** | Per current auditing rules / auditor | Member-commissioned; full disclosure report — **distinct** from engineering green |
 
 | Concern | Rule |
 |---|---|
 | Reproducibility | Same SF + generator version + serializer → same data |
 | Initial vs updates | Interactive splits ~90% bulk load vs update streams (see spec) |
 | GSI labeling | Count loaded entities → full GSI; see [SF → GSI crosswalk](../../reference/graph-scale-index.md#best-effort-snb-sf--gsi-total-entities--v) |
+| Disclosure | Evidence must record SF, Datagen commit/release, driver commit/release, serializer, and whether the run is engineering vs audited |
 
 ### Workloads
 
@@ -96,6 +103,10 @@ specification publishes SF sets including small validation factors
   schedule updates, and collect latency/throughput.
 - GraphForge may only expose thin ingest helpers later; the **driver remains
   outside core**.
+- **Identity:** every engineering or audited claim **must disclose** Datagen and
+  driver commit/release plus SNB **spec version** — see
+  [Pinned generator / driver identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)
+  and the [evidence schema](../../reference/graph-scale-index.md#evidence-artifact-schema).
 
 ### Pass criteria / validation (spec-level)
 
@@ -128,9 +139,33 @@ GraphBLAS, …). Consists of:
 - **Six core algorithms** (BFS, PageRank, weakly connected components, local
   clustering coefficient, community detection via label propagation, SSSP —
   exact names/parameters per the Graphalytics specification PDF).
-- **Standard datasets** with **reference outputs** for validation.
+- **Standard datasets** with **reference outputs** for validation
+  ([SURF/CWI repository](https://repository.surfsara.nl/datasets/cwi/graphalytics)).
 - Optional large synthetic graphs (including Graph500-class sizes) where the
   Graphalytics rules allow.
+
+#### GraphForge-facing dataset shortlist (ordered)
+
+Harnesses targeting GraphForge should prefer this ordered shortlist unless a
+full Graphalytics standard-benchmark job composition is explicitly claimed.
+Sizes are approximate from the Graphalytics specification; **re-profile → GSI**
+after load. Full catalog remains authoritative at the GDC/Graphalytics homes.
+
+| Order | Dataset id | Class | ≈ n | ≈ m | Typical GSI band | Role |
+|---:|---|---|---:|---:|---|---|
+| 1 | `wiki-Talk` | Real R1 (2XS) | 2.39M | 5.02M | `GU-06-MD-…` | First engineering dataset |
+| 2 | `kgs` | Real R2 (XS) | 0.83M | 17.9M | `GU-05-SM-…` | Gaming / denser |
+| 3 | `cit-Patents` | Real R3 (XS) | 3.77M | 16.5M | `GU-06-MD-…` | Knowledge / citation |
+| 4 | `dota-league` | Real R4 (S) | 0.06M | 50.9M | `GU-04-XS-…` (n) / high E | Dense gaming |
+| 5 | `Graph500-22` | Synthetic G22 (S) | 2.4M | 64.2M | `GU-06-MD-D00` | Bridge to Official Graph500 SCALE 22 |
+| 6 | `Datagen-7.9-fb` (or nearest Datagen-S) | Synthetic D7.9 (S) | ~1.4M | ~85.7M | `GU-06-MD-…` | Datagen family smoke |
+| 7+ | `com-Friendster`, `Graph500-24`+, larger Datagen | XL+ | — | — | `07`+ | Harness-only; not default laptop |
+
+For a **“full Graphalytics at dataset X”** claim: run all six core algorithms on
+X with reference-output validation. For **engineering green** on the shortlist:
+complete algorithms the SUT implements via the official Graphalytics driver path
+and **label omissions** (do not imply six-algorithm coverage if only a subset
+ran).
 
 ### Pass criteria / validation (spec-level)
 
@@ -138,7 +173,8 @@ GraphBLAS, …). Consists of:
    tolerances.
 2. All six core algorithms run on each declared dataset for a “full Graphalytics”
    claim at that dataset.
-3. Report platform, parallelism, and dataset ids exactly.
+3. Report platform, parallelism, dataset ids, driver commit/release, and
+   Graphalytics **spec version** exactly.
 
 **Relation to GraphForge:** analyst verbs (PageRank, components, paths, …) may
 implement kernels that *overlap* Graphalytics algorithms, but a Graphalytics
@@ -167,17 +203,36 @@ patterns.
 | **Transaction** | Defined — OLTP-style complex reads + continuous insert/delete |
 | **Analytics** | Future work (not yet a required GraphForge harness lane) |
 
+#### Scale factors (Transaction)
+
+Per FinBench specification (v0.2.0-alpha class; **disclose the exact spec
+version** used). SF ≈ serialized CSV GiB; default temporal window three years
+from 2020; default split **97%** initial bulk / **3%** incremental. Published SF
+set:
+
+| SF | ≈ CSV size (published datasets page) | Engineering default? | Notes |
+|---|---|---|---|
+| `0.01` | ~6 MB | Yes — smoke | Smallest published factor |
+| `0.1` | ~66 MB | Yes — laptop/harness | |
+| `0.3` | ~202 MB | Yes — harness | |
+| `1` | ~679 MB | Dedicated harness | Spec validation-class scale |
+| `3` | ~2 GB | Dedicated harness | |
+| `10` | ~6 GB | Large harness | Spec notes audited Transaction runs at SF10 |
+
+Entity counts per SF (accounts, companies, transfers, …) are in FinBench
+Appendix B — re-count after load and emit `GD-…` GSI. Pre-built dataset tarballs:
+[FinBench datasets](https://ldbcouncil.org/benchmarks/finbench/datasets/).
+
 ### Pass criteria / validation (spec-level)
 
-1. Use FinBench datagen + Transaction driver at a declared scale.
+1. Use FinBench datagen + Transaction driver at a declared SF from the table.
 2. Meet driver validation for the Transaction query set.
-3. Disclose scale parameters, hardware, and consistency/write mode.
+3. Disclose SF, datagen/driver commit or release, FinBench **spec version**,
+   hardware, and consistency/write mode.
 4. Do not claim “full FinBench” if only a read subset ran, or if Analytics is
    implied before GDC publishes it.
 
-Profile loaded graphs with `GD-…` GSI (directed). SF/scale parameters are
-FinBench-specific — crosswalk to GSI by entity counts after load (best-effort;
-document measured V/E).
+Profile loaded graphs with `GD-…` GSI (directed).
 
 ---
 
@@ -188,9 +243,10 @@ RDF/SPARQL workload based on a media-publishing ontology.
 
 | GraphForge posture | Detail |
 |---|---|
-| Suite inventory | **Included** — part of the official LDBC portfolio |
-| Product path | **Out of scope** for Cypher/property-graph GraphForge unless RDF support is explicitly added |
-| Harness | May omit SPB from GraphForge SUT runs; must still name SPB when stating what “full GDC suite” means |
+| Suite inventory | **Included** — part of the official LDBC portfolio (name it; do not omit silently) |
+| Product path | **Out of scope** for Cypher/property-graph GraphForge — RDF/SPARQL only |
+| Harness / SUT | **Inventory-only** — omit SPB from GraphForge SUT execution; no pass/fail lane |
+| Evidence | When listing suite coverage, record `spb: "inventory_only"` (or equivalent) rather than green/red |
 
 ---
 
@@ -249,6 +305,7 @@ Official compliance requires the external harness + LDBC drivers.
 - [SNB](https://ldbcouncil.org/benchmarks/snb/) · [Graphalytics](https://ldbcouncil.org/benchmarks/graphalytics/) · [FinBench](https://ldbcouncil.org/benchmarks/finbench/)
 - [LDBC GitHub org](https://github.com/ldbc)
 - [Graph Scale Index](../../reference/graph-scale-index.md) — size axis + SF crosswalk
+- [Evidence artifact schema](../../reference/graph-scale-index.md#evidence-artifact-schema) · [Pinned identity](../../reference/graph-scale-index.md#pinned-generator--driver-identity)
 - [Scale limits](../../reference/scale-limits.md) — product envelopes
 
 ## Related
