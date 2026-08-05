@@ -151,6 +151,14 @@ export default defineConfig({
             { label: 'TCK Compliance', slug: 'reference/tck-compliance' },
             { label: 'Scale Limits', slug: 'reference/scale-limits' },
             {
+              label: 'Graph Scale Index (GSI)',
+              slug: 'reference/graph-scale-index',
+            },
+            {
+              label: 'Scale Evaluation',
+              slug: 'reference/scale-evaluation',
+            },
+            {
               label: 'Load Matrix Results',
               slug: 'reference/load-matrix-results',
             },
@@ -161,7 +169,7 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { label: 'Overview', slug: 'guide/datasets/overview' },
-                { label: 'LDBC', slug: 'guide/datasets/ldbc' },
+                { label: 'LDBC full suite', slug: 'guide/datasets/ldbc' },
                 { label: 'Neo4j Examples', slug: 'guide/datasets/neo4j-examples' },
                 { label: 'NetworkRepository', slug: 'guide/datasets/networkrepository' },
                 { label: 'SNAP', slug: 'guide/datasets/snap' },
