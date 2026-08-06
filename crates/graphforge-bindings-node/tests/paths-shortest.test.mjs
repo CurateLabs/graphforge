@@ -438,7 +438,9 @@ function checkAStarPaths() {
   }
   assert.throws(
     () => new GraphForge().addNode("Person", { heuristic: Number.NaN }),
-    /Failed to convert js number to serde_json::Number/,
+    (error) =>
+      error.code === "ValidationError" &&
+      /non-finite node property/.test(error.message),
   );
 
   for (const [name, literal, code] of [

@@ -40,15 +40,16 @@ use graphforge_api::{
     validate_embedding_options,
 };
 use napi::bindgen_prelude::{
-    AbortSignal, AsyncTask, BigInt, Buffer, ClassInstance, Either3, Function, JsObjectValue, Object,
+    AbortSignal, AsyncTask, BigInt, Buffer, ClassInstance, Either3, FromNapiValue, Function,
+    JsObjectValue, Object, Unknown,
 };
-use napi::{Env, Task};
+use napi::{Env, JsValue, Task, ValueType};
 use napi_derive::napi;
 
 mod composite;
 mod error;
 use composite::CompositeTransactionInput;
-use error::{NodeError, to_napi_err};
+use error::{NodeError, to_napi_err, type_error};
 
 /// Result alias whose error surfaces a typed JS `error.code` (see [`error`]).
 pub(crate) type Result<T> = std::result::Result<T, NodeError>;
@@ -572,6 +573,10 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
+            // Nested plain objects are unsupported property values. Callers that
+            // need a JS `TypeError` (add_node / add_edge) must go through
+            // [`props_from_js_object`]; this serde path is used by composite
+            // JSON inputs and keeps a ValidationError for domain mapping.
             return Err(to_napi_err(&GfError::Validation(
                 "unsupported node property type (expected null/boolean/number/string/array)".into(),
             )));
@@ -587,6 +592,131 @@ pub(crate) fn props_from_map(
         .into_iter()
         .map(|(name, value)| Ok((name, json_to_prop_value(&value)?)))
         .collect()
+}
+
+const UNSUPPORTED_PROP_TYPE_MSG: &str =
+    "unsupported node property type (expected null/boolean/number/string/array)";
+
+/// Convert a JS property bag, raising a real `TypeError` for unsupported values
+/// (functions, symbols, nested plain objects).
+fn props_from_js_object(env: Env, props: Option<Object>) -> Result<HashMap<String, PropValue>> {
+    let Some(obj) = props else {
+        return Ok(HashMap::new());
+    };
+    let keys = Object::keys(&obj).map_err(|error| {
+        type_error(
+            env,
+            format!("failed to read node property keys: {}", error.reason),
+        )
+    })?;
+    let mut out = HashMap::with_capacity(keys.len());
+    for key in keys {
+        let Some(value) = obj.get::<Unknown>(&key).map_err(|error| {
+            type_error(
+                env,
+                format!("failed to read property `{key}`: {}", error.reason),
+            )
+        })?
+        else {
+            continue;
+        };
+        out.insert(key, js_unknown_to_prop_value(env, value)?);
+    }
+    Ok(out)
+}
+
+// SAFETY: each `cast` / `from_napi_value` follows an explicit `ValueType`
+// check (or ClassInstance fallible coerce) so the napi value kind matches.
+#[allow(unsafe_code)]
+fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
+    match value.get_type().map_err(|error| {
+        type_error(
+            env,
+            format!("failed to inspect property value type: {}", error.reason),
+        )
+    })? {
+        ValueType::Undefined | ValueType::Null => Ok(PropValue::Null),
+        ValueType::Boolean => {
+            let flag = unsafe { value.cast::<bool>() }.map_err(|error| {
+                type_error(env, format!("expected boolean property: {}", error.reason))
+            })?;
+            Ok(PropValue::Bool(flag))
+        }
+        ValueType::Number => {
+            let number = unsafe { value.cast::<f64>() }.map_err(|error| {
+                type_error(env, format!("expected number property: {}", error.reason))
+            })?;
+            if number.is_finite() && number.fract() == 0.0 {
+                // JS numbers are IEEE-754; whole values in the exact integer
+                // range are stored as PropValue::Int.
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "JS Number is f64; whole values in i64 range are intentional"
+                )]
+                {
+                    if number >= i64::MIN as f64 && number <= i64::MAX as f64 {
+                        return Ok(PropValue::Int(number as i64));
+                    }
+                }
+                return Err(to_napi_err(&GfError::Validation(
+                    "integer node property exceeds signed 64-bit range".into(),
+                )));
+            }
+            if !number.is_finite() {
+                return Err(to_napi_err(&GfError::Validation(
+                    "non-finite node property".into(),
+                )));
+            }
+            Ok(PropValue::Float(number))
+        }
+        ValueType::String => {
+            let text = unsafe { value.cast::<String>() }.map_err(|error| {
+                type_error(env, format!("expected string property: {}", error.reason))
+            })?;
+            Ok(PropValue::Str(text))
+        }
+        ValueType::Object => {
+            let object = unsafe { value.cast::<Object>() }.map_err(|error| {
+                type_error(env, format!("expected object property: {}", error.reason))
+            })?;
+            if !object.is_array().map_err(|error| {
+                type_error(
+                    env,
+                    format!("failed to inspect array property: {}", error.reason),
+                )
+            })? {
+                return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
+            }
+            let json = unsafe {
+                <serde_json::Value as FromNapiValue>::from_napi_value(env.raw(), object.raw())
+            }
+            .map_err(|error| {
+                type_error(
+                    env,
+                    format!("failed to read array property: {}", error.reason),
+                )
+            })?;
+            json_to_prop_value(&json)
+        }
+        ValueType::Function
+        | ValueType::Symbol
+        | ValueType::External
+        | ValueType::Unknown
+        | ValueType::BigInt => Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG)),
+    }
+}
+
+// SAFETY: `from_napi_value` fallibly coerces a ClassInstance; failures become
+// TypeError rather than a generic napi Error.
+#[allow(unsafe_code)]
+fn node_handle_from_unknown<'env>(
+    env: Env,
+    value: Unknown<'env>,
+    role: &str,
+) -> Result<ClassInstance<'env, NodeHandle>> {
+    unsafe { ClassInstance::<NodeHandle>::from_napi_value(env.raw(), value.raw()) }
+        .map_err(|_| type_error(env, format!("expected NodeHandle for addEdge {role}")))
 }
 
 type EmbeddingInput = HashMap<String, serde_json::Value>;
@@ -5614,11 +5744,12 @@ impl GraphForge {
     #[napi]
     pub fn add_node(
         &self,
+        env: Env,
         label: String,
-        props: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<NodeHandle> {
         self.ensure_open()?;
-        let props = props_from_map(props)?;
+        let props = props_from_js_object(env, props)?;
         let graph = self.open_guard()?;
         graph
             .add_node(&label, &props)
@@ -5630,12 +5761,15 @@ impl GraphForge {
     #[napi]
     pub fn add_edge(
         &self,
-        src: ClassInstance<'_, NodeHandle>,
+        env: Env,
+        #[napi(ts_arg_type = "NodeHandle")] src: Unknown,
         rel_type: String,
-        dst: ClassInstance<'_, NodeHandle>,
-        props: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "NodeHandle")] dst: Unknown,
+        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<EdgeHandle> {
-        let props = props_from_map(props)?;
+        let src = node_handle_from_unknown(env, src, "source")?;
+        let dst = node_handle_from_unknown(env, dst, "destination")?;
+        let props = props_from_js_object(env, props)?;
         let graph = self.open_guard()?;
         graph
             .add_edge(&src.inner, &rel_type, &dst.inner, &props)
@@ -7256,8 +7390,18 @@ mod tests {
     #[test]
     fn source_free_minimum_steiner_reaches_active_rust_handler() {
         let graph = GraphForge::new(None, None).unwrap();
-        let first = graph.add_node("Person".into(), None).unwrap();
-        let second = graph.add_node("Person".into(), None).unwrap();
+        // Construction methods require a napi Env for TypeError coercion; unit
+        // tests seed fixtures through the Rust facade instead.
+        let (first, second) = {
+            let engine = graph.open_guard().unwrap();
+            let first = engine
+                .add_node("Person", &Default::default())
+                .expect("fixture node");
+            let second = engine
+                .add_node("Person", &Default::default())
+                .expect("fixture node");
+            (first.uuid.to_string(), second.uuid.to_string())
+        };
 
         let result = graph.paths(
             None,
@@ -7270,7 +7414,7 @@ mod tests {
             None,
             None,
             None,
-            Some(vec![first.uuid(), second.uuid()]),
+            Some(vec![first, second]),
             None,
             None,
             None,

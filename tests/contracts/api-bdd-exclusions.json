@@ -91,24 +91,6 @@
       "scenario": "neighbourhood with hops 0 returns empty Arrow Table",
       "issue": 356,
       "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Type Errors",
-      "scenario": "TypeError when add_edge source is not a NodeHandle",
-      "issue": 357,
-      "languages": ["node"]
-    },
-    {
-      "feature": "Type Errors",
-      "scenario": "TypeError when add_edge destination is not a NodeHandle",
-      "issue": 357,
-      "languages": ["node"]
-    },
-    {
-      "feature": "Type Errors",
-      "scenario": "TypeError on unsupported property value type",
-      "issue": 357,
-      "languages": ["node"]
     }
   ]
 }
