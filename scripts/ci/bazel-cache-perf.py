@@ -155,8 +155,7 @@ def iter_policy_files(root: Path) -> list[Path]:
         files.extend(sorted(root.glob(pattern)))
     # Always include this harness so accidental active flags fail closed,
     # but exempt detection string assignments via line filters below.
-    unique = sorted({path.resolve() for path in files if path.is_file()})
-    return [path for path in unique]
+    return sorted({path.resolve() for path in files if path.is_file()})
 
 
 def check_remote_cache_policy(root: Path) -> list[str]:
@@ -367,12 +366,12 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
 
     # execution_log_json_file is NDJSON of executed actions.
     executed_labels: list[str] = []
-    for line in log_text.splitlines():
-        line = line.strip()
-        if not line:
+    for raw_line in log_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
             continue
         try:
-            entry = json.loads(line)
+            entry = json.loads(stripped)
         except json.JSONDecodeError:
             continue
         label = entry.get("targetLabel") or entry.get("mnemonic") or ""
@@ -459,8 +458,16 @@ def empty_evidence(root: Path) -> dict[str, Any]:
             "bindings": REPRESENTATIVE_BINDINGS,
         },
         "cold_protocol": {
-            "bazel": "Correctness: CLI-only empty --remote_cache/--disk_cache (zero remote hits; not a repo default). Cold perf: clean/evicted Blacksmith repo cache without sticky local state",
-            "cargo": "Cargo sticky-disk warm starts are not cold; cold Cargo uses empty target/ without sticky hydrate",
+            "bazel": (
+                "Correctness: CLI-only empty remote/disk cache "
+                "(zero remote hits; not a repo default). "
+                "Cold perf: clean/evicted Blacksmith repo cache "
+                "without sticky local state"
+            ),
+            "cargo": (
+                "Cargo sticky-disk warm starts are not cold; "
+                "cold Cargo uses empty target/ without sticky hydrate"
+            ),
         },
         "pairs": [],
         "observations": {
