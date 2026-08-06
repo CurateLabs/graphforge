@@ -34,7 +34,8 @@ Until step 2 lands, remote-cache hits cannot be measured and #5 **must stay open
 | --- | --- |
 | No competing `--remote_cache` | `.bazelrc`, workflows; enforced by `bazel-cache-perf.py --mode policy` |
 | Cache-unavailable cold correctness | `--mode cold-correctness` (CLI `--noremote_cache` + fresh `--output_base`) |
-| Warm observation harness | `--mode observe-warm` (identical-SHA re-build; records hits if present) |
+| Warm observation harness | `--mode observe-warm` (prime + warm across distinct `--output_base`s) |
+| Pair collector (≥10 cold/warm) | `--mode collect-pairs` (CI runs when hits observed + evidence incomplete) |
 | Affected-input isolation probe | `--mode affected-inputs` |
 | Gate evaluator (≥10 pairs, #1 thresholds) | `--mode evaluate` |
 | CI wiring | `Bazel Bootstrap` in `.github/workflows/test.yml` |
@@ -69,7 +70,9 @@ Matches the Blacksmith `Bazel Bootstrap` compile/test path (not full TCK BDD):
 ### Warm protocol
 
 1. Populate cache with a successful representative Bazel run at SHA `S`.
-2. Re-run the same targets at the same SHA on a Blacksmith runner.
+2. Re-run the same targets at the same SHA on a Blacksmith runner into a
+   **fresh** `--output_base` (same-base re-runs are satisfied locally and hide
+   remote hits).
 3. Bazel process summary must show `remote cache hit` counts &gt; 0.
 4. Record wall seconds, process counts, and (when available) Blacksmith Cache
    dashboard storage / hit-rate links.
@@ -117,6 +120,10 @@ python3 scripts/ci/bazel-cache-perf.py --mode cold-correctness
 # Warm observation (hits require org-admin enablement on Blacksmith runners)
 mkdir -p dist
 python3 scripts/ci/bazel-cache-perf.py --mode observe-warm --write dist/warm-observation.json
+
+# Collect ≥10 cold/warm pairs (Blacksmith runners; long-running)
+python3 scripts/ci/bazel-cache-perf.py --mode collect-pairs --pairs 10 \
+  --write dist/perf-sample-collected.json
 
 # Affected-input isolation probe
 python3 scripts/ci/bazel-cache-perf.py --mode affected-inputs --write dist/affected-inputs.json

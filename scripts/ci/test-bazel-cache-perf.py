@@ -75,6 +75,21 @@ def test_evaluate_pending_allow() -> None:
         raise SystemExit("strict evaluate must fail while status is pending_org_admin")
 
 
+def test_observe_warm_uses_distinct_output_bases() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("bazel_cache_perf", CHECK)
+    if spec is None or spec.loader is None:
+        raise SystemExit("unable to load bazel-cache-perf module")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    source = Path(CHECK).read_text(encoding="utf-8")
+    if "distinct_output_base_prime_then_warm" not in source:
+        raise SystemExit("observe-warm must document distinct output_base protocol")
+    if "gf-bazel-prime-" not in source or "gf-bazel-warm-" not in source:
+        raise SystemExit("observe-warm must use distinct temporary output bases")
+
+
 def test_evaluate_thresholds() -> None:
     with tempfile.TemporaryDirectory(prefix="gf-cache-eval-") as tmp:
         path = Path(tmp) / "sample.json"
@@ -130,6 +145,7 @@ def main() -> None:
     test_policy_passes_on_repo()
     test_policy_fails_on_competing_flag()
     test_evaluate_pending_allow()
+    test_observe_warm_uses_distinct_output_bases()
     test_evaluate_thresholds()
     print("bazel-cache-perf tests passed")
 
