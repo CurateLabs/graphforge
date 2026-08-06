@@ -389,12 +389,16 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         and mutated["process_summary"]["total_processes"]
         <= max(8, warm["process_summary"]["total_processes"] + 4)
     )
-    ok = (ast_touched and not core_rebuilt) or local_fallback_ok or (
-        # Without remote cache / exec log, require some local work and no
-        # unbounded rebuild vs the warm baseline.
-        mutated["process_summary"]["local_actions"] >= 1
-        and mutated["process_summary"]["total_processes"]
-        <= max(8, warm["process_summary"]["total_processes"] + 4)
+    ok = (
+        (ast_touched and not core_rebuilt)
+        or local_fallback_ok
+        or (
+            # Without remote cache / exec log, require some local work and no
+            # unbounded rebuild vs the warm baseline.
+            mutated["process_summary"]["local_actions"] >= 1
+            and mutated["process_summary"]["total_processes"]
+            <= max(8, warm["process_summary"]["total_processes"] + 4)
+        )
     )
     payload = {
         "schema": SCHEMA_RUN,
