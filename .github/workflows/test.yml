@@ -3,6 +3,9 @@ name: Test Suite
 on:
   pull_request:
     branches: ["main"]
+  # Temporary API trigger path while Actions webhooks are throttled (outage).
+  # Prefer pull_request events when they deliver; dispatch reads the branch ref.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,8 +38,14 @@ jobs:
         id: filter
         shell: bash
         run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [[ -z "$BASE" ]]; then
+            git fetch --no-tags origin main
+            BASE="$(git merge-base origin/main HEAD)"
+          fi
           scripts/ci/classify-changes.sh \
-            "${{ github.event.pull_request.base.sha }}" \
+            "$BASE" \
             "${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
   policy:
@@ -46,13 +55,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Classify Repository Policy suites
         id: policy-suites
         shell: bash
         run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [[ -z "$BASE" ]]; then
+            git fetch --no-tags origin main
+            BASE="$(git merge-base origin/main HEAD)"
+          fi
           scripts/ci/classify-policy-suites.sh \
-            "${{ github.event.pull_request.base.sha }}" \
+            "$BASE" \
             "${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Test changed-path classifier
