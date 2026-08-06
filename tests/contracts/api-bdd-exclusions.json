@@ -3,18 +3,6 @@
   "tag": "excluded-api-bdd",
   "exclusions": [
     {
-      "feature": "Edge Cases and Graceful Empty Results",
-      "scenario": "find on a label with no indexed content returns empty Arrow Table",
-      "issue": 352,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Edge Cases and Graceful Empty Results",
-      "scenario": "find with vector dimension mismatch returns empty Arrow Table",
-      "issue": 352,
-      "languages": ["rust", "python", "node"]
-    },
-    {
       "feature": "Error Handling",
       "scenario": "ExecutionError is raised on type mismatch",
       "issue": 353,
@@ -57,18 +45,6 @@
       "languages": ["rust", "python", "node"]
     },
     {
-      "feature": "Find API",
-      "scenario": "find by vector returns score and matched_on set to vector",
-      "issue": 352,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Find API",
-      "scenario": "find with text and vector returns matched_on set to text+vector for fused results",
-      "issue": 352,
-      "languages": ["rust", "python", "node"]
-    },
-    {
       "feature": "Graph Construction API",
       "scenario": "bulk add_nodes with a list of records",
       "issue": 355,
@@ -78,18 +54,6 @@
       "feature": "Graph Construction API",
       "scenario": "bulk add_nodes with Arrow Table",
       "issue": 355,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Index API",
-      "scenario": "index vector upsert stores a vector for a node",
-      "issue": 352,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Index API",
-      "scenario": "find reflects nodes added after initial index build",
-      "issue": 352,
       "languages": ["rust", "python", "node"]
     },
     {

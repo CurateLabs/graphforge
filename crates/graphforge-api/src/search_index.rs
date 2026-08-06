@@ -365,6 +365,21 @@ impl GraphForge {
 
     pub(crate) fn search_label_id(&self, label: &str) -> Result<u32, GfError> {
         validate_label(label)?;
+        self.resolve_search_label_id(label)
+            .ok_or_else(|| validation(format!("unknown search label {label:?}")))
+    }
+
+    /// Resolve a find label, soft-missing unknown labels like analyst verbs.
+    ///
+    /// Invalid label spelling still fails validation. An absent catalog entry
+    /// becomes [`u32::MAX`] so retrieval and Arrow shaping return a typed empty
+    /// table instead of `GF_VALIDATION`.
+    pub(crate) fn find_label_id(&self, label: &str) -> Result<u32, GfError> {
+        validate_label(label)?;
+        Ok(self.resolve_search_label_id(label).unwrap_or(u32::MAX))
+    }
+
+    fn resolve_search_label_id(&self, label: &str) -> Option<u32> {
         self.ontology
             .as_ref()
             .and_then(|ontology| ontology.entity_type_id(label).map(|id| id.0))
@@ -375,7 +390,6 @@ impl GraphForge {
                     .entity_type_names_with_ids()
                     .find_map(|(id, name)| (name == label).then_some(id.0))
             })
-            .ok_or_else(|| validation(format!("unknown search label {label:?}")))
     }
 }
 

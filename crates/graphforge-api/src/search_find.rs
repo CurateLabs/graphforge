@@ -1,11 +1,14 @@
-//! Public graph-native text and complete-generation vector retrieval.
+//! Public graph-native text, index-store vector, and complete-generation retrieval.
 
 use graphforge_search::{
     EmbeddingGenerationQuery, EmbeddingVectorQuery, FindSearchLimits, FindSearchRequest,
-    FusedSearchHit, MatchedOn, SearchChannelHit, VectorLifecycleLimits, reciprocal_rank_fusion,
-    search_embedding_generation, search_graph_native,
+    FusedSearchHit, MatchedOn, SearchChannelHit, VectorIndexRequest, VectorLifecycleLimits,
+    reciprocal_rank_fusion, search_embedding_generation, search_graph_native, search_graph_vectors,
 };
-use graphforge_storage::{SearchArtifactError, generation::read_search_generation};
+use graphforge_storage::{
+    SearchArtifactError, SearchArtifactKey, VectorSearchHit, current_search_artifact,
+    generation::read_search_generation,
+};
 
 use super::search_output::shape_search_output;
 use super::{FindOptions, GfError, GraphForge};
@@ -16,15 +19,15 @@ enum VectorQuery {
 }
 
 impl GraphForge {
-    /// Search one required label by text, complete-generation vector, or RRF hybrid retrieval.
+    /// Search one required label by text, vector, or RRF hybrid retrieval.
     ///
-    /// Raw and existing-node vectors select one explicit complete embedding-space alias.
-    /// Substantially stale generations fail unless `force_stale` explicitly selects the last
-    /// otherwise-valid complete generation. Semantic queries resolve one exact process-local
-    /// provider runtime before outbound work.
+    /// Raw vectors prefer a published index-store space when one exists, then fall
+    /// back to a complete embedding-space generation. Existing-node vectors always
+    /// read the selected complete generation. Unknown labels and incompatible
+    /// query dimensions soft-miss as a typed empty Arrow table.
     ///
     /// # Errors
-    /// Returns structured option, label, selector, freshness, dimension, corruption, lifecycle,
+    /// Returns structured option, selector, freshness, corruption, lifecycle,
     /// cancellation, resource, storage, or Arrow-shaping errors without partial rows.
     pub fn find(&self, options: FindOptions) -> Result<arrow::record_batch::RecordBatch, GfError> {
         if options.semantic_query.is_some() {
@@ -41,7 +44,7 @@ impl GraphForge {
             force_stale,
         } = options;
         let label = label.ok_or_else(|| validation("find requires label"))?;
-        let label_id = self.search_label_id(&label)?;
+        let label_id = self.find_label_id(&label)?;
         let vector_forms = usize::from(vector.is_some()) + usize::from(similar_to.is_some());
         if vector_forms > 1 {
             return Err(validation("vector and similar_to are mutually exclusive"));
@@ -117,23 +120,7 @@ impl GraphForge {
             .transpose()?;
         let vector = vector_query
             .map(|vector_query| {
-                let prepared = self.prepare_embedding_space_read(space, force_stale)?;
-                let query = match vector_query {
-                    VectorQuery::Raw(vector) => EmbeddingVectorQuery::Raw(vector),
-                    VectorQuery::Node(node_uuid) => EmbeddingVectorQuery::Node(*node_uuid),
-                };
-                search_embedding_generation(
-                    &self.dir,
-                    EmbeddingGenerationQuery {
-                        prepared: &prepared,
-                        label_id,
-                        query,
-                        limit,
-                    },
-                    VectorLifecycleLimits::default(),
-                    || Ok(()),
-                )
-                .map_err(GfError::from)
+                self.retrieve_vector_hits(label, label_id, vector_query, space, force_stale, limit)
             })
             .transpose()?;
 
@@ -168,6 +155,77 @@ impl GraphForge {
             (None, None) => unreachable!("at least one retrieval channel validated"),
         }
     }
+
+    fn retrieve_vector_hits(
+        &self,
+        label: &str,
+        label_id: u32,
+        vector_query: &VectorQuery,
+        space: Option<&str>,
+        force_stale: bool,
+        limit: usize,
+    ) -> Result<Vec<VectorSearchHit>, GfError> {
+        let space = space.expect("vector query form requires space");
+        match vector_query {
+            VectorQuery::Raw(vector) => {
+                let key = SearchArtifactKey::vector(label, space)?;
+                if current_search_artifact(&self.dir, &key)?.is_some() {
+                    return soft_dimension_miss(search_graph_vectors(
+                        &self.dir,
+                        VectorIndexRequest {
+                            label,
+                            label_id,
+                            space,
+                        },
+                        vector,
+                        limit,
+                        VectorLifecycleLimits::default(),
+                        || Ok(()),
+                    ));
+                }
+                let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
+                soft_dimension_miss(search_embedding_generation(
+                    &self.dir,
+                    EmbeddingGenerationQuery {
+                        prepared: &prepared,
+                        label_id,
+                        query: EmbeddingVectorQuery::Raw(vector),
+                        limit,
+                    },
+                    VectorLifecycleLimits::default(),
+                    || Ok(()),
+                ))
+            }
+            VectorQuery::Node(node_uuid) => {
+                let prepared = self.prepare_embedding_space_read(Some(space), force_stale)?;
+                soft_dimension_miss(search_embedding_generation(
+                    &self.dir,
+                    EmbeddingGenerationQuery {
+                        prepared: &prepared,
+                        label_id,
+                        query: EmbeddingVectorQuery::Node(*node_uuid),
+                        limit,
+                    },
+                    VectorLifecycleLimits::default(),
+                    || Ok(()),
+                ))
+            }
+        }
+    }
+}
+
+fn soft_dimension_miss(
+    result: Result<Vec<VectorSearchHit>, SearchArtifactError>,
+) -> Result<Vec<VectorSearchHit>, GfError> {
+    match result {
+        Ok(hits) => Ok(hits),
+        Err(SearchArtifactError::InvalidSelector { field, reason })
+            if field == "vector" && reason.contains("dimension") =>
+        {
+            Ok(Vec::new())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn validation(message: impl Into<String>) -> GfError {
@@ -183,7 +241,7 @@ mod tests {
     use super::*;
     use crate::{
         CallerEmbeddingBatchRequest, CallerEmbeddingBatchRow, CallerEmbeddingDistance,
-        CallerEmbeddingNormalization, NodeHandle, NodeSelector, PropValue,
+        CallerEmbeddingNormalization, NodeHandle, NodeSelector, PropValue, SearchIndexOptions,
     };
 
     fn node(graph: &GraphForge, title: &str) -> NodeHandle {
@@ -320,6 +378,72 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["node_uuid", "title", "score", "matched_on"]
         );
+    }
+
+    #[test]
+    fn unknown_label_and_dimension_mismatch_soft_miss_as_empty() {
+        let graph = GraphForge::new(None).unwrap();
+        let empty = graph
+            .find(FindOptions {
+                query: Some("anything".to_owned()),
+                label: Some("Paper".to_owned()),
+                limit: 10,
+                ..FindOptions::default()
+            })
+            .unwrap();
+        assert_eq!(empty.num_rows(), 0);
+        assert!(empty.schema().field_with_name("score").is_ok());
+        assert!(empty.schema().field_with_name("matched_on").is_ok());
+
+        let paper = node(&graph, "stub");
+        graph
+            .index_search(
+                "Paper",
+                SearchIndexOptions::Vector {
+                    node: NodeSelector::Handle(paper),
+                    vector: vec![1.0; 128],
+                    space: "sbert".to_owned(),
+                },
+            )
+            .unwrap();
+        let mismatched = graph
+            .find(FindOptions {
+                label: Some("Paper".to_owned()),
+                vector: Some(vec![1.0; 64]),
+                space: Some("sbert".to_owned()),
+                limit: 10,
+                ..FindOptions::default()
+            })
+            .unwrap();
+        assert_eq!(mismatched.num_rows(), 0);
+    }
+
+    #[test]
+    fn index_upsert_raw_vector_find_returns_vector_channel() {
+        let graph = GraphForge::new(None).unwrap();
+        let paper = node(&graph, "Graph Neural Networks");
+        let vector = vec![1.0; 8];
+        graph
+            .index_search(
+                "Paper",
+                SearchIndexOptions::Vector {
+                    node: NodeSelector::Handle(paper.clone()),
+                    vector: vector.clone(),
+                    space: "sbert".to_owned(),
+                },
+            )
+            .unwrap();
+        let found = graph
+            .find(FindOptions {
+                label: Some("Paper".to_owned()),
+                vector: Some(vector),
+                space: Some("sbert".to_owned()),
+                limit: 10,
+                ..FindOptions::default()
+            })
+            .unwrap();
+        assert_eq!(uuids(&found), [*paper.uuid.as_bytes()]);
+        assert_eq!(channels(&found), ["vector"]);
     }
 
     #[test]

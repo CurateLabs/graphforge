@@ -3364,8 +3364,11 @@ exclusive forms:
 `space` is required for every vector form. Structural spaces that cannot embed
 arbitrary text reject `semantic_query`. Neither channel, conflicting vector
 forms, a space without a vector form, a vector form without a space, an empty
-text query, an unknown label/space, incompatible dimensions/identity, or
-`limit` outside `1..=10_000` is a structured validation error.
+text query, an unknown space, incompatible identity, or `limit` outside
+`1..=10_000` is a structured validation error. An unknown or unindexed label
+and a finite vector whose dimension does not match the selected space soft-miss
+as the typed empty Arrow table (same schema, zero rows) rather than
+`GF_VALIDATION`.
 
 Text indexing remains derived: a missing or stale matching text index triggers
 one coordinated lazy build from observed string properties. Vector data is
