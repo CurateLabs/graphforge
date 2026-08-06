@@ -1,0 +1,30 @@
+"""Bazel targets for graphforge-rel (#10 compiler)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_rel",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-plan:graphforge_plan",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_rel_test",
+    crate = ":graphforge_rel",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-plan:graphforge_plan",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)

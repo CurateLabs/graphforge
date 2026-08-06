@@ -1,14 +1,9 @@
-"""GraphForge Bazel module (M2 / #11 bootstrap).
+"""GraphForge Bazel module (M2 / #10 foundation + compiler libs).
 
 Canonical build-system contract: GitHub issue #1.
-First-party library modeling begins in #10; this module bootstraps
-Bazelisk/Bzlmod, pinned rules_rust/toolchains, a minimal smoke target, and
-Cargo.lock/Cargo.toml inputs for the drift check.
-
-crate_universe `from_cargo` wiring for external crates is scaffolded in
-`tools/bazel/crate_universe.MODULE.bazel.fragment` and activated when #10
-needs generated `@crates` dependencies (keeps bootstrap green without
-claiming library modeling complete).
+Activates crate_universe `from_cargo` against the frozen Cargo workspace and
+models foundation/compiler-layer first-party libraries as real rules_rust
+targets (no Cargo shell-out for ordinary compilation).
 """
 
 module(
@@ -28,3 +23,13 @@ rust.toolchain(
 use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:cargo-bazel-lock.json",
+    # Workspace root discovers all members; listing every member Cargo.toml is redundant.
+    manifests = ["//:Cargo.toml"],
+)
+use_repo(crate, "crates")

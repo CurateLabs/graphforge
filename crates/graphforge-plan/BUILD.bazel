@@ -1,0 +1,24 @@
+"""Bazel targets for graphforge-plan (#10 compiler)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_plan",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_plan_test",
+    crate = ":graphforge_plan",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+    ],
+)

@@ -1,0 +1,22 @@
+"""Bazel targets for graphforge-ontology (#10 foundation)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_ontology",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_ontology_test",
+    crate = ":graphforge_ontology",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+    ],
+)

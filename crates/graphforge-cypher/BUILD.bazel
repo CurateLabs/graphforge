@@ -1,0 +1,28 @@
+"""Bazel targets for graphforge-cypher (#10 compiler)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_cypher",
+    deps = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-rel:graphforge_rel",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_cypher_test",
+    crate = ":graphforge_cypher",
+    deps = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-rel:graphforge_rel",
+    ],
+)

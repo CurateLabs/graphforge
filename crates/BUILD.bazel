@@ -1,3 +1,3 @@
-"""Scaffolding package for first-party crate BUILD files (#10+)."""
+"""First-party crate packages live in crates/*/BUILD.bazel (#10+)."""
 
 package(default_visibility = ["//visibility:public"])
