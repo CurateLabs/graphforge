@@ -21,7 +21,7 @@ pub type NodeError = napi::Error<String>;
 /// Use this for binding coercion failures (bad handles, unsupported property
 /// types). Do **not** use it for Rust-owned [`GfError`] domains — those continue
 /// to go through [`to_napi_err`].
-pub fn type_error(env: &Env, message: impl Into<String>) -> NodeError {
+pub fn type_error(env: Env, message: impl Into<String>) -> NodeError {
     let message = message.into();
     let _ = env.throw_type_error(&message, Some("InvalidArg"));
     napi::Error::new("PendingException".to_owned(), message)

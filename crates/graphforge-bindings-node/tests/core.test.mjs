@@ -36,7 +36,7 @@ function checkAddNode() {
 
   assert.throws(
     () => forge.addNode("Person", { nested: { unsupported: true } }),
-    (error) => error.code === "ValidationError",
+    (error) => error instanceof TypeError,
   );
   assert.equal(
     tableFromIPC(forge.execute("MATCH (n:Person) RETURN n")).numRows,

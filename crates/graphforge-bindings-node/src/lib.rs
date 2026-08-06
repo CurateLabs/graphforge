@@ -599,7 +599,7 @@ const UNSUPPORTED_PROP_TYPE_MSG: &str =
 
 /// Convert a JS property bag, raising a real `TypeError` for unsupported values
 /// (functions, symbols, nested plain objects).
-fn props_from_js_object(env: &Env, props: Option<Object>) -> Result<HashMap<String, PropValue>> {
+fn props_from_js_object(env: Env, props: Option<Object>) -> Result<HashMap<String, PropValue>> {
     let Some(obj) = props else {
         return Ok(HashMap::new());
     };
@@ -628,7 +628,7 @@ fn props_from_js_object(env: &Env, props: Option<Object>) -> Result<HashMap<Stri
 // SAFETY: each `cast` / `from_napi_value` follows an explicit `ValueType`
 // check (or ClassInstance fallible coerce) so the napi value kind matches.
 #[allow(unsafe_code)]
-fn js_unknown_to_prop_value(env: &Env, value: Unknown<'_>) -> Result<PropValue> {
+fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
     match value.get_type().map_err(|error| {
         type_error(
             env,
@@ -647,8 +647,17 @@ fn js_unknown_to_prop_value(env: &Env, value: Unknown<'_>) -> Result<PropValue> 
                 type_error(env, format!("expected number property: {}", error.reason))
             })?;
             if number.is_finite() && number.fract() == 0.0 {
-                if number >= i64::MIN as f64 && number <= i64::MAX as f64 {
-                    return Ok(PropValue::Int(number as i64));
+                // JS numbers are IEEE-754; whole values in the exact integer
+                // range are stored as PropValue::Int.
+                #[allow(
+                    clippy::cast_precision_loss,
+                    clippy::cast_possible_truncation,
+                    reason = "JS Number is f64; whole values in i64 range are intentional"
+                )]
+                {
+                    if number >= i64::MIN as f64 && number <= i64::MAX as f64 {
+                        return Ok(PropValue::Int(number as i64));
+                    }
                 }
                 return Err(to_napi_err(&GfError::Validation(
                     "integer node property exceeds signed 64-bit range".into(),
@@ -702,7 +711,7 @@ fn js_unknown_to_prop_value(env: &Env, value: Unknown<'_>) -> Result<PropValue> 
 // TypeError rather than a generic napi Error.
 #[allow(unsafe_code)]
 fn node_handle_from_unknown<'env>(
-    env: &'env Env,
+    env: Env,
     value: Unknown<'env>,
     role: &str,
 ) -> Result<ClassInstance<'env, NodeHandle>> {
@@ -5740,7 +5749,7 @@ impl GraphForge {
         #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<NodeHandle> {
         self.ensure_open()?;
-        let props = props_from_js_object(&env, props)?;
+        let props = props_from_js_object(env, props)?;
         let graph = self.open_guard()?;
         graph
             .add_node(&label, &props)
@@ -5758,9 +5767,9 @@ impl GraphForge {
         #[napi(ts_arg_type = "NodeHandle")] dst: Unknown,
         #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<EdgeHandle> {
-        let src = node_handle_from_unknown(&env, src, "source")?;
-        let dst = node_handle_from_unknown(&env, dst, "destination")?;
-        let props = props_from_js_object(&env, props)?;
+        let src = node_handle_from_unknown(env, src, "source")?;
+        let dst = node_handle_from_unknown(env, dst, "destination")?;
+        let props = props_from_js_object(env, props)?;
         let graph = self.open_guard()?;
         graph
             .add_edge(&src.inner, &rel_type, &dst.inner, &props)
