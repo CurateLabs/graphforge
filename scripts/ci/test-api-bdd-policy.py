@@ -50,7 +50,46 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         _, errors = POLICY.validate(self.root)
         self.assertTrue(any(expected in error for error in errors), errors)
 
+    def seed_product_exclusion(
+        self,
+        *,
+        feature: str = "Error Handling",
+        scenario: str = "ParseError is raised on invalid Cypher syntax",
+        issue: int = 353,
+    ) -> dict:
+        """Install one valid product exclusion so mutations have a row to edit.
+
+        The live inventory may be empty once every exclusion is cleared; mutation
+        tests still need a representative row.
+        """
+        feature_path = self.root / "tests/features/api/errors.feature"
+        text = feature_path.read_text()
+        needle = f"  Scenario: {scenario}"
+        self.assertIn(needle, text)
+        feature_path.write_text(
+            text.replace(
+                needle,
+                f"  @excluded-api-bdd @issue-{issue}\n{needle}",
+                1,
+            )
+        )
+        inventory_path = self.root / "tests/contracts/api-bdd-exclusions.json"
+        inventory = json.loads(inventory_path.read_text())
+        inventory["exclusions"] = [
+            {
+                "feature": feature,
+                "scenario": scenario,
+                "issue": issue,
+                "languages": ["rust", "python", "node"],
+            }
+        ]
+        inventory_path.write_text(json.dumps(inventory))
+        _, errors = POLICY.validate(self.root)
+        self.assertEqual(errors, [])
+        return inventory
+
     def test_inventory_entry_cannot_be_removed(self) -> None:
+        self.seed_product_exclusion()
         path = self.root / "tests/contracts/api-bdd-exclusions.json"
         inventory = json.loads(path.read_text())
         inventory["exclusions"].pop()
@@ -70,6 +109,7 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         self.assert_rejected("must be an object")
 
     def test_null_inventory_languages_are_rejected_cleanly(self) -> None:
+        self.seed_product_exclusion()
         path = self.root / "tests/contracts/api-bdd-exclusions.json"
         inventory = json.loads(path.read_text())
         inventory["exclusions"][0]["languages"] = None
@@ -77,6 +117,7 @@ class ApiBddPolicyMutationTests(unittest.TestCase):
         self.assert_rejected("invalid languages []")
 
     def test_issue_tag_must_match_inventory(self) -> None:
+        self.seed_product_exclusion(issue=353)
         path = self.root / "tests/features/api/errors.feature"
         path.write_text(path.read_text().replace("@issue-353", "@issue-999", 1))
         self.assert_rejected("missing @issue-353")
