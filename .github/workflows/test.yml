@@ -914,7 +914,7 @@ jobs:
         with:
           name: cargo-bazel-parity-evidence-${{ github.run_id }}
           path: dist/cargo-bazel-parity-evidence.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   ci-gate:
     name: CI Gate
