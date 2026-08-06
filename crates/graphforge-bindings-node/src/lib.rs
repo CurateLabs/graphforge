@@ -7381,8 +7381,18 @@ mod tests {
     #[test]
     fn source_free_minimum_steiner_reaches_active_rust_handler() {
         let graph = GraphForge::new(None, None).unwrap();
-        let first = graph.add_node("Person".into(), None).unwrap();
-        let second = graph.add_node("Person".into(), None).unwrap();
+        // Construction methods require a napi Env for TypeError coercion; unit
+        // tests seed fixtures through the Rust facade instead.
+        let (first, second) = {
+            let engine = graph.open_guard().unwrap();
+            let first = engine
+                .add_node("Person", &Default::default())
+                .expect("fixture node");
+            let second = engine
+                .add_node("Person", &Default::default())
+                .expect("fixture node");
+            (first.uuid.to_string(), second.uuid.to_string())
+        };
 
         let result = graph.paths(
             None,
@@ -7395,7 +7405,7 @@ mod tests {
             None,
             None,
             None,
-            Some(vec![first.uuid(), second.uuid()]),
+            Some(vec![first, second]),
             None,
             None,
             None,
