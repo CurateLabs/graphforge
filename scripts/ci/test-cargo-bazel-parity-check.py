@@ -36,10 +36,7 @@ def main() -> None:
         text=True,
     )
     if ok.returncode != 0:
-        raise SystemExit(
-            "expected inventory parity check to pass:\n"
-            f"{ok.stdout}\n{ok.stderr}"
-        )
+        raise SystemExit(f"expected inventory parity check to pass:\n{ok.stdout}\n{ok.stderr}")
 
     with tempfile.TemporaryDirectory(prefix="gf-parity-") as tmp:
         tmp_path = Path(tmp)
@@ -73,9 +70,7 @@ def main() -> None:
         if failed.returncode == 0:
             raise SystemExit("expected missing release platform to fail closed")
         if "python-windows" not in (failed.stdout + failed.stderr):
-            raise SystemExit(
-                "expected python-windows missing-platform error:\n" + failed.stderr
-            )
+            raise SystemExit("expected python-windows missing-platform error:\n" + failed.stderr)
 
     print("cargo-bazel parity check tests passed")
 

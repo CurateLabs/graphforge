@@ -24,10 +24,7 @@ def main() -> None:
         text=True,
     )
     if ok.returncode != 0:
-        raise SystemExit(
-            "expected current ledger map to pass:\n"
-            f"{ok.stdout}\n{ok.stderr}"
-        )
+        raise SystemExit(f"expected current ledger map to pass:\n{ok.stdout}\n{ok.stderr}")
 
     with tempfile.TemporaryDirectory(prefix="gf-ledger-") as tmp:
         tmp_path = Path(tmp)

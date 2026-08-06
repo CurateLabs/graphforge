@@ -19,9 +19,7 @@ from typing import Any
 SCHEMA = "graphforge.bazel-migration-target-map.v1"
 DEFAULT_MAP = Path("tools/bazel/parity/migration_target_map.json")
 DEFAULT_LEDGER = Path("docs/development/bazel-migration-ledger.md")
-ALLOWED_EXCEPTION_STATUS = frozenset(
-    {"justified", "handoff", "closed", "mapped", "excluded"}
-)
+ALLOWED_EXCEPTION_STATUS = frozenset({"justified", "handoff", "closed", "mapped", "excluded"})
 KIND_TO_CLASS = {
     "lib": "lib",
     "rlib": "lib",
@@ -89,9 +87,7 @@ def check(
 ) -> list[str]:
     errors: list[str] = []
     payload = load_map(map_path)
-    mapped_entries = {
-        (entry["package"], entry["target"]): entry for entry in payload["targets"]
-    }
+    mapped_entries = {(entry["package"], entry["target"]): entry for entry in payload["targets"]}
     exceptions = {entry["id"]: entry for entry in payload.get("exceptions", [])}
 
     cargo_rows = cargo_targets(root)
@@ -150,9 +146,7 @@ def check(
         if status == "stub":
             errors.append(f"unjustified retained exception stub: {exception_id}")
         elif status not in ALLOWED_EXCEPTION_STATUS:
-            errors.append(
-                f"retained exception {exception_id} has invalid status {status!r}"
-            )
+            errors.append(f"retained exception {exception_id} has invalid status {status!r}")
         if not (exc.get("justification") or "").strip():
             errors.append(f"retained exception {exception_id} missing justification")
 

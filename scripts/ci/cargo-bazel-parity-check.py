@@ -72,9 +72,7 @@ def check_release_platforms(root: Path, platforms_path: Path, rc_path: Path) -> 
     node_pkg = json.loads((root / NODE_PACKAGE).read_text(encoding="utf-8"))
     napi_targets = set((node_pkg.get("napi") or {}).get("targets") or [])
     modeled_node_triples = {
-        entry["rust_triple"]
-        for entry in payload["platforms"]
-        if entry.get("language") == "node"
+        entry["rust_triple"] for entry in payload["platforms"] if entry.get("language") == "node"
     }
     for missing in sorted(napi_targets - modeled_node_triples):
         errors.append(f"napi package.json target missing Bazel platform: {missing}")
@@ -134,8 +132,7 @@ def check_labels_exist(root: Path, map_path: Path) -> list[str]:
                 errors.append(f"bazel label missing: {label}")
         if not errors:
             errors.append(
-                "bazelisk query failed for mapped labels:\n"
-                + (result.stderr or result.stdout)
+                "bazelisk query failed for mapped labels:\n" + (result.stderr or result.stdout)
             )
         return errors
 
@@ -169,8 +166,7 @@ def run_dual_suite(root: Path, suite_path: Path) -> tuple[list[str], list[dict[s
         cases.append(record)
         if cargo_ok != bazel_ok:
             errors.append(
-                f"parity outcome mismatch for {case_id}: "
-                f"cargo_ok={cargo_ok} bazel_ok={bazel_ok}"
+                f"parity outcome mismatch for {case_id}: cargo_ok={cargo_ok} bazel_ok={bazel_ok}"
             )
         if not cargo_ok and not bazel_ok:
             errors.append(
@@ -202,13 +198,9 @@ def main(argv: list[str] | None = None) -> int:
 
     root = args.root.resolve() if args.root else repo_root()
     map_path = args.map if args.map.is_absolute() else root / args.map
-    platforms_path = (
-        args.platforms if args.platforms.is_absolute() else root / args.platforms
-    )
+    platforms_path = args.platforms if args.platforms.is_absolute() else root / args.platforms
     suite_path = args.suite if args.suite.is_absolute() else root / args.suite
-    rc_path = (
-        args.rc_contract if args.rc_contract.is_absolute() else root / args.rc_contract
-    )
+    rc_path = args.rc_contract if args.rc_contract.is_absolute() else root / args.rc_contract
 
     errors: list[str] = []
     evidence: dict[str, Any] = {
@@ -254,9 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence["ok"] = not errors
     if args.write_evidence is not None:
         out = (
-            args.write_evidence
-            if args.write_evidence.is_absolute()
-            else root / args.write_evidence
+            args.write_evidence if args.write_evidence.is_absolute() else root / args.write_evidence
         )
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -268,10 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {error}", file=sys.stderr)
         return 1
 
-    print(
-        "cargo/bazel parity check OK: "
-        f"sha={evidence['sha']} mode={args.mode} dual_build=true"
-    )
+    print(f"cargo/bazel parity check OK: sha={evidence['sha']} mode={args.mode} dual_build=true")
     return 0
 
 
