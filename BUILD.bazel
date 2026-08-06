@@ -1,4 +1,4 @@
-"""Root Bazel package for GraphForge (#10 foundation + #9 runtime libs)."""
+"""Root Bazel package for GraphForge (#10/#9 libs + #7 binding cdylibs)."""
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
@@ -19,6 +19,24 @@ alias(
 alias(
     name = "cargo_feature_drift_check",
     actual = "//tools/bazel/drift:cargo_feature_drift_check",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "binding_cdylibs",
+    actual = "//tools/bazel/bindings:binding_cdylibs_build",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "python_wheel_smoke",
+    actual = "//tools/bazel/bindings:python_wheel_smoke",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "node_package_smoke",
+    actual = "//tools/bazel/bindings:node_package_smoke",
     visibility = ["//visibility:public"],
 )
 

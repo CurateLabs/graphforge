@@ -881,6 +881,12 @@ jobs:
           bazelisk test //tools/bazel/smoke:smoke_test //:first_party_lib_tests
           bazelisk build //:bazel_smoke //:first_party_libs //:runtime_libs
 
+      - name: Bazel binding cdylibs + packaging handoff
+        run: |
+          # Do not set --remote_cache; Blacksmith injects repository cache.
+          bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke
+          python3 scripts/ci/test-assemble-bazel-binding-packages.py
+
   ci-gate:
     name: CI Gate
     runs-on: blacksmith-4vcpu-ubuntu-2404

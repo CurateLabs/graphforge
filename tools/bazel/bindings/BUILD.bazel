@@ -1,0 +1,61 @@
+"""Binding cdylib aggregates and packaging handoff (#7)."""
+
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+
+package(default_visibility = ["//visibility:public"])
+
+build_test(
+    name = "binding_cdylibs_build",
+    targets = [
+        "//crates/graphforge-bindings-node:graphforge_bindings_node",
+        "//crates/graphforge-bindings-py:graphforge_bindings_py",
+    ],
+)
+
+# Assemble a Python wheel from the Bazel cdylib + pure-Python sources.
+# Never invokes maturin/cargo compile (RT-maturin-assemble handoff).
+genrule(
+    name = "python_wheel_smoke",
+    srcs = [
+        "//crates/graphforge-bindings-py:graphforge_bindings_py",
+        "//crates/graphforge-bindings-py:python_sources",
+    ],
+    outs = ["graphforge-bazel-smoke.whl"],
+    cmd = """
+set -euo pipefail
+NATIVE=$$(echo $(locations //crates/graphforge-bindings-py:graphforge_bindings_py) | tr ' ' '\\n' | grep -E '\\.(so|dylib|dll)$$' | head -n1)
+INIT=$$(echo $(locations //crates/graphforge-bindings-py:python_sources) | tr ' ' '\\n' | grep 'python/graphforge/__init__.py$$' | head -n1)
+PKG_ROOT=$$(cd "$$(dirname "$$INIT")/../.." && pwd)
+python3 $(execpath //scripts/ci:assemble_bazel_binding_packages_py) \
+  --language python \
+  --native "$$NATIVE" \
+  --package-root "$$PKG_ROOT" \
+  --out "$@" \
+  --write-evidence "$(@D)/python-bazel-native-evidence.json"
+""",
+    tools = ["//scripts/ci:assemble_bazel_binding_packages_py"],
+)
+
+# Assemble a Node package zip from the Bazel cdylib + checked-in sources.
+# Never invokes napi/cargo compile (RT-napi-assemble handoff).
+genrule(
+    name = "node_package_smoke",
+    srcs = [
+        "//crates/graphforge-bindings-node:graphforge_bindings_node",
+        "//crates/graphforge-bindings-node:node_package_sources",
+    ],
+    outs = ["node-package-smoke.zip"],
+    cmd = """
+set -euo pipefail
+NATIVE=$$(echo $(locations //crates/graphforge-bindings-node:graphforge_bindings_node) | tr ' ' '\\n' | grep -E '\\.(so|dylib|dll|node)$$' | head -n1)
+PKG_JSON=$$(echo $(locations //crates/graphforge-bindings-node:node_package_sources) | tr ' ' '\\n' | grep 'package.json$$' | head -n1)
+PKG_ROOT=$$(cd "$$(dirname "$$PKG_JSON")" && pwd)
+python3 $(execpath //scripts/ci:assemble_bazel_binding_packages_py) \
+  --language node \
+  --native "$$NATIVE" \
+  --package-root "$$PKG_ROOT" \
+  --out "$@" \
+  --write-evidence "$(@D)/node-bazel-native-evidence.json"
+""",
+    tools = ["//scripts/ci:assemble_bazel_binding_packages_py"],
+)
