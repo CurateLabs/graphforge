@@ -14,7 +14,8 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
 | Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **No** — inventory/baseline only |
+| Bazel modeling claimed complete? | **No** — inventory/baseline only (#11 bootstrap smoke only) |
+| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); first-party libs remain `unmapped` until #10 |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
 This freeze uses the **current authoritative** metadata count (**90** targets;

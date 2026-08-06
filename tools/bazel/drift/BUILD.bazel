@@ -1,0 +1,23 @@
+"""Cargo feature fingerprint inputs for the #11 drift check.
+
+The fail-closed executable check lives in
+`scripts/ci/cargo-bazel-drift-check.py` (and
+`scripts/ci/test-cargo-bazel-drift-check.py`). CI and developers run those
+host-tool scripts; this package keeps the fingerprint and Cargo inputs visible
+to Bazel so later slices can depend on them hermetically.
+"""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "cargo_feature_fingerprint.json",
+])
+
+filegroup(
+    name = "cargo_feature_drift_check",
+    srcs = [
+        "//:Cargo.lock",
+        "//:Cargo.toml",
+        ":cargo_feature_fingerprint.json",
+    ],
+)

@@ -1,0 +1,20 @@
+"""Root Bazel package for GraphForge (#11 bootstrap)."""
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "rust-toolchain.toml",
+])
+
+alias(
+    name = "bazel_smoke",
+    actual = "//tools/bazel/smoke:smoke",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "cargo_feature_drift_check",
+    actual = "//tools/bazel/drift:cargo_feature_drift_check",
+    visibility = ["//visibility:public"],
+)

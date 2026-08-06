@@ -77,6 +77,10 @@ docs/_build/
 .pybuilder/
 target/
 
+# Bazel
+/bazel-*
+.bazelbsp/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

@@ -1,0 +1,3 @@
+"""Scaffolding package for first-party crate BUILD files (#10+)."""
+
+package(default_visibility = ["//visibility:public"])

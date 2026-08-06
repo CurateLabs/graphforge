@@ -1,0 +1,11 @@
+# GraphForge Bazel bootstrap (#11). Blacksmith injects repository remote cache;
+# do not set --remote_cache here or in CI.
+common --enable_bzlmod
+common --noenable_workspace
+
+build --incompatible_strict_action_env
+build --experimental_convenience_symlinks=normal
+
+# Keep action logs useful without leaking secrets into cacheable outputs.
+build --announce_rc
+test --test_output=errors

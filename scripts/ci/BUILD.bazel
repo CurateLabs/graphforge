@@ -1,0 +1,11 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "cargo-bazel-drift-check.py",
+    "test-cargo-bazel-drift-check.py",
+])
+
+filegroup(
+    name = "cargo_bazel_drift_check_py",
+    srcs = ["cargo-bazel-drift-check.py"],
+)
