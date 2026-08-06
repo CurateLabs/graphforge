@@ -40,12 +40,8 @@ def test_neighbourhood_returns_arrow_table() -> None:
 
 def test_neighbourhood_name_canonical_prop_has_no_duplicate_columns() -> None:
     forge = GraphForge()
-    forge.execute(
-        "CREATE (:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob'})"
-    )
-    table = neighbourhood(
-        forge, "Alice", hops=1, label="Person", canonical_prop="name"
-    )
+    forge.execute("CREATE (:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob'})")
+    table = neighbourhood(forge, "Alice", hops=1, label="Person", canonical_prop="name")
     assert table.column_names == ["name", "labels"]
     assert table.column("name").to_pylist() == ["Bob"]
 

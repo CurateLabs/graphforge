@@ -15,13 +15,18 @@ test("neighbourhood returns distinct name rows without duplicate columns", () =>
   forge.addEdge(bob, "KNOWS", charlie);
 
   const table = tableFromIPC(
-    neighbourhood(forge, "Alice", 2, { label: "Person", canonicalProp: "name" }),
+    neighbourhood(forge, "Alice", 2, {
+      label: "Person",
+      canonicalProp: "name",
+    }),
   );
   assert.deepEqual(
     table.schema.fields.map((field) => field.name),
     ["name", "labels"],
   );
-  const names = [...(table.getChild("name")?.toArray() ?? [])].map(String).sort();
+  const names = [...(table.getChild("name")?.toArray() ?? [])]
+    .map(String)
+    .sort();
   assert.deepEqual(names, ["Bob", "Charlie"]);
 });
 
@@ -29,7 +34,10 @@ test("neighbourhood hops 0 returns typed empty Arrow table", () => {
   const forge = new GraphForge();
   forge.addNode("Person", { name: "Alice" });
   const table = tableFromIPC(
-    neighbourhood(forge, "Alice", 0, { label: "Person", canonicalProp: "name" }),
+    neighbourhood(forge, "Alice", 0, {
+      label: "Person",
+      canonicalProp: "name",
+    }),
   );
   assert.equal(table.numRows, 0);
   assert.deepEqual(

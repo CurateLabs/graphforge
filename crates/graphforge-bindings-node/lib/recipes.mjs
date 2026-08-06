@@ -4,7 +4,9 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function identifier(name, kind) {
   if (typeof name !== "string" || !IDENTIFIER.test(name)) {
-    throw new TypeError(`${kind} must be a valid identifier, got ${JSON.stringify(name)}`);
+    throw new TypeError(
+      `${kind} must be a valid identifier, got ${JSON.stringify(name)}`,
+    );
   }
   return name;
 }
@@ -34,7 +36,9 @@ export function neighbourhood(
   label = identifier(label, "label");
   canonicalProp = identifier(canonicalProp, "canonical_prop");
   if (typeof hops !== "number" || !Number.isInteger(hops) || hops < 0) {
-    throw new TypeError(`hops must be an integer >= 0, got ${JSON.stringify(hops)}`);
+    throw new TypeError(
+      `hops must be an integer >= 0, got ${JSON.stringify(hops)}`,
+    );
   }
   if (hops === 0) {
     return forge.execute(
