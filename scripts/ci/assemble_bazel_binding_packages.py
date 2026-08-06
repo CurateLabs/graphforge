@@ -10,6 +10,7 @@ Bazel-produced shared library into a package layout (wheel or npm-style tree).
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -121,7 +122,6 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
         )
         shutil.copy2(native, package_dir / module_name)
 
-        wheel_tag = "py3-none-any"
         # Platform-specific abi3 wheel tag keeps clean-install expectations honest
         # for CI smoke; full cross-platform matrix remains #6.
         sys_name = platform.system()
@@ -136,6 +136,8 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
             wheel_tag = "cp310-abi3-macosx_10_12_x86_64"
         elif sys_name == "Windows" and mach in ("amd64", "x86_64"):
             wheel_tag = "cp310-abi3-win_amd64"
+        else:
+            _die(f"unsupported host platform for abi3 wheel tagging: {sys_name}/{mach}")
 
         (dist_info / "METADATA").write_text(
             "\n".join(
@@ -171,7 +173,11 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
                     continue
                 arcname = path.relative_to(staging).as_posix()
                 data = path.read_bytes()
-                digest = hashlib.sha256(data).hexdigest()
+                digest = (
+                    base64.urlsafe_b64encode(hashlib.sha256(data).digest())
+                    .rstrip(b"=")
+                    .decode("ascii")
+                )
                 record_lines.append(f"{arcname},sha256={digest},{len(data)}")
                 wheel.writestr(arcname, data)
             record_path = f"graphforge-{version}.dist-info/RECORD"

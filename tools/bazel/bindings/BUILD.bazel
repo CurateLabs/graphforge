@@ -20,7 +20,10 @@ genrule(
         "//crates/graphforge-bindings-py:graphforge_bindings_py",
         "//crates/graphforge-bindings-py:python_sources",
     ],
-    outs = ["graphforge-bazel-smoke.whl"],
+    outs = [
+        "graphforge-bazel-smoke.whl",
+        "python-bazel-native-evidence.json",
+    ],
     cmd = """
 set -euo pipefail
 NATIVE=$$(echo $(locations //crates/graphforge-bindings-py:graphforge_bindings_py) | tr ' ' '\\n' | grep -E '\\.(so|dylib|dll)$$' | head -n1)
@@ -30,8 +33,8 @@ python3 $(execpath //scripts/ci:assemble_bazel_binding_packages_py) \
   --language python \
   --native "$$NATIVE" \
   --package-root "$$PKG_ROOT" \
-  --out "$@" \
-  --write-evidence "$(@D)/python-bazel-native-evidence.json"
+  --out $(location graphforge-bazel-smoke.whl) \
+  --write-evidence $(location python-bazel-native-evidence.json)
 """,
     tools = ["//scripts/ci:assemble_bazel_binding_packages_py"],
 )
@@ -44,7 +47,10 @@ genrule(
         "//crates/graphforge-bindings-node:graphforge_bindings_node",
         "//crates/graphforge-bindings-node:node_package_sources",
     ],
-    outs = ["node-package-smoke.zip"],
+    outs = [
+        "node-package-smoke.zip",
+        "node-bazel-native-evidence.json",
+    ],
     cmd = """
 set -euo pipefail
 NATIVE=$$(echo $(locations //crates/graphforge-bindings-node:graphforge_bindings_node) | tr ' ' '\\n' | grep -E '\\.(so|dylib|dll|node)$$' | head -n1)
@@ -54,8 +60,8 @@ python3 $(execpath //scripts/ci:assemble_bazel_binding_packages_py) \
   --language node \
   --native "$$NATIVE" \
   --package-root "$$PKG_ROOT" \
-  --out "$@" \
-  --write-evidence "$(@D)/node-bazel-native-evidence.json"
+  --out $(location node-package-smoke.zip) \
+  --write-evidence $(location node-bazel-native-evidence.json)
 """,
     tools = ["//scripts/ci:assemble_bazel_binding_packages_py"],
 )
