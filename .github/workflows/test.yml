@@ -881,22 +881,35 @@ jobs:
           python3 scripts/ci/test-bazel-migration-ledger-check.py
           python3 scripts/ci/test-cargo-bazel-parity-check.py
 
-      - name: Bazel smoke + first-party libs/tests/CLI/resources
+      - name: Blacksmith remote-cache policy + perf harness tests (#5)
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          bazelisk test //:bazel_test_graph_smoke
+          python3 scripts/ci/bazel-cache-perf.py --mode policy
+          python3 scripts/ci/test-bazel-cache-perf.py
+          python3 scripts/ci/bazel-cache-perf.py --mode evaluate --allow-pending \
+            --evidence docs/development/bazel-migration-evidence/perf-sample.json
+
+      - name: Bazel smoke + first-party libs/tests/CLI/resources
+        run: |
+          set -euo pipefail
+          # Do not set --remote_cache; Blacksmith injects repository cache.
+          mkdir -p dist
+          bazelisk test //:bazel_test_graph_smoke 2>&1 | tee dist/bazel-test-graph-smoke.log
           bazelisk build \
             //:bazel_smoke \
             //:first_party_libs \
             //:runtime_libs \
             //:cli_bins \
             //:resource_inputs \
-            //:release_bins
+            //:release_bins 2>&1 | tee dist/bazel-representative-build.log
 
       - name: Bazel binding cdylibs + packaging handoff
         run: |
+          set -euo pipefail
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke
+          mkdir -p dist
+          bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke \
+            2>&1 | tee dist/bazel-binding-build.log
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
 
       - name: Same-SHA Cargo/Bazel dual-build parity
@@ -908,12 +921,65 @@ jobs:
             --mode all \
             --write-evidence "dist/cargo-bazel-parity-evidence.json"
 
+      - name: Cache-unavailable cold correctness + warm observation (#5)
+        run: |
+          set -euo pipefail
+          # Cold correctness clears remote/disk cache via CLI only (not checked in).
+          mkdir -p dist
+          python3 scripts/ci/bazel-cache-perf.py --mode cold-correctness
+          python3 scripts/ci/bazel-cache-perf.py --mode observe-warm \
+            --write dist/bazel-warm-observation.json
+          python3 scripts/ci/bazel-cache-perf.py --mode affected-inputs \
+            --write dist/bazel-affected-inputs.json
+          if [[ -f dist/bazel-representative-build.log ]]; then
+            python3 scripts/ci/bazel-cache-perf.py --mode parse-log \
+              --log dist/bazel-representative-build.log \
+              > dist/bazel-representative-build.summary.json || \
+              echo '{"remote_cache_hits":0,"raw":null}' > dist/bazel-representative-build.summary.json
+          else
+            echo '{"remote_cache_hits":0,"raw":null,"note":"missing build log"}' \
+              > dist/bazel-representative-build.summary.json
+          fi
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          dist = Path("dist")
+          warm = json.loads((dist / "bazel-warm-observation.json").read_text())
+          affected = json.loads((dist / "bazel-affected-inputs.json").read_text())
+          summary = {
+              "schema": "graphforge.bazel-cache-perf-ci-observation.v1",
+              "warm_observation": warm,
+              "affected_inputs": affected,
+              "remote_cache_hits_observed": bool(warm.get("remote_cache_hits_observed")),
+              "org_admin_blocker_likely": not bool(warm.get("remote_cache_hits_observed")),
+          }
+          (dist / "bazel-cache-perf-ci-observation.json").write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
       - name: Upload Cargo/Bazel parity evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: cargo-bazel-parity-evidence-${{ github.run_id }}
           path: dist/cargo-bazel-parity-evidence.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload Bazel cache/perf observation (#5)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bazel-cache-perf-evidence-${{ github.run_id }}
+          path: |
+            dist/bazel-warm-observation.json
+            dist/bazel-affected-inputs.json
+            dist/bazel-cache-perf-ci-observation.json
+            dist/bazel-representative-build.summary.json
+            docs/development/bazel-migration-evidence/perf-sample.json
           if-no-files-found: error
           retention-days: 1
 

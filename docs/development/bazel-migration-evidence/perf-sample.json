@@ -1,0 +1,67 @@
+{
+  "baseline": {
+    "cargo_compute_proxy_p50_seconds": 923,
+    "cargo_primary_p50_seconds": 625,
+    "inventory_sha": "6e8b8e3fdc1ecd960eacf14a73e5be7b54fcef3c",
+    "primary_jobs": [
+      "Rust Tests",
+      "Python Binding",
+      "Node Binding"
+    ]
+  },
+  "baseline_ref": "docs/development/bazel-migration-baseline.md",
+  "blacksmith_dashboard_links": [],
+  "blocker": {
+    "cache_page": "https://app.blacksmith.sh/cache",
+    "dashboard": "https://app.blacksmith.sh/settings?tab=features",
+    "docs": "https://docs.blacksmith.sh/blacksmith-caching/bazel-build-caching",
+    "kind": "org_admin_blacksmith_bazel_build_caching",
+    "steps": [
+      "Org admin opens Blacksmith Settings → Features",
+      "Under Caching, enable Bazel Build Caching for CurateLabs/graphforge",
+      "Confirm no competing --remote_cache remains in-repo (policy check)",
+      "Re-run Bazel Bootstrap / measurement harness on an immutable SHA",
+      "Collect ≥10 paired cold/warm runs and refresh perf-sample.json"
+    ]
+  },
+  "cold_protocol": {
+    "bazel": "Correctness: CLI-only empty --remote_cache/--disk_cache (zero remote hits; not a repo default). Cold perf: clean/evicted Blacksmith repo cache without sticky local state",
+    "cargo": "Cargo sticky-disk warm starts are not cold; cold Cargo uses empty target/ without sticky hydrate"
+  },
+  "gates": {
+    "passed": false,
+    "reason": "pending_org_admin_and_paired_sample"
+  },
+  "git_sha_at_scaffold": "457eb1171cbd240ade30efd63814d9b8748a9934",
+  "issue": 5,
+  "observations": {
+    "affected_inputs_isolation": false,
+    "cache_unavailable_cold_correct": false,
+    "remote_cache_hits_on_identical_sha": false
+  },
+  "pairs": [],
+  "representative_targets": {
+    "bindings": [
+      "//:binding_cdylibs"
+    ],
+    "build": [
+      "//:bazel_smoke",
+      "//:first_party_libs",
+      "//:cli_bins",
+      "//:resource_inputs",
+      "//:release_bins"
+    ],
+    "test": [
+      "//:bazel_test_graph_smoke"
+    ]
+  },
+  "schema": "graphforge.bazel-cache-perf-evidence.v1",
+  "status": "pending_org_admin",
+  "thresholds": {
+    "cold_regression_max": 0.1,
+    "compute_reduction_min": 0.25,
+    "min_pairs": 10,
+    "warm_speedup_min": 0.3
+  },
+  "waiver": null
+}

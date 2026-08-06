@@ -8,8 +8,9 @@ exports_files([
     "test-bazel-migration-ledger-check.py",
     "cargo-bazel-parity-check.py",
     "test-cargo-bazel-parity-check.py",
+    "bazel-cache-perf.py",
+    "test-bazel-cache-perf.py",
 ])
-
 filegroup(
     name = "cargo_bazel_drift_check_py",
     srcs = ["cargo-bazel-drift-check.py"],
