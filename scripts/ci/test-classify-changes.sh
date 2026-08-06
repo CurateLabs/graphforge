@@ -113,6 +113,8 @@ assert_classification "$all" tests/contracts/concurrency-short-matrix.json concu
 assert_classification "$bazel_only" MODULE.bazel bazel-module
 assert_classification "$bazel_only" tools/bazel/smoke/src/lib.rs bazel-smoke
 assert_classification "$bazel_only" scripts/ci/cargo-bazel-drift-check.py bazel-drift-check
+assert_classification "$bazel_only" cargo-bazel-lock.json bazel-crate-universe-lock
+assert_classification "$bazel_only" crates/graphforge-core/BUILD.bazel bazel-crate-build
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.

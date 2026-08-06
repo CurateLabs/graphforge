@@ -1,0 +1,5 @@
+"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])

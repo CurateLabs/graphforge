@@ -1,0 +1,28 @@
+"""Bazel targets for graphforge-ir (#10 compiler)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_ir",
+    deps = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ontology:graphforge_ontology",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_ir_test",
+    crate = ":graphforge_ir",
+    deps = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        # Cargo [dev-dependencies]; unit tests call graphforge_cypher::parse.
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-ontology:graphforge_ontology",
+    ],
+)

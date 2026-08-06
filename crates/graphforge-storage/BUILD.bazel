@@ -1,0 +1,32 @@
+"""Bazel targets for graphforge-storage.
+
+Modeled in #10 because graphforge-rel (compiler lowering) depends on it.
+Issue #9 still owns the remaining runtime libraries (exec/search/knowledge/api/io).
+"""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_storage",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-ontology:graphforge_ontology",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_storage_test",
+    crate = ":graphforge_storage",
+    # Unit suite exercises filesystem/async paths; default "small" is too tight.
+    size = "medium",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-ontology:graphforge_ontology",
+    ],
+)

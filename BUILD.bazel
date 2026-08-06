@@ -1,8 +1,11 @@
-"""Root Bazel package for GraphForge (#11 bootstrap)."""
+"""Root Bazel package for GraphForge (#10 foundation/compiler libs)."""
+
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
 exports_files([
     "Cargo.toml",
     "Cargo.lock",
+    "cargo-bazel-lock.json",
     "LICENSE",
     "rust-toolchain.toml",
 ])
@@ -17,4 +20,36 @@ alias(
     name = "cargo_feature_drift_check",
     actual = "//tools/bazel/drift:cargo_feature_drift_check",
     visibility = ["//visibility:public"],
+)
+
+# Foundation + compiler-layer libraries modeled in #10 (plus storage, required
+# by graphforge-rel). Runtime peers remain for #9.
+build_test(
+    name = "foundation_compiler_libs",
+    targets = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-plan:graphforge_plan",
+        "//crates/graphforge-provenance:graphforge_provenance",
+        "//crates/graphforge-rel:graphforge_rel",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+test_suite(
+    name = "foundation_compiler_tests",
+    tests = [
+        "//crates/graphforge-ast:graphforge_ast_test",
+        "//crates/graphforge-core:graphforge_core_test",
+        "//crates/graphforge-cypher:graphforge_cypher_test",
+        "//crates/graphforge-ir:graphforge_ir_test",
+        "//crates/graphforge-ontology:graphforge_ontology_test",
+        "//crates/graphforge-plan:graphforge_plan_test",
+        "//crates/graphforge-provenance:graphforge_provenance_test",
+        "//crates/graphforge-rel:graphforge_rel_test",
+        "//crates/graphforge-storage:graphforge_storage_test",
+    ],
 )
