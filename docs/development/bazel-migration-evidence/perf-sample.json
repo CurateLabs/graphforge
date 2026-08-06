@@ -10,36 +10,210 @@
     ]
   },
   "baseline_ref": "docs/development/bazel-migration-baseline.md",
-  "blacksmith_dashboard_links": [],
-  "blocker": {
-    "cache_page": "https://app.blacksmith.sh/cache",
-    "dashboard": "https://app.blacksmith.sh/settings?tab=features",
-    "docs": "https://docs.blacksmith.sh/blacksmith-caching/bazel-build-caching",
-    "kind": "org_admin_blacksmith_bazel_build_caching",
-    "steps": [
-      "Org admin opens Blacksmith Settings → Features",
-      "Under Caching, enable Bazel Build Caching for CurateLabs/graphforge",
-      "Confirm no competing --remote_cache remains in-repo (policy check)",
-      "Re-run Bazel Bootstrap / measurement harness on an immutable SHA",
-      "Collect ≥10 paired cold/warm runs and refresh perf-sample.json"
-    ]
-  },
+  "blacksmith_dashboard_links": [
+    "https://github.com/CurateLabs/graphforge/actions/runs/31129168631",
+    "https://app.blacksmith.sh/cache"
+  ],
   "cold_protocol": {
     "bazel": "Correctness: CLI-only empty --remote_cache/--disk_cache (zero remote hits; not a repo default). Cold perf: clean/evicted Blacksmith repo cache without sticky local state",
     "cargo": "Cargo sticky-disk warm starts are not cold; cold Cargo uses empty target/ without sticky hydrate"
   },
+  "collection": {
+    "pair_count": 10,
+    "populate_wall_seconds": 7.981,
+    "remote_cache_hits_seen": true,
+    "run_id": "31129168631",
+    "run_url": "https://github.com/CurateLabs/graphforge/actions/runs/31129168631",
+    "runner": "blacksmith-01kzckv9gvmvpr5dzy42sgjksh-4vcpu"
+  },
   "gates": {
-    "passed": false,
-    "reason": "pending_org_admin_and_paired_sample"
+    "cold_regression": -0.3798696,
+    "compute_reduction": 0.9818201516793066,
+    "pair_count": 10,
+    "passed": true,
+    "reason": "ok",
+    "warm_speedup": 0.973152
   },
   "git_sha_at_scaffold": "457eb1171cbd240ade30efd63814d9b8748a9934",
+  "git_sha_measured": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
   "issue": 5,
   "observations": {
-    "affected_inputs_isolation": false,
-    "cache_unavailable_cold_correct": false,
-    "remote_cache_hits_on_identical_sha": false
+    "affected_inputs_isolation": true,
+    "cache_unavailable_cold_correct": true,
+    "remote_cache_hits_on_identical_sha": true
   },
-  "pairs": [],
+  "pairs": [
+    {
+      "cold": {
+        "build_wall_seconds": 26.118,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 228.277,
+        "wall_seconds": 254.396
+      },
+      "compute_proxy_seconds": 9.352,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 0,
+      "warm": {
+        "build_wall_seconds": 1.036,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 8.316,
+        "wall_seconds": 9.352
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 27.2,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 251.339,
+        "wall_seconds": 278.54
+      },
+      "compute_proxy_seconds": 12.111,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 1,
+      "warm": {
+        "build_wall_seconds": 0.956,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 11.155,
+        "wall_seconds": 12.111
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 27.498,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 234.881,
+        "wall_seconds": 262.379
+      },
+      "compute_proxy_seconds": 9.784,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 2,
+      "warm": {
+        "build_wall_seconds": 1.07,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 8.714,
+        "wall_seconds": 9.784
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 40.235,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 250.178,
+        "wall_seconds": 290.414
+      },
+      "compute_proxy_seconds": 16.78,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 3,
+      "warm": {
+        "build_wall_seconds": 1.811,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 14.969,
+        "wall_seconds": 16.78
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 36.086,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 294.489,
+        "wall_seconds": 330.576
+      },
+      "compute_proxy_seconds": 16.318,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 4,
+      "warm": {
+        "build_wall_seconds": 1.933,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 14.385,
+        "wall_seconds": 16.318
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 54.731,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 410.491,
+        "wall_seconds": 465.23
+      },
+      "compute_proxy_seconds": 47.015,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 5,
+      "warm": {
+        "build_wall_seconds": 1.817,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 45.198,
+        "wall_seconds": 47.015
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 55.061,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 454.108,
+        "wall_seconds": 509.171
+      },
+      "compute_proxy_seconds": 23.813,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 6,
+      "warm": {
+        "build_wall_seconds": 1.89,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 21.923,
+        "wall_seconds": 23.813
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 57.721,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 416.287,
+        "wall_seconds": 474.01
+      },
+      "compute_proxy_seconds": 24.064,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 7,
+      "warm": {
+        "build_wall_seconds": 1.808,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 22.256,
+        "wall_seconds": 24.064
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 36.032,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 417.357,
+        "wall_seconds": 453.389
+      },
+      "compute_proxy_seconds": 16.78,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 8,
+      "warm": {
+        "build_wall_seconds": 1.28,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 15.5,
+        "wall_seconds": 16.78
+      }
+    },
+    {
+      "cold": {
+        "build_wall_seconds": 36.878,
+        "remote_cache_hits": 0,
+        "test_wall_seconds": 407.708,
+        "wall_seconds": 444.587
+      },
+      "compute_proxy_seconds": 16.813,
+      "git_sha": "d9c3acea41a6e9f89f0c342148fc9f7ffa9e91b1",
+      "index": 9,
+      "warm": {
+        "build_wall_seconds": 1.516,
+        "remote_cache_hits": 1243,
+        "test_wall_seconds": 15.297,
+        "wall_seconds": 16.813
+      }
+    }
+  ],
   "representative_targets": {
     "bindings": [
       "//:binding_cdylibs"
@@ -56,7 +230,7 @@
     ]
   },
   "schema": "graphforge.bazel-cache-perf-evidence.v1",
-  "status": "pending_org_admin",
+  "status": "complete",
   "thresholds": {
     "cold_regression_max": 0.1,
     "compute_reduction_min": 0.25,

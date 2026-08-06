@@ -10,25 +10,24 @@ Companion artifacts:
 - Machine-readable sample: [bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json)
 - Harness: `scripts/ci/bazel-cache-perf.py`
 
-## Org-admin blocker (required for remote hits)
+## Blacksmith Bazel Build Caching (enabled)
 
-Blacksmith injects repository Bazel caching **only after** an organization
-administrator enables **Bazel Build Caching** for this repository. GraphForge
-must **not** set `--remote_cache` in `.bazelrc` or workflows.
+Blacksmith injects repository Bazel caching after an organization administrator
+enables **Bazel Build Caching** for this repository. GraphForge must **not** set
+`--remote_cache` in `.bazelrc` or workflows.
 
-### Exact admin steps
+Enablement is confirmed: identical-SHA warm observation reported remote cache
+hits, and ≥10 cold/warm pairs are checked in under
+[perf-sample.json](bazel-migration-evidence/perf-sample.json). Re-check steps if
+hits regress:
 
 1. Open [Blacksmith Settings → Features](https://app.blacksmith.sh/settings?tab=features).
-2. Under **Caching**, enable **Bazel Build Caching** for `CurateLabs/graphforge`.
-3. Confirm the [Cache page](https://app.blacksmith.sh/cache) shows a Bazel tab for
-   this repository (hit rate / storage appear after jobs run).
-4. Do **not** add a second remote-cache provider. If any legacy `--remote_cache`
-   exists elsewhere, remove it so Blacksmith’s injection takes effect.
+2. Under **Caching**, confirm **Bazel Build Caching** for `CurateLabs/graphforge`.
+3. Confirm the [Cache page](https://app.blacksmith.sh/cache) shows a Bazel tab.
+4. Do **not** add a competing `--remote_cache`.
 5. Docs: [Blacksmith Bazel Build Caching](https://docs.blacksmith.sh/blacksmith-caching/bazel-build-caching).
 
-Until step 2 lands, remote-cache hits cannot be measured and #5 **must stay open**.
-
-## In-repo readiness (lands without admin)
+## In-repo harness + evidence
 
 | Piece | Location |
 | --- | --- |
@@ -39,11 +38,10 @@ Until step 2 lands, remote-cache hits cannot be measured and #5 **must stay open
 | Affected-input isolation probe | `--mode affected-inputs` |
 | Gate evaluator (≥10 pairs, #1 thresholds) | `--mode evaluate` |
 | CI wiring | `Bazel Bootstrap` in `.github/workflows/test.yml` |
-| Checked-in sample status | `perf-sample.json` → `pending_org_admin` |
+| Checked-in sample status | `perf-sample.json` → `complete` (10 pairs; gates passed) |
 
-CI uses `--allow-pending` so in-repo readiness stays green while the org-admin
-blocker remains. Strict evaluate (no `--allow-pending`) fails until the paired
-sample and observations are complete — that is the #5 close gate.
+CI may still pass `--allow-pending` for harness readiness. The #5 close gate is
+strict `evaluate` (no `--allow-pending`) against the checked-in complete sample.
 
 ## Measurement plan
 
