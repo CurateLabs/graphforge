@@ -439,7 +439,8 @@ function checkAStarPaths() {
   assert.throws(
     () => new GraphForge().addNode("Person", { heuristic: Number.NaN }),
     (error) =>
-      error.code === "ValidationError" && /non-finite node property/.test(error.message),
+      error.code === "ValidationError" &&
+      /non-finite node property/.test(error.message),
   );
 
   for (const [name, literal, code] of [
