@@ -1392,6 +1392,61 @@ async fn when_load_ontology(world: &mut GraphForgeWorld) {
     }
 }
 
+#[when(regex = r#"^I bulk add nodes with label "Person" and 2 records$"#)]
+async fn when_bulk_add_nodes_list(world: &mut GraphForgeWorld) {
+    publish_bulk_person_nodes(world, &["Alice", "Bob"]);
+}
+
+#[when(regex = r#"^I bulk add nodes with label "Person" from an Arrow Table of 5 rows$"#)]
+async fn when_bulk_add_nodes_arrow(world: &mut GraphForgeWorld) {
+    publish_bulk_person_nodes(world, &["A", "B", "C", "D", "E"]);
+}
+
+fn publish_bulk_person_nodes(world: &mut GraphForgeWorld, names: &[&str]) {
+    use arrow::array::{FixedSizeBinaryBuilder, StringArray};
+    use arrow::datatypes::{DataType, Field};
+    use std::sync::Arc;
+
+    let rows = names.len();
+    let mut node_ids = FixedSizeBinaryBuilder::with_capacity(rows, 16);
+    for _ in 0..rows {
+        node_ids.append_null();
+    }
+    let schema =
+        graphforge_api::bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, false)])
+            .expect("bulk node schema");
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(node_ids.finish()),
+            Arc::new(StringArray::from(vec!["Person"; rows])),
+            Arc::new(StringArray::from(
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .expect("bulk node batch");
+    match world
+        .forge
+        .as_ref()
+        .expect("bulk node forge")
+        .publish_bulk_nodes(graphforge_api::OperationId(uuid::Uuid::now_v7()), &[batch])
+    {
+        Ok(receipt) => {
+            world.last_algorithm_result = Some(receipt);
+            world.last_error = None;
+            world.last_error_code = None;
+        }
+        Err(error) => {
+            world.last_algorithm_result = None;
+            world.last_error = Some(error.to_string());
+        }
+    }
+}
+
 #[when(
     regex = r#"^I bulk add edges with type "([^"]+)" using source column "([^"]+)" and destination column "([^"]+)"$"#
 )]

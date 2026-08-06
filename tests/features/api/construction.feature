@@ -23,13 +23,11 @@ Feature: Graph Construction API
     Then execute readback returns the NodeHandle UUID and name "Alice"
 
   @construction
-  @excluded-api-bdd @issue-355
   Scenario: bulk add_nodes with a list of records
     When I bulk add nodes with label "Person" and 2 records
     Then execute "MATCH (p:Person) RETURN p.name" returns 2 rows
 
   @construction
-  @excluded-api-bdd @issue-355
   Scenario: bulk add_nodes with Arrow Table
     When I bulk add nodes with label "Person" from an Arrow Table of 5 rows
     Then execute "MATCH (p:Person) RETURN p.name" returns 5 rows
