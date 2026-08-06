@@ -130,7 +130,8 @@ pub fn explain_logical_for_writes(
     dir: &std::path::Path,
     mode: graphforge_core::OntologyMode,
 ) -> Result<String, GfError> {
-    let lowered = GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode).lower_plan(plan)?;
+    let lowered =
+        GraphPlanLowerer::new_for_writes(catalog, ontology, dir, mode).lower_plan(plan)?;
     let ctx = datafusion::prelude::SessionContext::new();
     let final_plan = ctx.state().optimize(&lowered).unwrap_or(lowered);
     Ok(final_plan.display_indent_schema().to_string())
