@@ -1,5 +1,38 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-cli library (link dep for #7 bindings).
+
+Bin / integration tests remain #8. This package models the `lib` + `build.rs`
+surface required to link PyO3/napi cdylibs (RT-cli-build-script partial).
+"""
+
+load("//tools/bazel:gf_rust.bzl", "gf_cargo_build_script", "gf_rust_library")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+gf_cargo_build_script(
+    name = "graphforge_cli_build_script",
+    build_script_env = {
+        "GRAPHFORGE_PROJECT_SKILLS_MANIFEST": "$(execpath //:project-skills/manifest.json)",
+    },
+    crate_name = "build_script_build",
+    data = [
+        "//:project_skills_bundle",
+        "//:project-skills/manifest.json",
+    ],
+    pkg_name = "graphforge-cli",
+    version = "0.5.2",
+)
+
+gf_rust_library(
+    name = "graphforge_cli",
+    # Exclude the bin root; library sources only.
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    deps = [
+        ":graphforge_cli_build_script",
+        "//crates/graphforge-api:graphforge_api",
+    ],
+)

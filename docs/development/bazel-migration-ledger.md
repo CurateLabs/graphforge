@@ -14,8 +14,8 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
 | Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **No** — #10/#9 first-party libs mapped (14/15 lib rows); CLI lib + bindings/tests remain |
-| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + foundation/runtime library labels from #10/#9 |
+| Bazel modeling claimed complete? | **No** — #10/#9/#7 libs+cdylibs mapped (15/15 lib rows + 2 cdylibs); CLI bin + tests/resources remain (#8) |
+| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + foundation/runtime/binding labels from #10/#9/#7 |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
 This freeze uses the **current authoritative** metadata count (**90** targets;
@@ -99,15 +99,15 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-api` | `with_aggregation` | `integration-test` | `crates/graphforge-api/tests/with_aggregation.rs` | — | `unmapped` | |
 | `graphforge-api` | `xor_scaling` | `integration-test` | `crates/graphforge-api/tests/xor_scaling.rs` | — | `unmapped` | |
 | `graphforge-ast` | `graphforge_ast` | `lib` | `crates/graphforge-ast/src/lib.rs` | `//crates/graphforge-ast:graphforge_ast` | `mapped` | #10; unit tests `//crates/graphforge-ast:graphforge_ast_test` |
-| `graphforge-bindings-node` | `graphforge_bindings_node` | `cdylib` | `crates/graphforge-bindings-node/src/lib.rs` | — | `unmapped` | #7 |
-| `graphforge-bindings-node` | `build-script-build` | `custom-build` | `crates/graphforge-bindings-node/build.rs` | — | `unmapped` | #7 |
-| `graphforge-bindings-py` | `graphforge_bindings_py` | `cdylib` | `crates/graphforge-bindings-py/src/lib.rs` | — | `unmapped` | #7 |
-| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | — | `unmapped` | #8; `build.rs` embeds `project-skills` (RT-cli-build-script) |
+| `graphforge-bindings-node` | `graphforge_bindings_node` | `cdylib` | `crates/graphforge-bindings-node/src/lib.rs` | `//crates/graphforge-bindings-node:graphforge_bindings_node` | `mapped` | #7; packaging `//:node_package_smoke` |
+| `graphforge-bindings-node` | `build-script-build` | `custom-build` | `crates/graphforge-bindings-node/build.rs` | `//crates/graphforge-bindings-node:graphforge_bindings_node_build_script` | `mapped` | #7; `napi-build` via `gf_cargo_build_script` |
+| `graphforge-bindings-py` | `graphforge_bindings_py` | `cdylib` | `crates/graphforge-bindings-py/src/lib.rs` | `//crates/graphforge-bindings-py:graphforge_bindings_py` | `mapped` | #7; packaging `//:python_wheel_smoke` |
+| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | `//crates/graphforge-cli:graphforge_cli` | `mapped` | #7 link dep for bindings; bin/tests remain #8 |
 | `graphforge-cli` | `gf` | `bin` | `crates/graphforge-cli/src/main.rs` | — | `unmapped` | #8 |
 | `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | — | `unmapped` | #8 |
 | `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | — | `unmapped` | #8 |
 | `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | — | `unmapped` | #8 |
-| `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | — | `unmapped` | #8 |
+| `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | `//crates/graphforge-cli:graphforge_cli_build_script` | `mapped` | #7 (embeds `project-skills`); #8 owns bin/tests |
 | `graphforge-core` | `graphforge_core` | `lib` | `crates/graphforge-core/src/lib.rs` | `//crates/graphforge-core:graphforge_core` | `mapped` | #10; unit tests `//crates/graphforge-core:graphforge_core_test` |
 | `graphforge-cypher` | `graphforge_cypher` | `lib` | `crates/graphforge-cypher/src/lib.rs` | `//crates/graphforge-cypher:graphforge_cypher` | `mapped` | #10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test` |
 | `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | — | `unmapped` | #8 |
@@ -151,10 +151,10 @@ before #6 parity can pass with the exception still open.
 | --- | --- | --- | --- | --- |
 | RT-fuzz | `cargo fuzz` (`fuzz/` workspace, workflow `fuzz.yml`) | cargo-fuzz driver + corpus workflow outside ordinary `rules_rust` test graph | #8/#6 justify or map | stub |
 | RT-publish-crates | `cargo publish` / crates.io authorize flows | Ecosystem publication metadata and registry auth | keep Cargo; ledger must remain explicit | stub |
-| RT-maturin-assemble | `maturin build` / `maturin sdist` packaging assembly | May assemble/sign/publish wheels, but must consume Bazel-built natives after #7 | #7 handoff | stub |
-| RT-napi-assemble | `napi build` / `napi artifacts` / `napi pre-publish` | Package assembly + npm provenance; must not silently recompile a different Rust graph after #7 | #7 handoff | stub |
-| RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | `cargo_build_script` + `include_bytes!` skill bundle; bin/tests owned with CLI surface | #8 map with build script | explicit |
-| RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | cdylib packages have no ordinary `lib` row; native packaging is #7 | #7 | explicit |
+| RT-maturin-assemble | `maturin build` / `maturin sdist` packaging assembly | Bazel handoff: `//:python_wheel_smoke` + `assemble_bazel_binding_packages.py` consume Bazel cdylibs (no silent `maturin build` recompile). Maturin may still sign/publish later. | #7 handoff | handoff |
+| RT-napi-assemble | `napi build` / `napi artifacts` / `napi pre-publish` | Bazel handoff: `//:node_package_smoke` consumes Bazel cdylib (no silent `napi build` recompile). napi may still assemble/sign/publish later. | #7 handoff | handoff |
+| RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Lib + build script mapped for #7 binding link; bin/tests still #8 | #8 bin/tests; #7 mapped lib | partial |
+| RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | Mapped as `rust_shared_library` cdylibs + packaging smoke targets | #7 | mapped |
 | RT-examples | `graphforge-api` examples (11) | May be CI/release probes vs developer samples; map or except per #8/#6 | #8/#6 | stub |
 | RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for M2** — not a deliverable; do not inventory as required targets | excluded | excluded |
 

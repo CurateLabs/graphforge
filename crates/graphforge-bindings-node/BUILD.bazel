@@ -1,5 +1,41 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-bindings-node napi-rs cdylib (#7)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_cargo_build_script", "gf_rust_shared_library")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+# Checked-in package inputs. `index.js` / `index.d.ts` are napi-generated and
+# gitignored; the packaging handoff synthesizes a smoke loader instead of
+# invoking `napi build` (which would recompile Rust).
+filegroup(
+    name = "node_package_sources",
+    srcs = glob(
+        [
+            "package.json",
+            "lib/**",
+            "LICENSE",
+            "NOTICE",
+            "THIRD_PARTY_NOTICES.md",
+            "README.md",
+        ],
+    ),
+)
+
+gf_cargo_build_script(
+    name = "graphforge_bindings_node_build_script",
+    crate_name = "build_script_build",
+    pkg_name = "graphforge-bindings-node",
+    version = "0.5.2",
+)
+
+gf_rust_shared_library(
+    name = "graphforge_bindings_node",
+    crate_name = "graphforge_bindings_node",
+    deps = [
+        ":graphforge_bindings_node_build_script",
+        "//crates/graphforge-api:graphforge_api",
+        "//crates/graphforge-cli:graphforge_cli",
+    ],
+)

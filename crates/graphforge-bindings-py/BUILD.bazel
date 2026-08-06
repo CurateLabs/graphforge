@@ -1,5 +1,52 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-bindings-py PyO3 cdylib (#7)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_shared_library")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+# Pure-Python package tree packaged beside the Bazel-built native module.
+filegroup(
+    name = "python_sources",
+    srcs = glob(
+        [
+            "python/graphforge/**",
+            "LICENSE",
+            "NOTICE",
+            "THIRD_PARTY_NOTICES.md",
+            "README.md",
+            "pyproject.toml",
+        ],
+        exclude = [
+            "python/graphforge/**/*.pyc",
+            "python/graphforge/**/__pycache__/**",
+            # Local maturin develop artifacts must not enter the Bazel package.
+            "python/graphforge/_graphforge_rs*.so",
+            "python/graphforge/_graphforge_rs*.pyd",
+            "python/graphforge/_graphforge_rs*.dylib",
+        ],
+    ),
+)
+
+gf_rust_shared_library(
+    name = "graphforge_bindings_py",
+    crate_name = "graphforge_bindings_py",
+    # abi3-py310 + extension-module are selected via crate_universe feature
+    # unification from this package's Cargo.toml (see cargo-bazel-lock.json).
+    # Mirror `.cargo/config.toml` apple rustflags so PyO3 extension-module
+    # symbols resolve at Python load time (not link time).
+    rustc_flags = select({
+        "@platforms//os:osx": [
+            "-C",
+            "link-arg=-undefined",
+            "-C",
+            "link-arg=dynamic_lookup",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//crates/graphforge-api:graphforge_api",
+        "//crates/graphforge-cli:graphforge_cli",
+    ],
+)

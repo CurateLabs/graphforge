@@ -117,6 +117,8 @@ assert_classification "$bazel_only" cargo-bazel-lock.json bazel-crate-universe-l
 assert_classification "$bazel_only" crates/graphforge-core/BUILD.bazel bazel-crate-build
 assert_classification "$bazel_only" docs/reference/BUILD.bazel bazel-docs-reference-build
 assert_classification "$bazel_only" docs/contracts/examples/BUILD.bazel bazel-docs-contracts-build
+assert_classification "$bazel_only" scripts/ci/assemble_bazel_binding_packages.py bazel-binding-packaging
+assert_classification "$bazel_only" tools/bazel/bindings/BUILD.bazel bazel-bindings-handoff
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.

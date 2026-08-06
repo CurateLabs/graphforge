@@ -112,6 +112,8 @@ while IFS= read -r -d '' path; do
       docs/contracts/examples/BUILD.bazel | docs/reference/BUILD.bazel | \
       scripts/ci/cargo-bazel-drift-check.py | \
       scripts/ci/test-cargo-bazel-drift-check.py | \
+      scripts/ci/assemble_bazel_binding_packages.py | \
+      scripts/ci/test-assemble-bazel-binding-packages.py | \
       scripts/ci/BUILD.bazel)
       bazel=true
       ;;

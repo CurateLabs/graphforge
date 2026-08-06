@@ -1,6 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "assemble_bazel_binding_packages.py",
     "cargo-bazel-drift-check.py",
     "test-cargo-bazel-drift-check.py",
 ])
@@ -8,4 +9,10 @@ exports_files([
 filegroup(
     name = "cargo_bazel_drift_check_py",
     srcs = ["cargo-bazel-drift-check.py"],
+)
+
+# Host-python tool for #7 packaging handoff genrules (no rules_python required).
+filegroup(
+    name = "assemble_bazel_binding_packages_py",
+    srcs = ["assemble_bazel_binding_packages.py"],
 )
