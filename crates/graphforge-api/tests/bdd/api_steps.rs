@@ -1412,19 +1412,19 @@ fn publish_bulk_person_nodes(world: &mut GraphForgeWorld, names: &[&str]) {
     for _ in 0..rows {
         node_ids.append_null();
     }
-    let schema = graphforge_api::bulk_node_input_schema(vec![Field::new(
-        "name",
-        DataType::Utf8,
-        false,
-    )])
-    .expect("bulk node schema");
+    let schema =
+        graphforge_api::bulk_node_input_schema(vec![Field::new("name", DataType::Utf8, false)])
+            .expect("bulk node schema");
     let batch = arrow::record_batch::RecordBatch::try_new(
         schema,
         vec![
             Arc::new(node_ids.finish()),
             Arc::new(StringArray::from(vec!["Person"; rows])),
             Arc::new(StringArray::from(
-                names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>(),
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
