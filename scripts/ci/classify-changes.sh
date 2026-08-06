@@ -108,14 +108,22 @@ while IFS= read -r -d '' path; do
 
     MODULE.bazel | MODULE.bazel.lock | BUILD.bazel | .bazelrc | .bazelversion | \
       cargo-bazel-lock.json | tools/bazel/* | tools/bazel/**/* | \
+      platforms/BUILD.bazel | \
       crates/BUILD.bazel | crates/*/BUILD.bazel | \
       docs/contracts/examples/BUILD.bazel | docs/reference/BUILD.bazel | \
       tests/features/BUILD.bazel | tests/tck/BUILD.bazel | \
+      tests/release_workflows/BUILD.bazel | \
       examples/agent_grounding/BUILD.bazel | \
+      docs/development/bazel-migration-parity.md | \
+      docs/development/bazel-migration-ledger.md | \
       scripts/ci/cargo-bazel-drift-check.py | \
       scripts/ci/test-cargo-bazel-drift-check.py | \
       scripts/ci/assemble_bazel_binding_packages.py | \
       scripts/ci/test-assemble-bazel-binding-packages.py | \
+      scripts/ci/bazel-migration-ledger-check.py | \
+      scripts/ci/test-bazel-migration-ledger-check.py | \
+      scripts/ci/cargo-bazel-parity-check.py | \
+      scripts/ci/test-cargo-bazel-parity-check.py | \
       scripts/ci/BUILD.bazel)
       bazel=true
       ;;

@@ -55,6 +55,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "visualization-limits-stress-${{ github.sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
+        "cargo-bazel-parity-evidence-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -232,6 +233,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             ("candidate/release-artifacts/evidence/\ncandidate/release-artifacts/node-addons/"),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
+            "dist/cargo-bazel-parity-evidence.json",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):

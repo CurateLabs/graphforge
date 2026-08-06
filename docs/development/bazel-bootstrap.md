@@ -92,8 +92,9 @@ skills are declared via root `//:project_skills_bundle` / `//:project-skills/man
 | Integration-test mapped | 59 | `//:integration_tests` (+ BDD harness) |
 | CLI `bin` mapped | 1 | `//crates/graphforge-cli:gf` |
 | CLI `custom-build` mapped | 1 | `cargo_build_script` + `//:project_skills_bundle` |
-| Explicit retained exception | 1 | API examples (`RT-examples` → #6) |
-| Justified Cargo tool | 1 | `RT-fuzz` (cargo-fuzz workflow; keep until #6) |
+| Example binaries mapped | 11 | `//crates/graphforge-api:*` + `//:release_bins` (#6) |
+| Justified Cargo tools | 2 | `RT-fuzz`, `RT-publish-crates` |
+| Release platforms | 5 OS/arch + 8 Binding RC surfaces | `//platforms:*` + `tools/bazel/release/release_platforms.json` |
 
 ### Residual gaps (justified)
 
@@ -102,13 +103,14 @@ skills are declared via root `//:project_skills_bundle` / `//:project-skills/man
   for lint CI until a later slice).
 - Doctests are not separate Bazel targets (documented equivalent: coverage attaches
   to crate unit-test targets; same policy as #10/#9).
-- API `example` binaries are `RT-examples` for #6 (not required to close #8).
-- Blacksmith `Bazel Bootstrap` runs `//:bazel_test_graph_smoke` (unit + CLI +
-  representative integration/snapshot probes). Full `//:integration_tests` and
-  `//:bdd_tests` remain executable under Bazel for parity (#6) and local runs.
-- Full cross-platform binding/release matrix remains #6.
+- Blacksmith `Bazel Bootstrap` runs `//:bazel_test_graph_smoke`, release bins,
+  binding smokes, and the #6 dual-build parity gate. Full `//:integration_tests`
+  and `//:bdd_tests` remain executable under Bazel for local/full runs.
+- Cross-OS Binding RC still produces macOS/Windows natives on those runners;
+  Bazel models every certified platform and builds host-native release artifacts.
+  Sole Bazel authority is #4 after #5 cache/perf.
 - Bazel storage always enables `test-failpoints` (env-gated no-ops); Cargo release
-  builds keep the const no-op body — track under #6 parity if needed.
+  builds keep the const no-op body — documented dual-build parity surface.
 
 ## Local commands
 
@@ -123,6 +125,12 @@ bazelisk build //:first_party_libs //:cli_bins //:resource_inputs
 # Binding cdylibs + packaging handoff (no maturin/napi recompile)
 bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke
 python3 scripts/ci/test-assemble-bazel-binding-packages.py
+
+# Release bins + dual-build parity (#6)
+bazelisk build //:release_bins
+python3 scripts/ci/bazel-migration-ledger-check.py
+python3 scripts/ci/cargo-bazel-parity-check.py --mode all \
+  --write-evidence dist/cargo-bazel-parity-evidence.json
 
 # Full mapped suites (longer)
 bazelisk test //:unit_tests //:integration_tests //:snapshot_tests //:cli_tests
@@ -145,5 +153,6 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 
 ## Next
 
-1. [#6](https://github.com/CurateLabs/graphforge/issues/6) — cross-platform release
-   targets and same-SHA Cargo/Bazel parity (blocked by #7 and #8).
+1. [#5](https://github.com/CurateLabs/graphforge/issues/5) — Blacksmith remote-cache
+   enablement + cold/warm performance gates (may need org-admin Bazel Build Caching).
+2. See [bazel-migration-parity.md](bazel-migration-parity.md) for #6 evidence.

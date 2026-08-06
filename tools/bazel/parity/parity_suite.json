@@ -1,0 +1,32 @@
+{
+  "schema": "graphforge.cargo-bazel-parity-suite.v1",
+  "issue": 6,
+  "description": "Representative mapped targets exercised by both Cargo and Bazel at one SHA",
+  "cases": [
+    {
+      "id": "ast-unit",
+      "cargo": ["test", "-p", "graphforge-ast", "--lib", "--no-fail-fast"],
+      "bazel": ["//crates/graphforge-ast:graphforge_ast_test"]
+    },
+    {
+      "id": "ir-golden",
+      "cargo": ["test", "-p", "graphforge-ir", "--test", "golden", "--no-fail-fast"],
+      "bazel": ["//crates/graphforge-ir:golden"]
+    },
+    {
+      "id": "api-clear",
+      "cargo": ["test", "-p", "graphforge-api", "--test", "clear", "--no-fail-fast"],
+      "bazel": ["//crates/graphforge-api:clear"]
+    },
+    {
+      "id": "api-value-semantics",
+      "cargo": ["test", "-p", "graphforge-api", "--test", "value_semantics", "--no-fail-fast"],
+      "bazel": ["//crates/graphforge-api:value_semantics"]
+    },
+    {
+      "id": "rel-logical-plan-golden",
+      "cargo": ["test", "-p", "graphforge-rel", "--test", "logical_plan_golden", "--no-fail-fast"],
+      "bazel": ["//crates/graphforge-rel:logical_plan_golden"]
+    }
+  ]
+}

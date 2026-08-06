@@ -1,9 +1,10 @@
-"""GraphForge Bazel module (M2 / #10–#7 libs+cdylibs + #8 tests/CLI).
+"""GraphForge Bazel module (M2 / #10–#6 libs/tests/bindings/release/parity).
 
 Canonical build-system contract: GitHub issue #1.
 Activates crate_universe `from_cargo` against the frozen Cargo workspace and
-models first-party libraries, tests, CLI, resources, and PyO3/napi cdylibs as
-real rules_rust targets (no Cargo shell-out for ordinary compilation or tests).
+models first-party libraries, tests, CLI, resources, PyO3/napi cdylibs, and
+release platforms as real rules_rust / platforms targets (no Cargo shell-out
+for ordinary compilation or tests).
 """
 
 module(

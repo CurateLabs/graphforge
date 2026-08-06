@@ -1,0 +1,957 @@
+{
+  "schema": "graphforge.bazel-migration-target-map.v1",
+  "issue": 6,
+  "cargo_target_count": 90,
+  "targets": [
+    {
+      "package": "graphforge-api",
+      "target": "atomic_recovery_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/atomic_recovery_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:atomic_recovery_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "bdd",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/bdd/main.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:bdd",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "bdd_timing",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/bdd_timing.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:bdd_timing",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "belief_subject_contract",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/belief_subject_contract.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:belief_subject_contract",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "bind_error_spans",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/bind_error_spans.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:bind_error_spans",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "clear",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/clear.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:clear",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "conductance",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/conductance.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:conductance",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "correction_churn_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/correction_churn_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:correction_churn_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "create_scaling",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/create_scaling.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:create_scaling",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "cyber_intrusion_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/cyber_intrusion_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:cyber_intrusion_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "derived_state_freshness_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/derived_state_freshness_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:derived_state_freshness_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "e2e_baseline",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/e2e_baseline.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:e2e_baseline",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "existential_subquery",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/existential_subquery.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:existential_subquery",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "facade_methods",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/facade_methods.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:facade_methods",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "finance_fraud_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/finance_fraud_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:finance_fraud_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "fixed_hop_limit",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/fixed_hop_limit.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:fixed_hop_limit",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "graph_internal_metadata",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/graph_internal_metadata.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:graph_internal_metadata",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "graphforge_api",
+      "class": "lib",
+      "source": "crates/graphforge-api/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:graphforge_api",
+      "exception_id": null,
+      "notes": "#9; unit tests `//crates/graphforge-api:graphforge_api_test`"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "inference_provenance",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/inference_provenance.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:inference_provenance",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "knowledge_evolution_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/knowledge_evolution_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:knowledge_evolution_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "knowledge_isolation",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/knowledge_isolation.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:knowledge_isolation",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "list_semantics",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/list_semantics.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:list_semantics",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "m22_m18_public_surface",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/m22_m18_public_surface.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:m22_m18_public_surface",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "m22_m19_public_surface",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/m22_m19_public_surface.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:m22_m19_public_surface",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "m22_provider_public_surface",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/m22_provider_public_surface.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:m22_provider_public_surface",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "max_bipartite_matching",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/max_bipartite_matching.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:max_bipartite_matching",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "max_cardinality_matching",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/max_cardinality_matching.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:max_cardinality_matching",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "max_weight_matching",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/max_weight_matching.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:max_weight_matching",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "minimum_k_spanning_tree",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/minimum_k_spanning_tree.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:minimum_k_spanning_tree",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "modularity",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/modularity.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:modularity",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "multi_label_scaling",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/multi_label_scaling.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:multi_label_scaling",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "ontology_emergence_strict_handoff",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:ontology_emergence_strict_handoff",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "pattern_comprehension",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/pattern_comprehension.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:pattern_comprehension",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "percentile_aggregates",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/percentile_aggregates.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:percentile_aggregates",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "probate_genealogy_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/probate_genealogy_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:probate_genealogy_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "provider_session",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/provider_session.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:provider_session",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "public_facade_remaining_conformance",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:public_facade_remaining_conformance",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "public_lifecycle_conformance",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/public_lifecycle_conformance.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:public_lifecycle_conformance",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "release_load_construction",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/release_load_construction.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:release_load_construction",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "release_load_probe",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/release_load_probe.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:release_load_probe",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "sna_intelligence_workflow",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/sna_intelligence_workflow.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:sna_intelligence_workflow",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "strict_add_node_fixture",
+      "class": "example",
+      "source": "crates/graphforge-api/examples/strict_add_node_fixture.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:strict_add_node_fixture",
+      "exception_id": null,
+      "notes": "#6 example binary"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "strict_runtime_properties",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/strict_runtime_properties.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:strict_runtime_properties",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "value_access_semantics",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/value_access_semantics.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:value_access_semantics",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "value_semantics",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/value_semantics.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:value_semantics",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "with_aggregation",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/with_aggregation.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:with_aggregation",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "xor_scaling",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/xor_scaling.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:xor_scaling",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-ast",
+      "target": "graphforge_ast",
+      "class": "lib",
+      "source": "crates/graphforge-ast/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ast:graphforge_ast",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-ast:graphforge_ast_test`"
+    },
+    {
+      "package": "graphforge-bindings-node",
+      "target": "build-script-build",
+      "class": "custom-build",
+      "source": "crates/graphforge-bindings-node/build.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-bindings-node:graphforge_bindings_node_build_script",
+      "exception_id": null,
+      "notes": "#7; `napi-build` via `gf_cargo_build_script`"
+    },
+    {
+      "package": "graphforge-bindings-node",
+      "target": "graphforge_bindings_node",
+      "class": "cdylib",
+      "source": "crates/graphforge-bindings-node/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-bindings-node:graphforge_bindings_node",
+      "exception_id": null,
+      "notes": "#7; packaging `//:node_package_smoke`"
+    },
+    {
+      "package": "graphforge-bindings-py",
+      "target": "graphforge_bindings_py",
+      "class": "cdylib",
+      "source": "crates/graphforge-bindings-py/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-bindings-py:graphforge_bindings_py",
+      "exception_id": null,
+      "notes": "#7; packaging `//:python_wheel_smoke`"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "build-script-build",
+      "class": "custom-build",
+      "source": "crates/graphforge-cli/build.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:graphforge_cli_build_script",
+      "exception_id": null,
+      "notes": "#7/#8; RT-cli-build-script closed"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "checkpoints",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/checkpoints.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:checkpoints",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "gf",
+      "class": "bin",
+      "source": "crates/graphforge-cli/src/main.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:gf",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "graphforge_cli",
+      "class": "lib",
+      "source": "crates/graphforge-cli/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:graphforge_cli",
+      "exception_id": null,
+      "notes": "#7/#8; unit `//crates/graphforge-cli:graphforge_cli_test`"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "portable",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/portable.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:portable",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "repository",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/repository.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:repository",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-core",
+      "target": "graphforge_core",
+      "class": "lib",
+      "source": "crates/graphforge-core/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-core:graphforge_core",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-core:graphforge_core_test`"
+    },
+    {
+      "package": "graphforge-cypher",
+      "target": "corpus",
+      "class": "integration-test",
+      "source": "crates/graphforge-cypher/tests/corpus.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cypher:corpus",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-cypher",
+      "target": "graphforge_cypher",
+      "class": "lib",
+      "source": "crates/graphforge-cypher/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cypher:graphforge_cypher",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test`"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "adjacency_expand",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/adjacency_expand.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:adjacency_expand",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "bench_traversal_scaling",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/bench_traversal_scaling.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:bench_traversal_scaling",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "create_execution",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/create_execution.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:create_execution",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "create_input_driven",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/create_input_driven.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:create_input_driven",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "differential_traversal",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/differential_traversal.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:differential_traversal",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "explain_snapshots",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/explain_snapshots.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:explain_snapshots",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "graphforge_exec",
+      "class": "lib",
+      "source": "crates/graphforge-exec/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:graphforge_exec",
+      "exception_id": null,
+      "notes": "#9; unit tests `//crates/graphforge-exec:graphforge_exec_test`"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "optional_match",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/optional_match.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:optional_match",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "persistent_adjacency",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/persistent_adjacency.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:persistent_adjacency",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "read_execution",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/read_execution.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:read_execution",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "unwind",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/unwind.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:unwind",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "var_len_expand",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/var_len_expand.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:var_len_expand",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-exec",
+      "target": "write_statement",
+      "class": "integration-test",
+      "source": "crates/graphforge-exec/tests/write_statement.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-exec:write_statement",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-io",
+      "target": "graphforge_io",
+      "class": "lib",
+      "source": "crates/graphforge-io/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-io:graphforge_io",
+      "exception_id": null,
+      "notes": "#9; unit tests `//crates/graphforge-io:graphforge_io_test`"
+    },
+    {
+      "package": "graphforge-ir",
+      "target": "golden",
+      "class": "integration-test",
+      "source": "crates/graphforge-ir/tests/golden.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ir:golden",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-ir",
+      "target": "graphforge_ir",
+      "class": "lib",
+      "source": "crates/graphforge-ir/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ir:graphforge_ir",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-ir:graphforge_ir_test`"
+    },
+    {
+      "package": "graphforge-knowledge",
+      "target": "graphforge_knowledge",
+      "class": "lib",
+      "source": "crates/graphforge-knowledge/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-knowledge:graphforge_knowledge",
+      "exception_id": null,
+      "notes": "#9; unit tests `//crates/graphforge-knowledge:graphforge_knowledge_test`"
+    },
+    {
+      "package": "graphforge-ontology",
+      "target": "graphforge_ontology",
+      "class": "lib",
+      "source": "crates/graphforge-ontology/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ontology:graphforge_ontology",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test`"
+    },
+    {
+      "package": "graphforge-ontology",
+      "target": "integration",
+      "class": "integration-test",
+      "source": "crates/graphforge-ontology/tests/integration.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ontology:integration",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-plan",
+      "target": "graphforge_plan",
+      "class": "lib",
+      "source": "crates/graphforge-plan/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-plan:graphforge_plan",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-plan:graphforge_plan_test`"
+    },
+    {
+      "package": "graphforge-provenance",
+      "target": "graphforge_provenance",
+      "class": "lib",
+      "source": "crates/graphforge-provenance/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-provenance:graphforge_provenance",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-provenance:graphforge_provenance_test`"
+    },
+    {
+      "package": "graphforge-rel",
+      "target": "expression_lowering_matrix",
+      "class": "integration-test",
+      "source": "crates/graphforge-rel/tests/expression_lowering_matrix.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-rel:expression_lowering_matrix",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-rel",
+      "target": "graphforge_rel",
+      "class": "lib",
+      "source": "crates/graphforge-rel/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-rel:graphforge_rel",
+      "exception_id": null,
+      "notes": "#10; unit tests `//crates/graphforge-rel:graphforge_rel_test`"
+    },
+    {
+      "package": "graphforge-rel",
+      "target": "logical_plan_golden",
+      "class": "integration-test",
+      "source": "crates/graphforge-rel/tests/logical_plan_golden.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-rel:logical_plan_golden",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-search",
+      "target": "graphforge_search",
+      "class": "lib",
+      "source": "crates/graphforge-search/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-search:graphforge_search",
+      "exception_id": null,
+      "notes": "#9; unit tests `//crates/graphforge-search:graphforge_search_test`"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "adjacency_delta_write",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/adjacency_delta_write.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:adjacency_delta_write",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "filtered_read",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/filtered_read.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:filtered_read",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "graph_writer",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/graph_writer.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:graph_writer",
+      "exception_id": null,
+      "notes": "#8"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "graphforge_storage",
+      "class": "lib",
+      "source": "crates/graphforge-storage/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:graphforge_storage",
+      "exception_id": null,
+      "notes": "#10 early / #9; Bazel enables `test-failpoints` for api subprocess unification; unit tests `//crates/graphforge-storage:graphforge_storage_test`"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "io_stats",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/io_stats.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:io_stats",
+      "exception_id": null,
+      "notes": "#8"
+    }
+  ],
+  "exceptions": [
+    {
+      "id": "RT-fuzz",
+      "tool": "cargo fuzz",
+      "status": "justified",
+      "justification": "cargo-fuzz driver + corpus workflow outside ordinary rules_rust test graph; keep Cargo until a dedicated fuzz modeling slice"
+    },
+    {
+      "id": "RT-publish-crates",
+      "tool": "cargo publish / crates.io authorize",
+      "status": "justified",
+      "justification": "Ecosystem publication metadata and registry auth are not Bazel compilation; Cargo remains authoritative for crates.io"
+    },
+    {
+      "id": "RT-maturin-assemble",
+      "tool": "maturin assemble/sign/publish",
+      "status": "handoff",
+      "justification": "Bazel cdylib + assemble_bazel_binding_packages.py; maturin may sign/publish without silent recompile"
+    },
+    {
+      "id": "RT-napi-assemble",
+      "tool": "napi assemble/sign/publish",
+      "status": "handoff",
+      "justification": "Bazel cdylib + assemble_bazel_binding_packages.py; napi may assemble/sign/publish without silent recompile"
+    },
+    {
+      "id": "RT-cli-build-script",
+      "tool": "graphforge-cli build.rs",
+      "status": "closed",
+      "justification": "Mapped via cargo_build_script + project_skills_bundle (#7/#8)"
+    },
+    {
+      "id": "RT-bindings-cdylib",
+      "tool": "PyO3/napi cdylibs",
+      "status": "mapped",
+      "justification": "Mapped as rust_shared_library + packaging smoke (#7)"
+    },
+    {
+      "id": "RT-examples",
+      "tool": "graphforge-api examples",
+      "status": "closed",
+      "justification": "All 11 example binaries mapped under //crates/graphforge-api:* (#6)"
+    },
+    {
+      "id": "RT-mobile",
+      "tool": "Swift/Kotlin/UniFFI/mobile",
+      "status": "excluded",
+      "justification": "Abandoned for M2; not required targets"
+    }
+  ]
+}

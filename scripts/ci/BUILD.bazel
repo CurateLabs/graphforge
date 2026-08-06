@@ -4,6 +4,10 @@ exports_files([
     "assemble_bazel_binding_packages.py",
     "cargo-bazel-drift-check.py",
     "test-cargo-bazel-drift-check.py",
+    "bazel-migration-ledger-check.py",
+    "test-bazel-migration-ledger-check.py",
+    "cargo-bazel-parity-check.py",
+    "test-cargo-bazel-parity-check.py",
 ])
 
 filegroup(

@@ -1,0 +1,8 @@
+"""Non-source inputs for API release-workflow example binaries (#6)."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "sna_phase2_advisory",
+    srcs = ["sna-intelligence/ontologies/phase-2-advisory.yaml"],
+)
