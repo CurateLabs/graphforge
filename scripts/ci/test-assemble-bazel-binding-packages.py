@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
 
 from assemble_bazel_binding_packages import (
     FORBIDDEN_RECOMPILE,

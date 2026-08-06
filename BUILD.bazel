@@ -8,7 +8,16 @@ exports_files([
     "cargo-bazel-lock.json",
     "LICENSE",
     "rust-toolchain.toml",
+    "project-skills/manifest.json",
 ])
+
+# Canonical skill bundle for CLI embedding (#7). Kept at the workspace root so
+# `project-skills/` stays a pure distribution tree (no BUILD.bazel payload).
+filegroup(
+    name = "project_skills_bundle",
+    srcs = glob(["project-skills/**"]),
+    visibility = ["//visibility:public"],
+)
 
 alias(
     name = "bazel_smoke",

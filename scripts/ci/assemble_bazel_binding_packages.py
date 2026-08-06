@@ -12,13 +12,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from pathlib import Path
 import platform
 import re
 import shutil
 import sys
 import tempfile
 import zipfile
-from pathlib import Path
 
 FORBIDDEN_RECOMPILE = re.compile(
     r"""(?ix)
@@ -75,6 +75,7 @@ def _napi_platform_tag() -> str:
         if machine in ("amd64", "x86_64"):
             return "win32-x64-msvc"
     _die(f"unsupported host platform for napi addon naming: {system}/{machine}")
+    return ""  # unreachable; _die raises SystemExit
 
 
 def _read_version(package_root: Path, language: str) -> str:
@@ -174,7 +175,7 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
                 record_lines.append(f"{arcname},sha256={digest},{len(data)}")
                 wheel.writestr(arcname, data)
             record_path = f"graphforge-{version}.dist-info/RECORD"
-            record_body = "\n".join(record_lines + [f"{record_path},,"]) + "\n"
+            record_body = "\n".join([*record_lines, f"{record_path},,"]) + "\n"
             wheel.writestr(record_path, record_body)
 
     return {
