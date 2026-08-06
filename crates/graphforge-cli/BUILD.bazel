@@ -1,15 +1,32 @@
-"""Bazel targets for graphforge-cli library (link dep for #7 bindings).
+"""Bazel targets for graphforge-cli (#8): lib + build.rs + gf bin + tests.
 
-Bin / integration tests remain #8. This package models the `lib` + `build.rs`
-surface required to link PyO3/napi cdylibs (RT-cli-build-script partial).
+Lib + build script were first modeled in #7 as a binding link dep; this package
+owns the remaining bin/unit/integration surface and closes RT-cli-build-script.
 """
 
-load("//tools/bazel:gf_rust.bzl", "gf_cargo_build_script", "gf_rust_library")
+load(
+    "//tools/bazel:gf_rust.bzl",
+    "gf_cargo_build_script",
+    "gf_rust_binary",
+    "gf_rust_integration_test",
+    "gf_rust_library",
+    "gf_rust_test",
+)
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
 
+_CLI_DEPS = [
+    "//crates/graphforge-api:graphforge_api",
+]
+
+_CONTRACT_FIXTURES = [
+    "//docs/contracts/examples:fixtures",
+]
+
+# Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
+# `project-skills/` remains a pure distribution tree (#7 packaging contract).
 gf_cargo_build_script(
     name = "graphforge_cli_build_script",
     build_script_env = {
@@ -31,8 +48,69 @@ gf_rust_library(
         ["src/**/*.rs"],
         exclude = ["src/main.rs"],
     ),
-    deps = [
-        ":graphforge_cli_build_script",
-        "//crates/graphforge-api:graphforge_api",
+    deps = _CLI_DEPS + [":graphforge_cli_build_script"],
+)
+
+gf_rust_test(
+    name = "graphforge_cli_test",
+    crate = ":graphforge_cli",
+    compile_data = _CONTRACT_FIXTURES,
+    size = "medium",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_binary(
+    name = "gf",
+    srcs = ["src/main.rs"],
+    deps = _CLI_DEPS + [":graphforge_cli"],
+)
+
+_CLI_TEST_DATA = [":gf"] + _CONTRACT_FIXTURES
+
+_CLI_BIN_ENV = {
+    "CARGO_BIN_EXE_gf": "$(rootpath :gf)",
+}
+
+gf_rust_integration_test(
+    name = "checkpoints",
+    srcs = ["tests/checkpoints.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "large",
+    timeout = "long",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "portable",
+    srcs = ["tests/portable.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "large",
+    timeout = "long",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "repository",
+    srcs = ["tests/repository.rs"],
+    crate = ":graphforge_cli",
+    compile_data = _CONTRACT_FIXTURES,
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "large",
+    timeout = "long",
+    deps = _CLI_DEPS,
+)
+
+test_suite(
+    name = "cli_tests",
+    tests = [
+        ":checkpoints",
+        ":graphforge_cli_test",
+        ":portable",
+        ":repository",
     ],
 )

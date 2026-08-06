@@ -1,0 +1,29 @@
+"""Vendored openCypher TCK corpus + baselines for Rust BDD (#8)."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "features",
+    srcs = glob(["features/**/*"]),
+)
+
+filegroup(
+    name = "baselines",
+    srcs = [
+        "passing_baseline.txt",
+        "performance_baseline.json",
+        "performance_policy.json",
+        "coverage_matrix.json",
+    ],
+)
+
+filegroup(
+    name = "corpus",
+    srcs = [
+        ":baselines",
+        ":features",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+    ],
+)

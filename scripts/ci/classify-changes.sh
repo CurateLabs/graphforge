@@ -110,6 +110,8 @@ while IFS= read -r -d '' path; do
       cargo-bazel-lock.json | tools/bazel/* | tools/bazel/**/* | \
       crates/BUILD.bazel | crates/*/BUILD.bazel | \
       docs/contracts/examples/BUILD.bazel | docs/reference/BUILD.bazel | \
+      tests/features/BUILD.bazel | tests/tck/BUILD.bazel | \
+      examples/agent_grounding/BUILD.bazel | \
       scripts/ci/cargo-bazel-drift-check.py | \
       scripts/ci/test-cargo-bazel-drift-check.py | \
       scripts/ci/assemble_bazel_binding_packages.py | \

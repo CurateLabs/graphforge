@@ -14,8 +14,8 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
 | Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **No** — #10/#9/#7 libs+cdylibs mapped (15/15 lib rows + 2 cdylibs); CLI bin + tests/resources remain (#8) |
-| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + foundation/runtime/binding labels from #10/#9/#7 |
+| Bazel modeling claimed complete? | **No** — #10/#9/#7/#8 libs+cdylibs+tests+CLI mapped; examples (`RT-examples`) remain for #6 |
+| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + library/test/CLI/cdylib labels from #10/#9/#8/#7 |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
 This freeze uses the **current authoritative** metadata count (**90** targets;
@@ -47,7 +47,7 @@ doctests. For migration accounting:
 ## Cargo target ledger
 
 Columns `bazel_label` and `status` are filled by modeling slices (#10–#7).
-Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
+Example rows stay `unmapped` until #6; libs/tests/CLI/cdylibs mapped through #8/#7.
 
 | Package | Target | Class | Source | Bazel label | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -63,84 +63,84 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-api` | `release_load_probe` | `example` | `crates/graphforge-api/examples/release_load_probe.rs` | — | `unmapped` | |
 | `graphforge-api` | `sna_intelligence_workflow` | `example` | `crates/graphforge-api/examples/sna_intelligence_workflow.rs` | — | `unmapped` | |
 | `graphforge-api` | `strict_add_node_fixture` | `example` | `crates/graphforge-api/examples/strict_add_node_fixture.rs` | — | `unmapped` | |
-| `graphforge-api` | `bdd` | `integration-test` | `crates/graphforge-api/tests/bdd/main.rs` | — | `unmapped` | |
-| `graphforge-api` | `bdd_timing` | `integration-test` | `crates/graphforge-api/tests/bdd_timing.rs` | — | `unmapped` | |
-| `graphforge-api` | `belief_subject_contract` | `integration-test` | `crates/graphforge-api/tests/belief_subject_contract.rs` | — | `unmapped` | |
-| `graphforge-api` | `bind_error_spans` | `integration-test` | `crates/graphforge-api/tests/bind_error_spans.rs` | — | `unmapped` | |
-| `graphforge-api` | `clear` | `integration-test` | `crates/graphforge-api/tests/clear.rs` | — | `unmapped` | |
-| `graphforge-api` | `conductance` | `integration-test` | `crates/graphforge-api/tests/conductance.rs` | — | `unmapped` | |
-| `graphforge-api` | `create_scaling` | `integration-test` | `crates/graphforge-api/tests/create_scaling.rs` | — | `unmapped` | |
-| `graphforge-api` | `e2e_baseline` | `integration-test` | `crates/graphforge-api/tests/e2e_baseline.rs` | — | `unmapped` | |
-| `graphforge-api` | `existential_subquery` | `integration-test` | `crates/graphforge-api/tests/existential_subquery.rs` | — | `unmapped` | |
-| `graphforge-api` | `facade_methods` | `integration-test` | `crates/graphforge-api/tests/facade_methods.rs` | — | `unmapped` | |
-| `graphforge-api` | `fixed_hop_limit` | `integration-test` | `crates/graphforge-api/tests/fixed_hop_limit.rs` | — | `unmapped` | |
-| `graphforge-api` | `graph_internal_metadata` | `integration-test` | `crates/graphforge-api/tests/graph_internal_metadata.rs` | — | `unmapped` | |
-| `graphforge-api` | `inference_provenance` | `integration-test` | `crates/graphforge-api/tests/inference_provenance.rs` | — | `unmapped` | |
-| `graphforge-api` | `knowledge_isolation` | `integration-test` | `crates/graphforge-api/tests/knowledge_isolation.rs` | — | `unmapped` | |
-| `graphforge-api` | `list_semantics` | `integration-test` | `crates/graphforge-api/tests/list_semantics.rs` | — | `unmapped` | |
-| `graphforge-api` | `m22_m18_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m18_public_surface.rs` | — | `unmapped` | |
-| `graphforge-api` | `m22_m19_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m19_public_surface.rs` | — | `unmapped` | |
-| `graphforge-api` | `m22_provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_provider_public_surface.rs` | — | `unmapped` | |
-| `graphforge-api` | `max_bipartite_matching` | `integration-test` | `crates/graphforge-api/tests/max_bipartite_matching.rs` | — | `unmapped` | |
-| `graphforge-api` | `max_cardinality_matching` | `integration-test` | `crates/graphforge-api/tests/max_cardinality_matching.rs` | — | `unmapped` | |
-| `graphforge-api` | `max_weight_matching` | `integration-test` | `crates/graphforge-api/tests/max_weight_matching.rs` | — | `unmapped` | |
-| `graphforge-api` | `minimum_k_spanning_tree` | `integration-test` | `crates/graphforge-api/tests/minimum_k_spanning_tree.rs` | — | `unmapped` | |
-| `graphforge-api` | `modularity` | `integration-test` | `crates/graphforge-api/tests/modularity.rs` | — | `unmapped` | |
-| `graphforge-api` | `multi_label_scaling` | `integration-test` | `crates/graphforge-api/tests/multi_label_scaling.rs` | — | `unmapped` | |
-| `graphforge-api` | `pattern_comprehension` | `integration-test` | `crates/graphforge-api/tests/pattern_comprehension.rs` | — | `unmapped` | |
-| `graphforge-api` | `percentile_aggregates` | `integration-test` | `crates/graphforge-api/tests/percentile_aggregates.rs` | — | `unmapped` | |
-| `graphforge-api` | `provider_session` | `integration-test` | `crates/graphforge-api/tests/provider_session.rs` | — | `unmapped` | |
-| `graphforge-api` | `public_facade_remaining_conformance` | `integration-test` | `crates/graphforge-api/tests/public_facade_remaining_conformance.rs` | — | `unmapped` | |
-| `graphforge-api` | `public_lifecycle_conformance` | `integration-test` | `crates/graphforge-api/tests/public_lifecycle_conformance.rs` | — | `unmapped` | |
-| `graphforge-api` | `release_load_construction` | `integration-test` | `crates/graphforge-api/tests/release_load_construction.rs` | — | `unmapped` | |
-| `graphforge-api` | `strict_runtime_properties` | `integration-test` | `crates/graphforge-api/tests/strict_runtime_properties.rs` | — | `unmapped` | |
-| `graphforge-api` | `value_access_semantics` | `integration-test` | `crates/graphforge-api/tests/value_access_semantics.rs` | — | `unmapped` | |
-| `graphforge-api` | `value_semantics` | `integration-test` | `crates/graphforge-api/tests/value_semantics.rs` | — | `unmapped` | |
-| `graphforge-api` | `with_aggregation` | `integration-test` | `crates/graphforge-api/tests/with_aggregation.rs` | — | `unmapped` | |
-| `graphforge-api` | `xor_scaling` | `integration-test` | `crates/graphforge-api/tests/xor_scaling.rs` | — | `unmapped` | |
+| `graphforge-api` | `bdd` | `integration-test` | `crates/graphforge-api/tests/bdd/main.rs` | `//crates/graphforge-api:bdd` | `mapped` | #8 |
+| `graphforge-api` | `bdd_timing` | `integration-test` | `crates/graphforge-api/tests/bdd_timing.rs` | `//crates/graphforge-api:bdd_timing` | `mapped` | #8 |
+| `graphforge-api` | `belief_subject_contract` | `integration-test` | `crates/graphforge-api/tests/belief_subject_contract.rs` | `//crates/graphforge-api:belief_subject_contract` | `mapped` | #8 |
+| `graphforge-api` | `bind_error_spans` | `integration-test` | `crates/graphforge-api/tests/bind_error_spans.rs` | `//crates/graphforge-api:bind_error_spans` | `mapped` | #8 |
+| `graphforge-api` | `clear` | `integration-test` | `crates/graphforge-api/tests/clear.rs` | `//crates/graphforge-api:clear` | `mapped` | #8 |
+| `graphforge-api` | `conductance` | `integration-test` | `crates/graphforge-api/tests/conductance.rs` | `//crates/graphforge-api:conductance` | `mapped` | #8 |
+| `graphforge-api` | `create_scaling` | `integration-test` | `crates/graphforge-api/tests/create_scaling.rs` | `//crates/graphforge-api:create_scaling` | `mapped` | #8 |
+| `graphforge-api` | `e2e_baseline` | `integration-test` | `crates/graphforge-api/tests/e2e_baseline.rs` | `//crates/graphforge-api:e2e_baseline` | `mapped` | #8 |
+| `graphforge-api` | `existential_subquery` | `integration-test` | `crates/graphforge-api/tests/existential_subquery.rs` | `//crates/graphforge-api:existential_subquery` | `mapped` | #8 |
+| `graphforge-api` | `facade_methods` | `integration-test` | `crates/graphforge-api/tests/facade_methods.rs` | `//crates/graphforge-api:facade_methods` | `mapped` | #8 |
+| `graphforge-api` | `fixed_hop_limit` | `integration-test` | `crates/graphforge-api/tests/fixed_hop_limit.rs` | `//crates/graphforge-api:fixed_hop_limit` | `mapped` | #8 |
+| `graphforge-api` | `graph_internal_metadata` | `integration-test` | `crates/graphforge-api/tests/graph_internal_metadata.rs` | `//crates/graphforge-api:graph_internal_metadata` | `mapped` | #8 |
+| `graphforge-api` | `inference_provenance` | `integration-test` | `crates/graphforge-api/tests/inference_provenance.rs` | `//crates/graphforge-api:inference_provenance` | `mapped` | #8 |
+| `graphforge-api` | `knowledge_isolation` | `integration-test` | `crates/graphforge-api/tests/knowledge_isolation.rs` | `//crates/graphforge-api:knowledge_isolation` | `mapped` | #8 |
+| `graphforge-api` | `list_semantics` | `integration-test` | `crates/graphforge-api/tests/list_semantics.rs` | `//crates/graphforge-api:list_semantics` | `mapped` | #8 |
+| `graphforge-api` | `m22_m18_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m18_public_surface.rs` | `//crates/graphforge-api:m22_m18_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `m22_m19_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m19_public_surface.rs` | `//crates/graphforge-api:m22_m19_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `m22_provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_provider_public_surface.rs` | `//crates/graphforge-api:m22_provider_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `max_bipartite_matching` | `integration-test` | `crates/graphforge-api/tests/max_bipartite_matching.rs` | `//crates/graphforge-api:max_bipartite_matching` | `mapped` | #8 |
+| `graphforge-api` | `max_cardinality_matching` | `integration-test` | `crates/graphforge-api/tests/max_cardinality_matching.rs` | `//crates/graphforge-api:max_cardinality_matching` | `mapped` | #8 |
+| `graphforge-api` | `max_weight_matching` | `integration-test` | `crates/graphforge-api/tests/max_weight_matching.rs` | `//crates/graphforge-api:max_weight_matching` | `mapped` | #8 |
+| `graphforge-api` | `minimum_k_spanning_tree` | `integration-test` | `crates/graphforge-api/tests/minimum_k_spanning_tree.rs` | `//crates/graphforge-api:minimum_k_spanning_tree` | `mapped` | #8 |
+| `graphforge-api` | `modularity` | `integration-test` | `crates/graphforge-api/tests/modularity.rs` | `//crates/graphforge-api:modularity` | `mapped` | #8 |
+| `graphforge-api` | `multi_label_scaling` | `integration-test` | `crates/graphforge-api/tests/multi_label_scaling.rs` | `//crates/graphforge-api:multi_label_scaling` | `mapped` | #8 |
+| `graphforge-api` | `pattern_comprehension` | `integration-test` | `crates/graphforge-api/tests/pattern_comprehension.rs` | `//crates/graphforge-api:pattern_comprehension` | `mapped` | #8 |
+| `graphforge-api` | `percentile_aggregates` | `integration-test` | `crates/graphforge-api/tests/percentile_aggregates.rs` | `//crates/graphforge-api:percentile_aggregates` | `mapped` | #8 |
+| `graphforge-api` | `provider_session` | `integration-test` | `crates/graphforge-api/tests/provider_session.rs` | `//crates/graphforge-api:provider_session` | `mapped` | #8 |
+| `graphforge-api` | `public_facade_remaining_conformance` | `integration-test` | `crates/graphforge-api/tests/public_facade_remaining_conformance.rs` | `//crates/graphforge-api:public_facade_remaining_conformance` | `mapped` | #8 |
+| `graphforge-api` | `public_lifecycle_conformance` | `integration-test` | `crates/graphforge-api/tests/public_lifecycle_conformance.rs` | `//crates/graphforge-api:public_lifecycle_conformance` | `mapped` | #8 |
+| `graphforge-api` | `release_load_construction` | `integration-test` | `crates/graphforge-api/tests/release_load_construction.rs` | `//crates/graphforge-api:release_load_construction` | `mapped` | #8 |
+| `graphforge-api` | `strict_runtime_properties` | `integration-test` | `crates/graphforge-api/tests/strict_runtime_properties.rs` | `//crates/graphforge-api:strict_runtime_properties` | `mapped` | #8 |
+| `graphforge-api` | `value_access_semantics` | `integration-test` | `crates/graphforge-api/tests/value_access_semantics.rs` | `//crates/graphforge-api:value_access_semantics` | `mapped` | #8 |
+| `graphforge-api` | `value_semantics` | `integration-test` | `crates/graphforge-api/tests/value_semantics.rs` | `//crates/graphforge-api:value_semantics` | `mapped` | #8 |
+| `graphforge-api` | `with_aggregation` | `integration-test` | `crates/graphforge-api/tests/with_aggregation.rs` | `//crates/graphforge-api:with_aggregation` | `mapped` | #8 |
+| `graphforge-api` | `xor_scaling` | `integration-test` | `crates/graphforge-api/tests/xor_scaling.rs` | `//crates/graphforge-api:xor_scaling` | `mapped` | #8 |
 | `graphforge-ast` | `graphforge_ast` | `lib` | `crates/graphforge-ast/src/lib.rs` | `//crates/graphforge-ast:graphforge_ast` | `mapped` | #10; unit tests `//crates/graphforge-ast:graphforge_ast_test` |
 | `graphforge-bindings-node` | `graphforge_bindings_node` | `cdylib` | `crates/graphforge-bindings-node/src/lib.rs` | `//crates/graphforge-bindings-node:graphforge_bindings_node` | `mapped` | #7; packaging `//:node_package_smoke` |
 | `graphforge-bindings-node` | `build-script-build` | `custom-build` | `crates/graphforge-bindings-node/build.rs` | `//crates/graphforge-bindings-node:graphforge_bindings_node_build_script` | `mapped` | #7; `napi-build` via `gf_cargo_build_script` |
 | `graphforge-bindings-py` | `graphforge_bindings_py` | `cdylib` | `crates/graphforge-bindings-py/src/lib.rs` | `//crates/graphforge-bindings-py:graphforge_bindings_py` | `mapped` | #7; packaging `//:python_wheel_smoke` |
-| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | `//crates/graphforge-cli:graphforge_cli` | `mapped` | #7 link dep for bindings; bin/tests remain #8 |
-| `graphforge-cli` | `gf` | `bin` | `crates/graphforge-cli/src/main.rs` | — | `unmapped` | #8 |
-| `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | — | `unmapped` | #8 |
-| `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | — | `unmapped` | #8 |
-| `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | — | `unmapped` | #8 |
-| `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | `//crates/graphforge-cli:graphforge_cli_build_script` | `mapped` | #7 (embeds `project-skills`); #8 owns bin/tests |
+| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | `//crates/graphforge-cli:graphforge_cli` | `mapped` | #7/#8; unit `//crates/graphforge-cli:graphforge_cli_test` |
+| `graphforge-cli` | `gf` | `bin` | `crates/graphforge-cli/src/main.rs` | `//crates/graphforge-cli:gf` | `mapped` | #8 |
+| `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | `//crates/graphforge-cli:checkpoints` | `mapped` | #8 |
+| `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | `//crates/graphforge-cli:portable` | `mapped` | #8 |
+| `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | `//crates/graphforge-cli:repository` | `mapped` | #8 |
+| `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | `//crates/graphforge-cli:graphforge_cli_build_script` | `mapped` | #7/#8; RT-cli-build-script closed |
 | `graphforge-core` | `graphforge_core` | `lib` | `crates/graphforge-core/src/lib.rs` | `//crates/graphforge-core:graphforge_core` | `mapped` | #10; unit tests `//crates/graphforge-core:graphforge_core_test` |
 | `graphforge-cypher` | `graphforge_cypher` | `lib` | `crates/graphforge-cypher/src/lib.rs` | `//crates/graphforge-cypher:graphforge_cypher` | `mapped` | #10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test` |
-| `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | — | `unmapped` | #8 |
+| `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | `//crates/graphforge-cypher:corpus` | `mapped` | #8 |
 | `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | `//crates/graphforge-exec:graphforge_exec` | `mapped` | #9; unit tests `//crates/graphforge-exec:graphforge_exec_test` |
-| `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | — | `unmapped` | |
-| `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | — | `unmapped` | |
-| `graphforge-exec` | `create_execution` | `integration-test` | `crates/graphforge-exec/tests/create_execution.rs` | — | `unmapped` | |
-| `graphforge-exec` | `create_input_driven` | `integration-test` | `crates/graphforge-exec/tests/create_input_driven.rs` | — | `unmapped` | |
-| `graphforge-exec` | `differential_traversal` | `integration-test` | `crates/graphforge-exec/tests/differential_traversal.rs` | — | `unmapped` | |
-| `graphforge-exec` | `explain_snapshots` | `integration-test` | `crates/graphforge-exec/tests/explain_snapshots.rs` | — | `unmapped` | |
-| `graphforge-exec` | `optional_match` | `integration-test` | `crates/graphforge-exec/tests/optional_match.rs` | — | `unmapped` | |
-| `graphforge-exec` | `persistent_adjacency` | `integration-test` | `crates/graphforge-exec/tests/persistent_adjacency.rs` | — | `unmapped` | |
-| `graphforge-exec` | `read_execution` | `integration-test` | `crates/graphforge-exec/tests/read_execution.rs` | — | `unmapped` | |
-| `graphforge-exec` | `unwind` | `integration-test` | `crates/graphforge-exec/tests/unwind.rs` | — | `unmapped` | |
-| `graphforge-exec` | `var_len_expand` | `integration-test` | `crates/graphforge-exec/tests/var_len_expand.rs` | — | `unmapped` | |
-| `graphforge-exec` | `write_statement` | `integration-test` | `crates/graphforge-exec/tests/write_statement.rs` | — | `unmapped` | |
+| `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | `//crates/graphforge-exec:adjacency_expand` | `mapped` | #8 |
+| `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | `//crates/graphforge-exec:bench_traversal_scaling` | `mapped` | #8 |
+| `graphforge-exec` | `create_execution` | `integration-test` | `crates/graphforge-exec/tests/create_execution.rs` | `//crates/graphforge-exec:create_execution` | `mapped` | #8 |
+| `graphforge-exec` | `create_input_driven` | `integration-test` | `crates/graphforge-exec/tests/create_input_driven.rs` | `//crates/graphforge-exec:create_input_driven` | `mapped` | #8 |
+| `graphforge-exec` | `differential_traversal` | `integration-test` | `crates/graphforge-exec/tests/differential_traversal.rs` | `//crates/graphforge-exec:differential_traversal` | `mapped` | #8 |
+| `graphforge-exec` | `explain_snapshots` | `integration-test` | `crates/graphforge-exec/tests/explain_snapshots.rs` | `//crates/graphforge-exec:explain_snapshots` | `mapped` | #8 |
+| `graphforge-exec` | `optional_match` | `integration-test` | `crates/graphforge-exec/tests/optional_match.rs` | `//crates/graphforge-exec:optional_match` | `mapped` | #8 |
+| `graphforge-exec` | `persistent_adjacency` | `integration-test` | `crates/graphforge-exec/tests/persistent_adjacency.rs` | `//crates/graphforge-exec:persistent_adjacency` | `mapped` | #8 |
+| `graphforge-exec` | `read_execution` | `integration-test` | `crates/graphforge-exec/tests/read_execution.rs` | `//crates/graphforge-exec:read_execution` | `mapped` | #8 |
+| `graphforge-exec` | `unwind` | `integration-test` | `crates/graphforge-exec/tests/unwind.rs` | `//crates/graphforge-exec:unwind` | `mapped` | #8 |
+| `graphforge-exec` | `var_len_expand` | `integration-test` | `crates/graphforge-exec/tests/var_len_expand.rs` | `//crates/graphforge-exec:var_len_expand` | `mapped` | #8 |
+| `graphforge-exec` | `write_statement` | `integration-test` | `crates/graphforge-exec/tests/write_statement.rs` | `//crates/graphforge-exec:write_statement` | `mapped` | #8 |
 | `graphforge-io` | `graphforge_io` | `lib` | `crates/graphforge-io/src/lib.rs` | `//crates/graphforge-io:graphforge_io` | `mapped` | #9; unit tests `//crates/graphforge-io:graphforge_io_test` |
 | `graphforge-ir` | `graphforge_ir` | `lib` | `crates/graphforge-ir/src/lib.rs` | `//crates/graphforge-ir:graphforge_ir` | `mapped` | #10; unit tests `//crates/graphforge-ir:graphforge_ir_test` |
-| `graphforge-ir` | `golden` | `integration-test` | `crates/graphforge-ir/tests/golden.rs` | — | `unmapped` | #8 |
+| `graphforge-ir` | `golden` | `integration-test` | `crates/graphforge-ir/tests/golden.rs` | `//crates/graphforge-ir:golden` | `mapped` | #8 |
 | `graphforge-knowledge` | `graphforge_knowledge` | `lib` | `crates/graphforge-knowledge/src/lib.rs` | `//crates/graphforge-knowledge:graphforge_knowledge` | `mapped` | #9; unit tests `//crates/graphforge-knowledge:graphforge_knowledge_test` |
 | `graphforge-ontology` | `graphforge_ontology` | `lib` | `crates/graphforge-ontology/src/lib.rs` | `//crates/graphforge-ontology:graphforge_ontology` | `mapped` | #10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test` |
-| `graphforge-ontology` | `integration` | `integration-test` | `crates/graphforge-ontology/tests/integration.rs` | — | `unmapped` | #8 |
+| `graphforge-ontology` | `integration` | `integration-test` | `crates/graphforge-ontology/tests/integration.rs` | `//crates/graphforge-ontology:integration` | `mapped` | #8 |
 | `graphforge-plan` | `graphforge_plan` | `lib` | `crates/graphforge-plan/src/lib.rs` | `//crates/graphforge-plan:graphforge_plan` | `mapped` | #10; unit tests `//crates/graphforge-plan:graphforge_plan_test` |
 | `graphforge-provenance` | `graphforge_provenance` | `lib` | `crates/graphforge-provenance/src/lib.rs` | `//crates/graphforge-provenance:graphforge_provenance` | `mapped` | #10; unit tests `//crates/graphforge-provenance:graphforge_provenance_test` |
 | `graphforge-rel` | `graphforge_rel` | `lib` | `crates/graphforge-rel/src/lib.rs` | `//crates/graphforge-rel:graphforge_rel` | `mapped` | #10; unit tests `//crates/graphforge-rel:graphforge_rel_test` |
-| `graphforge-rel` | `expression_lowering_matrix` | `integration-test` | `crates/graphforge-rel/tests/expression_lowering_matrix.rs` | — | `unmapped` | #8 |
-| `graphforge-rel` | `logical_plan_golden` | `integration-test` | `crates/graphforge-rel/tests/logical_plan_golden.rs` | — | `unmapped` | #8 |
+| `graphforge-rel` | `expression_lowering_matrix` | `integration-test` | `crates/graphforge-rel/tests/expression_lowering_matrix.rs` | `//crates/graphforge-rel:expression_lowering_matrix` | `mapped` | #8 |
+| `graphforge-rel` | `logical_plan_golden` | `integration-test` | `crates/graphforge-rel/tests/logical_plan_golden.rs` | `//crates/graphforge-rel:logical_plan_golden` | `mapped` | #8 |
 | `graphforge-search` | `graphforge_search` | `lib` | `crates/graphforge-search/src/lib.rs` | `//crates/graphforge-search:graphforge_search` | `mapped` | #9; unit tests `//crates/graphforge-search:graphforge_search_test` |
 | `graphforge-storage` | `graphforge_storage` | `lib` | `crates/graphforge-storage/src/lib.rs` | `//crates/graphforge-storage:graphforge_storage` | `mapped` | #10 early / #9; Bazel enables `test-failpoints` for api subprocess unification; unit tests `//crates/graphforge-storage:graphforge_storage_test` |
-| `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | — | `unmapped` | |
-| `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | — | `unmapped` | |
-| `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | — | `unmapped` | |
-| `graphforge-storage` | `io_stats` | `integration-test` | `crates/graphforge-storage/tests/io_stats.rs` | — | `unmapped` | |
+| `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | `//crates/graphforge-storage:adjacency_delta_write` | `mapped` | #8 |
+| `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | `//crates/graphforge-storage:filtered_read` | `mapped` | #8 |
+| `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | `//crates/graphforge-storage:graph_writer` | `mapped` | #8 |
+| `graphforge-storage` | `io_stats` | `integration-test` | `crates/graphforge-storage/tests/io_stats.rs` | `//crates/graphforge-storage:io_stats` | `mapped` | #8 |
 
 ## Retained-tool exception stubs
 
@@ -149,13 +149,13 @@ before #6 parity can pass with the exception still open.
 
 | ID | Tool / surface | Why Bazel may not replace cleanly | Owning follow-up | Status |
 | --- | --- | --- | --- | --- |
-| RT-fuzz | `cargo fuzz` (`fuzz/` workspace, workflow `fuzz.yml`) | cargo-fuzz driver + corpus workflow outside ordinary `rules_rust` test graph | #8/#6 justify or map | stub |
+| RT-fuzz | `cargo fuzz` (`fuzz/` workspace, workflow `fuzz.yml`) | cargo-fuzz driver + corpus workflow outside ordinary `rules_rust` test graph | #6 parity may keep Cargo; justified retained tool | explicit |
 | RT-publish-crates | `cargo publish` / crates.io authorize flows | Ecosystem publication metadata and registry auth | keep Cargo; ledger must remain explicit | stub |
 | RT-maturin-assemble | `maturin build` / `maturin sdist` packaging assembly | Bazel handoff: `//:python_wheel_smoke` + `assemble_bazel_binding_packages.py` consume Bazel cdylibs (no silent `maturin build` recompile). Maturin may still sign/publish later. | #7 handoff | handoff |
 | RT-napi-assemble | `napi build` / `napi artifacts` / `napi pre-publish` | Bazel handoff: `//:node_package_smoke` consumes Bazel cdylib (no silent `napi build` recompile). napi may still assemble/sign/publish later. | #7 handoff | handoff |
-| RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Lib + build script mapped for #7 binding link; bin/tests still #8 | #8 bin/tests; #7 mapped lib | partial |
+| RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Mapped via `cargo_build_script` + `//:project_skills_bundle`; bin/tests mapped | #8 complete | closed |
 | RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | Mapped as `rust_shared_library` cdylibs + packaging smoke targets | #7 | mapped |
-| RT-examples | `graphforge-api` examples (11) | May be CI/release probes vs developer samples; map or except per #8/#6 | #8/#6 | stub |
+| RT-examples | `graphforge-api` examples (11) | Developer samples + release-load probes; not required for #8 test graph; map under #6 if parity demands binaries | #6 | explicit |
 | RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for M2** — not a deliverable; do not inventory as required targets | excluded | excluded |
 
 ## CI / release build command sites

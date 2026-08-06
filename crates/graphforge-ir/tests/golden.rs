@@ -18,10 +18,26 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 // Setup helpers
 // ---------------------------------------------------------------------------
 
+/// Resolve `CARGO_MANIFEST_DIR` to an absolute path.
+///
+/// Cargo bakes an absolute path; Bazel may bake a workspace-relative path.
+/// Insta falls back to the manifest directory when `cargo metadata` is
+/// unavailable and will double-prefix relative snapshot paths unless this is
+/// absolute.
+fn manifest_dir() -> std::path::PathBuf {
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if raw.is_absolute() {
+        return raw.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(raw))
+        .unwrap_or_else(|_| raw.to_path_buf())
+}
+
 /// Path to the shared HR ontology fixture.
 fn hr_fixture() -> std::path::PathBuf {
     // The HR fixture lives in graphforge-ontology's test fixtures directory.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    manifest_dir()
         .parent() // crates/
         .unwrap()
         .join("graphforge-ontology")
@@ -62,11 +78,7 @@ fn bind_query(query: &str) -> graphforge_ir::GraphPlan {
 /// Must be called at the start of every `#[test]` in this file.
 fn golden_settings() -> insta::Settings {
     let mut settings = insta::Settings::clone_current();
-    settings.set_snapshot_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("ir_goldens"),
-    );
+    settings.set_snapshot_path(manifest_dir().join("tests").join("ir_goldens"));
     // Omit the module path prefix from snapshot names for cleaner file names.
     settings.set_omit_expression(true);
     settings

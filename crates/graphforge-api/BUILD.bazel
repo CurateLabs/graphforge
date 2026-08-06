@@ -1,6 +1,6 @@
-"""Bazel targets for graphforge-api (#9 runtime)."""
+"""Bazel targets for graphforge-api (#9 runtime + #8 integration/BDD)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
@@ -11,21 +11,23 @@ _API_COMPILE_DATA = [
     "//docs/contracts/examples:fixtures",
 ]
 
+_API_DEPS = [
+    "//crates/graphforge-core:graphforge_core",
+    "//crates/graphforge-cypher:graphforge_cypher",
+    "//crates/graphforge-exec:graphforge_exec",
+    "//crates/graphforge-ir:graphforge_ir",
+    "//crates/graphforge-knowledge:graphforge_knowledge",
+    "//crates/graphforge-ontology:graphforge_ontology",
+    "//crates/graphforge-provenance:graphforge_provenance",
+    "//crates/graphforge-rel:graphforge_rel",
+    "//crates/graphforge-search:graphforge_search",
+    "//crates/graphforge-storage:graphforge_storage",
+]
+
 gf_rust_library(
     name = "graphforge_api",
     compile_data = _API_COMPILE_DATA,
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-cypher:graphforge_cypher",
-        "//crates/graphforge-exec:graphforge_exec",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-knowledge:graphforge_knowledge",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-provenance:graphforge_provenance",
-        "//crates/graphforge-rel:graphforge_rel",
-        "//crates/graphforge-search:graphforge_search",
-        "//crates/graphforge-storage:graphforge_storage",
-    ],
+    deps = _API_DEPS,
 )
 
 gf_rust_test(
@@ -41,16 +43,401 @@ gf_rust_test(
     # Large public-facade unit suite with filesystem/async paths.
     size = "large",
     timeout = "long",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-cypher:graphforge_cypher",
-        "//crates/graphforge-exec:graphforge_exec",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-knowledge:graphforge_knowledge",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-provenance:graphforge_provenance",
-        "//crates/graphforge-rel:graphforge_rel",
-        "//crates/graphforge-search:graphforge_search",
-        "//crates/graphforge-storage:graphforge_storage",
+    deps = _API_DEPS,
+)
+
+_API_TEST_DATA = [
+    "//docs/contracts/examples:fixtures",
+    "//docs/reference:schema_inventory_fixtures",
+    "//crates/graphforge-ontology:test_fixtures",
+]
+
+
+gf_rust_integration_test(
+    name = "bdd_timing",
+    srcs = ["tests/bdd_timing.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "belief_subject_contract",
+    srcs = ["tests/belief_subject_contract.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "bind_error_spans",
+    srcs = ["tests/bind_error_spans.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "clear",
+    srcs = ["tests/clear.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "conductance",
+    srcs = ["tests/conductance.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "create_scaling",
+    srcs = ["tests/create_scaling.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "e2e_baseline",
+    srcs = ["tests/e2e_baseline.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "existential_subquery",
+    srcs = ["tests/existential_subquery.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "facade_methods",
+    srcs = ["tests/facade_methods.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "fixed_hop_limit",
+    srcs = ["tests/fixed_hop_limit.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "graph_internal_metadata",
+    srcs = ["tests/graph_internal_metadata.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "inference_provenance",
+    srcs = ["tests/inference_provenance.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "knowledge_isolation",
+    srcs = ["tests/knowledge_isolation.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "list_semantics",
+    srcs = ["tests/list_semantics.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "m22_m18_public_surface",
+    srcs = ["tests/m22_m18_public_surface.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "m22_m19_public_surface",
+    srcs = ["tests/m22_m19_public_surface.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "m22_provider_public_surface",
+    srcs = ["tests/m22_provider_public_surface.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "max_bipartite_matching",
+    srcs = ["tests/max_bipartite_matching.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "max_cardinality_matching",
+    srcs = ["tests/max_cardinality_matching.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "max_weight_matching",
+    srcs = ["tests/max_weight_matching.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "minimum_k_spanning_tree",
+    srcs = ["tests/minimum_k_spanning_tree.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "modularity",
+    srcs = ["tests/modularity.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "multi_label_scaling",
+    srcs = ["tests/multi_label_scaling.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "pattern_comprehension",
+    srcs = ["tests/pattern_comprehension.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "percentile_aggregates",
+    srcs = ["tests/percentile_aggregates.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "provider_session",
+    srcs = ["tests/provider_session.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "public_facade_remaining_conformance",
+    srcs = ["tests/public_facade_remaining_conformance.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "public_lifecycle_conformance",
+    srcs = ["tests/public_lifecycle_conformance.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "release_load_construction",
+    srcs = ["tests/release_load_construction.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "strict_runtime_properties",
+    srcs = ["tests/strict_runtime_properties.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "value_access_semantics",
+    srcs = ["tests/value_access_semantics.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "value_semantics",
+    srcs = ["tests/value_semantics.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "with_aggregation",
+    srcs = ["tests/with_aggregation.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "xor_scaling",
+    srcs = ["tests/xor_scaling.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "bdd",
+    srcs = glob(["tests/bdd/**/*.rs"]),
+    crate = ":graphforge_api",
+    crate_root = "tests/bdd/main.rs",
+    data = _API_TEST_DATA + [
+        "//tests/features:api_features",
+        "//tests/tck:corpus",
+    ],
+    # Runtime path resolution (std::env::var), not rustc env!().
+    env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-api",
+    },
+    size = "enormous",
+    timeout = "eternal",
+    use_libtest_harness = False,
+    deps = _API_DEPS,
+)
+
+test_suite(
+    name = "api_integration_tests",
+    tests = [
+        ":bdd_timing",
+        ":belief_subject_contract",
+        ":bind_error_spans",
+        ":clear",
+        ":conductance",
+        ":create_scaling",
+        ":e2e_baseline",
+        ":existential_subquery",
+        ":facade_methods",
+        ":fixed_hop_limit",
+        ":graph_internal_metadata",
+        ":inference_provenance",
+        ":knowledge_isolation",
+        ":list_semantics",
+        ":m22_m18_public_surface",
+        ":m22_m19_public_surface",
+        ":m22_provider_public_surface",
+        ":max_bipartite_matching",
+        ":max_cardinality_matching",
+        ":max_weight_matching",
+        ":minimum_k_spanning_tree",
+        ":modularity",
+        ":multi_label_scaling",
+        ":pattern_comprehension",
+        ":percentile_aggregates",
+        ":provider_session",
+        ":public_facade_remaining_conformance",
+        ":public_lifecycle_conformance",
+        ":release_load_construction",
+        ":strict_runtime_properties",
+        ":value_access_semantics",
+        ":value_semantics",
+        ":with_aggregation",
+        ":xor_scaling",
+    ],
+)
+
+test_suite(
+    name = "bdd_tests",
+    tests = [":bdd"],
+)
+
+test_suite(
+    name = "api_tests",
+    tests = [
+        ":api_integration_tests",
+        ":bdd",
+        ":graphforge_api_test",
     ],
 )

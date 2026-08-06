@@ -1,14 +1,16 @@
-"""Bazel targets for graphforge-storage.
+"""Bazel targets for graphforge-storage (#10/#9 + #8 integration)."""
 
-Modeled in #10 because graphforge-rel (compiler lowering) depends on it.
-Runtime peers (exec/search/knowledge/api/io) are modeled in #9.
-"""
-
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+_STORAGE_DEPS = [
+    "//crates/graphforge-core:graphforge_core",
+    "//crates/graphforge-ir:graphforge_ir",
+    "//crates/graphforge-ontology:graphforge_ontology",
+]
 
 gf_rust_library(
     name = "graphforge_storage",
@@ -18,11 +20,7 @@ gf_rust_library(
     # unification). Residual vs Cargo release builds: Bazel links the env-gated
     # bodies instead of the const no-op; document for #6 parity.
     crate_features = ["test-failpoints"],
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
-    ],
+    deps = _STORAGE_DEPS,
 )
 
 gf_rust_test(
@@ -31,9 +29,60 @@ gf_rust_test(
     crate_features = ["test-failpoints"],
     # Unit suite exercises filesystem/async paths; default "small" is too tight.
     size = "medium",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
+    deps = _STORAGE_DEPS,
+)
+
+
+gf_rust_integration_test(
+    name = "adjacency_delta_write",
+    srcs = ["tests/adjacency_delta_write.rs"],
+    crate = ":graphforge_storage",
+    crate_features = ["test-failpoints"],
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "filtered_read",
+    srcs = ["tests/filtered_read.rs"],
+    crate = ":graphforge_storage",
+    crate_features = ["test-failpoints"],
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "graph_writer",
+    srcs = ["tests/graph_writer.rs"],
+    crate = ":graphforge_storage",
+    crate_features = ["test-failpoints"],
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "io_stats",
+    srcs = ["tests/io_stats.rs"],
+    crate = ":graphforge_storage",
+    crate_features = ["test-failpoints"],
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
+test_suite(
+    name = "storage_integration_tests",
+    tests = [
+        ":adjacency_delta_write",
+        ":filtered_read",
+        ":graph_writer",
+        ":io_stats",
+    ],
+)
+
+test_suite(
+    name = "storage_tests",
+    tests = [
+        ":graphforge_storage_test",
+        ":storage_integration_tests",
     ],
 )
