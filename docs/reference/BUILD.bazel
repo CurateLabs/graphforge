@@ -1,0 +1,15 @@
+"""Checked-in schema inventory contracts used by graphforge-api unit tests (#9)."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"]))
+
+filegroup(
+    name = "schema_inventory_fixtures",
+    srcs = [
+        "m20-schema-inventory.json",
+        "m20-schema-inventory.sha256",
+        "m21-schema-inventory.json",
+        "m21-schema-inventory.sha256",
+    ],
+)

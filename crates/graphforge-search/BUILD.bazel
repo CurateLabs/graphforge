@@ -1,5 +1,26 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-search (#9 runtime)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_search",
+    deps = [
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_search_test",
+    crate = ":graphforge_search",
+    # Indexing / tempfile paths; default "small" is too tight.
+    size = "medium",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)

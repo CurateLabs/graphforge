@@ -1,5 +1,24 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-io (#9 runtime)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_io",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_io_test",
+    crate = ":graphforge_io",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
