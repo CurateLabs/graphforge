@@ -611,9 +611,12 @@ fn props_from_js_object(env: &Env, props: Option<Object>) -> Result<HashMap<Stri
     })?;
     let mut out = HashMap::with_capacity(keys.len());
     for key in keys {
-        let Some(value) = obj
-            .get::<Unknown>(&key)
-            .map_err(|error| type_error(env, format!("failed to read property `{key}`: {}", error.reason)))?
+        let Some(value) = obj.get::<Unknown>(&key).map_err(|error| {
+            type_error(
+                env,
+                format!("failed to read property `{key}`: {}", error.reason),
+            )
+        })?
         else {
             continue;
         };
@@ -703,9 +706,8 @@ fn node_handle_from_unknown<'env>(
     value: Unknown<'env>,
     role: &str,
 ) -> Result<ClassInstance<'env, NodeHandle>> {
-    unsafe { ClassInstance::<NodeHandle>::from_napi_value(env.raw(), value.raw()) }.map_err(
-        |_| type_error(env, format!("expected NodeHandle for addEdge {role}")),
-    )
+    unsafe { ClassInstance::<NodeHandle>::from_napi_value(env.raw(), value.raw()) }
+        .map_err(|_| type_error(env, format!("expected NodeHandle for addEdge {role}")))
 }
 
 type EmbeddingInput = HashMap<String, serde_json::Value>;
@@ -5735,8 +5737,7 @@ impl GraphForge {
         &self,
         env: Env,
         label: String,
-        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")]
-        props: Option<Object>,
+        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<NodeHandle> {
         self.ensure_open()?;
         let props = props_from_js_object(&env, props)?;
@@ -5755,8 +5756,7 @@ impl GraphForge {
         #[napi(ts_arg_type = "NodeHandle")] src: Unknown,
         rel_type: String,
         #[napi(ts_arg_type = "NodeHandle")] dst: Unknown,
-        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")]
-        props: Option<Object>,
+        #[napi(ts_arg_type = "Record<string, unknown> | null | undefined")] props: Option<Object>,
     ) -> Result<EdgeHandle> {
         let src = node_handle_from_unknown(&env, src, "source")?;
         let dst = node_handle_from_unknown(&env, dst, "destination")?;
