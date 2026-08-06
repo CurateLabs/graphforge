@@ -251,6 +251,9 @@ When adding features, update:
 M2 Bazel migration work follows the sub-agent contracts in
 [bazel-migration-orchestration.md](bazel-migration-orchestration.md)
 (canonical issue [#1](https://github.com/CurateLabs/graphforge/issues/1)).
+The frozen inventory and Cargo/Blacksmith baseline live in
+[bazel-migration-ledger.md](bazel-migration-ledger.md) and
+[bazel-migration-baseline.md](bazel-migration-baseline.md).
 
 ---
 
