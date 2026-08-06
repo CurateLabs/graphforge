@@ -295,24 +295,25 @@ def mode_observe_warm(root: Path, out: Path) -> int:
     rebuild into a second fresh ``--output_base`` so hits must come from remote.
     """
     target = ["build", "//tools/bazel/smoke:smoke_test"]
-    with tempfile.TemporaryDirectory(prefix="gf-bazel-prime-") as prime_base:
-        with tempfile.TemporaryDirectory(prefix="gf-bazel-warm-") as warm_base:
-            prime = measure_bazel(
-                root,
-                target,
-                startup_args=[f"--output_base={prime_base}"],
-            )
-            warm = measure_bazel(
-                root,
-                target,
-                startup_args=[f"--output_base={warm_base}"],
-            )
+    with (
+        tempfile.TemporaryDirectory(prefix="gf-bazel-prime-") as prime_base,
+        tempfile.TemporaryDirectory(prefix="gf-bazel-warm-") as warm_base,
+    ):
+        prime = measure_bazel(
+            root,
+            target,
+            startup_args=[f"--output_base={prime_base}"],
+        )
+        warm = measure_bazel(
+            root,
+            target,
+            startup_args=[f"--output_base={warm_base}"],
+        )
     hits = warm["process_summary"]["remote_cache_hits"]
     announce = (prime.get("stdout_tail") or "") + "\n" + (prime.get("stderr_tail") or "")
     # Blacksmith injects remote cache at runner start; announce_rc reveals it.
     remote_injected = bool(
-        re.search(r"--remote_cache(?:=|\s)", announce)
-        or re.search(r"remote_cache:", announce)
+        re.search(r"--remote_cache(?:=|\s)", announce) or re.search(r"remote_cache:", announce)
     )
     payload = {
         "schema": SCHEMA_RUN,
@@ -371,8 +372,7 @@ def measure_representative(
     )
     wall = time.perf_counter() - started
     hits = (
-        test["process_summary"]["remote_cache_hits"]
-        + build["process_summary"]["remote_cache_hits"]
+        test["process_summary"]["remote_cache_hits"] + build["process_summary"]["remote_cache_hits"]
     )
     return {
         "schema": SCHEMA_RUN,
@@ -478,7 +478,9 @@ def mode_collect_pairs(
     if remote_hits_seen:
         obs["remote_cache_hits_on_identical_sha"] = True
     evidence["pairs"] = pairs
-    evidence["status"] = "collecting" if not remote_hits_seen else evidence.get("status", "collecting")
+    evidence["status"] = (
+        "collecting" if not remote_hits_seen else evidence.get("status", "collecting")
+    )
     evidence["git_sha_measured"] = git_sha(root)
     evidence["collection"] = {
         "pair_count": len(pairs),
@@ -521,23 +523,30 @@ def mode_collect_pairs(
 
 
 def mode_affected_inputs(root: Path, out: Path) -> int:
-    """Touch one crate source; require a rebuild of that package path only."""
+    """Touch one crate source; require a rebuild of that package path only.
+
+    Warm and mutated legs use distinct ``--output_base`` dirs so Blacksmith
+    remote hits on the unchanged crate are visible (same-base action-cache
+    hits hide isolation signal).
+    """
     target_file = root / "crates/graphforge-ast/src/lib.rs"
     if not target_file.is_file():
         print(f"missing {target_file}", file=sys.stderr)
         return 1
     original = target_file.read_text(encoding="utf-8")
     marker = "\n// graphforge-bazel-cache-perf-mutation\n"
+    targets = [
+        "build",
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+    ]
     try:
-        # Warm two independent crates once.
-        warm = measure_bazel(
-            root,
-            [
-                "build",
-                "//crates/graphforge-ast:graphforge_ast",
-                "//crates/graphforge-core:graphforge_core",
-            ],
-        )
+        with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-warm-") as warm_base:
+            warm = measure_bazel(
+                root,
+                targets,
+                startup_args=[f"--output_base={warm_base}"],
+            )
         if warm["exit_code"] != 0:
             print(warm["stderr_tail"], file=sys.stderr)
             return 1
@@ -545,15 +554,15 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         target_file.write_text(original + marker, encoding="utf-8")
         with tempfile.TemporaryDirectory(prefix="gf-exec-log-") as tmp:
             log_path = Path(tmp) / "exec.json"
-            mutated = measure_bazel(
-                root,
-                [
-                    "build",
-                    "//crates/graphforge-ast:graphforge_ast",
-                    "//crates/graphforge-core:graphforge_core",
-                    f"--execution_log_json_file={log_path}",
-                ],
-            )
+            with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-mut-") as mut_base:
+                mutated = measure_bazel(
+                    root,
+                    [
+                        *targets,
+                        f"--execution_log_json_file={log_path}",
+                    ],
+                    startup_args=[f"--output_base={mut_base}"],
+                )
             if mutated["exit_code"] != 0:
                 print(mutated["stderr_tail"], file=sys.stderr)
                 return 1
@@ -577,34 +586,43 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
 
     ast_touched = any("graphforge-ast" in label for label in executed_labels)
     core_rebuilt = any("graphforge-core" in label for label in executed_labels)
-    # If the execution log is empty (remote hits only / no local execute), treat
-    # local process counts as the fallback signal.
+    mut_summary = mutated["process_summary"]
+    warm_summary = warm["process_summary"]
+    # Remote-cache path: unchanged core should remote-hit; mutated ast needs
+    # local work (exec log and/or sandbox/local process counts).
+    remote_isolation_ok = (
+        mut_summary["remote_cache_hits"] >= 1
+        and mut_summary["local_actions"] >= 1
+        and not core_rebuilt
+        and mut_summary["total_processes"] <= max(32, warm_summary["total_processes"] + 8)
+    )
     local_fallback_ok = (
         not executed_labels
-        and mutated["process_summary"]["local_actions"] >= 1
-        and mutated["process_summary"]["total_processes"]
-        <= max(8, warm["process_summary"]["total_processes"] + 4)
+        and mut_summary["local_actions"] >= 1
+        and mut_summary["total_processes"] <= max(8, warm_summary["total_processes"] + 4)
     )
     ok = (
         (ast_touched and not core_rebuilt)
+        or remote_isolation_ok
         or local_fallback_ok
         or (
             # Without remote cache / exec log, require some local work and no
             # unbounded rebuild vs the warm baseline.
-            mutated["process_summary"]["local_actions"] >= 1
-            and mutated["process_summary"]["total_processes"]
-            <= max(8, warm["process_summary"]["total_processes"] + 4)
+            mut_summary["local_actions"] >= 1
+            and mut_summary["total_processes"] <= max(8, warm_summary["total_processes"] + 4)
         )
     )
     payload = {
         "schema": SCHEMA_RUN,
         "kind": "affected_inputs",
         "git_sha": git_sha(root),
-        "warm": warm["process_summary"],
-        "mutated": mutated["process_summary"],
+        "warm": warm_summary,
+        "mutated": mut_summary,
         "executed_labels": executed_labels[:200],
         "ast_touched": ast_touched,
         "core_rebuilt": core_rebuilt,
+        "remote_isolation_ok": bool(remote_isolation_ok),
+        "protocol": "distinct_output_base_warm_then_mutated",
         "passed": bool(ok),
     }
     out.parent.mkdir(parents=True, exist_ok=True)

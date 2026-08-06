@@ -76,18 +76,15 @@ def test_evaluate_pending_allow() -> None:
 
 
 def test_observe_warm_uses_distinct_output_bases() -> None:
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("bazel_cache_perf", CHECK)
-    if spec is None or spec.loader is None:
-        raise SystemExit("unable to load bazel-cache-perf module")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
     source = Path(CHECK).read_text(encoding="utf-8")
     if "distinct_output_base_prime_then_warm" not in source:
         raise SystemExit("observe-warm must document distinct output_base protocol")
     if "gf-bazel-prime-" not in source or "gf-bazel-warm-" not in source:
         raise SystemExit("observe-warm must use distinct temporary output bases")
+    if "distinct_output_base_warm_then_mutated" not in source:
+        raise SystemExit("affected-inputs must use distinct output bases under remote cache")
+    if "remote_isolation_ok" not in source:
+        raise SystemExit("affected-inputs must accept remote-cache isolation signal")
 
 
 def test_evaluate_thresholds() -> None:
