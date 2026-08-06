@@ -59,7 +59,32 @@ def _native_python_module_name(native: Path) -> str:
     return "_graphforge_rs.abi3.so"
 
 
-def _napi_platform_tag() -> str:
+_NAPI_PLATFORM_TAGS = frozenset(
+    {
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64-gnu",
+        "linux-x64-gnu",
+        "win32-x64-msvc",
+    }
+)
+
+_WHEEL_TAGS = frozenset(
+    {
+        "cp310-abi3-manylinux_2_17_x86_64",
+        "cp310-abi3-manylinux_2_17_aarch64",
+        "cp310-abi3-macosx_11_0_arm64",
+        "cp310-abi3-macosx_10_12_x86_64",
+        "cp310-abi3-win_amd64",
+    }
+)
+
+
+def _napi_platform_tag(explicit: str | None = None) -> str:
+    if explicit is not None:
+        if explicit not in _NAPI_PLATFORM_TAGS:
+            _die(f"unsupported napi platform tag: {explicit}")
+        return explicit
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Darwin":
@@ -79,6 +104,27 @@ def _napi_platform_tag() -> str:
     return ""  # unreachable; _die raises SystemExit
 
 
+def _python_wheel_tag(explicit: str | None = None) -> str:
+    if explicit is not None:
+        if explicit not in _WHEEL_TAGS:
+            _die(f"unsupported abi3 wheel tag: {explicit}")
+        return explicit
+    sys_name = platform.system()
+    mach = platform.machine().lower()
+    if sys_name == "Linux" and mach in ("x86_64", "amd64"):
+        return "cp310-abi3-manylinux_2_17_x86_64"
+    if sys_name == "Linux" and mach in ("aarch64", "arm64"):
+        return "cp310-abi3-manylinux_2_17_aarch64"
+    if sys_name == "Darwin" and mach in ("arm64", "aarch64"):
+        return "cp310-abi3-macosx_11_0_arm64"
+    if sys_name == "Darwin" and mach in ("x86_64", "amd64"):
+        return "cp310-abi3-macosx_10_12_x86_64"
+    if sys_name == "Windows" and mach in ("amd64", "x86_64"):
+        return "cp310-abi3-win_amd64"
+    _die(f"unsupported host platform for abi3 wheel tagging: {sys_name}/{mach}")
+    return ""
+
+
 def _read_version(package_root: Path, language: str) -> str:
     if language == "python":
         text = (package_root / "pyproject.toml").read_text(encoding="utf-8")
@@ -93,7 +139,13 @@ def _read_version(package_root: Path, language: str) -> str:
     return version
 
 
-def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str, str]:
+def assemble_python(
+    *,
+    native: Path,
+    package_root: Path,
+    out: Path,
+    wheel_tag: str | None = None,
+) -> dict[str, str]:
     if not native.is_file():
         _die(f"native library not found: {native}")
     python_pkg = package_root / "python" / "graphforge"
@@ -103,6 +155,7 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
     version = _read_version(package_root, "python")
     module_name = _native_python_module_name(native)
     native_hash = _sha256(native)
+    resolved_wheel_tag = _python_wheel_tag(wheel_tag)
 
     with tempfile.TemporaryDirectory(prefix="gf-bazel-py-wheel-") as tmp:
         staging = Path(tmp)
@@ -122,22 +175,9 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
         )
         shutil.copy2(native, package_dir / module_name)
 
-        # Platform-specific abi3 wheel tag keeps clean-install expectations honest
-        # for CI smoke; full cross-platform matrix remains #6.
-        sys_name = platform.system()
-        mach = platform.machine().lower()
-        if sys_name == "Linux" and mach in ("x86_64", "amd64"):
-            wheel_tag = "cp310-abi3-manylinux_2_17_x86_64"
-        elif sys_name == "Linux" and mach in ("aarch64", "arm64"):
-            wheel_tag = "cp310-abi3-manylinux_2_17_aarch64"
-        elif sys_name == "Darwin" and mach in ("arm64", "aarch64"):
-            wheel_tag = "cp310-abi3-macosx_11_0_arm64"
-        elif sys_name == "Darwin" and mach in ("x86_64", "amd64"):
-            wheel_tag = "cp310-abi3-macosx_10_12_x86_64"
-        elif sys_name == "Windows" and mach in ("amd64", "x86_64"):
-            wheel_tag = "cp310-abi3-win_amd64"
-        else:
-            _die(f"unsupported host platform for abi3 wheel tagging: {sys_name}/{mach}")
+        # Explicit --wheel-tag models the #6 cross-platform matrix; host default
+        # remains for local/CI smoke when the tag is omitted.
+        wheel_tag = resolved_wheel_tag
 
         (dist_info / "METADATA").write_text(
             "\n".join(
@@ -190,19 +230,26 @@ def assemble_python(*, native: Path, package_root: Path, out: Path) -> dict[str,
         "native_module": module_name,
         "version": version,
         "wheel": str(out),
+        "wheel_tag": resolved_wheel_tag,
         "recompiled": "false",
     }
 
 
-def assemble_node(*, native: Path, package_root: Path, out: Path) -> dict[str, str]:
+def assemble_node(
+    *,
+    native: Path,
+    package_root: Path,
+    out: Path,
+    platform_tag: str | None = None,
+) -> dict[str, str]:
     if not native.is_file():
         _die(f"native library not found: {native}")
     if not (package_root / "package.json").is_file():
         _die(f"missing package.json under {package_root}")
 
     version = _read_version(package_root, "node")
-    platform_tag = _napi_platform_tag()
-    addon_name = f"graphforge.{platform_tag}.node"
+    resolved_platform_tag = _napi_platform_tag(platform_tag)
+    addon_name = f"graphforge.{resolved_platform_tag}.node"
     native_hash = _sha256(native)
 
     write_zip = out.suffix == ".zip"
@@ -256,6 +303,7 @@ def assemble_node(*, native: Path, package_root: Path, out: Path) -> dict[str, s
             "language": "node",
             "native_sha256": native_hash,
             "addon": addon_name,
+            "platform_tag": resolved_platform_tag,
             "version": version,
             "recompiled": "false",
         }
@@ -298,6 +346,16 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Optional JSON evidence path (native hash, no-recompile assertion).",
     )
+    parser.add_argument(
+        "--wheel-tag",
+        default=None,
+        help="Explicit abi3 wheel tag for #6 cross-platform matrix (Python).",
+    )
+    parser.add_argument(
+        "--platform-tag",
+        default=None,
+        help="Explicit napi platform tag for #6 cross-platform matrix (Node).",
+    )
     args = parser.parse_args(argv)
 
     native = args.native.resolve()
@@ -305,9 +363,19 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out.resolve()
 
     if args.language == "python":
-        evidence = assemble_python(native=native, package_root=package_root, out=out)
+        evidence = assemble_python(
+            native=native,
+            package_root=package_root,
+            out=out,
+            wheel_tag=args.wheel_tag,
+        )
     else:
-        evidence = assemble_node(native=native, package_root=package_root, out=out)
+        evidence = assemble_node(
+            native=native,
+            package_root=package_root,
+            out=out,
+            platform_tag=args.platform_tag,
+        )
 
     if args.write_evidence is not None:
         args.write_evidence.parent.mkdir(parents=True, exist_ok=True)

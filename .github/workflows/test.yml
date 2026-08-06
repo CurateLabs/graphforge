@@ -875,6 +875,12 @@ jobs:
           python3 scripts/ci/cargo-bazel-drift-check.py
           python3 scripts/ci/test-cargo-bazel-drift-check.py
 
+      - name: Migration ledger + release platform inventory (fail-closed)
+        run: |
+          python3 scripts/ci/bazel-migration-ledger-check.py
+          python3 scripts/ci/test-bazel-migration-ledger-check.py
+          python3 scripts/ci/test-cargo-bazel-parity-check.py
+
       - name: Bazel smoke + first-party libs/tests/CLI/resources
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
@@ -884,13 +890,31 @@ jobs:
             //:first_party_libs \
             //:runtime_libs \
             //:cli_bins \
-            //:resource_inputs
+            //:resource_inputs \
+            //:release_bins
 
       - name: Bazel binding cdylibs + packaging handoff
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
           bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
+
+      - name: Same-SHA Cargo/Bazel dual-build parity
+        run: |
+          # Dual-build remains under CI Gate; Bazel is not sole authority yet (#4).
+          # Do not set --remote_cache; Blacksmith injects repository cache.
+          mkdir -p dist
+          python3 scripts/ci/cargo-bazel-parity-check.py \
+            --mode all \
+            --write-evidence "dist/cargo-bazel-parity-evidence.json"
+
+      - name: Upload Cargo/Bazel parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-bazel-parity-evidence-${{ github.run_id }}
+          path: dist/cargo-bazel-parity-evidence.json
+          if-no-files-found: warn
 
   ci-gate:
     name: CI Gate

@@ -1,0 +1,89 @@
+{
+  "schema": "graphforge.bazel-release-platforms.v1",
+  "issue": 6,
+  "contract": "tests/contracts/binding-release-candidate-targets.json",
+  "platforms": [
+    {
+      "id": "python-ubuntu",
+      "language": "python",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:linux_x86_64",
+      "rust_triple": "x86_64-unknown-linux-gnu",
+      "wheel_tag": "cp310-abi3-manylinux_2_17_x86_64",
+      "node_platform_tag": null
+    },
+    {
+      "id": "python-macos",
+      "language": "python",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:macos_aarch64",
+      "rust_triple": "aarch64-apple-darwin",
+      "wheel_tag": "cp310-abi3-macosx_11_0_arm64",
+      "node_platform_tag": null,
+      "notes": "Binding RC macOS Python runs on blacksmith-12vcpu-macos-15 (arm64)"
+    },
+    {
+      "id": "python-windows",
+      "language": "python",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:windows_x86_64",
+      "rust_triple": "x86_64-pc-windows-msvc",
+      "wheel_tag": "cp310-abi3-win_amd64",
+      "node_platform_tag": null
+    },
+    {
+      "id": "node-x86_64-unknown-linux-gnu",
+      "language": "node",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:linux_x86_64",
+      "rust_triple": "x86_64-unknown-linux-gnu",
+      "wheel_tag": null,
+      "node_platform_tag": "linux-x64-gnu"
+    },
+    {
+      "id": "node-aarch64-unknown-linux-gnu",
+      "language": "node",
+      "execution_mode": "package-validation",
+      "bazel_platform": "//platforms:linux_aarch64",
+      "rust_triple": "aarch64-unknown-linux-gnu",
+      "wheel_tag": null,
+      "node_platform_tag": "linux-arm64-gnu",
+      "notes": "Supported Node cross-target (napi-cross on x86_64 Linux host)"
+    },
+    {
+      "id": "node-x86_64-apple-darwin",
+      "language": "node",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:macos_x86_64",
+      "rust_triple": "x86_64-apple-darwin",
+      "wheel_tag": null,
+      "node_platform_tag": "darwin-x64"
+    },
+    {
+      "id": "node-aarch64-apple-darwin",
+      "language": "node",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:macos_aarch64",
+      "rust_triple": "aarch64-apple-darwin",
+      "wheel_tag": null,
+      "node_platform_tag": "darwin-arm64"
+    },
+    {
+      "id": "node-x86_64-pc-windows-msvc",
+      "language": "node",
+      "execution_mode": "native",
+      "bazel_platform": "//platforms:windows_x86_64",
+      "rust_triple": "x86_64-pc-windows-msvc",
+      "wheel_tag": null,
+      "node_platform_tag": "win32-x64-msvc"
+    }
+  ],
+  "host_release_artifacts": {
+    "cli": "//crates/graphforge-cli:gf",
+    "release_load_probe": "//crates/graphforge-api:release_load_probe",
+    "api_examples": "//crates/graphforge-api:api_example_bins",
+    "python_wheel_smoke": "//:python_wheel_smoke",
+    "node_package_smoke": "//:node_package_smoke",
+    "binding_cdylibs": "//:binding_cdylibs"
+  }
+}

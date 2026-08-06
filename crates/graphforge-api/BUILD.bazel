@@ -1,6 +1,13 @@
-"""Bazel targets for graphforge-api (#9 runtime + #8 integration/BDD)."""
+"""Bazel targets for graphforge-api (#9 runtime + #8 integration/BDD + #6 examples)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load(
+    "//tools/bazel:gf_rust.bzl",
+    "gf_rust_binary",
+    "gf_rust_integration_test",
+    "gf_rust_library",
+    "gf_rust_test",
+)
 
 exports_files(["Cargo.toml"])
 
@@ -440,4 +447,44 @@ test_suite(
         ":bdd",
         ":graphforge_api_test",
     ],
+)
+
+# API example binaries (#6). Release load probe is required for M1 certification;
+# remaining examples are opt-in workflow evidence mapped for ledger completeness.
+_EXAMPLE_RUSTC_ENV = {
+    "CARGO_MANIFEST_DIR": "crates/graphforge-api",
+}
+
+_EXAMPLE_NAMES = [
+    "atomic_recovery_workflow",
+    "correction_churn_workflow",
+    "cyber_intrusion_workflow",
+    "derived_state_freshness_workflow",
+    "finance_fraud_workflow",
+    "knowledge_evolution_workflow",
+    "ontology_emergence_strict_handoff",
+    "probate_genealogy_workflow",
+    "release_load_probe",
+    "sna_intelligence_workflow",
+    "strict_add_node_fixture",
+]
+
+_EXAMPLE_COMPILE_DATA = {
+    "sna_intelligence_workflow": ["//tests/release_workflows:sna_phase2_advisory"],
+}
+
+[
+    gf_rust_binary(
+        name = example_name,
+        srcs = ["examples/%s.rs" % example_name],
+        compile_data = _EXAMPLE_COMPILE_DATA.get(example_name, []),
+        rustc_env = _EXAMPLE_RUSTC_ENV,
+        deps = _API_DEPS + [":graphforge_api"],
+    )
+    for example_name in _EXAMPLE_NAMES
+]
+
+build_test(
+    name = "api_example_bins",
+    targets = [":%s" % name for name in _EXAMPLE_NAMES],
 )

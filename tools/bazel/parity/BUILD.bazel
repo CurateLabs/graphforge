@@ -1,0 +1,18 @@
+"""Same-SHA Cargo/Bazel parity inventory (#6)."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "migration_target_map.json",
+    "parity_suite.json",
+])
+
+filegroup(
+    name = "migration_target_map",
+    srcs = ["migration_target_map.json"],
+)
+
+filegroup(
+    name = "parity_suite",
+    srcs = ["parity_suite.json"],
+)

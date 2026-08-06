@@ -14,8 +14,9 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
 | Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **No** — #10/#9/#7/#8 libs+cdylibs+tests+CLI mapped; examples (`RT-examples`) remain for #6 |
-| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + library/test/CLI/cdylib labels from #10/#9/#8/#7 |
+| Bazel modeling claimed complete? | **Yes** — all 90 Cargo targets mapped (#10–#6); retained tools justified in exceptions |
+| Machine-readable map | `tools/bazel/parity/migration_target_map.json` (fail-closed via `scripts/ci/bazel-migration-ledger-check.py`) |
+| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); parity evidence [bazel-migration-parity.md](bazel-migration-parity.md) |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
 This freeze uses the **current authoritative** metadata count (**90** targets;
@@ -31,7 +32,7 @@ not silently ignore new targets.
 | `cdylib` | 2 | PyO3 + napi-rs native libs |
 | `bin` | 1 | CLI (`gf`) |
 | `custom-build` | 2 | `build.rs` scripts |
-| `example` | 11 | API examples (map or justify retained exception in later slices) |
+| `example` | 11 | API examples mapped as `//crates/graphforge-api:<name>` (#6) |
 | **Total** | **90** | |
 
 ### Unit tests and doctests
@@ -46,23 +47,23 @@ doctests. For migration accounting:
 
 ## Cargo target ledger
 
-Columns `bazel_label` and `status` are filled by modeling slices (#10–#7).
-Example rows stay `unmapped` until #6; libs/tests/CLI/cdylibs mapped through #8/#7.
+Columns `bazel_label` and `status` are filled by modeling slices (#10–#6).
+Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.json`.
 
 | Package | Target | Class | Source | Bazel label | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | `graphforge-api` | `graphforge_api` | `lib` | `crates/graphforge-api/src/lib.rs` | `//crates/graphforge-api:graphforge_api` | `mapped` | #9; unit tests `//crates/graphforge-api:graphforge_api_test` |
-| `graphforge-api` | `atomic_recovery_workflow` | `example` | `crates/graphforge-api/examples/atomic_recovery_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `correction_churn_workflow` | `example` | `crates/graphforge-api/examples/correction_churn_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `cyber_intrusion_workflow` | `example` | `crates/graphforge-api/examples/cyber_intrusion_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `derived_state_freshness_workflow` | `example` | `crates/graphforge-api/examples/derived_state_freshness_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `finance_fraud_workflow` | `example` | `crates/graphforge-api/examples/finance_fraud_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `knowledge_evolution_workflow` | `example` | `crates/graphforge-api/examples/knowledge_evolution_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `ontology_emergence_strict_handoff` | `example` | `crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs` | — | `unmapped` | |
-| `graphforge-api` | `probate_genealogy_workflow` | `example` | `crates/graphforge-api/examples/probate_genealogy_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `release_load_probe` | `example` | `crates/graphforge-api/examples/release_load_probe.rs` | — | `unmapped` | |
-| `graphforge-api` | `sna_intelligence_workflow` | `example` | `crates/graphforge-api/examples/sna_intelligence_workflow.rs` | — | `unmapped` | |
-| `graphforge-api` | `strict_add_node_fixture` | `example` | `crates/graphforge-api/examples/strict_add_node_fixture.rs` | — | `unmapped` | |
+| `graphforge-api` | `atomic_recovery_workflow` | `example` | `crates/graphforge-api/examples/atomic_recovery_workflow.rs` | `//crates/graphforge-api:atomic_recovery_workflow` | `mapped` | #6 |
+| `graphforge-api` | `correction_churn_workflow` | `example` | `crates/graphforge-api/examples/correction_churn_workflow.rs` | `//crates/graphforge-api:correction_churn_workflow` | `mapped` | #6 |
+| `graphforge-api` | `cyber_intrusion_workflow` | `example` | `crates/graphforge-api/examples/cyber_intrusion_workflow.rs` | `//crates/graphforge-api:cyber_intrusion_workflow` | `mapped` | #6 |
+| `graphforge-api` | `derived_state_freshness_workflow` | `example` | `crates/graphforge-api/examples/derived_state_freshness_workflow.rs` | `//crates/graphforge-api:derived_state_freshness_workflow` | `mapped` | #6 |
+| `graphforge-api` | `finance_fraud_workflow` | `example` | `crates/graphforge-api/examples/finance_fraud_workflow.rs` | `//crates/graphforge-api:finance_fraud_workflow` | `mapped` | #6 |
+| `graphforge-api` | `knowledge_evolution_workflow` | `example` | `crates/graphforge-api/examples/knowledge_evolution_workflow.rs` | `//crates/graphforge-api:knowledge_evolution_workflow` | `mapped` | #6 |
+| `graphforge-api` | `ontology_emergence_strict_handoff` | `example` | `crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs` | `//crates/graphforge-api:ontology_emergence_strict_handoff` | `mapped` | #6 |
+| `graphforge-api` | `probate_genealogy_workflow` | `example` | `crates/graphforge-api/examples/probate_genealogy_workflow.rs` | `//crates/graphforge-api:probate_genealogy_workflow` | `mapped` | #6 |
+| `graphforge-api` | `release_load_probe` | `example` | `crates/graphforge-api/examples/release_load_probe.rs` | `//crates/graphforge-api:release_load_probe` | `mapped` | #6; M1 release certification probe |
+| `graphforge-api` | `sna_intelligence_workflow` | `example` | `crates/graphforge-api/examples/sna_intelligence_workflow.rs` | `//crates/graphforge-api:sna_intelligence_workflow` | `mapped` | #6 |
+| `graphforge-api` | `strict_add_node_fixture` | `example` | `crates/graphforge-api/examples/strict_add_node_fixture.rs` | `//crates/graphforge-api:strict_add_node_fixture` | `mapped` | #6 |
 | `graphforge-api` | `bdd` | `integration-test` | `crates/graphforge-api/tests/bdd/main.rs` | `//crates/graphforge-api:bdd` | `mapped` | #8 |
 | `graphforge-api` | `bdd_timing` | `integration-test` | `crates/graphforge-api/tests/bdd_timing.rs` | `//crates/graphforge-api:bdd_timing` | `mapped` | #8 |
 | `graphforge-api` | `belief_subject_contract` | `integration-test` | `crates/graphforge-api/tests/belief_subject_contract.rs` | `//crates/graphforge-api:belief_subject_contract` | `mapped` | #8 |
@@ -142,21 +143,29 @@ Example rows stay `unmapped` until #6; libs/tests/CLI/cdylibs mapped through #8/
 | `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | `//crates/graphforge-storage:graph_writer` | `mapped` | #8 |
 | `graphforge-storage` | `io_stats` | `integration-test` | `crates/graphforge-storage/tests/io_stats.rs` | `//crates/graphforge-storage:io_stats` | `mapped` | #8 |
 
-## Retained-tool exception stubs
+## Retained-tool exceptions
 
-These are **not** claimed as Bazel-complete at freeze. Each needs a justification
-before #6 parity can pass with the exception still open.
+Justified retained Cargo/ecosystem tools after #6. Stub status is forbidden; the
+ledger check fails closed on `stub` or missing justification.
 
 | ID | Tool / surface | Why Bazel may not replace cleanly | Owning follow-up | Status |
 | --- | --- | --- | --- | --- |
-| RT-fuzz | `cargo fuzz` (`fuzz/` workspace, workflow `fuzz.yml`) | cargo-fuzz driver + corpus workflow outside ordinary `rules_rust` test graph | #6 parity may keep Cargo; justified retained tool | explicit |
-| RT-publish-crates | `cargo publish` / crates.io authorize flows | Ecosystem publication metadata and registry auth | keep Cargo; ledger must remain explicit | stub |
+| RT-fuzz | `cargo fuzz` (`fuzz/` workspace, workflow `fuzz.yml`) | cargo-fuzz driver + corpus workflow outside ordinary `rules_rust` test graph | keep Cargo | justified |
+| RT-publish-crates | `cargo publish` / crates.io authorize flows | Ecosystem publication metadata and registry auth | keep Cargo | justified |
 | RT-maturin-assemble | `maturin build` / `maturin sdist` packaging assembly | Bazel handoff: `//:python_wheel_smoke` + `assemble_bazel_binding_packages.py` consume Bazel cdylibs (no silent `maturin build` recompile). Maturin may still sign/publish later. | #7 handoff | handoff |
 | RT-napi-assemble | `napi build` / `napi artifacts` / `napi pre-publish` | Bazel handoff: `//:node_package_smoke` consumes Bazel cdylib (no silent `napi build` recompile). napi may still assemble/sign/publish later. | #7 handoff | handoff |
 | RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Mapped via `cargo_build_script` + `//:project_skills_bundle`; bin/tests mapped | #8 complete | closed |
 | RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | Mapped as `rust_shared_library` cdylibs + packaging smoke targets | #7 | mapped |
-| RT-examples | `graphforge-api` examples (11) | Developer samples + release-load probes; not required for #8 test graph; map under #6 if parity demands binaries | #6 | explicit |
+| RT-examples | `graphforge-api` examples (11) | All 11 example binaries mapped under `//crates/graphforge-api:*` | #6 | closed |
 | RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for M2** — not a deliverable; do not inventory as required targets | excluded | excluded |
+
+## Cross-platform release platforms (#6)
+
+Checked-in model: `tools/bazel/release/release_platforms.json` + `//platforms:*`.
+Must cover every Binding RC target in
+`tests/contracts/binding-release-candidate-targets.json` and every
+`package.json` `napi.targets` triple (including `aarch64-unknown-linux-gnu`
+cross-target). Host-native release bins aggregate: `//:release_bins`.
 
 ## CI / release build command sites
 
@@ -346,9 +355,12 @@ Primary `test.yml` sticky key pattern:
 
 ## Update rules
 
-1. Modeling PRs (#11–#7) must update `bazel_label` / `status` for touched rows in the
-   same change.
-2. New Cargo targets require a new ledger row before #6 parity can pass.
-3. Unjustified retained exceptions fail the migration at #6.
+1. Modeling PRs must update `bazel_label` / `status` (markdown +
+   `migration_target_map.json`) for touched rows in the same change.
+2. New Cargo targets require a new map/ledger row; unmapped rows fail
+   `scripts/ci/bazel-migration-ledger-check.py`.
+3. Unjustified retained exceptions (`stub` or empty justification) fail the ledger.
 4. Mobile bindings stay `excluded` — never promote to required M2 targets.
+5. Release platform additions must update `release_platforms.json` and
+   `//platforms:*` together with the Binding RC contract.
 

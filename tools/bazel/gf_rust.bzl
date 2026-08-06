@@ -92,12 +92,13 @@ def gf_cargo_build_script(name, deps = [], data = [], crate_features = [], **kwa
         **kwargs
     )
 
-def gf_rust_binary(name, deps = [], data = [], crate_features = [], **kwargs):
+def gf_rust_binary(name, deps = [], data = [], compile_data = [], crate_features = [], **kwargs):
     """rust_binary wired to crate_universe deps for this package's Cargo.toml."""
     rust_binary(
         name = name,
         srcs = kwargs.pop("srcs", native.glob(["src/**/*.rs"])),
         aliases = aliases(),
+        compile_data = compile_data,
         crate_features = crate_features,
         data = data,
         edition = "2024",

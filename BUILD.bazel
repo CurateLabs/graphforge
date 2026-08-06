@@ -1,4 +1,4 @@
-"""Root Bazel package for GraphForge (#10/#9/#7 libs+cdylibs + #8 tests/CLI/resources)."""
+"""Root Bazel package for GraphForge (#10–#6 libs/tests/bindings/release/parity)."""
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
@@ -207,6 +207,7 @@ build_test(
         "//examples/agent_grounding:notebooks",
         "//tests/features:api_features",
         "//tests/tck:corpus",
+        "//tests/release_workflows:sna_phase2_advisory",
         "//crates/graphforge-cypher:corpus_data",
         "//crates/graphforge-exec:explain_goldens",
         "//crates/graphforge-ir:ir_goldens",
@@ -233,5 +234,50 @@ test_suite(
         # One mid-size API integration binary as the public-facade probe.
         "//crates/graphforge-api:clear",
         "//crates/graphforge-api:value_semantics",
+    ],
+)
+
+# Host-native release artifact aggregate (#6). Cross-OS Binding RC surfaces are
+# modeled under //platforms:* and tools/bazel/release/release_platforms.json.
+build_test(
+    name = "release_bins",
+    targets = [
+        "//crates/graphforge-cli:gf",
+        "//crates/graphforge-api:atomic_recovery_workflow",
+        "//crates/graphforge-api:correction_churn_workflow",
+        "//crates/graphforge-api:cyber_intrusion_workflow",
+        "//crates/graphforge-api:derived_state_freshness_workflow",
+        "//crates/graphforge-api:finance_fraud_workflow",
+        "//crates/graphforge-api:knowledge_evolution_workflow",
+        "//crates/graphforge-api:ontology_emergence_strict_handoff",
+        "//crates/graphforge-api:probate_genealogy_workflow",
+        "//crates/graphforge-api:release_load_probe",
+        "//crates/graphforge-api:sna_intelligence_workflow",
+        "//crates/graphforge-api:strict_add_node_fixture",
+    ],
+)
+
+alias(
+    name = "release_platforms",
+    actual = "//tools/bazel/release:release_platforms",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "migration_target_map",
+    actual = "//tools/bazel/parity:migration_target_map",
+    visibility = ["//visibility:public"],
+)
+
+# Dual-build parity suite labels (#6); outcomes compared by
+# scripts/ci/cargo-bazel-parity-check.py against Cargo at the same SHA.
+test_suite(
+    name = "parity_suite",
+    tests = [
+        "//crates/graphforge-ast:graphforge_ast_test",
+        "//crates/graphforge-ir:golden",
+        "//crates/graphforge-api:clear",
+        "//crates/graphforge-api:value_semantics",
+        "//crates/graphforge-rel:logical_plan_golden",
     ],
 )

@@ -122,6 +122,11 @@ assert_classification "$bazel_only" tools/bazel/bindings/BUILD.bazel bazel-bindi
 assert_classification "$bazel_only" tests/features/BUILD.bazel bazel-features-build
 assert_classification "$bazel_only" tests/tck/BUILD.bazel bazel-tck-build
 assert_classification "$bazel_only" examples/agent_grounding/BUILD.bazel bazel-notebook-build
+assert_classification "$bazel_only" platforms/BUILD.bazel bazel-release-platforms
+assert_classification "$bazel_only" tests/release_workflows/BUILD.bazel bazel-release-workflow-inputs
+assert_classification "$bazel_only" scripts/ci/cargo-bazel-parity-check.py bazel-parity-check
+assert_classification "$bazel_only" scripts/ci/bazel-migration-ledger-check.py bazel-ledger-check
+assert_classification "$bazel_only" docs/development/bazel-migration-parity.md bazel-parity-doc
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.

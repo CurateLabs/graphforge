@@ -92,6 +92,33 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 body = json.loads(archive.read("bazel-native-evidence.json"))
                 self.assertEqual(body["recompiled"], "false")
 
+    def test_explicit_cross_platform_tags(self) -> None:
+        py_root = ROOT / "crates" / "graphforge-bindings-py"
+        node_root = ROOT / "crates" / "graphforge-bindings-node"
+        with tempfile.TemporaryDirectory() as tmp:
+            py_native = Path(tmp) / "libgraphforge_bindings_py.so"
+            py_native.write_bytes(b"FAKE_PY")
+            py_out = Path(tmp) / "win.whl"
+            py_evidence = assemble_python(
+                native=py_native,
+                package_root=py_root,
+                out=py_out,
+                wheel_tag="cp310-abi3-win_amd64",
+            )
+            self.assertEqual(py_evidence["wheel_tag"], "cp310-abi3-win_amd64")
+
+            node_native = Path(tmp) / "libgraphforge_bindings_node.so"
+            node_native.write_bytes(b"FAKE_NODE")
+            node_out = Path(tmp) / "linux-arm.zip"
+            node_evidence = assemble_node(
+                native=node_native,
+                package_root=node_root,
+                out=node_out,
+                platform_tag="linux-arm64-gnu",
+            )
+            self.assertEqual(node_evidence["platform_tag"], "linux-arm64-gnu")
+            self.assertEqual(node_evidence["addon"], "graphforge.linux-arm64-gnu.node")
+
 
 if __name__ == "__main__":
     unittest.main()
