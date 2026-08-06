@@ -232,6 +232,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             ("candidate/release-artifacts/evidence/\ncandidate/release-artifacts/node-addons/"),
             "reconciliation/summary.json",
             "examples/visualization/stress/results/",
+            "dist/cargo-bazel-parity-evidence.json",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
