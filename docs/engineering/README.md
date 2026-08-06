@@ -28,6 +28,7 @@ flowchart LR
 | --- | --- |
 | [`../book/architecture/`](../book/architecture/overview.md) | Deep architecture notes, pipeline, storage, embedding contracts |
 | [`../development/`](../development/contributing.md) | Contributor workflow, testing detail, release process |
+| [`../development/bazel-migration-orchestration.md`](../development/bazel-migration-orchestration.md) | M2 / #1 Bazel migration sub-agent roles, contracts, and handoffs |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
 | Root `AGENTS.md` | Agent workflow and validation gates |
