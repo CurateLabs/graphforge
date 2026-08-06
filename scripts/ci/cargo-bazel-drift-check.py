@@ -53,9 +53,7 @@ def build_entries(metadata: dict[str, Any]) -> list[dict[str, Any]]:
                     "req": dep.get("req"),
                     "features": sorted(dep.get("features") or []),
                     "optional": bool(dep.get("optional")),
-                    "uses_default_features": bool(
-                        dep.get("uses_default_features", True)
-                    ),
+                    "uses_default_features": bool(dep.get("uses_default_features", True)),
                     "kind": dep.get("kind"),
                     "target": dep.get("target"),
                 }
@@ -110,9 +108,7 @@ def main(argv: list[str] | None = None) -> int:
 
     root = args.root.resolve() if args.root else repo_root()
     fingerprint_path = (
-        args.fingerprint
-        if args.fingerprint.is_absolute()
-        else root / args.fingerprint
+        args.fingerprint if args.fingerprint.is_absolute() else root / args.fingerprint
     )
 
     payload = fingerprint_payload(build_entries(cargo_metadata(root)))
@@ -136,7 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if expected.get("sha256") != payload["sha256"] or expected.get("entries") != payload["entries"]:
-        print("Cargo dependency/feature graph drifted from Bazel migration fingerprint.", file=sys.stderr)
+        print(
+            "Cargo dependency/feature graph drifted from Bazel migration fingerprint.",
+            file=sys.stderr,
+        )
         print(f"checked-in sha256: {expected.get('sha256')}", file=sys.stderr)
         print(f"current sha256:    {payload['sha256']}", file=sys.stderr)
         print(
