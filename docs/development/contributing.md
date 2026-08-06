@@ -248,6 +248,10 @@ When adding features, update:
 - `docs/book/architecture/` — if the change affects the compiler pipeline, storage, or execution model
 - `docs/reference/` — if the public API changes
 
+M2 Bazel migration work follows the sub-agent contracts in
+[bazel-migration-orchestration.md](bazel-migration-orchestration.md)
+(canonical issue [#1](https://github.com/CurateLabs/graphforge/issues/1)).
+
 ---
 
 ## Releases and Versioning
