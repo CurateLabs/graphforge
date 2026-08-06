@@ -730,8 +730,11 @@ impl GraphForge {
 
         validate_call_params(&plan, params)?;
 
-        let result = self.run_plan(&plan, params)?;
+        let result = self
+            .run_plan(&plan, params)
+            .map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
+            .map_err(publicize_query_error)
     }
 
     /// Build a session reflecting the current runtime catalog and run `plan`,
@@ -2777,6 +2780,30 @@ fn row_count_param_value(
             "missing query parameter `${name}` for {keyword}"
         ))),
     }
+}
+
+/// Remap planner-surface failures that the public API classifies as execution
+/// errors: unbound query parameters and arithmetic/type coercion mismatches.
+fn publicize_query_error(err: GfError) -> GfError {
+    match err {
+        GfError::Plan(msg) if is_public_execution_plan_failure(&msg) => {
+            let msg = msg
+                .strip_prefix("Execution error: ")
+                .unwrap_or(&msg)
+                .to_owned();
+            GfError::Execution(msg)
+        }
+        other => other,
+    }
+}
+
+fn is_public_execution_plan_failure(msg: &str) -> bool {
+    msg.contains("Placeholder '")
+        || msg.contains("Placeholder \"$")
+        || msg.contains("placeholder with name $")
+        || msg.contains("No value found for placeholder")
+        || msg.contains("was not provided a value for execution")
+        || msg.contains("Cannot coerce")
 }
 
 /// Collapse a binder's `Vec<BindError>` into a span-rich [`GfError::Bind`]

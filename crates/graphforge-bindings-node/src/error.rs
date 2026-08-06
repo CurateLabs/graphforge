@@ -2,12 +2,11 @@
 //!
 //! napi-rs cannot export JS `Error` subclasses, so the fault domain is carried
 //! on `err.code` (the napi error `status` string becomes the JS `error.code`).
-//! `ParseError` and `Bind` (a binder failure, surfaced as `PlanError`)
-//! additionally encode their source span as a leading `[span:<start>:<len>]`
-//! token in the message — mirroring the Python binding's `(offset, length)`
-//! tuple on the exception's `span` (`crates/graphforge-bindings-py`'s `to_pyerr`). The
-//! eight codes line up 1:1 with the Python exception hierarchy (`Bind` shares
-//! the `PlanError` domain).
+//! `ParseError` and `Bind` (binder failures) additionally encode their source
+//! span as a leading `[span:<start>:<len>]` token in the message — mirroring
+//! the Python binding's `(offset, length)` tuple on the exception's `span`
+//! (`crates/graphforge-bindings-py`'s `to_pyerr`). Binder failures share the
+//! public `ParseError` / `GF_PARSE` domain with lexer/grammar parse failures.
 
 use graphforge_api::GfError;
 use napi::Env;
@@ -30,8 +29,8 @@ pub fn type_error(env: Env, message: impl Into<String>) -> NodeError {
 /// The JS `error.code` for each [`GfError`] fault domain.
 fn error_code(err: &GfError) -> &'static str {
     match err {
-        GfError::Parse { .. } => "ParseError",
-        GfError::Bind { .. } | GfError::Plan(_) => "PlanError",
+        GfError::Parse { .. } | GfError::Bind { .. } => "ParseError",
+        GfError::Plan(_) => "PlanError",
         GfError::Execution(_) | GfError::Provider { .. } => "ExecutionError",
         GfError::Storage(_) => "GF_IO",
         GfError::Project { code, .. } => code.as_str(),
@@ -241,13 +240,13 @@ mod tests {
     }
 
     #[test]
-    fn bind_error_shares_plan_domain_and_encodes_span() {
+    fn bind_error_shares_parse_domain_and_encodes_span() {
         let mapped = to_napi_err(&GfError::Bind {
             msg: "bind error: variable not in scope".into(),
             span: Span { start: 7, end: 8 },
         });
-        // Bind shares the PlanError fault domain but carries a span like Parse.
-        assert_eq!(mapped.status, "PlanError");
+        // Bind shares the ParseError fault domain and carries a span like Parse.
+        assert_eq!(mapped.status, "ParseError");
         assert_eq!(
             mapped.reason,
             "[span:7:1] bind error: variable not in scope"

@@ -5228,9 +5228,10 @@ fn bind_query_params(
     logical: LogicalPlan,
     params: &HashMap<String, graphforge_ir::IrLiteral>,
 ) -> Result<LogicalPlan, GfError> {
-    if params.is_empty() {
-        return Ok(logical);
-    }
+    // Always apply param substitution — including an empty map — so unbound
+    // `$name` placeholders fail at plan time instead of depending on whether
+    // the optimizer happens to evaluate the expression (empty-graph scans can
+    // otherwise skip the placeholder and silently return zero rows).
     let values: HashMap<String, datafusion::scalar::ScalarValue> = params
         .iter()
         .map(|(name, lit)| (name.clone(), graphforge_rel::ir_literal_to_scalar(lit)))

@@ -116,9 +116,10 @@ pub enum GfError {
 
     /// The binder rejected the query (e.g. undeclared variable, strict-mode
     /// unknown label). Carries the source span of the *first* error so callers
-    /// can point at the offending token; `msg` lists every binder error. Shares
-    /// the `PlanError` fault domain with [`GfError::Plan`] in the binding layers
-    /// — it is the span-rich sibling for binder-phase failures.
+    /// can point at the offending token; `msg` lists every binder error.
+    ///
+    /// Publicly classified with [`GfError::Parse`] as `GF_PARSE` / `ParseError`
+    /// — semantic query-structure failures share the parse fault domain.
     #[error("bind error at {span}: {msg}")]
     Bind {
         /// Human-readable description (all binder errors, joined with `; `).
@@ -187,8 +188,8 @@ impl GfError {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NotImplemented(_) => "GF_NOT_IMPLEMENTED",
-            Self::Parse { .. } => "GF_PARSE",
-            Self::Bind { .. } | Self::Plan(_) => "GF_PLAN",
+            Self::Parse { .. } | Self::Bind { .. } => "GF_PARSE",
+            Self::Plan(_) => "GF_PLAN",
             Self::Execution(_) | Self::Provider { .. } => "GF_EXECUTION",
             Self::Storage(_) => "GF_IO",
             Self::Project { code, .. } => code.as_str(),
@@ -912,7 +913,7 @@ mod tests {
                     msg: "x".into(),
                     span,
                 },
-                "GF_PLAN",
+                "GF_PARSE",
             ),
             (GfError::Plan("x".into()), "GF_PLAN"),
             (GfError::Execution("x".into()), "GF_EXECUTION"),

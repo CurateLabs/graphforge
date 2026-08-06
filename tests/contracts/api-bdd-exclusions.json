@@ -1,42 +1,5 @@
 {
   "version": 1,
   "tag": "excluded-api-bdd",
-  "exclusions": [
-    {
-      "feature": "Error Handling",
-      "scenario": "ExecutionError is raised on type mismatch",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Error Handling",
-      "scenario": "ParseError on undefined variable in RETURN",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Error Handling",
-      "scenario": "ParseError on aggregation used in WHERE clause",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Error Handling",
-      "scenario": "ParseError on CREATE with undirected relationship",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Error Handling",
-      "scenario": "ParseError on duplicate alias in WITH clause",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Error Handling",
-      "scenario": "ExecutionError when a query references an unbound parameter",
-      "issue": 353,
-      "languages": ["rust", "python", "node"]
-    }
-  ]
+  "exclusions": []
 }

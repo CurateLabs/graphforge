@@ -13,7 +13,6 @@ Feature: Error Handling
     Then a ParseError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ExecutionError is raised on type mismatch
     Given a graph with a Person node with age stored as a string "not-a-number"
     When I execute "MATCH (p:Person) RETURN p.age + 1 AS result"
@@ -26,21 +25,18 @@ Feature: Error Handling
     Then a StorageError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ParseError on undefined variable in RETURN
     Given an empty graph
     When I execute "MATCH (n:Person) RETURN x.name AS name"
     Then a ParseError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ParseError on aggregation used in WHERE clause
     Given a graph with 3 Person nodes
     When I execute "MATCH (n:Person) WHERE count(n) > 1 RETURN n"
     Then a ParseError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ParseError on CREATE with undirected relationship
     Given an empty graph
     When I execute "CREATE (a:Person)-[:KNOWS]-(b:Person)"
@@ -52,7 +48,6 @@ Feature: Error Handling
     Then a ParseError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ParseError on duplicate alias in WITH clause
     Given a graph with a Person node named "Alice"
     When I execute "MATCH (n:Person) WITH n.name AS x, n.name AS x RETURN x"
@@ -65,7 +60,6 @@ Feature: Error Handling
     Then an ExecutionError is raised
 
 
-  @excluded-api-bdd @issue-353
   Scenario: ExecutionError when a query references an unbound parameter
     Given an empty graph
     When I execute "MATCH (p:Person) WHERE p.name = $name RETURN p" without parameters

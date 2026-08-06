@@ -390,12 +390,22 @@ async fn given_named_person_pair(world: &mut GraphForgeWorld, first: String, sec
     }
 }
 
-#[given(
-    regex = r#"^a graph with a Person node named "([^"]+)" with age stored as a string "([^"]+)"$"#
-)]
-async fn given_person_string_age(world: &mut GraphForgeWorld, _name: String, _age: String) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+#[given(regex = r#"^a graph with a Person node with age stored as a string "([^"]+)"$"#)]
+async fn given_person_string_age(world: &mut GraphForgeWorld, age: String) {
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let props = std::collections::HashMap::from([
+        (
+            "name".to_owned(),
+            graphforge_api::PropValue::Str("Alice".into()),
+        ),
+        ("age".to_owned(), graphforge_api::PropValue::Str(age)),
+    ]);
+    let handle = forge
+        .add_node("Person", &props)
+        .expect("Person string-age fixture");
+    world.nodes.clear();
+    world.nodes.insert("Alice".into(), handle);
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with a Person node named "([^"]+)" with age (\d+)$"#)]
@@ -667,6 +677,23 @@ async fn when_execute_param(world: &mut GraphForgeWorld, query: String, _value: 
         match forge.execute_with_params(&query, &params) {
             Ok(r) => world.last_exec = Some(r),
             Err(e) => world.last_error = Some(e.to_string()),
+        }
+    }
+}
+
+#[when(regex = r#"^I execute "([^"]*)" without parameters$"#)]
+async fn when_execute_without_params(world: &mut GraphForgeWorld, query: String) {
+    if let Some(forge) = &world.forge {
+        match forge.execute_with_params(&query, &std::collections::HashMap::new()) {
+            Ok(r) => {
+                world.last_exec = Some(r);
+                world.last_error = None;
+                world.last_error_code = None;
+            }
+            Err(error) => {
+                world.last_error_code = Some(error.code());
+                world.last_error = Some(error.to_string());
+            }
         }
     }
 }
