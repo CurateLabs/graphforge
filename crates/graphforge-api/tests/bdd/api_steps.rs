@@ -287,6 +287,15 @@ fn add_named_fixture_node(
         .expect("named fixture node")
 }
 
+fn is_cypher_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[given("a graph with a directed cycle")]
 async fn given_directed_cycle(world: &mut GraphForgeWorld) {
     let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
@@ -470,28 +479,65 @@ fn set_ontology_fixture(world: &mut GraphForgeWorld, name: &str, contents: &str)
 
 #[given(regex = r#"^a graph with Person nodes connected by KNOWS edges up to 3 hops deep$"#)]
 async fn given_persons_3hops(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    world.nodes.clear();
+    let names = ["Alice", "Bob", "Carol", "Dave"];
+    let mut handles = Vec::with_capacity(names.len());
+    for name in names {
+        let handle = add_named_fixture_node(&forge, name);
+        world.nodes.insert(name.into(), handle.clone());
+        handles.push(handle);
+    }
+    for window in handles.windows(2) {
+        forge
+            .add_edge(&window[0], "KNOWS", &window[1], &Default::default())
+            .expect("3-hop fixture edge");
+    }
+    world.forge = Some(forge);
 }
 
 #[given(
     regex = r#"^a graph where Alice knows Bob and Bob knows Charlie but Alice does not know Charlie$"#
 )]
 async fn given_alice_bob_charlie(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let alice = add_named_fixture_node(&forge, "Alice");
+    let bob = add_named_fixture_node(&forge, "Bob");
+    let charlie = add_named_fixture_node(&forge, "Charlie");
+    forge
+        .add_edge(&alice, "KNOWS", &bob, &Default::default())
+        .expect("Alice-Bob edge");
+    forge
+        .add_edge(&bob, "KNOWS", &charlie, &Default::default())
+        .expect("Bob-Charlie edge");
+    world.nodes.clear();
+    world.nodes.insert("Alice".into(), alice);
+    world.nodes.insert("Bob".into(), bob);
+    world.nodes.insert("Charlie".into(), charlie);
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph where Alice knows Bob$"#)]
 async fn given_alice_knows_bob(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let alice = add_named_fixture_node(&forge, "Alice");
+    let bob = add_named_fixture_node(&forge, "Bob");
+    forge
+        .add_edge(&alice, "KNOWS", &bob, &Default::default())
+        .expect("Alice-Bob edge");
+    world.nodes.clear();
+    world.nodes.insert("Alice".into(), alice);
+    world.nodes.insert("Bob".into(), bob);
+    world.forge = Some(forge);
 }
 
 #[given(regex = r#"^a graph with a single Person node named "Lone"$"#)]
 async fn given_lone_person(world: &mut GraphForgeWorld) {
-    world.forge =
-        Some(graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed"));
+    let forge = graphforge_api::GraphForge::new(None).expect("in-memory forge must succeed");
+    let lone = add_named_fixture_node(&forge, "Lone");
+    world.nodes.clear();
+    world.nodes.insert("Lone".into(), lone);
+    world.forge = Some(forge);
 }
 
 #[given(
@@ -1211,6 +1257,60 @@ async fn when_node_count(world: &mut GraphForgeWorld, label: String) {
                 });
             }
             Err(error) => world.last_error = Some(error.to_string()),
+        }
+    }
+}
+
+#[when(
+    regex = r#"^I call neighbourhood for "([^"]*)" with hops (\d+) in label "([^"]*)" using canonical property "([^"]*)"$"#
+)]
+async fn when_neighbourhood(
+    world: &mut GraphForgeWorld,
+    canonical: String,
+    hops: u32,
+    label: String,
+    prop: String,
+) {
+    world.last_error = None;
+    world.last_error_code = None;
+    world.last_algorithm_result = None;
+    if !is_cypher_identifier(&label) || !is_cypher_identifier(&prop) {
+        world.last_error = Some("invalid neighbourhood identifier".into());
+        return;
+    }
+    let return_clause = if prop == "name" {
+        "RETURN DISTINCT neighbour.name AS name, labels(neighbour) AS labels".to_owned()
+    } else {
+        format!(
+            "RETURN DISTINCT neighbour.{prop} AS {prop}, neighbour.name AS name, labels(neighbour) AS labels"
+        )
+    };
+    let query = if hops == 0 {
+        format!("MATCH (neighbour:{label}) WHERE false {return_clause}")
+    } else {
+        format!(
+            "MATCH (seed:{label} {{{prop}: $canonical}})-[*1..{hops}]-(neighbour:{label}) \
+             WHERE neighbour.{prop} <> $canonical {return_clause}"
+        )
+    };
+    let params = std::collections::HashMap::from([(
+        "canonical".to_owned(),
+        graphforge_api::IrLiteral::Str(canonical),
+    )]);
+    match world
+        .forge
+        .as_ref()
+        .expect("neighbourhood fixture")
+        .execute_with_params(&query, &params)
+    {
+        Ok(result) => {
+            world.last_exec = Some(result);
+            world.last_error = None;
+        }
+        Err(error) => {
+            world.last_exec = None;
+            world.last_error_code = Some(error.code());
+            world.last_error = Some(error.to_string());
         }
     }
 }
@@ -2026,4 +2126,51 @@ async fn then_arrow_at_least_1(world: &mut GraphForgeWorld) {
             .sum::<usize>()
             >= 1
     );
+}
+
+#[then(regex = r#"^the result contains a row for "([^"]*)"$"#)]
+async fn then_result_has_row_for(world: &mut GraphForgeWorld, name: String) {
+    assert!(
+        world.last_error.is_none(),
+        "unexpected error: {:?}",
+        world.last_error
+    );
+    let names = neighbourhood_names(world);
+    assert!(
+        names.iter().any(|value| value == &name),
+        "result omitted row for {name}; got {names:?}"
+    );
+}
+
+#[then(regex = r#"^the result does not contain a row for "([^"]*)"$"#)]
+async fn then_result_no_row_for(world: &mut GraphForgeWorld, name: String) {
+    assert!(
+        world.last_error.is_none(),
+        "unexpected error: {:?}",
+        world.last_error
+    );
+    let names = neighbourhood_names(world);
+    assert!(
+        names.iter().all(|value| value != &name),
+        "result unexpectedly included row for {name}; got {names:?}"
+    );
+}
+
+fn neighbourhood_names(world: &GraphForgeWorld) -> Vec<String> {
+    let mut names = Vec::new();
+    for batch in result_batches(world) {
+        let column = batch
+            .column_by_name("name")
+            .expect("neighbourhood result requires a name column");
+        let values = column
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("Utf8 name column");
+        for index in 0..values.len() {
+            if !values.is_null(index) {
+                names.push(values.value(index).to_owned());
+            }
+        }
+    }
+    names
 }

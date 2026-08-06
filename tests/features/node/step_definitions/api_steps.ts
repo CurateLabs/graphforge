@@ -1096,6 +1096,25 @@ When(/^I analyze by "([^"]*)"$/, function (this: GraphForgeWorld, algorithm: str
   _catch(this, () => this.forge!.analyze(algorithm));
 });
 
+When(
+  /^I call neighbourhood for "([^"]*)" with hops (\d+) in label "([^"]*)" using canonical property "([^"]*)"$/,
+  function (
+    this: GraphForgeWorld,
+    canonical: string,
+    hopsStr: string,
+    label: string,
+    prop: string,
+  ) {
+    const { neighbourhood } = require("../../../../crates/graphforge-bindings-node/lib/recipes.mjs");
+    _catch(this, () =>
+      neighbourhood(this.forge!, canonical, parseInt(hopsStr, 10), {
+        label,
+        canonicalProp: prop,
+      }),
+    );
+  },
+);
+
 // ---------------------------------------------------------------------------
 // THEN steps
 // ---------------------------------------------------------------------------

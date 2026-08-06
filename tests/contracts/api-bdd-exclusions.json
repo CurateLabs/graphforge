@@ -55,42 +55,6 @@
       "scenario": "bulk add_nodes with Arrow Table",
       "issue": 355,
       "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood returns an Arrow Table",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood with hops 1 returns only direct neighbours",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood with hops 2 reaches two-hop neighbours",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood on a node with no neighbours returns an empty Arrow Table",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood with non-existent canonical value returns empty Arrow Table",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Recipes API",
-      "scenario": "neighbourhood with hops 0 returns empty Arrow Table",
-      "issue": 356,
-      "languages": ["rust", "python", "node"]
     }
   ]
 }
