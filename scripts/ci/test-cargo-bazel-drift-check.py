@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import tempfile
-from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "scripts/ci/cargo-bazel-drift-check.py"
