@@ -37,12 +37,6 @@
       "scenario": "ExecutionError when a query references an unbound parameter",
       "issue": 353,
       "languages": ["rust", "python", "node"]
-    },
-    {
-      "feature": "Explain API",
-      "scenario": "explain does not execute the query",
-      "issue": 354,
-      "languages": ["rust", "python", "node"]
     }
   ]
 }

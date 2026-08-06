@@ -12,7 +12,6 @@ Feature: Explain API
     Then the result contains "AST"
     And the result contains "GraphIR"
 
-  @excluded-api-bdd @issue-354
   Scenario: explain does not execute the query
     Given an empty graph
     When I call explain on "CREATE (:Person {name: 'Ghost'})"
