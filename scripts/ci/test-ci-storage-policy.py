@@ -55,6 +55,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "visualization-limits-stress-${{ github.sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
+        "cargo-bazel-parity-evidence-${{ github.run_id }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
