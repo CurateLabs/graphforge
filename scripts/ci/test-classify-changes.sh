@@ -127,6 +127,10 @@ assert_classification "$bazel_only" tests/release_workflows/BUILD.bazel bazel-re
 assert_classification "$bazel_only" scripts/ci/cargo-bazel-parity-check.py bazel-parity-check
 assert_classification "$bazel_only" scripts/ci/bazel-migration-ledger-check.py bazel-ledger-check
 assert_classification "$bazel_only" docs/development/bazel-migration-parity.md bazel-parity-doc
+assert_classification "$bazel_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
+assert_classification "$bazel_only" docs/development/bazel-migration-perf.md bazel-cache-perf-doc
+assert_classification "$bazel_only" \
+  docs/development/bazel-migration-evidence/perf-sample.json bazel-cache-perf-evidence
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.

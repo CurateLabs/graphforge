@@ -70,3 +70,9 @@ Against this baseline, on paired representative runs (≥10 pairs per #1):
 - Org-admin Blacksmith **Bazel Build Caching** enablement remains a #5 dependency.
 - Docs-only PR runs (path-skipped Rust/bindings) are **excluded** from this sample.
 
+## #5 measurement pointer
+
+Cold/warm protocols, harness commands, and the pending paired sample live in
+[bazel-migration-perf.md](bazel-migration-perf.md) and
+[bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json).
+

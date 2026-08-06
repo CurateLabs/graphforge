@@ -352,6 +352,9 @@ Primary `test.yml` sticky key pattern:
 - **Org-admin dependency for #5:** enable **Bazel Build Caching** for this repository
   in Blacksmith. Ledger freeze does **not** wait on that enablement.
 - Do not configure repository `--remote_cache`; Blacksmith injects cache for Bazel jobs.
+- #5 harness/docs: [bazel-migration-perf.md](bazel-migration-perf.md) +
+  `docs/development/bazel-migration-evidence/perf-sample.json` (strict evaluate
+  stays blocked until org-admin enablement + ≥10 paired runs).
 
 ## Update rules
 

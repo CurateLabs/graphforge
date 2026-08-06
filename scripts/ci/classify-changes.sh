@@ -116,6 +116,10 @@ while IFS= read -r -d '' path; do
       examples/agent_grounding/BUILD.bazel | \
       docs/development/bazel-migration-parity.md | \
       docs/development/bazel-migration-ledger.md | \
+      docs/development/bazel-migration-perf.md | \
+      docs/development/bazel-migration-baseline.md | \
+      docs/development/bazel-migration-evidence/* | \
+      docs/development/bazel-migration-evidence/**/* | \
       scripts/ci/cargo-bazel-drift-check.py | \
       scripts/ci/test-cargo-bazel-drift-check.py | \
       scripts/ci/assemble_bazel_binding_packages.py | \
@@ -124,6 +128,8 @@ while IFS= read -r -d '' path; do
       scripts/ci/test-bazel-migration-ledger-check.py | \
       scripts/ci/cargo-bazel-parity-check.py | \
       scripts/ci/test-cargo-bazel-parity-check.py | \
+      scripts/ci/bazel-cache-perf.py | \
+      scripts/ci/test-bazel-cache-perf.py | \
       scripts/ci/BUILD.bazel)
       bazel=true
       ;;

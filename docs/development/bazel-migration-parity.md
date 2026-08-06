@@ -69,7 +69,8 @@ bazelisk test //:parity_suite //:bazel_test_graph_smoke
 
 ## Next
 
-1. [#5](https://github.com/CurateLabs/graphforge/issues/5) — Blacksmith Bazel Build
-   Caching (org-admin enablement) + cold/warm performance gates.
-2. [#4](https://github.com/CurateLabs/graphforge/issues/4) — `CI Gate` cutover and
-   Cargo sticky-disk retirement after parity + perf evidence.
+1. [#5](https://github.com/CurateLabs/graphforge/issues/5) — see
+   [bazel-migration-perf.md](bazel-migration-perf.md) (org-admin Bazel Build
+   Caching still required for remote hits / close).
+2. [#4](https://github.com/CurateLabs/graphforge/issues/4) — only after #5 is
+   honestly closable.

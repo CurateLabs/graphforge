@@ -150,9 +150,15 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 - CI runs on Blacksmith runners when `bazel` path classification is true.
 - Do **not** add `--remote_cache` in `.bazelrc` or workflow steps. Blacksmith
   injects repository Bazel caching when org-admin enablement lands (#5).
+- Policy + measurement harness: `scripts/ci/bazel-cache-perf.py` (see
+  [bazel-migration-perf.md](bazel-migration-perf.md)).
+- Org-admin must enable **Bazel Build Caching** under Blacksmith
+  [Settings → Features](https://app.blacksmith.sh/settings?tab=features) before
+  remote hits can be measured; #5 stays open until gates pass.
 
 ## Next
 
-1. [#5](https://github.com/CurateLabs/graphforge/issues/5) — Blacksmith remote-cache
-   enablement + cold/warm performance gates (may need org-admin Bazel Build Caching).
-2. See [bazel-migration-parity.md](bazel-migration-parity.md) for #6 evidence.
+1. Complete [#5](https://github.com/CurateLabs/graphforge/issues/5) after org-admin
+   enablement + ≥10 paired cold/warm runs (strict `evaluate` without
+   `--allow-pending`).
+2. Then [#4](https://github.com/CurateLabs/graphforge/issues/4) — `CI Gate` cutover.
