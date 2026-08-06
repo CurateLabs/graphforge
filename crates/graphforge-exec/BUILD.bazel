@@ -1,21 +1,28 @@
-"""Bazel targets for graphforge-exec (#9 runtime)."""
+"""Bazel targets for graphforge-exec (#9 runtime + #8 integration/snapshots)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "explain_goldens",
+    srcs = glob(["tests/explain_goldens/**/*"]),
+)
+
+_EXEC_DEPS = [
+    "//crates/graphforge-core:graphforge_core",
+    "//crates/graphforge-ir:graphforge_ir",
+    "//crates/graphforge-ontology:graphforge_ontology",
+    "//crates/graphforge-plan:graphforge_plan",
+    "//crates/graphforge-rel:graphforge_rel",
+    "//crates/graphforge-storage:graphforge_storage",
+]
+
 gf_rust_library(
     name = "graphforge_exec",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-plan:graphforge_plan",
-        "//crates/graphforge-rel:graphforge_rel",
-        "//crates/graphforge-storage:graphforge_storage",
-    ],
+    deps = _EXEC_DEPS,
 )
 
 gf_rust_test(
@@ -23,13 +30,156 @@ gf_rust_test(
     crate = ":graphforge_exec",
     # Algorithm + execution unit suite; default "small" is too tight.
     size = "medium",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
+    deps = _EXEC_DEPS + [
         "//crates/graphforge-cypher:graphforge_cypher",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-plan:graphforge_plan",
-        "//crates/graphforge-rel:graphforge_rel",
-        "//crates/graphforge-storage:graphforge_storage",
     ],
+)
+
+_EXEC_TEST_DEPS = _EXEC_DEPS + [
+    "//crates/graphforge-cypher:graphforge_cypher",
+]
+
+_EXEC_TEST_DATA = [
+    "//crates/graphforge-ontology:test_fixtures",
+]
+
+
+gf_rust_integration_test(
+    name = "adjacency_expand",
+    srcs = ["tests/adjacency_expand.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "bench_traversal_scaling",
+    srcs = ["tests/bench_traversal_scaling.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "create_execution",
+    srcs = ["tests/create_execution.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "create_input_driven",
+    srcs = ["tests/create_input_driven.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "differential_traversal",
+    srcs = ["tests/differential_traversal.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "explain_snapshots",
+    srcs = ["tests/explain_snapshots.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA + [":explain_goldens"],
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "optional_match",
+    srcs = ["tests/optional_match.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "persistent_adjacency",
+    srcs = ["tests/persistent_adjacency.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "read_execution",
+    srcs = ["tests/read_execution.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "unwind",
+    srcs = ["tests/unwind.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "var_len_expand",
+    srcs = ["tests/var_len_expand.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "write_statement",
+    srcs = ["tests/write_statement.rs"],
+    crate = ":graphforge_exec",
+    data = _EXEC_TEST_DATA,
+    size = "medium",
+    deps = _EXEC_TEST_DEPS,
+)
+
+test_suite(
+    name = "exec_integration_tests",
+    tests = [
+        ":adjacency_expand",
+        ":bench_traversal_scaling",
+        ":create_execution",
+        ":create_input_driven",
+        ":differential_traversal",
+        ":explain_snapshots",
+        ":optional_match",
+        ":persistent_adjacency",
+        ":read_execution",
+        ":unwind",
+        ":var_len_expand",
+        ":write_statement",
+    ],
+)
+
+test_suite(
+    name = "exec_tests",
+    tests = [
+        ":exec_integration_tests",
+        ":graphforge_exec_test",
+    ],
+)
+
+test_suite(
+    name = "snapshot_tests",
+    tests = [":explain_snapshots"],
 )

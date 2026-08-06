@@ -1,12 +1,9 @@
-# Bazelisk / Bzlmod bootstrap (#11–#9, #7 bindings)
+# Bazelisk / Bzlmod bootstrap (#11–#8, #7 bindings)
 
 Minimal Bazel workspace for M2 issues
-[#11](https://github.com/CurateLabs/graphforge/issues/11),
-[#10](https://github.com/CurateLabs/graphforge/issues/10),
-[#9](https://github.com/CurateLabs/graphforge/issues/9), and
-[#7](https://github.com/CurateLabs/graphforge/issues/7). Canonical contract:
-[#1](https://github.com/CurateLabs/graphforge/issues/1). Orchestration:
-[bazel-migration-orchestration.md](bazel-migration-orchestration.md).
+[#11](https://github.com/CurateLabs/graphforge/issues/11)–[#7](https://github.com/CurateLabs/graphforge/issues/7).
+Canonical contract: [#1](https://github.com/CurateLabs/graphforge/issues/1).
+Orchestration: [bazel-migration-orchestration.md](bazel-migration-orchestration.md).
 
 ## What landed
 
@@ -19,10 +16,13 @@ Minimal Bazel workspace for M2 issues
 | Smoke library/test | `//tools/bazel/smoke:smoke` / `:smoke_test` |
 | Foundation/compiler libs | `//:foundation_compiler_libs` / `//:foundation_compiler_tests` |
 | Runtime libs | `//:runtime_libs` / `//:runtime_lib_tests` |
-| All modeled libs | `//:first_party_libs` / `//:first_party_lib_tests` |
+| All modeled libs (incl. CLI) | `//:first_party_libs` / `//:first_party_lib_tests` |
 | Binding cdylibs | `//:binding_cdylibs` (`graphforge_bindings_py` / `graphforge_bindings_node`) |
 | Packaging handoff | `//:python_wheel_smoke` / `//:node_package_smoke` |
-| Shared rust macros | `tools/bazel/gf_rust.bzl` (`gf_rust_library` / `gf_rust_test` / `gf_rust_shared_library` / `gf_cargo_build_script`) |
+| CI target groups | `//:unit_tests`, `//:integration_tests`, `//:snapshot_tests`, `//:bdd_tests`, `//:cli_tests` |
+| Resource filegroups | `//:resource_inputs` (skills via `//:project_skills_bundle`, TCK, features, goldens, notebooks, contracts) |
+| Bootstrap smoke suite | `//:bazel_test_graph_smoke` |
+| Shared rust macros | `tools/bazel/gf_rust.bzl` (`gf_rust_library` / `gf_rust_test` / `gf_rust_integration_test` / `gf_rust_binary` / `gf_rust_shared_library` / `gf_cargo_build_script`) |
 | Cargo feature fingerprint | `tools/bazel/drift/cargo_feature_fingerprint.json` |
 | Drift check | `scripts/ci/cargo-bazel-drift-check.py` |
 | Fail-closed drift test | `scripts/ci/test-cargo-bazel-drift-check.py` |
@@ -64,28 +64,48 @@ see the same env-gated hooks Cargo gets via feature unification.
 | --- | --- | --- |
 | PyO3 cdylib | `//crates/graphforge-bindings-py:graphforge_bindings_py` | abi3-py310 / extension-module via crate_universe |
 | napi-rs cdylib | `//crates/graphforge-bindings-node:graphforge_bindings_node` | includes `napi-build` build script |
-| CLI lib (link dep) | `//crates/graphforge-cli:graphforge_cli` | lib + skill-bundle `build.rs` only; bin/tests → #8 |
 | Python wheel smoke | `//:python_wheel_smoke` | assembles wheel from Bazel `.so`/`.dylib`; no `maturin build` |
 | Node package smoke | `//:node_package_smoke` | assembles zip from Bazel cdylib; no `napi build` |
 
 Credentials / OIDC stay outside cacheable Bazel actions (publish workflows unchanged).
 
+## Test / CLI / resource slice (#8)
+
+| Surface | Labels |
+| --- | --- |
+| CLI lib + `build.rs` + `gf` bin | `//crates/graphforge-cli:graphforge_cli`, `:graphforge_cli_build_script`, `:gf` |
+| CLI tests | `//crates/graphforge-cli:cli_tests` |
+| Integration suite | `//:integration_tests` (59 Cargo integration binaries) |
+| Snapshot / golden | `//:snapshot_tests` (IR, logical plan, explain) |
+| BDD (API + TCK) | `//:bdd_tests` → `//crates/graphforge-api:bdd` |
+| Resources | `//:resource_inputs` (`//:project_skills_bundle`, TCK, features, goldens, notebooks, contracts) |
+
+`project-skills/` remains a pure distribution tree (no `BUILD.bazel` payload);
+skills are declared via root `//:project_skills_bundle` / `//:project-skills/manifest.json`.
+
 ### Package coverage (17 workspace members)
 
-| Class | Count | Status after #7 |
+| Class | Count | Status after #8 |
 | --- | ---: | --- |
-| Ordinary `lib` mapped | 15 | foundation + runtime + CLI lib (link dep) |
-| Binding cdylibs mapped | 2 | PyO3 + napi-rs |
-| Remaining for #8 | bin + integration/BDD/CLI tests + resources | |
+| Ordinary `lib` mapped | 15 | foundation + runtime + CLI |
+| Binding cdylibs mapped | 2 | PyO3 + napi-rs (#7) |
+| Integration-test mapped | 59 | `//:integration_tests` (+ BDD harness) |
+| CLI `bin` mapped | 1 | `//crates/graphforge-cli:gf` |
+| CLI `custom-build` mapped | 1 | `cargo_build_script` + `//:project_skills_bundle` |
+| Explicit retained exception | 1 | API examples (`RT-examples` → #6) |
+| Justified Cargo tool | 1 | `RT-fuzz` (cargo-fuzz workflow; keep until #6) |
 
 ### Residual gaps (justified)
 
 - Workspace Clippy/lint policy from `Cargo.toml` `[workspace.lints]` is not yet
   mirrored as Bazel `rustc_flags` / Clippy aspects (Cargo remains authoritative
   for lint CI until a later slice).
-- Doctests are not separate Bazel targets yet (same attachment note as the
-  ledger unit-test policy).
-- Integration / snapshot / BDD / CLI tests and the `gf` binary are out of scope (#8).
+- Doctests are not separate Bazel targets (documented equivalent: coverage attaches
+  to crate unit-test targets; same policy as #10/#9).
+- API `example` binaries are `RT-examples` for #6 (not required to close #8).
+- Blacksmith `Bazel Bootstrap` runs `//:bazel_test_graph_smoke` (unit + CLI +
+  representative integration/snapshot probes). Full `//:integration_tests` and
+  `//:bdd_tests` remain executable under Bazel for parity (#6) and local runs.
 - Full cross-platform binding/release matrix remains #6.
 - Bazel storage always enables `test-failpoints` (env-gated no-ops); Cargo release
   builds keep the const no-op body — track under #6 parity if needed.
@@ -96,13 +116,17 @@ Credentials / OIDC stay outside cacheable Bazel actions (publish workflows uncha
 # Pin via Bazelisk
 bazelisk version   # must report 9.2.0 from .bazelversion
 
-# Smoke + all modeled first-party libraries (rules_rust; no Cargo shell-out)
-bazelisk test //tools/bazel/smoke:smoke_test //:first_party_lib_tests
-bazelisk build //:bazel_smoke //:first_party_libs //:runtime_libs
+# Smoke + modeled first-party libraries/tests/CLI/resources
+bazelisk test //:bazel_test_graph_smoke
+bazelisk build //:first_party_libs //:cli_bins //:resource_inputs
 
 # Binding cdylibs + packaging handoff (no maturin/napi recompile)
 bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke
 python3 scripts/ci/test-assemble-bazel-binding-packages.py
+
+# Full mapped suites (longer)
+bazelisk test //:unit_tests //:integration_tests //:snapshot_tests //:cli_tests
+bazelisk test //:bdd_tests
 
 # Cargo ↔ fingerprint drift (host cargo metadata; fail-closed)
 python3 scripts/ci/cargo-bazel-drift-check.py
@@ -121,7 +145,5 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 
 ## Next
 
-1. [#8](https://github.com/CurateLabs/graphforge/issues/8) — test/BDD/CLI/resource
-   graph (CLI bin + tests; may extend the CLI lib row already mapped for #7).
-2. [#6](https://github.com/CurateLabs/graphforge/issues/6) — cross-platform release
-   targets and Cargo/Bazel parity evidence (blocked by #7 and #8).
+1. [#6](https://github.com/CurateLabs/graphforge/issues/6) — cross-platform release
+   targets and same-SHA Cargo/Bazel parity (blocked by #7 and #8).

@@ -44,9 +44,20 @@ use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 // Setup helpers (mirrors crates/graphforge-ir/tests/golden.rs)
 // ---------------------------------------------------------------------------
 
+/// Resolve `CARGO_MANIFEST_DIR` to an absolute path (see graphforge-ir golden).
+fn manifest_dir() -> std::path::PathBuf {
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if raw.is_absolute() {
+        return raw.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(raw))
+        .unwrap_or_else(|_| raw.to_path_buf())
+}
+
 /// Path to the shared HR ontology fixture.
 fn hr_fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    manifest_dir()
         .parent() // crates/
         .unwrap()
         .join("graphforge-ontology")
@@ -161,11 +172,7 @@ fn render_property_read(query: &str) -> String {
 /// insta settings with the snapshot path set to `tests/logical_plan_goldens/`.
 fn golden_settings() -> insta::Settings {
     let mut settings = insta::Settings::clone_current();
-    settings.set_snapshot_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("logical_plan_goldens"),
-    );
+    settings.set_snapshot_path(manifest_dir().join("tests").join("logical_plan_goldens"));
     settings.set_omit_expression(true);
     settings
 }

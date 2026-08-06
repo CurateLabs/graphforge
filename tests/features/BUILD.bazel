@@ -1,0 +1,20 @@
+"""Public-API Gherkin features consumed by graphforge-api BDD (#8)."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "api_features",
+    srcs = glob(["api/**/*.feature"]),
+)
+
+filegroup(
+    name = "all_features",
+    srcs = glob(
+        ["**/*"],
+        exclude = [
+            "BUILD.bazel",
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    ),
+)

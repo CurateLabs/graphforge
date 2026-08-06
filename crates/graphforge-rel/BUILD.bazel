@@ -1,30 +1,67 @@
-"""Bazel targets for graphforge-rel (#10 compiler)."""
+"""Bazel targets for graphforge-rel (#10 compiler + #8 integration/snapshots)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "logical_plan_goldens",
+    srcs = glob(["tests/logical_plan_goldens/**/*"]),
+)
+
+_REL_DEPS = [
+    "//crates/graphforge-core:graphforge_core",
+    "//crates/graphforge-ir:graphforge_ir",
+    "//crates/graphforge-ontology:graphforge_ontology",
+    "//crates/graphforge-plan:graphforge_plan",
+    "//crates/graphforge-storage:graphforge_storage",
+]
+
 gf_rust_library(
     name = "graphforge_rel",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-plan:graphforge_plan",
-        "//crates/graphforge-storage:graphforge_storage",
-    ],
+    deps = _REL_DEPS,
 )
 
 gf_rust_test(
     name = "graphforge_rel_test",
     crate = ":graphforge_rel",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-ir:graphforge_ir",
-        "//crates/graphforge-ontology:graphforge_ontology",
-        "//crates/graphforge-plan:graphforge_plan",
-        "//crates/graphforge-storage:graphforge_storage",
+    deps = _REL_DEPS,
+)
+
+_REL_TEST_DEPS = _REL_DEPS + [
+    "//crates/graphforge-cypher:graphforge_cypher",
+]
+
+gf_rust_integration_test(
+    name = "expression_lowering_matrix",
+    srcs = ["tests/expression_lowering_matrix.rs"],
+    crate = ":graphforge_rel",
+    deps = _REL_TEST_DEPS,
+)
+
+gf_rust_integration_test(
+    name = "logical_plan_golden",
+    srcs = ["tests/logical_plan_golden.rs"],
+    crate = ":graphforge_rel",
+    data = [
+        ":logical_plan_goldens",
+        "//crates/graphforge-ontology:test_fixtures",
     ],
+    deps = _REL_TEST_DEPS,
+)
+
+test_suite(
+    name = "rel_tests",
+    tests = [
+        ":expression_lowering_matrix",
+        ":graphforge_rel_test",
+        ":logical_plan_golden",
+    ],
+)
+
+test_suite(
+    name = "snapshot_tests",
+    tests = [":logical_plan_golden"],
 )

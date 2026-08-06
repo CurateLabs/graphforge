@@ -69,13 +69,19 @@ fn escape_for_regex(s: &str) -> String {
 
 /// Snapshot settings: goldens directory + filters normalizing the TempDir
 /// path and any partition/byte-size noise DataFusion embeds in scan nodes.
+fn manifest_dir() -> std::path::PathBuf {
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if raw.is_absolute() {
+        return raw.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(raw))
+        .unwrap_or_else(|_| raw.to_path_buf())
+}
+
 fn golden_settings(dir: &Path) -> insta::Settings {
     let mut settings = insta::Settings::clone_current();
-    settings.set_snapshot_path(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("explain_goldens"),
-    );
+    settings.set_snapshot_path(manifest_dir().join("tests").join("explain_goldens"));
     settings.set_omit_expression(true);
     settings.add_filter(&escape_for_regex(&dir.display().to_string()), "<DIR>");
     // Parquet scan lines embed file sizes / row-group offsets that vary with

@@ -1,10 +1,15 @@
-"""Bazel targets for graphforge-ir (#10 compiler)."""
+"""Bazel targets for graphforge-ir (#10 compiler + #8 golden/snapshots)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "ir_goldens",
+    srcs = glob(["tests/ir_goldens/**/*"]),
+)
 
 gf_rust_library(
     name = "graphforge_ir",
@@ -25,4 +30,33 @@ gf_rust_test(
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-ontology:graphforge_ontology",
     ],
+)
+
+gf_rust_integration_test(
+    name = "golden",
+    srcs = ["tests/golden.rs"],
+    crate = ":graphforge_ir",
+    data = [
+        ":ir_goldens",
+        "//crates/graphforge-ontology:test_fixtures",
+    ],
+    deps = [
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-ontology:graphforge_ontology",
+    ],
+)
+
+test_suite(
+    name = "ir_tests",
+    tests = [
+        ":golden",
+        ":graphforge_ir_test",
+    ],
+)
+
+test_suite(
+    name = "snapshot_tests",
+    tests = [":golden"],
 )

@@ -1,4 +1,4 @@
-"""Root Bazel package for GraphForge (#10/#9 libs + #7 binding cdylibs)."""
+"""Root Bazel package for GraphForge (#10/#9/#7 libs+cdylibs + #8 tests/CLI/resources)."""
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
@@ -11,7 +11,7 @@ exports_files([
     "project-skills/manifest.json",
 ])
 
-# Canonical skill bundle for CLI embedding (#7). Kept at the workspace root so
+# Canonical skill bundle for CLI embedding (#7/#8). Kept at the workspace root so
 # `project-skills/` stays a pure distribution tree (no BUILD.bazel payload).
 filegroup(
     name = "project_skills_bundle",
@@ -106,12 +106,13 @@ test_suite(
     ],
 )
 
-# All first-party library targets modeled so far (#10 + #9).
+# All first-party library targets (#10 + #9 + #8 CLI lib).
 build_test(
     name = "first_party_libs",
     targets = [
         "//crates/graphforge-api:graphforge_api",
         "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-cli:graphforge_cli",
         "//crates/graphforge-core:graphforge_core",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-exec:graphforge_exec",
@@ -132,6 +133,7 @@ test_suite(
     tests = [
         "//crates/graphforge-api:graphforge_api_test",
         "//crates/graphforge-ast:graphforge_ast_test",
+        "//crates/graphforge-cli:graphforge_cli_test",
         "//crates/graphforge-core:graphforge_core_test",
         "//crates/graphforge-cypher:graphforge_cypher_test",
         "//crates/graphforge-exec:graphforge_exec_test",
@@ -144,5 +146,92 @@ test_suite(
         "//crates/graphforge-rel:graphforge_rel_test",
         "//crates/graphforge-search:graphforge_search_test",
         "//crates/graphforge-storage:graphforge_storage_test",
+    ],
+)
+
+# CLI binary build surface (#8).
+build_test(
+    name = "cli_bins",
+    targets = ["//crates/graphforge-cli:gf"],
+)
+
+# Deterministic CI target groups (#8 / #1 step 5).
+test_suite(
+    name = "unit_tests",
+    tests = [":first_party_lib_tests"],
+)
+
+test_suite(
+    name = "integration_tests",
+    tests = [
+        "//crates/graphforge-api:api_integration_tests",
+        "//crates/graphforge-cli:checkpoints",
+        "//crates/graphforge-cli:portable",
+        "//crates/graphforge-cli:repository",
+        "//crates/graphforge-cypher:corpus",
+        "//crates/graphforge-exec:exec_integration_tests",
+        "//crates/graphforge-ir:golden",
+        "//crates/graphforge-ontology:integration",
+        "//crates/graphforge-rel:expression_lowering_matrix",
+        "//crates/graphforge-rel:logical_plan_golden",
+        "//crates/graphforge-storage:storage_integration_tests",
+    ],
+)
+
+test_suite(
+    name = "snapshot_tests",
+    tests = [
+        "//crates/graphforge-exec:snapshot_tests",
+        "//crates/graphforge-ir:snapshot_tests",
+        "//crates/graphforge-rel:snapshot_tests",
+    ],
+)
+
+test_suite(
+    name = "bdd_tests",
+    tests = ["//crates/graphforge-api:bdd_tests"],
+)
+
+test_suite(
+    name = "cli_tests",
+    tests = ["//crates/graphforge-cli:cli_tests"],
+)
+
+# Non-source inputs declared as precise filegroups (#8).
+build_test(
+    name = "resource_inputs",
+    targets = [
+        "//:project_skills_bundle",
+        "//docs/contracts/examples:fixtures",
+        "//docs/reference:schema_inventory_fixtures",
+        "//examples/agent_grounding:notebooks",
+        "//tests/features:api_features",
+        "//tests/tck:corpus",
+        "//crates/graphforge-cypher:corpus_data",
+        "//crates/graphforge-exec:explain_goldens",
+        "//crates/graphforge-ir:ir_goldens",
+        "//crates/graphforge-ontology:test_fixtures",
+        "//crates/graphforge-rel:logical_plan_goldens",
+    ],
+)
+
+# Representative #8 surface for Blacksmith Bazel Bootstrap (excludes full TCK BDD
+# wall-time; BDD remains in //:bdd_tests for explicit/full runs).
+test_suite(
+    name = "bazel_test_graph_smoke",
+    tests = [
+        "//tools/bazel/smoke:smoke_test",
+        ":unit_tests",
+        "//crates/graphforge-cli:cli_tests",
+        "//crates/graphforge-cypher:corpus",
+        "//crates/graphforge-ir:golden",
+        "//crates/graphforge-ontology:integration",
+        "//crates/graphforge-rel:expression_lowering_matrix",
+        "//crates/graphforge-rel:logical_plan_golden",
+        "//crates/graphforge-exec:explain_snapshots",
+        "//crates/graphforge-storage:storage_integration_tests",
+        # One mid-size API integration binary as the public-facade probe.
+        "//crates/graphforge-api:clear",
+        "//crates/graphforge-api:value_semantics",
     ],
 )

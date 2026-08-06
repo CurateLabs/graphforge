@@ -119,6 +119,9 @@ assert_classification "$bazel_only" docs/reference/BUILD.bazel bazel-docs-refere
 assert_classification "$bazel_only" docs/contracts/examples/BUILD.bazel bazel-docs-contracts-build
 assert_classification "$bazel_only" scripts/ci/assemble_bazel_binding_packages.py bazel-binding-packaging
 assert_classification "$bazel_only" tools/bazel/bindings/BUILD.bazel bazel-bindings-handoff
+assert_classification "$bazel_only" tests/features/BUILD.bazel bazel-features-build
+assert_classification "$bazel_only" tests/tck/BUILD.bazel bazel-tck-build
+assert_classification "$bazel_only" examples/agent_grounding/BUILD.bazel bazel-notebook-build
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.
