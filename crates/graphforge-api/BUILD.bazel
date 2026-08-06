@@ -1,5 +1,56 @@
-"""Scaffolding for crate_universe manifests; library modeling deferred (#9/#7/#8)."""
+"""Bazel targets for graphforge-api (#9 runtime)."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
 
 exports_files(["Cargo.toml"])
 
 package(default_visibility = ["//visibility:public"])
+
+# Unit tests include_str! contract fixtures from docs/contracts/examples.
+_API_COMPILE_DATA = [
+    "//docs/contracts/examples:fixtures",
+]
+
+gf_rust_library(
+    name = "graphforge_api",
+    compile_data = _API_COMPILE_DATA,
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-exec:graphforge_exec",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-knowledge:graphforge_knowledge",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-provenance:graphforge_provenance",
+        "//crates/graphforge-rel:graphforge_rel",
+        "//crates/graphforge-search:graphforge_search",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+gf_rust_test(
+    name = "graphforge_api_test",
+    crate = ":graphforge_api",
+    compile_data = _API_COMPILE_DATA,
+    # Runtime reads via env!("CARGO_MANIFEST_DIR")/../../docs/reference/...
+    # Bake a workspace-relative manifest dir so runfiles layout resolves.
+    data = ["//docs/reference:schema_inventory_fixtures"],
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-api",
+    },
+    # Large public-facade unit suite with filesystem/async paths.
+    size = "large",
+    timeout = "long",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-exec:graphforge_exec",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-knowledge:graphforge_knowledge",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-provenance:graphforge_provenance",
+        "//crates/graphforge-rel:graphforge_rel",
+        "//crates/graphforge-search:graphforge_search",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)

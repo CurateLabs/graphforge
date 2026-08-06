@@ -1,4 +1,4 @@
-"""Root Bazel package for GraphForge (#10 foundation/compiler libs)."""
+"""Root Bazel package for GraphForge (#10 foundation + #9 runtime libs)."""
 
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 
@@ -23,7 +23,7 @@ alias(
 )
 
 # Foundation + compiler-layer libraries modeled in #10 (plus storage, required
-# by graphforge-rel). Runtime peers remain for #9.
+# by graphforge-rel).
 build_test(
     name = "foundation_compiler_libs",
     targets = [
@@ -50,6 +50,72 @@ test_suite(
         "//crates/graphforge-plan:graphforge_plan_test",
         "//crates/graphforge-provenance:graphforge_provenance_test",
         "//crates/graphforge-rel:graphforge_rel_test",
+        "//crates/graphforge-storage:graphforge_storage_test",
+    ],
+)
+
+# Runtime libraries modeled in #9 (storage already in foundation aggregate).
+build_test(
+    name = "runtime_libs",
+    targets = [
+        "//crates/graphforge-api:graphforge_api",
+        "//crates/graphforge-exec:graphforge_exec",
+        "//crates/graphforge-io:graphforge_io",
+        "//crates/graphforge-knowledge:graphforge_knowledge",
+        "//crates/graphforge-search:graphforge_search",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+test_suite(
+    name = "runtime_lib_tests",
+    tests = [
+        "//crates/graphforge-api:graphforge_api_test",
+        "//crates/graphforge-exec:graphforge_exec_test",
+        "//crates/graphforge-io:graphforge_io_test",
+        "//crates/graphforge-knowledge:graphforge_knowledge_test",
+        "//crates/graphforge-search:graphforge_search_test",
+        "//crates/graphforge-storage:graphforge_storage_test",
+    ],
+)
+
+# All first-party library targets modeled so far (#10 + #9).
+build_test(
+    name = "first_party_libs",
+    targets = [
+        "//crates/graphforge-api:graphforge_api",
+        "//crates/graphforge-ast:graphforge_ast",
+        "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-cypher:graphforge_cypher",
+        "//crates/graphforge-exec:graphforge_exec",
+        "//crates/graphforge-io:graphforge_io",
+        "//crates/graphforge-ir:graphforge_ir",
+        "//crates/graphforge-knowledge:graphforge_knowledge",
+        "//crates/graphforge-ontology:graphforge_ontology",
+        "//crates/graphforge-plan:graphforge_plan",
+        "//crates/graphforge-provenance:graphforge_provenance",
+        "//crates/graphforge-rel:graphforge_rel",
+        "//crates/graphforge-search:graphforge_search",
+        "//crates/graphforge-storage:graphforge_storage",
+    ],
+)
+
+test_suite(
+    name = "first_party_lib_tests",
+    tests = [
+        "//crates/graphforge-api:graphforge_api_test",
+        "//crates/graphforge-ast:graphforge_ast_test",
+        "//crates/graphforge-core:graphforge_core_test",
+        "//crates/graphforge-cypher:graphforge_cypher_test",
+        "//crates/graphforge-exec:graphforge_exec_test",
+        "//crates/graphforge-io:graphforge_io_test",
+        "//crates/graphforge-ir:graphforge_ir_test",
+        "//crates/graphforge-knowledge:graphforge_knowledge_test",
+        "//crates/graphforge-ontology:graphforge_ontology_test",
+        "//crates/graphforge-plan:graphforge_plan_test",
+        "//crates/graphforge-provenance:graphforge_provenance_test",
+        "//crates/graphforge-rel:graphforge_rel_test",
+        "//crates/graphforge-search:graphforge_search_test",
         "//crates/graphforge-storage:graphforge_storage_test",
     ],
 )

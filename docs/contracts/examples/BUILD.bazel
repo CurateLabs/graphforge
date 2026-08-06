@@ -1,0 +1,10 @@
+"""Contract example fixtures compiled into graphforge-api unit tests (#9)."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"]))
+
+filegroup(
+    name = "fixtures",
+    srcs = glob(["*"]),
+)

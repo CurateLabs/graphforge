@@ -875,11 +875,11 @@ jobs:
           python3 scripts/ci/cargo-bazel-drift-check.py
           python3 scripts/ci/test-cargo-bazel-drift-check.py
 
-      - name: Bazel smoke + foundation/compiler libs
+      - name: Bazel smoke + first-party library targets
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          bazelisk test //tools/bazel/smoke:smoke_test //:foundation_compiler_tests
-          bazelisk build //:bazel_smoke //:foundation_compiler_libs
+          bazelisk test //tools/bazel/smoke:smoke_test //:first_party_lib_tests
+          bazelisk build //:bazel_smoke //:first_party_libs //:runtime_libs
 
   ci-gate:
     name: CI Gate

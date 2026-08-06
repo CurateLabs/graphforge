@@ -14,8 +14,8 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
 | Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **No** — #10 foundation/compiler libs mapped; runtime/bindings/tests remain |
-| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + foundation/compiler labels from #10 |
+| Bazel modeling claimed complete? | **No** — #10/#9 first-party libs mapped (14/15 lib rows); CLI lib + bindings/tests remain |
+| Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); crate_universe + foundation/runtime library labels from #10/#9 |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
 This freeze uses the **current authoritative** metadata count (**90** targets;
@@ -51,7 +51,7 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 
 | Package | Target | Class | Source | Bazel label | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `graphforge-api` | `graphforge_api` | `lib` | `crates/graphforge-api/src/lib.rs` | — | `unmapped` | #9 |
+| `graphforge-api` | `graphforge_api` | `lib` | `crates/graphforge-api/src/lib.rs` | `//crates/graphforge-api:graphforge_api` | `mapped` | #9; unit tests `//crates/graphforge-api:graphforge_api_test` |
 | `graphforge-api` | `atomic_recovery_workflow` | `example` | `crates/graphforge-api/examples/atomic_recovery_workflow.rs` | — | `unmapped` | |
 | `graphforge-api` | `correction_churn_workflow` | `example` | `crates/graphforge-api/examples/correction_churn_workflow.rs` | — | `unmapped` | |
 | `graphforge-api` | `cyber_intrusion_workflow` | `example` | `crates/graphforge-api/examples/cyber_intrusion_workflow.rs` | — | `unmapped` | |
@@ -102,7 +102,7 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-bindings-node` | `graphforge_bindings_node` | `cdylib` | `crates/graphforge-bindings-node/src/lib.rs` | — | `unmapped` | #7 |
 | `graphforge-bindings-node` | `build-script-build` | `custom-build` | `crates/graphforge-bindings-node/build.rs` | — | `unmapped` | #7 |
 | `graphforge-bindings-py` | `graphforge_bindings_py` | `cdylib` | `crates/graphforge-bindings-py/src/lib.rs` | — | `unmapped` | #7 |
-| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | — | `unmapped` | #8/#9 peer |
+| `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | — | `unmapped` | #8; `build.rs` embeds `project-skills` (RT-cli-build-script) |
 | `graphforge-cli` | `gf` | `bin` | `crates/graphforge-cli/src/main.rs` | — | `unmapped` | #8 |
 | `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | — | `unmapped` | #8 |
 | `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | — | `unmapped` | #8 |
@@ -111,7 +111,7 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-core` | `graphforge_core` | `lib` | `crates/graphforge-core/src/lib.rs` | `//crates/graphforge-core:graphforge_core` | `mapped` | #10; unit tests `//crates/graphforge-core:graphforge_core_test` |
 | `graphforge-cypher` | `graphforge_cypher` | `lib` | `crates/graphforge-cypher/src/lib.rs` | `//crates/graphforge-cypher:graphforge_cypher` | `mapped` | #10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test` |
 | `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | — | `unmapped` | #8 |
-| `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | — | `unmapped` | #9 |
+| `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | `//crates/graphforge-exec:graphforge_exec` | `mapped` | #9; unit tests `//crates/graphforge-exec:graphforge_exec_test` |
 | `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | — | `unmapped` | |
 | `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | — | `unmapped` | |
 | `graphforge-exec` | `create_execution` | `integration-test` | `crates/graphforge-exec/tests/create_execution.rs` | — | `unmapped` | |
@@ -124,10 +124,10 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-exec` | `unwind` | `integration-test` | `crates/graphforge-exec/tests/unwind.rs` | — | `unmapped` | |
 | `graphforge-exec` | `var_len_expand` | `integration-test` | `crates/graphforge-exec/tests/var_len_expand.rs` | — | `unmapped` | |
 | `graphforge-exec` | `write_statement` | `integration-test` | `crates/graphforge-exec/tests/write_statement.rs` | — | `unmapped` | |
-| `graphforge-io` | `graphforge_io` | `lib` | `crates/graphforge-io/src/lib.rs` | — | `unmapped` | #9 |
+| `graphforge-io` | `graphforge_io` | `lib` | `crates/graphforge-io/src/lib.rs` | `//crates/graphforge-io:graphforge_io` | `mapped` | #9; unit tests `//crates/graphforge-io:graphforge_io_test` |
 | `graphforge-ir` | `graphforge_ir` | `lib` | `crates/graphforge-ir/src/lib.rs` | `//crates/graphforge-ir:graphforge_ir` | `mapped` | #10; unit tests `//crates/graphforge-ir:graphforge_ir_test` |
 | `graphforge-ir` | `golden` | `integration-test` | `crates/graphforge-ir/tests/golden.rs` | — | `unmapped` | #8 |
-| `graphforge-knowledge` | `graphforge_knowledge` | `lib` | `crates/graphforge-knowledge/src/lib.rs` | — | `unmapped` | #9 |
+| `graphforge-knowledge` | `graphforge_knowledge` | `lib` | `crates/graphforge-knowledge/src/lib.rs` | `//crates/graphforge-knowledge:graphforge_knowledge` | `mapped` | #9; unit tests `//crates/graphforge-knowledge:graphforge_knowledge_test` |
 | `graphforge-ontology` | `graphforge_ontology` | `lib` | `crates/graphforge-ontology/src/lib.rs` | `//crates/graphforge-ontology:graphforge_ontology` | `mapped` | #10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test` |
 | `graphforge-ontology` | `integration` | `integration-test` | `crates/graphforge-ontology/tests/integration.rs` | — | `unmapped` | #8 |
 | `graphforge-plan` | `graphforge_plan` | `lib` | `crates/graphforge-plan/src/lib.rs` | `//crates/graphforge-plan:graphforge_plan` | `mapped` | #10; unit tests `//crates/graphforge-plan:graphforge_plan_test` |
@@ -135,8 +135,8 @@ Integration-test / example / cdylib / bin rows stay `unmapped` until #8/#7/#9.
 | `graphforge-rel` | `graphforge_rel` | `lib` | `crates/graphforge-rel/src/lib.rs` | `//crates/graphforge-rel:graphforge_rel` | `mapped` | #10; unit tests `//crates/graphforge-rel:graphforge_rel_test` |
 | `graphforge-rel` | `expression_lowering_matrix` | `integration-test` | `crates/graphforge-rel/tests/expression_lowering_matrix.rs` | — | `unmapped` | #8 |
 | `graphforge-rel` | `logical_plan_golden` | `integration-test` | `crates/graphforge-rel/tests/logical_plan_golden.rs` | — | `unmapped` | #8 |
-| `graphforge-search` | `graphforge_search` | `lib` | `crates/graphforge-search/src/lib.rs` | — | `unmapped` | #9 |
-| `graphforge-storage` | `graphforge_storage` | `lib` | `crates/graphforge-storage/src/lib.rs` | `//crates/graphforge-storage:graphforge_storage` | `mapped` | #10 early (required by `graphforge-rel`); unit tests `//crates/graphforge-storage:graphforge_storage_test` |
+| `graphforge-search` | `graphforge_search` | `lib` | `crates/graphforge-search/src/lib.rs` | `//crates/graphforge-search:graphforge_search` | `mapped` | #9; unit tests `//crates/graphforge-search:graphforge_search_test` |
+| `graphforge-storage` | `graphforge_storage` | `lib` | `crates/graphforge-storage/src/lib.rs` | `//crates/graphforge-storage:graphforge_storage` | `mapped` | #10 early / #9; Bazel enables `test-failpoints` for api subprocess unification; unit tests `//crates/graphforge-storage:graphforge_storage_test` |
 | `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | — | `unmapped` | |
 | `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | — | `unmapped` | |
 | `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | — | `unmapped` | |
@@ -153,6 +153,8 @@ before #6 parity can pass with the exception still open.
 | RT-publish-crates | `cargo publish` / crates.io authorize flows | Ecosystem publication metadata and registry auth | keep Cargo; ledger must remain explicit | stub |
 | RT-maturin-assemble | `maturin build` / `maturin sdist` packaging assembly | May assemble/sign/publish wheels, but must consume Bazel-built natives after #7 | #7 handoff | stub |
 | RT-napi-assemble | `napi build` / `napi artifacts` / `napi pre-publish` | Package assembly + npm provenance; must not silently recompile a different Rust graph after #7 | #7 handoff | stub |
+| RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | `cargo_build_script` + `include_bytes!` skill bundle; bin/tests owned with CLI surface | #8 map with build script | explicit |
+| RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | cdylib packages have no ordinary `lib` row; native packaging is #7 | #7 | explicit |
 | RT-examples | `graphforge-api` examples (11) | May be CI/release probes vs developer samples; map or except per #8/#6 | #8/#6 | stub |
 | RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for M2** — not a deliverable; do not inventory as required targets | excluded | excluded |
 

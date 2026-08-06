@@ -1,9 +1,9 @@
-"""GraphForge Bazel module (M2 / #10 foundation + compiler libs).
+"""GraphForge Bazel module (M2 / #10 foundation + #9 runtime libs).
 
 Canonical build-system contract: GitHub issue #1.
 Activates crate_universe `from_cargo` against the frozen Cargo workspace and
-models foundation/compiler-layer first-party libraries as real rules_rust
-targets (no Cargo shell-out for ordinary compilation).
+models first-party libraries as real rules_rust targets (no Cargo shell-out
+for ordinary compilation).
 """
 
 module(

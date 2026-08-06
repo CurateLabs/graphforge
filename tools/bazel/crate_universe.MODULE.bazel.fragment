@@ -12,4 +12,4 @@
 # use_repo(crate, "crates")
 #
 # After Cargo.toml / Cargo.lock dependency changes:
-#   CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:foundation_compiler_libs
+#   CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party_libs
