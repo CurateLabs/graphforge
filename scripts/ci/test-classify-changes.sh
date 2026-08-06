@@ -40,22 +40,24 @@ assert_classification() {
   git -C "$fixture" reset --hard -q "$base"
 }
 
-none=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false'
-rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false'
-python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false'
-gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false'
-binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false'
-binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false'
-binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false'
-binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false'
-binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false'
-agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false'
-pulumi_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false'
-terraform_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true'
-binding_iac=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true'
-rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true'
-rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true'
-all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true'
+none=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
+agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
+pulumi_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nbazel=false'
+terraform_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nbazel=false'
+binding_iac=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
+rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
+rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
+all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
+bazel_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+rust_bindings_bazel=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 
 assert_classification "$rust_only" crates/graphforge-exec/src/kernel.rs core-rust
 assert_classification "$binding_rust" crates/graphforge-api/src/lib.rs public-api-rust
@@ -108,6 +110,9 @@ assert_classification "$all" ".github/workflows/test.yml" workflow
 assert_classification "$all" scripts/ci/require-gates.sh aggregate-gate
 assert_classification "$all" scripts/ci/concurrency-short-gate.py concurrency-short-gate
 assert_classification "$all" tests/contracts/concurrency-short-matrix.json concurrency-short-matrix
+assert_classification "$bazel_only" MODULE.bazel bazel-module
+assert_classification "$bazel_only" tools/bazel/smoke/src/lib.rs bazel-smoke
+assert_classification "$bazel_only" scripts/ci/cargo-bazel-drift-check.py bazel-drift-check
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
 # Packaging-only Cargo metadata must not compile the workspace.
@@ -133,8 +138,8 @@ manifest_actual=$(
   cd "$fixture"
   "$classifier" "$base" HEAD
 )
-[[ "$manifest_actual" == "$binding_rust" ]] || {
-  printf 'dependency manifest edit must run Rust and bindings, got:\n%s\n' \
+[[ "$manifest_actual" == "$rust_bindings_bazel" ]] || {
+  printf 'dependency manifest edit must run Rust, bindings, and Bazel drift, got:\n%s\n' \
     "$manifest_actual" >&2
   exit 1
 }

@@ -31,6 +31,7 @@ flowchart LR
 | [`../development/bazel-migration-orchestration.md`](../development/bazel-migration-orchestration.md) | M2 / #1 Bazel migration sub-agent roles, contracts, and handoffs |
 | [`../development/bazel-migration-ledger.md`](../development/bazel-migration-ledger.md) | M2 / #1 Cargo target + CI command migration ledger (freeze) |
 | [`../development/bazel-migration-baseline.md`](../development/bazel-migration-baseline.md) | M2 / #1 accepted Blacksmith/Cargo CI performance baseline |
+| [`../development/bazel-bootstrap.md`](../development/bazel-bootstrap.md) | M2 / #11 Bazelisk/Bzlmod bootstrap and Cargo drift check |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
 | Root `AGENTS.md` | Agent workflow and validation gates |

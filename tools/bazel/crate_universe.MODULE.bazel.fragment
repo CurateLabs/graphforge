@@ -1,0 +1,16 @@
+# Fragment for #10+: activate crate_universe against the frozen Cargo inputs.
+# Copy into MODULE.bazel (or load via a maintained include pattern) when the
+# first first-party library target needs `@crates` dependencies.
+#
+# crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+# crate.from_cargo(
+#     name = "crates",
+#     cargo_lockfile = "//:Cargo.lock",
+#     lockfile = "//:cargo-bazel-lock.json",
+#     manifests = [
+#         "//:Cargo.toml",
+#         "//crates/graphforge-core:Cargo.toml",
+#         # ... remaining workspace members from the migration ledger ...
+#     ],
+# )
+# use_repo(crate, "crates")

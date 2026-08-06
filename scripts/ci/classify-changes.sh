@@ -11,6 +11,7 @@ bindings=false
 agent_skills=false
 pulumi=false
 terraform=false
+bazel=false
 
 emit() {
   printf 'rust=%s\n' "$rust"
@@ -20,6 +21,7 @@ emit() {
   printf 'agent_skills=%s\n' "$agent_skills"
   printf 'pulumi=%s\n' "$pulumi"
   printf 'terraform=%s\n' "$terraform"
+  printf 'bazel=%s\n' "$bazel"
 }
 
 enable_all() {
@@ -30,6 +32,7 @@ enable_all() {
   agent_skills=true
   pulumi=true
   terraform=true
+  bazel=true
 }
 
 # Cargo package metadata does not affect compiled behavior. Treat a manifest
@@ -93,12 +96,23 @@ while IFS= read -r -d '' path; do
       if ! manifest_is_metadata_only "$path"; then
         rust=true
         bindings=true
+        bazel=true
       fi
       ;;
 
     Cargo.lock | rust-toolchain.toml | .cargo/* | fuzz/*)
       rust=true
       bindings=true
+      bazel=true
+      ;;
+
+    MODULE.bazel | MODULE.bazel.lock | BUILD.bazel | .bazelrc | .bazelversion | \
+      cargo-bazel-lock.json | tools/bazel/* | tools/bazel/**/* | \
+      crates/BUILD.bazel | crates/*/BUILD.bazel | \
+      scripts/ci/cargo-bazel-drift-check.py | \
+      scripts/ci/test-cargo-bazel-drift-check.py | \
+      scripts/ci/BUILD.bazel)
+      bazel=true
       ;;
 
     tests/features/api/* | tests/features/api/**/* | \

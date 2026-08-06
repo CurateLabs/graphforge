@@ -24,6 +24,7 @@ jobs:
       agent_skills: ${{ steps.filter.outputs.agent_skills }}
       pulumi: ${{ steps.filter.outputs.pulumi }}
       terraform: ${{ steps.filter.outputs.terraform }}
+      bazel: ${{ steps.filter.outputs.bazel }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -851,6 +852,35 @@ jobs:
           cargo test -p graphforge-storage project_generation::tests:: --lib
           --no-fail-fast
 
+  bazel-bootstrap:
+    name: Bazel Bootstrap
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.bazel == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Bazelisk
+        run: |
+          sudo curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazelisk version
+
+      - name: Cargo feature drift check (fail-closed)
+        run: |
+          python3 scripts/ci/cargo-bazel-drift-check.py
+          python3 scripts/ci/test-cargo-bazel-drift-check.py
+
+      - name: Bazel smoke build and test
+        run: |
+          # Do not set --remote_cache; Blacksmith injects repository cache.
+          bazelisk test //tools/bazel/smoke:smoke_test
+          bazelisk build //:bazel_smoke
+
   ci-gate:
     name: CI Gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -869,6 +899,7 @@ jobs:
       - node-binding
       - concurrency-matrix
       - windows-graphforge-storage-locks
+      - bazel-bootstrap
     steps:
       - name: Checkout gate implementation
         uses: actions/checkout@v7
@@ -889,3 +920,4 @@ jobs:
           "${{ needs.node-binding.result }}"
           "${{ needs.concurrency-matrix.result }}"
           "${{ needs.windows-graphforge-storage-locks.result }}"
+          "${{ needs.bazel-bootstrap.result }}"
