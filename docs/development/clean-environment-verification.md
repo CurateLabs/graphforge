@@ -18,7 +18,7 @@ artifacts.
 | `skills` | #182 | Install `@curatelabs/graphforge-agent-skills@<version>` + offline `compatibility --json` |
 | `cargo` | #185 | Add all 15 `graphforge-*` crates at `<version>` and compile a clean consumer |
 | `reopen` | #184 | Create/close/reopen project; Arrow rows survive reopen |
-| `urls` | #186 | Published docs + package/registry URLs resolve |
+| `urls` | #186 | Published docs, licensing, and package/registry URLs resolve (human HTML pages optional when CDNs block bots) |
 | `checksums` | #187 | Registry digests match `graphforge-release-record-v1` |
 
 Close each child only with commands + outcomes (or an explicit disposition). The

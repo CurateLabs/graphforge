@@ -184,6 +184,31 @@ def test_urls_lane_reports_failures() -> None:
         assert result.error and "docs_quickstart" in result.error
 
 
+def test_urls_lane_tolerates_optional_html_cdn_blocks() -> None:
+    def fetch(url: str) -> tuple[int, bytes, dict[str, str]]:
+        if "www.npmjs.com" in url or url.startswith("https://crates.io/crates/"):
+            return 403, b"blocked", {}
+        return 200, b"ok", {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = cev.Context(
+            version="0.5.2",
+            work_root=Path(tmp),
+            docs_base=cev.DEFAULT_DOCS_BASE,
+            crates=("graphforge-api",),
+            release_record=None,
+            fetch=fetch,
+            run_cmd=cev.run_subprocess,
+            allow_network_install=False,
+        )
+        result = cev.lane_urls(ctx)
+        assert result.ok is True
+        assert any("optional human HTML" in note for note in result.notes)
+        assert result.artifacts["statuses"]["npm_node"] == 200
+        assert result.artifacts["statuses"]["crates_graphforge-api"] == 200
+        assert result.artifacts["statuses"]["docs_licensing"] == 200
+
+
 def test_checksums_match_release_record() -> None:
     record = sample_record()
 
