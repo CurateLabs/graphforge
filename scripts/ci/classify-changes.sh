@@ -166,6 +166,23 @@ while IFS= read -r -d '' path; do
       bindings=true
       ;;
 
+    # Bazel-mapped hermetic crate test data must win over the binding crate
+    # globs below. Without this ordering, e.g. graphforge-api fixtures only
+    # enable bindings and skip the authoritative Rust/Bazel suite.
+    crates/*/tests/*goldens/* | crates/*/tests/*goldens/**/* | \
+      crates/*/tests/**/*.snap | \
+      crates/*/tests/fixtures/* | crates/*/tests/fixtures/**/* | \
+      crates/*/tests/corpus/* | crates/*/tests/corpus/**/*)
+      rust=true
+      bazel=true
+      case "$path" in
+        crates/graphforge-api/* | crates/graphforge-bindings-py/* | \
+          crates/graphforge-bindings-node/*)
+          bindings=true
+          ;;
+      esac
+      ;;
+
     crates/graphforge-api/* | crates/graphforge-bindings-py/* | crates/graphforge-bindings-node/*)
       bindings=true
       [[ "$path" == *.rs ]] && rust=true
@@ -262,15 +279,11 @@ while IFS= read -r -d '' path; do
       terraform=true
       ;;
 
-    # Bazel-mapped hermetic test data (resource_inputs / filegroups). These are
-    # not *.rs, so they must be classified explicitly or they would fall through
-    # to the fail-closed default below.
+    # Bazel-mapped hermetic test data outside binding crate globs (crate
+    # goldens/fixtures/corpus/snaps are classified earlier so they win over
+    # crates/graphforge-api|bindings-* globs).
     tests/tck/* | tests/tck/**/* | \
       tests/release_workflows/* | tests/release_workflows/**/* | \
-      crates/*/tests/*goldens/* | crates/*/tests/*goldens/**/* | \
-      crates/*/tests/**/*.snap | \
-      crates/*/tests/fixtures/* | crates/*/tests/fixtures/**/* | \
-      crates/*/tests/corpus/* | crates/*/tests/corpus/**/* | \
       docs/contracts/examples/* | docs/contracts/examples/**/* | \
       docs/reference/* | docs/reference/**/*)
       rust=true

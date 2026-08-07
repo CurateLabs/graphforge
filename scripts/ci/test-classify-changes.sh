@@ -144,6 +144,14 @@ assert_classification "$rust_only" \
   crates/graphforge-ontology/tests/fixtures/hr.json ontology-fixture
 assert_classification "$rust_only" \
   crates/graphforge-cypher/tests/corpus/valid.json cypher-corpus
+# Binding-crate fixtures must still enable authoritative Rust/Bazel (not
+# bindings-only from the later crate glob).
+assert_classification "$binding_rust" \
+  crates/graphforge-api/tests/fixtures/x.json api-fixture
+assert_classification "$binding_rust" \
+  crates/graphforge-bindings-py/tests/fixtures/sample.json py-binding-fixture
+assert_classification "$binding_rust" \
+  crates/graphforge-bindings-node/tests/fixtures/sample.json node-binding-fixture
 assert_classification "$binding_rust" \
   examples/agent_grounding/ecommerce_agent.ipynb grounding-notebook
 assert_classification "$rust_only" \
