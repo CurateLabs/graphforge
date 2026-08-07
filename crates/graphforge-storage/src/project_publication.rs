@@ -9,7 +9,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use atomicwrites::{AllowOverwrite, AtomicFile};
-use fs4::fs_std::FileExt;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -401,7 +400,7 @@ fn acquire_writer_lock_for_parts(
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
-    if !FileExt::try_lock_exclusive(&writer_lock).map_err(publication_io)? {
+    if !crate::file_lock::try_lock_exclusive(&writer_lock).map_err(publication_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             format!(
@@ -418,7 +417,7 @@ fn wait_for_writer_lock(root: &Path) -> Result<File, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
-    FileExt::lock_exclusive(&writer_lock).map_err(publication_io)?;
+    crate::file_lock::lock_exclusive(&writer_lock).map_err(publication_io)?;
     Ok(writer_lock)
 }
 
@@ -427,7 +426,7 @@ fn acquire_transaction_lock(
     request: &ProjectGenerationRequest,
 ) -> Result<File, GfError> {
     let lock = open_transaction_lock(root, request.transaction_uuid)?;
-    if !FileExt::try_lock_exclusive(&lock).map_err(publication_io)? {
+    if !crate::file_lock::try_lock_exclusive(&lock).map_err(publication_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             format!(
@@ -1155,7 +1154,7 @@ impl Drop for StagedProjectGeneration {
     fn drop(&mut self) {
         match &self.publication_lock {
             PublicationLock::Exclusive(lock) | PublicationLock::Optimistic(lock) => {
-                let _ = FileExt::unlock(lock);
+                let _ = crate::file_lock::unlock(lock);
             }
         }
     }
@@ -2541,7 +2540,7 @@ mod tests {
             .truncate(false)
             .open(lock_dir.join(WRITER_LOCK_FILE))
             .unwrap();
-        FileExt::lock_exclusive(&lock).unwrap();
+        crate::file_lock::lock_exclusive(&lock).unwrap();
         let parent = resolve_project_generation(root.path())
             .unwrap()
             .generation_uuid();

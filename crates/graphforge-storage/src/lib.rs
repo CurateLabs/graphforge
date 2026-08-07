@@ -10,6 +10,8 @@
 //! - [`search_manifest`] / [`search_publication`] — shared M19 search freshness and atomic publication
 #![forbid(unsafe_code)]
 
+mod file_lock;
+
 pub mod adjacency;
 pub mod adjacency_delta;
 

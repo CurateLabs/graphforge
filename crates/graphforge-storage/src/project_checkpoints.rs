@@ -13,7 +13,6 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use fs4::fs_std::FileExt;
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
 use graphforge_core::{GfError, ProjectErrorCode};
 use parquet::arrow::ArrowWriter;
@@ -225,10 +224,10 @@ impl MutationLocks {
 impl Drop for MutationLocks {
     fn drop(&mut self) {
         if let Some(checkpoint) = &self.checkpoint {
-            let _ = FileExt::unlock(checkpoint);
+            let _ = crate::file_lock::unlock(checkpoint);
         }
         if let Some(writer) = &self.writer {
-            let _ = FileExt::unlock(writer);
+            let _ = crate::file_lock::unlock(writer);
         }
     }
 }
@@ -722,8 +721,8 @@ where
 }
 
 fn release_revert_replay_locks(checkpoint: &File, writer: &File) -> Result<(), GfError> {
-    let checkpoint_unlock = FileExt::unlock(checkpoint);
-    let writer_unlock = FileExt::unlock(writer);
+    let checkpoint_unlock = crate::file_lock::unlock(checkpoint);
+    let writer_unlock = crate::file_lock::unlock(writer);
     finish_revert_replay_lock_handoff(checkpoint_unlock, writer_unlock)
 }
 
@@ -791,7 +790,7 @@ pub(crate) fn checkpoint_retention_roots_after_writer_lock(
 ) -> Result<CheckpointRetentionRoots, GfError> {
     let lock_root = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     let checkpoint_lock = open_regular_lock(&lock_root.join(CHECKPOINT_LOCK_FILE))?;
-    if !FileExt::try_lock_exclusive(&checkpoint_lock).map_err(storage_io)? {
+    if !crate::file_lock::try_lock_exclusive(&checkpoint_lock).map_err(storage_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             "recovery could not acquire checkpoints.lock after writer.lock",
@@ -875,14 +874,14 @@ fn acquire_mutation_locks(root: &Path) -> Result<MutationLocks, GfError> {
     let lock_root = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer = open_regular_lock(&lock_root.join(WRITER_LOCK_FILE))?;
-    if !FileExt::try_lock_exclusive(&writer).map_err(storage_io)? {
+    if !crate::file_lock::try_lock_exclusive(&writer).map_err(storage_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             "checkpoint mutation could not acquire writer.lock",
         ));
     }
     let checkpoint = open_regular_lock(&lock_root.join(CHECKPOINT_LOCK_FILE))?;
-    if !FileExt::try_lock_exclusive(&checkpoint).map_err(storage_io)? {
+    if !crate::file_lock::try_lock_exclusive(&checkpoint).map_err(storage_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             "checkpoint mutation could not acquire checkpoints.lock",
@@ -897,7 +896,7 @@ fn acquire_mutation_locks(root: &Path) -> Result<MutationLocks, GfError> {
 fn acquire_checkpoint_read_lock(root: &Path) -> Result<File, GfError> {
     let lock_root = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     let checkpoint = open_regular_lock(&lock_root.join(CHECKPOINT_LOCK_FILE))?;
-    if !FileExt::try_lock_shared(&checkpoint).map_err(storage_io)? {
+    if !crate::file_lock::try_lock_shared(&checkpoint).map_err(storage_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             "checkpoint read could not acquire checkpoints.lock",
@@ -1790,12 +1789,13 @@ mod tests {
                 let writer =
                     open_regular_lock(&worker_path).expect("phase=holder open writer.lock");
                 assert!(
-                    FileExt::try_lock_exclusive(&writer).expect("phase=holder acquire writer.lock"),
+                    crate::file_lock::try_lock_exclusive(&writer)
+                        .expect("phase=holder acquire writer.lock"),
                     "phase=holder writer.lock unexpectedly busy"
                 );
                 ready_sender.send(()).expect("phase=holder publish ready");
                 release_receiver.recv().expect("phase=holder await release");
-                FileExt::unlock(&writer).expect("phase=holder release writer.lock");
+                crate::file_lock::unlock(&writer).expect("phase=holder release writer.lock");
             })
             .expect("phase=holder spawn");
         let holder = WriterLockHolder {
@@ -2040,21 +2040,21 @@ mod tests {
                 let result = (|| {
                     let writer = open_regular_lock(&worker_writer_path)
                         .map_err(|error| format!("open writer.lock failed: {error}"))?;
-                    FileExt::lock_exclusive(&writer)
+                    crate::file_lock::lock_exclusive(&writer)
                         .map_err(|error| format!("acquire writer.lock failed: {error}"))?;
 
                     let checkpoint = match open_regular_lock(&worker_checkpoint_path) {
                         Ok(checkpoint) => checkpoint,
                         Err(error) => {
-                            let writer_unlock = FileExt::unlock(&writer);
+                            let writer_unlock = crate::file_lock::unlock(&writer);
                             return Err(format!(
                                 "open checkpoints.lock failed: {error}; \
                                  writer_unlock={writer_unlock:?}"
                             ));
                         }
                     };
-                    if let Err(error) = FileExt::lock_exclusive(&checkpoint) {
-                        let writer_unlock = FileExt::unlock(&writer);
+                    if let Err(error) = crate::file_lock::lock_exclusive(&checkpoint) {
+                        let writer_unlock = crate::file_lock::unlock(&writer);
                         return Err(format!(
                             "acquire checkpoints.lock failed: {error}; writer_unlock={writer_unlock:?}"
                         ));
@@ -2068,9 +2068,9 @@ mod tests {
                     } else {
                         Ok(())
                     };
-                    let checkpoint_unlock = FileExt::unlock(&checkpoint)
+                    let checkpoint_unlock = crate::file_lock::unlock(&checkpoint)
                         .map_err(|error| format!("unlock checkpoints.lock failed: {error}"));
-                    let writer_unlock = FileExt::unlock(&writer)
+                    let writer_unlock = crate::file_lock::unlock(&writer)
                         .map_err(|error| format!("unlock writer.lock failed: {error}"));
 
                     recovery?;
@@ -2397,8 +2397,8 @@ mod tests {
         let checkpoint =
             open_regular_lock(&directory.path().join(LOCKS_DIR).join(CHECKPOINT_LOCK_FILE))
                 .unwrap();
-        assert!(FileExt::try_lock_exclusive(&checkpoint).unwrap());
-        FileExt::unlock(&checkpoint).unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&checkpoint).unwrap());
+        crate::file_lock::unlock(&checkpoint).unwrap();
         drop(retained);
     }
 
@@ -2861,7 +2861,7 @@ mod tests {
         let lease =
             crate::project_publication::open_regular_lock(&generation_path.join("lease.lock"))
                 .unwrap();
-        FileExt::lock_shared(&lease).unwrap();
+        crate::file_lock::lock_shared(&lease).unwrap();
         delete_checkpoint(
             directory.path(),
             &CheckpointDeleteRequest {
@@ -2873,7 +2873,7 @@ mod tests {
         .unwrap();
         crate::recover_project_transactions(directory.path()).unwrap();
         assert!(generation_path.exists(), "an open lease was invalidated");
-        FileExt::unlock(&lease).unwrap();
+        crate::file_lock::unlock(&lease).unwrap();
         drop(lease);
         crate::recover_project_transactions(directory.path()).unwrap();
         assert!(
@@ -2996,14 +2996,17 @@ mod tests {
             let name = path.file_name().unwrap().to_str().unwrap();
             Uuid::parse_str(name).expect("generation staging entry leaked");
             let lease = open_regular_lock(&path.join("lease.lock")).unwrap();
-            assert!(FileExt::try_lock_exclusive(&lease).unwrap());
-            FileExt::unlock(&lease).unwrap();
+            assert!(crate::file_lock::try_lock_exclusive(&lease).unwrap());
+            crate::file_lock::unlock(&lease).unwrap();
         }
         let lock_root = root.join(LOCKS_DIR);
         for name in [WRITER_LOCK_FILE, CHECKPOINT_LOCK_FILE] {
             let lock = open_regular_lock(&lock_root.join(name)).unwrap();
-            assert!(FileExt::try_lock_exclusive(&lock).unwrap(), "{name} leaked");
-            FileExt::unlock(&lock).unwrap();
+            assert!(
+                crate::file_lock::try_lock_exclusive(&lock).unwrap(),
+                "{name} leaked"
+            );
+            crate::file_lock::unlock(&lock).unwrap();
         }
     }
 
