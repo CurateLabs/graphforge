@@ -41,7 +41,10 @@ assert mod.validate(
 )
 
 workflow = WORKFLOW.read_text(encoding="utf-8")
-assert "default: v0.5.2" in workflow
+assert "default: v0.5.2" not in workflow
+assert "recovery_overlay_sha:" in workflow
+assert "cancel-in-progress: false" in workflow
+assert "group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}" in workflow
 assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
@@ -76,6 +79,7 @@ crates = workflow.split("  publish-crates:\n", 1)[1].split("\n  reconcile:", 1)[
 summary = workflow.split("  reconcile:\n", 1)[1]
 
 assert "needs: candidate-preflight" in pypi
+assert "environment: release" in pypi
 assert "id-token: write" in pypi
 assert "uv publish candidate/release-artifacts/python/*" in pypi
 assert "secrets.NPM_TOKEN" not in pypi
@@ -84,6 +88,7 @@ assert "secrets.CARGO_REGISTRY_TOKEN" not in pypi
 assert "fail-fast: false" in native
 assert native.count("- graphforge-") == 5
 assert "needs: candidate-preflight" in native
+assert "environment: release" in native
 assert '--package "@curatelabs/${{ matrix.package }}"' in native
 assert "id-token: write" in native
 assert "secrets.NPM_TOKEN" not in native
@@ -91,29 +96,37 @@ assert "NODE_AUTH_TOKEN" not in native
 assert "secrets.CARGO_REGISTRY_TOKEN" not in native
 
 assert "needs: [candidate-preflight, npm-native]" in main
+assert "environment: release" in main
 assert "Require verified native fan-in and authorize main" in main
 assert "--node npm:@curatelabs/graphforge" in main
 assert "id-token: write" in main
 assert "secrets.NPM_TOKEN" not in main
 assert "NODE_AUTH_TOKEN" not in main
 assert "needs: [candidate-preflight, npm-main]" in cli
+assert "environment: release" in cli
 assert "--node npm:@curatelabs/graphforge-cli" in cli
 assert "id-token: write" in cli
 assert "secrets.NPM_TOKEN" not in cli
 assert "NODE_AUTH_TOKEN" not in cli
 assert "needs: [candidate-preflight, npm-cli]" in skills
+assert "environment: release" in skills
 assert "--node npm:@curatelabs/graphforge-agent-skills" in skills
 assert "id-token: write" in skills
 assert "secrets.NPM_TOKEN" not in skills
 assert "NODE_AUTH_TOKEN" not in skills
 
 assert "needs: candidate-preflight" in crates
+assert "environment: release" in crates
 assert "timeout-minutes: 180" in crates
-assert "Use main-branch crates publisher for recovery" in crates
-assert "refs/remotes/origin/main:scripts/publish_crates.py" in crates
-assert "refs/remotes/origin/main:scripts/ci/release_action.py" in crates
-assert "refs/remotes/origin/main:scripts/ci/crate-authorize-refresh-nodes.py" in crates
-assert "refs/remotes/origin/main:scripts/ci/release_registry.py" in crates
+assert "Use reviewed recovery-overlay SHA crates publisher" in crates
+assert "RECOVERY_OVERLAY_SHA" in crates
+assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/publish_crates.py"' in crates
+assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_action.py"' in crates
+assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/crate-authorize-refresh-nodes.py"' in crates
+assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_registry.py"' in crates
+assert "refs/remotes/origin/main:scripts/publish_crates.py" not in crates
+assert "RECOVERY_OVERLAY_SHA" in preflight
+assert 'git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-publish-preflight.py"' in preflight
 assert "scripts/ci/crate-publish-plan.py list" in crates
 assert "scripts/publish_crates.py" in crates
 assert '--crate "$crate"' in crates

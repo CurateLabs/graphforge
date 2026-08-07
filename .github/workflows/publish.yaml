@@ -6,17 +6,25 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing immutable v2 release tag to resume
+        description: Existing immutable v2 release tag to resume (no default; must match the tag)
         required: true
-        default: v0.5.2
         type: string
       recovery_reason:
         description: Public maintainer reason for the recovery dispatch
         required: true
         type: string
+      recovery_overlay_sha:
+        description: Reviewed commit SHA whose publisher/recovery scripts may overlay the tag checkout
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+# One publish lane per tag; never cancel an in-flight registry write.
+concurrency:
+  group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+  cancel-in-progress: false
 
 jobs:
   candidate-preflight:
@@ -45,6 +53,7 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
           EVENT_SHA: ${{ github.sha }}
           RECOVERY_REASON: ${{ inputs.recovery_reason || '' }}
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha || '' }}
         run: |
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           release_sha="$(git rev-parse "$RELEASE_TAG^{}")"
@@ -58,13 +67,19 @@ jobs:
             test "$(git rev-parse refs/remotes/origin/main)" = "$release_sha"
           else
             test -n "$RECOVERY_REASON"
+            test -n "$RECOVERY_OVERLAY_SHA"
+            test "${#RECOVERY_OVERLAY_SHA}" -eq 40
             gh release view "$RELEASE_TAG" >/dev/null
             git merge-base --is-ancestor "$release_sha" refs/remotes/origin/main
-            git show refs/remotes/origin/main:scripts/ci/release-publish-preflight.py \
+            git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+            git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+            git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+            git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release-publish-preflight.py" \
               > "$RUNNER_TEMP/release-publish-preflight.py"
             install -m 0755 "$RUNNER_TEMP/release-publish-preflight.py" \
               scripts/ci/release-publish-preflight.py
             printf 'Recovery reason: %s\n' "$RECOVERY_REASON"
+            printf 'Recovery overlay SHA: %s\n' "$RECOVERY_OVERLAY_SHA"
           fi
           python3 scripts/ci/release-publish-preflight.py \
             --tag "$RELEASE_TAG" \
@@ -206,6 +221,7 @@ jobs:
     name: PyPI node
     needs: candidate-preflight
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -281,6 +297,7 @@ jobs:
           - graphforge-linux-x64-gnu
           - graphforge-win32-x64-msvc
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -358,6 +375,7 @@ jobs:
     name: npm main fan-in
     needs: [candidate-preflight, npm-native]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -432,6 +450,7 @@ jobs:
     name: npm CLI after verified main
     needs: [candidate-preflight, npm-main]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -478,6 +497,7 @@ jobs:
     name: npm agent skills after verified CLI
     needs: [candidate-preflight, npm-cli]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     permissions:
       actions: read
       contents: write
@@ -524,6 +544,7 @@ jobs:
     name: Dependency-ordered crates lane
     needs: candidate-preflight
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: release
     # New-crate rate limits are ~10 minutes each; remaining surface may need ~90+ minutes.
     timeout-minutes: 180
     permissions:
@@ -534,25 +555,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
-      - name: Use main-branch crates publisher for recovery
+      - name: Use reviewed recovery-overlay SHA crates publisher
         if: github.event_name == 'workflow_dispatch'
         shell: bash
+        env:
+          RECOVERY_OVERLAY_SHA: ${{ inputs.recovery_overlay_sha }}
         run: |
           # Recovery checkouts the immutable tag SHA for certified crate bytes.
-          # Overlay the durable publisher (429 Retry-After waits) and authorize
-          # diagnostics from main without moving the tag. Never print secrets.
+          # Overlay durable publisher scripts from an explicit reviewed SHA
+          # (not floating origin/main tip). Never print secrets.
+          test -n "$RECOVERY_OVERLAY_SHA"
+          test "${#RECOVERY_OVERLAY_SHA}" -eq 40
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git show refs/remotes/origin/main:scripts/publish_crates.py \
+          git fetch --no-tags origin "$RECOVERY_OVERLAY_SHA"
+          git cat-file -e "$RECOVERY_OVERLAY_SHA^{commit}"
+          git merge-base --is-ancestor "$RECOVERY_OVERLAY_SHA" refs/remotes/origin/main
+          git show "$RECOVERY_OVERLAY_SHA:scripts/publish_crates.py" \
             > "$RUNNER_TEMP/publish_crates.py"
           install -m 0755 "$RUNNER_TEMP/publish_crates.py" scripts/publish_crates.py
-          git show refs/remotes/origin/main:scripts/ci/release_action.py \
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_action.py" \
             > "$RUNNER_TEMP/release_action.py"
           install -m 0755 "$RUNNER_TEMP/release_action.py" scripts/ci/release_action.py
-          git show refs/remotes/origin/main:scripts/ci/crate-authorize-refresh-nodes.py \
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/crate-authorize-refresh-nodes.py" \
             > "$RUNNER_TEMP/crate-authorize-refresh-nodes.py"
           install -m 0755 "$RUNNER_TEMP/crate-authorize-refresh-nodes.py" \
             scripts/ci/crate-authorize-refresh-nodes.py
-          git show refs/remotes/origin/main:scripts/ci/release_registry.py \
+          git show "$RECOVERY_OVERLAY_SHA:scripts/ci/release_registry.py" \
             > "$RUNNER_TEMP/release_registry.py"
           install -m 0755 "$RUNNER_TEMP/release_registry.py" scripts/ci/release_registry.py
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05

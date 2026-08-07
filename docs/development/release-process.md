@@ -52,7 +52,11 @@ gh release create vX.Y.Z --title "GraphForge vX.Y.Z" --generate-notes
 ```
 
 Publishing is triggered only by the authorized GitHub Release or an authorized
-recovery dispatch for the same immutable release identity.
+recovery dispatch for the same immutable release identity. Recovery
+`workflow_dispatch` requires `release_tag`, `recovery_reason`, and a reviewed
+`recovery_overlay_sha` (publisher scripts overlay that SHA, not floating
+`main`). Registry write jobs use GitHub Environment `release`; concurrency
+group `publish-<tag>` sets `cancel-in-progress: false`.
 
 ## 4. Publish and reconcile
 

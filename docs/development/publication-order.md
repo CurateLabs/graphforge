@@ -158,10 +158,15 @@ headers, cookies, tokens, or raw registry bodies.
 
 ## Recovery and stop conditions
 
-Re-run `publish.yaml` only for the same immutable v0.5.1 tag and provide a
-public recovery reason. The new run re-observes the registries, skips verified
-nodes without downloading unrelated partitions, and schedules only eligible
-absent work.
+Re-run `publish.yaml` only for the same immutable tag via `workflow_dispatch`
+and provide: the exact `release_tag` (no stale default), a public
+`recovery_reason`, and a reviewed `recovery_overlay_sha` (40-char commit on
+`main`) whose publisher/recovery scripts may overlay the tag checkout. Do not
+overlay floating `origin/main` tip. Concurrent runs for the same tag share
+concurrency group `publish-<tag>` with `cancel-in-progress: false`. Registry
+write jobs require the GitHub Environment `release`. The new run re-observes
+the registries, skips verified nodes without downloading unrelated partitions,
+and schedules only eligible absent work.
 
 Stop and require a human decision when:
 
