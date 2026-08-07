@@ -19,12 +19,18 @@ suite → open a focused PR against `main`. For release operators, start at
 
 ## Development Setup
 
-**Prerequisites:** Python 3.10+, Rust stable, [uv](https://github.com/astral-sh/uv), maturin
+**Prerequisites:** Python 3.10+, Rust stable (pinned by `rust-toolchain.toml`),
+[uv](https://github.com/astral-sh/uv), maturin, pnpm for the Node binding, and
+[Bazelisk](https://github.com/bazelbuild/bazelisk) (`bazelisk` on `PATH`).
+CI Rust compile/test authority is Bazel — start with [bazel.md](bazel.md).
 
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
+
+# Install Bazelisk (example: macOS Homebrew)
+brew install bazelisk
 
 git clone https://github.com/CurateLabs/graphforge.git
 cd graphforge
@@ -38,6 +44,9 @@ maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml
 # Verify
 cargo test --workspace
 python -c "import graphforge; print(graphforge.__version__)"
+make pre-push-fast   # requires bazelisk; runs Cargo/Bazel drift
+# Optional heavy local Bazel suite (mirrors CI authority):
+# make bazel-test
 ```
 
 See [Installation](../guide/installation.md) for the published-package path.
@@ -54,10 +63,15 @@ See [Installation](../guide/installation.md) for the published-package path.
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
+make pre-push-fast   # bazelisk + drift, then format/lint/security/…
 make pre-push
+make bazel-test      # optional: bazelisk test //:ci_rust_tests
 ```
 
-`make pre-push` mirrors the CI gate for the changed surface.
+`make pre-push` mirrors the CI gate for the changed surface. Fast path requires
+`bazelisk` and fails closed on Cargo/Bazel feature drift
+(`scripts/ci/cargo-bazel-drift-check.py`). Full local Bazel suite:
+`make bazel-test` (see [bazel.md](bazel.md)).
 
 ### Running Tests
 

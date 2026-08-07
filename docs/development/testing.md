@@ -212,12 +212,16 @@ pytest tests/ -n auto
 ## Resumable full validation
 
 `make pre-push` is the full local gate. It begins with a prerequisite and disk
-preflight, then records content-addressed evidence for policy checks, Rust
-tests and coverage, the instrumented native Python and Node builds consumed by
-acceptance, wrapper coverage, API BDD acceptance, and
-coverage thresholds. It never skips a gate: a compatible passed stage is reused
-only when its exact inputs, command contract, toolchain, dependency evidence,
-and required native artifact identity still match.
+preflight (including `bazelisk` on `PATH`), then records content-addressed
+evidence for policy checks, Rust tests and coverage, the instrumented native
+Python and Node builds consumed by acceptance, wrapper coverage, API BDD
+acceptance, and coverage thresholds. `make pre-push-fast` (also invoked from the
+policy-static stage) runs bazelisk presence + `cargo-bazel-drift-check.py`
+before format/lint/security. Optional authoritative local Bazel suite:
+`make bazel-test` → `bazelisk test //:ci_rust_tests` (see [bazel.md](bazel.md)).
+It never skips a gate: a compatible passed stage is reused only when its exact
+inputs, command contract, toolchain, dependency evidence, and required native
+artifact identity still match.
 
 The human-readable stage lines and machine-readable summary report elapsed time,
 evidence hit or miss, identity digest, invalidation reason, and disk budget.

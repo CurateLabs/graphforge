@@ -38,8 +38,15 @@ Use targeted checks while iterating; run gates appropriate to the changed surfac
 cargo fmt --all -- --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
+make pre-push-fast   # includes bazelisk + Cargo/Bazel drift
 make pre-push
+make bazel-test      # optional: authoritative //:ci_rust_tests locally
 ```
+
+CI Rust compile/test authority is Bazel (`//:ci_rust_tests`); see
+`docs/development/bazel.md`. `make pre-push-fast` requires `bazelisk` on `PATH`
+and runs `cargo-bazel-drift-check.py`. Full `//:ci_rust_tests` is optional
+locally via `make bazel-test` (heavy).
 
 Run formatting after the final edit. Review intentional snapshot changes before accepting them. Keep native builds isolated with `CARGO_TARGET_DIR`; run at most two heavy builds concurrently and monitor disk.
 
