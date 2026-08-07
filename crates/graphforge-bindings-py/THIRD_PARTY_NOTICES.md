@@ -3112,9 +3112,9 @@ Used by:
 - anstyle-parse 1.0.0
 - anstyle-query 1.1.5
 - anstyle-wincon 3.0.11
-- clap 4.6.1
-- clap_builder 4.6.0
-- clap_derive 4.6.1
+- clap 4.6.6
+- clap_builder 4.6.6
+- clap_derive 4.6.4
 - clap_lex 1.1.0
 - colorchoice 1.0.5
 - crc32fast 1.5.0
@@ -5115,7 +5115,7 @@ Used by:
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2
 - url 2.5.8
-- uuid 1.23.2
+- uuid 1.24.0
 - version_check 0.9.5
 - wasi 0.11.1+wasi-snapshot-preview1
 - wasip2 1.0.3+wasi-0.2.9
@@ -6606,9 +6606,9 @@ Apache License
 Used by:
 - allocator-api2 0.2.21
 - android_system_properties 0.1.5
-- anyhow 1.0.102
+- anyhow 1.0.104
 - arrow-pyarrow 58.3.0
-- async-trait 0.1.89
+- async-trait 0.1.91
 - blake3 1.8.5
 - bon 3.9.3
 - bon-macros 3.9.3
@@ -6621,7 +6621,7 @@ Used by:
 - ident_case 1.0.1
 - inventory 0.3.24
 - itoa 1.0.18
-- libc 0.2.186
+- libc 0.2.189
 - miniz_oxide 0.8.9
 - num-conv 0.2.2
 - oneshot 0.1.13
@@ -6648,7 +6648,7 @@ Used by:
 - serde 1.0.228
 - serde_core 1.0.228
 - serde_derive 1.0.228
-- serde_json 1.0.150
+- serde_json 1.0.151
 - serde_yaml_ng 0.9.36
 - shlex 2.0.1
 - simdutf8 0.1.5
@@ -6656,9 +6656,9 @@ Used by:
 - syn 2.0.117
 - syn 3.0.2
 - thiserror 1.0.69
-- thiserror 2.0.18
+- thiserror 2.0.19
 - thiserror-impl 1.0.69
-- thiserror-impl 2.0.18
+- thiserror-impl 2.0.19
 - thrift 0.17.0
 - time 0.3.54
 - time-core 0.1.9
@@ -6994,7 +6994,7 @@ limitations under the License.
 ## Apache License 2.0
 
 Used by:
-- chrono 0.4.44
+- chrono 0.4.45
 
 ```
 Rust-chrono is dual-licensed under The MIT License [1] and
@@ -8463,11 +8463,11 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.9.0
-- napi-build 2.3.2
-- napi-derive 3.5.6
-- napi-derive-backend 5.0.4
-- napi-sys 3.2.1
+- napi 3.11.0
+- napi-build 2.4.0
+- napi-derive 3.6.2
+- napi-derive-backend 6.1.1
+- napi-sys 3.3.0
 - ownedbytes 0.9.0
 - tantivy-bitpacker 0.10.0
 - tantivy-columnar 0.7.0
@@ -8503,7 +8503,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 ## MIT License
 
 Used by:
-- tokio 1.52.3
+- tokio 1.53.1
 - tokio-stream 0.1.18
 - tokio-util 0.7.18
 
