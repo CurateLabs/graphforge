@@ -18,7 +18,6 @@
 //! and filter application.  This is correct and simple for M12; lower-level
 //! pushdown can be added in a later milestone.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
@@ -1097,10 +1096,6 @@ impl TopologyNodeTable {
 
 #[async_trait]
 impl TableProvider for TopologyNodeTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         TOPOLOGY_NODES_SCHEMA.clone()
     }
@@ -1158,10 +1153,6 @@ impl TypedEdgeTable {
 
 #[async_trait]
 impl TableProvider for TypedEdgeTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -1210,10 +1201,6 @@ impl UnionEdgeTable {
 
 #[async_trait]
 impl TableProvider for UnionEdgeTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         EXPLORATORY_EDGE_SCHEMA.clone()
     }
@@ -1326,10 +1313,6 @@ impl EdgePropertyTable {
 
 #[async_trait]
 impl TableProvider for EdgePropertyTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -1361,10 +1344,6 @@ pub(crate) fn discover_parquet_schema(path: &Path) -> Option<SchemaRef> {
 
 #[async_trait]
 impl TableProvider for PropertyTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -1416,10 +1395,6 @@ impl GraphSchema {
 
 #[async_trait]
 impl SchemaProvider for GraphSchema {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tables.keys().cloned().collect();
         names.sort();
@@ -1621,10 +1596,6 @@ fn build_label_names(runtime_catalog: &RuntimeCatalog) -> HashMap<u32, String> {
 }
 
 impl CatalogProvider for GraphCatalog {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema_names(&self) -> Vec<String> {
         vec!["graph".to_owned()]
     }
@@ -1947,11 +1918,11 @@ mod tests {
         for (index, provider) in providers.into_iter().enumerate() {
             assert_eq!(provider.table_type(), TableType::Base);
             assert!(
-                provider.as_any().is::<TopologyNodeTable>()
-                    || provider.as_any().is::<TypedEdgeTable>()
-                    || provider.as_any().is::<UnionEdgeTable>()
-                    || provider.as_any().is::<PropertyTable>()
-                    || provider.as_any().is::<EdgePropertyTable>()
+                provider.is::<TopologyNodeTable>()
+                    || provider.is::<TypedEdgeTable>()
+                    || provider.is::<UnionEdgeTable>()
+                    || provider.is::<PropertyTable>()
+                    || provider.is::<EdgePropertyTable>()
             );
             let name = format!("provider_{index}");
             let expected = provider.schema();
@@ -2182,8 +2153,9 @@ mod tests {
     fn catalog_and_schema_debug_identity_are_stable_and_content_free() {
         let schema = GraphSchema::new();
         assert_eq!(format!("{schema:?}"), "GraphSchema { table_names: [] }");
-        assert!(schema.as_any().downcast_ref::<GraphSchema>().is_some());
-        assert!(!schema.table_exist("missing"));
+        let schema_provider: Arc<dyn SchemaProvider> = Arc::new(schema);
+        assert!(schema_provider.downcast_ref::<GraphSchema>().is_some());
+        assert!(!schema_provider.table_exist("missing"));
 
         let dir = TempDir::new().unwrap();
         let catalog = GraphCatalog::open(dir.path(), None, &RuntimeCatalog::new()).unwrap();
@@ -2191,9 +2163,10 @@ mod tests {
             format!("{catalog:?}"),
             "GraphCatalog { schema_names: [\"graph\"] }"
         );
-        assert!(catalog.as_any().downcast_ref::<GraphCatalog>().is_some());
-        assert!(catalog.schema("graph").is_some());
-        assert!(catalog.schema("private").is_none());
+        let catalog_provider: Arc<dyn CatalogProvider> = Arc::new(catalog);
+        assert!(catalog_provider.downcast_ref::<GraphCatalog>().is_some());
+        assert!(catalog_provider.schema("graph").is_some());
+        assert!(catalog_provider.schema("private").is_none());
     }
 
     #[test]

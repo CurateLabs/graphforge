@@ -4,7 +4,6 @@
 //! [`ExprArena`] from a [`GraphPlan`] and produces DataFusion [`Expr`] values
 //! that can be consumed by operator lowering (#575, #576).
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -3592,10 +3591,6 @@ fn dynamic_het_type(arg_types: &[DataType]) -> DataType {
 }
 
 impl ScalarUDFImpl for CypherDynamicHetList {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_dynamic_het_list"
     }
@@ -3773,10 +3768,6 @@ impl CypherRelationshipDisjoint {
 }
 
 impl ScalarUDFImpl for CypherRelationshipDisjoint {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_relationship_disjoint"
     }
@@ -3871,10 +3862,6 @@ impl CypherListPlus {
 }
 
 impl ScalarUDFImpl for CypherListPlus {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_list_plus"
     }
@@ -5332,10 +5319,6 @@ impl CypherConversion {
 }
 
 impl ScalarUDFImpl for CypherConversion {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         match self.kind {
             CypherConversionKind::Integer => "cypher_to_integer",
@@ -5556,10 +5539,6 @@ impl CypherRowMarker {
 }
 
 impl ScalarUDFImpl for CypherRowMarker {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_row_marker"
     }
@@ -5596,10 +5575,6 @@ impl CypherSize {
 }
 
 impl ScalarUDFImpl for CypherSize {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_size"
     }
@@ -5714,10 +5689,6 @@ impl CypherGraphMetadata {
 }
 
 impl ScalarUDFImpl for CypherGraphMetadata {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         match self.kind {
             GraphMetadataKind::Labels => "cypher_labels",
@@ -5811,10 +5782,6 @@ impl CypherEntityProperties {
 }
 
 impl ScalarUDFImpl for CypherEntityProperties {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_entity_properties"
     }
@@ -5904,10 +5871,6 @@ impl CypherMapKeys {
 }
 
 impl ScalarUDFImpl for CypherMapKeys {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_map_keys"
     }
@@ -6076,10 +6039,6 @@ impl CypherStaticValueAccess {
 }
 
 impl ScalarUDFImpl for CypherStaticValueAccess {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_static_value_access"
     }
@@ -6162,10 +6121,6 @@ impl CypherValueAccess {
 }
 
 impl ScalarUDFImpl for CypherValueAccess {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_value_access"
     }
@@ -6509,9 +6464,6 @@ impl CypherReverse {
 }
 
 impl ScalarUDFImpl for CypherReverse {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_reverse"
     }
@@ -6623,9 +6575,6 @@ impl CypherBoolOp {
 }
 
 impl ScalarUDFImpl for CypherBoolOp {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         match self.kind {
             CypherBoolOpKind::And => "cypher_and",
@@ -6707,9 +6656,6 @@ impl CypherCmpPred {
 }
 
 impl ScalarUDFImpl for CypherCmpPred {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_cmp_pred"
     }
@@ -6817,9 +6763,6 @@ impl CypherStringPredicate {
 }
 
 impl ScalarUDFImpl for CypherStringPredicate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         match self.kind {
             StringPredicate::Starts => "cypher_starts_with",
@@ -6891,9 +6834,6 @@ impl CypherRange {
 }
 
 impl ScalarUDFImpl for CypherRange {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_range"
     }
@@ -6987,9 +6927,6 @@ impl CypherOrderKey {
 }
 
 impl ScalarUDFImpl for CypherOrderKey {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_order_key"
     }
@@ -7134,10 +7071,6 @@ impl CypherEq {
 }
 
 impl ScalarUDFImpl for CypherEq {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_eq"
     }
@@ -7334,9 +7267,6 @@ fn cypher_in_tagged_list(
 }
 
 impl ScalarUDFImpl for CypherIn {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_in"
     }
@@ -7633,9 +7563,6 @@ impl std::hash::Hash for CypherExtreme {
     }
 }
 impl datafusion::logical_expr::AggregateUDFImpl for CypherExtreme {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &str {
         if self.is_max {
             "cypher_max"
@@ -7757,9 +7684,6 @@ impl std::hash::Hash for CypherCollect {
 }
 
 impl datafusion::logical_expr::AggregateUDFImpl for CypherCollect {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &str {
         if self.distinct {
             "cypher_collect_distinct"
@@ -7910,10 +7834,6 @@ impl std::hash::Hash for CypherPercentile {
 }
 
 impl datafusion::logical_expr::AggregateUDFImpl for CypherPercentile {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         if self.continuous {
             "cypher_percentile_cont"
@@ -8385,10 +8305,6 @@ impl CypherDateComponent {
 }
 
 impl ScalarUDFImpl for CypherDateComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_component"
     }
@@ -8449,10 +8365,6 @@ impl CypherDurationComponent {
 }
 
 impl ScalarUDFImpl for CypherDurationComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_component"
     }
@@ -8544,10 +8456,6 @@ impl CypherTemporalComponent {
 }
 
 impl ScalarUDFImpl for CypherTemporalComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_component"
     }
@@ -8647,10 +8555,6 @@ impl CypherTemporalZoneStr {
 }
 
 impl ScalarUDFImpl for CypherTemporalZoneStr {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_zone_str"
     }
@@ -8763,10 +8667,6 @@ fn between_operand(
 }
 
 impl ScalarUDFImpl for CypherDurationBetween {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_between"
     }
@@ -8846,10 +8746,6 @@ impl CypherTemporalArith {
 }
 
 impl ScalarUDFImpl for CypherTemporalArith {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_arith"
     }
@@ -9013,9 +8909,6 @@ impl CypherDurationParse {
 }
 
 impl ScalarUDFImpl for CypherDurationParse {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_duration_parse"
     }
@@ -9072,10 +8965,6 @@ impl CypherDurationAdd {
 }
 
 impl ScalarUDFImpl for CypherDurationAdd {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_add"
     }
@@ -9153,9 +9042,6 @@ impl CypherDurationScale {
 }
 
 impl ScalarUDFImpl for CypherDurationScale {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_duration_scale"
     }
@@ -9320,9 +9206,6 @@ fn reduce_invariant_quantifier(
 }
 
 impl ScalarUDFImpl for CypherInvariantQuantifier {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_invariant_quantifier"
     }
@@ -9360,9 +9243,6 @@ impl ScalarUDFImpl for CypherInvariantQuantifier {
 }
 
 impl ScalarUDFImpl for CypherQuantifier {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_quantifier"
     }
@@ -9648,9 +9528,6 @@ impl CypherListComp {
 }
 
 impl ScalarUDFImpl for CypherListComp {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_list_comprehension"
     }
@@ -9877,10 +9754,6 @@ impl CypherDateProject {
 }
 
 impl ScalarUDFImpl for CypherDateProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_project"
     }
@@ -9992,10 +9865,6 @@ impl CypherLocalTimeProject {
 }
 
 impl ScalarUDFImpl for CypherLocalTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localtime_project"
     }
@@ -10107,10 +9976,6 @@ impl CypherLocalTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherLocalTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localtime_truncate"
     }
@@ -10465,10 +10330,6 @@ impl CypherLocalDateTimeProject {
 }
 
 impl ScalarUDFImpl for CypherLocalDateTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localdatetime_project"
     }
@@ -10634,10 +10495,6 @@ impl CypherLocalDateTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localdatetime_truncate"
     }
@@ -10860,10 +10717,6 @@ impl CypherTimeProject {
 }
 
 impl ScalarUDFImpl for CypherTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_time_project"
     }
@@ -10993,10 +10846,6 @@ impl CypherTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_time_truncate"
     }
@@ -11221,10 +11070,6 @@ impl CypherDateTimeProject {
 }
 
 impl ScalarUDFImpl for CypherDateTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_datetime_project"
     }
@@ -11397,10 +11242,6 @@ impl CypherDateTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherDateTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_datetime_truncate"
     }
@@ -11591,10 +11432,6 @@ impl CypherToString {
 }
 
 impl ScalarUDFImpl for CypherToString {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_to_string"
     }
@@ -11791,10 +11628,6 @@ impl CypherDateTruncate {
 }
 
 impl ScalarUDFImpl for CypherDateTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_truncate"
     }
@@ -11967,10 +11800,6 @@ impl CypherPathNodes {
 }
 
 impl ScalarUDFImpl for CypherPathNodes {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_path_nodes"
     }
@@ -12348,10 +12177,6 @@ mod tests {
     }
 
     impl ScalarUDFImpl for CountingVolatilePredicate {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn name(&self) -> &'static str {
             "counting_volatile_predicate"
         }
@@ -13328,7 +13153,7 @@ mod tests {
             let DfExpr::ScalarFunction(f) = e else {
                 return Option::None;
             };
-            let q = f.func.inner().as_any().downcast_ref::<CypherQuantifier>()?;
+            let q = f.func.inner().downcast_ref::<CypherQuantifier>()?;
             Some((q.elem_name.clone(), q.outer_names.clone(), f.args.clone()))
         };
 
@@ -16588,7 +16413,7 @@ mod tests {
     #[test]
     fn exact_zero_temporal_udf_metadata_contracts_are_total() {
         fn check<U: ScalarUDFImpl + 'static>(udf: U) {
-            assert!(udf.as_any().is::<U>());
+            assert!(udf.is::<U>());
             assert!(!udf.name().is_empty());
             let _ = udf.signature();
             assert!(udf.return_type(&[DataType::Null]).is_ok());

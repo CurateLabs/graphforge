@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "120121b17f30a08315e9b6cd7722546d2ec5d42030a1cbc3f2ab3121852204de",
+  "sha256": "5bf6ceb145c5f44c9489528cf177a8cbfb5efd8575c91096e62760f9e6e4886b",
   "entries": [
     {
       "name": "graphforge-api",
@@ -29,7 +29,7 @@
         },
         {
           "name": "datafusion",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -715,7 +715,7 @@
         },
         {
           "name": "datafusion",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -724,7 +724,7 @@
         },
         {
           "name": "datafusion-datasource",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1186,7 +1186,7 @@
       "dependencies": [
         {
           "name": "datafusion",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1316,7 +1316,7 @@
         },
         {
           "name": "datafusion",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1325,7 +1325,7 @@
         },
         {
           "name": "datafusion-functions-aggregate",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1551,7 +1551,7 @@
         },
         {
           "name": "datafusion",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1560,7 +1560,7 @@
         },
         {
           "name": "datafusion-catalog",
-          "req": "^53",
+          "req": "^54",
           "features": [],
           "optional": false,
           "uses_default_features": true,

@@ -6,7 +6,6 @@
 //! the fixed-hop operators below that semantic boundary. Unknown and blocking
 //! operators are deliberately opaque: demand never crosses them.
 
-use std::any::Any;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::pin::Pin;
@@ -404,7 +403,7 @@ impl PhysicalOptimizerRule for FixedHopDemandRule {
 }
 
 fn find_terminal_demand(plan: &Arc<dyn ExecutionPlan>) -> Option<TerminalDemand> {
-    if let Some(limit) = plan.as_any().downcast_ref::<GlobalLimitExec>() {
+    if let Some(limit) = plan.downcast_ref::<GlobalLimitExec>() {
         let fetch = limit.fetch()?;
         return Some(TerminalDemand {
             batch_goal: limit.skip().saturating_add(fetch),
@@ -429,20 +428,20 @@ fn find_terminal_demand(plan: &Arc<dyn ExecutionPlan>) -> Option<TerminalDemand>
 }
 
 fn is_fetch_transparent(plan: &dyn ExecutionPlan) -> bool {
-    plan.as_any().is::<GlobalLimitExec>()
-        || plan.as_any().is::<LocalLimitExec>()
-        || plan.as_any().is::<CoalescePartitionsExec>()
-        || plan.as_any().is::<FilterExec>()
-        || plan.as_any().is::<ProjectionExec>()
-        || plan.as_any().is::<RepartitionExec>()
-        || plan.as_any().is::<ExpandExec>()
+    plan.is::<GlobalLimitExec>()
+        || plan.is::<LocalLimitExec>()
+        || plan.is::<CoalescePartitionsExec>()
+        || plan.is::<FilterExec>()
+        || plan.is::<ProjectionExec>()
+        || plan.is::<RepartitionExec>()
+        || plan.is::<ExpandExec>()
 }
 
 /// Whether a fixed hop is reachable without crossing a semantic boundary.
 /// This is intentionally stricter than a whole-tree search: an exchange above
 /// a sort/join/aggregate must not be treated as part of the bounded pipeline.
 fn contains_demand_expand(plan: &Arc<dyn ExecutionPlan>) -> bool {
-    if plan.as_any().is::<ExpandExec>() {
+    if plan.is::<ExpandExec>() {
         return true;
     }
     is_fetch_transparent(plan.as_ref()) && plan.children().into_iter().any(contains_demand_expand)
@@ -454,7 +453,7 @@ fn rewrite_bounded(
     demand: Arc<QueryDemand>,
     filter_ordinal: &mut usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
-    if let Some(repartition) = plan.as_any().downcast_ref::<RepartitionExec>()
+    if let Some(repartition) = plan.downcast_ref::<RepartitionExec>()
         && !repartition.preserve_order()
         && matches!(repartition.partitioning(), Partitioning::RoundRobinBatch(_))
         && contains_demand_expand(repartition.input())
@@ -471,12 +470,11 @@ fn rewrite_bounded(
         return Ok(plan); // fail closed at blockers and unknown nodes
     }
 
-    if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
+    if let Some(filter) = plan.downcast_ref::<FilterExec>() {
         let ordinal = *filter_ordinal;
         *filter_ordinal += 1;
         let uniqueness = filter
             .predicate()
-            .as_any()
             .downcast_ref::<ScalarFunctionExpr>()
             .is_some_and(|function| function.name() == "cypher_relationship_disjoint");
         let child = rewrite_bounded(
@@ -515,7 +513,7 @@ fn rewrite_bounded(
     } else {
         plan.with_new_children(rewritten_children)?
     };
-    if let Some(expand) = rebuilt.as_any().downcast_ref::<ExpandExec>() {
+    if let Some(expand) = rebuilt.downcast_ref::<ExpandExec>() {
         return Ok(expand.with_demand(batch_goal, demand));
     }
     Ok(rebuilt)
@@ -570,10 +568,6 @@ impl DisplayAs for ProbeExec {
 impl ExecutionPlan for ProbeExec {
     fn name(&self) -> &str {
         "DemandProbeExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -684,10 +678,6 @@ impl DisplayAs for DemandGuardExec {
 impl ExecutionPlan for DemandGuardExec {
     fn name(&self) -> &str {
         "DemandGuardExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -1067,7 +1057,7 @@ mod tests {
         let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
         let probe = ProbeExec::new(Arc::clone(&child), 3, true, true);
         assert_eq!(probe.name(), "DemandProbeExec");
-        assert!(probe.as_any().is::<ProbeExec>());
+        assert!(probe.is::<ProbeExec>());
         assert!(format!("{probe:?}").contains("ordinal: 3"));
         assert!(
             format!(
@@ -1081,7 +1071,7 @@ mod tests {
 
         let demand = Arc::new(QueryDemand::new());
         let guard = DemandGuardExec::new(child, Arc::clone(&demand), 2);
-        assert!(guard.as_any().is::<DemandGuardExec>());
+        assert!(guard.is::<DemandGuardExec>());
         assert!(format!("{guard:?}").contains("cancel_after: 2"));
         assert!(
             format!(

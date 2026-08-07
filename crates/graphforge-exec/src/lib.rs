@@ -207,7 +207,6 @@ pub use algorithm_similar::{similar_algorithm, similar_projection_fingerprint};
 
 mod write_driver;
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -717,10 +716,6 @@ impl DisplayAs for GraphCreateExec {
 impl ExecutionPlan for GraphCreateExec {
     fn name(&self) -> &str {
         "GraphCreateExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -1373,7 +1368,7 @@ fn append_created_node_output_cols(
 /// created rows, not the summary, so the counts are read back from the exec's
 /// shared tally after execution rather than from the result batch.
 fn create_tally_in_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<CreateTally> {
-    if let Some(c) = plan.as_any().downcast_ref::<GraphCreateExec>()
+    if let Some(c) = plan.downcast_ref::<GraphCreateExec>()
         && c.emits_rows()
     {
         return Some(c.effects());
@@ -1503,10 +1498,6 @@ impl DisplayAs for GraphDeleteExec {
 impl ExecutionPlan for GraphDeleteExec {
     fn name(&self) -> &str {
         "GraphDeleteExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2063,10 +2054,6 @@ impl ExecutionPlan for GraphSetExec {
         "GraphSetExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -2204,10 +2191,6 @@ impl DisplayAs for GraphRemoveExec {
 impl ExecutionPlan for GraphRemoveExec {
     fn name(&self) -> &str {
         "GraphRemoveExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2391,10 +2374,6 @@ impl ExecutionPlan for VarLenExpandExec {
         "VarLenExpandExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -2517,10 +2496,6 @@ impl DisplayAs for OntologyInferExec {
 impl ExecutionPlan for OntologyInferExec {
     fn name(&self) -> &str {
         "OntologyInferExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -3258,10 +3233,6 @@ impl ExecutionPlan for ExpandExec {
         "ExpandExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -3741,10 +3712,6 @@ impl ExecutionPlan for OptionalMatchExec {
         "OptionalMatchExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -4015,10 +3982,6 @@ impl DisplayAs for UnwindExec {
 impl ExecutionPlan for UnwindExec {
     fn name(&self) -> &str {
         "UnwindExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -6442,10 +6405,10 @@ mod tests {
         ] {
             assert_eq!(plan.name(), expected_name);
             assert!(
-                plan.as_any().is::<GraphCreateExec>()
-                    || plan.as_any().is::<GraphDeleteExec>()
-                    || plan.as_any().is::<GraphSetExec>()
-                    || plan.as_any().is::<GraphRemoveExec>()
+                plan.is::<GraphCreateExec>()
+                    || plan.is::<GraphDeleteExec>()
+                    || plan.is::<GraphSetExec>()
+                    || plan.is::<GraphRemoveExec>()
             );
             assert_eq!(plan.children().len(), 1);
             assert_eq!(plan.properties().output_partitioning().partition_count(), 1);

@@ -1,5 +1,5 @@
 {
-  "checksum": "86cf277c8ad3a27703c2a988acf5e28c2f13776e3e768bb32663b1f911a897fd",
+  "checksum": "ff07780c6da0c14fbccedd474016ead7caa83b11db8601da086498f55c659c48",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -83,11 +83,16 @@
           "**"
         ],
         "crate_features": {
-          "common": [
-            "getrandom",
-            "runtime-rng"
-          ],
+          "common": [],
           "selects": {
+            "aarch64-apple-darwin": [
+              "getrandom",
+              "runtime-rng"
+            ],
+            "aarch64-unknown-linux-gnu": [
+              "getrandom",
+              "runtime-rng"
+            ],
             "wasm32-unknown-unknown": [
               "compile-time-rng",
               "const-random"
@@ -95,6 +100,18 @@
             "wasm32-wasip1": [
               "compile-time-rng",
               "const-random"
+            ],
+            "x86_64-pc-windows-msvc": [
+              "getrandom",
+              "runtime-rng"
+            ],
+            "x86_64-unknown-linux-gnu": [
+              "getrandom",
+              "runtime-rng"
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              "getrandom",
+              "runtime-rng"
             ]
           }
         },
@@ -105,15 +122,23 @@
               "target": "cfg_if"
             },
             {
-              "id": "getrandom 0.3.4",
-              "target": "getrandom"
-            },
-            {
               "id": "zerocopy 0.8.50",
               "target": "zerocopy"
             }
           ],
           "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "getrandom 0.3.4",
+                "target": "getrandom"
+              }
+            ],
+            "aarch64-unknown-linux-gnu": [
+              {
+                "id": "getrandom 0.3.4",
+                "target": "getrandom"
+              }
+            ],
             "cfg(not(all(target_arch = \"arm\", target_os = \"none\")))": [
               {
                 "id": "once_cell 1.21.4",
@@ -130,6 +155,24 @@
               {
                 "id": "const-random 0.1.18",
                 "target": "const_random"
+              }
+            ],
+            "x86_64-pc-windows-msvc": [
+              {
+                "id": "getrandom 0.3.4",
+                "target": "getrandom"
+              }
+            ],
+            "x86_64-unknown-linux-gnu": [
+              {
+                "id": "getrandom 0.3.4",
+                "target": "getrandom"
+              }
+            ],
+            "x86_64-unknown-nixos-gnu": [
+              {
+                "id": "getrandom 0.3.4",
+                "target": "getrandom"
               }
             ]
           }
@@ -978,6 +1021,7 @@
             "arrow-csv",
             "arrow-ipc",
             "arrow-json",
+            "canonical_extension_types",
             "chrono-tz",
             "csv",
             "default",
@@ -2887,6 +2931,54 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "block-buffer 0.12.1": {
+      "name": "block-buffer",
+      "version": "0.12.1",
+      "package_url": "https://github.com/RustCrypto/utils",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/block-buffer/0.12.1/download",
+          "sha256": "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "block_buffer",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "block_buffer",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "hybrid-array 0.4.14",
+              "target": "hybrid_array"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.12.1"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "bon 3.9.3": {
       "name": "bon",
       "version": "3.9.3",
@@ -4403,6 +4495,45 @@
       ],
       "license_file": "LICENSE"
     },
+    "const-oid 0.10.2": {
+      "name": "const-oid",
+      "version": "0.10.2",
+      "package_url": "https://github.com/RustCrypto/formats",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/const-oid/0.10.2/download",
+          "sha256": "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "const_oid",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "const_oid",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "edition": "2024",
+        "version": "0.10.2"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "const-random 0.1.18": {
       "name": "const-random",
       "version": "0.1.18",
@@ -5242,6 +5373,54 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "crypto-common 0.2.2": {
+      "name": "crypto-common",
+      "version": "0.2.2",
+      "package_url": "https://github.com/RustCrypto/traits",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/crypto-common/0.2.2/download",
+          "sha256": "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "crypto_common",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "crypto_common",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "hybrid-array 0.4.14",
+              "target": "hybrid_array"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.2.2"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "csv 1.4.0": {
       "name": "csv",
       "version": "1.4.0",
@@ -5945,14 +6124,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "datafusion 53.1.0": {
+    "datafusion 54.1.0": {
       "name": "datafusion",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion/53.1.0/download",
-          "sha256": "93db0e623840612f7f2cd757f7e8a8922064192363732c88692e0870016e141b"
+          "url": "https://static.crates.io/crates/datafusion/54.1.0/download",
+          "sha256": "754ef4e8f073922a26f5b23133b9db4829342362b09be0bc94309cf261c2f098"
         }
       },
       "targets": [
@@ -6010,10 +6189,6 @@
               "target": "arrow_schema"
             },
             {
-              "id": "bytes 1.11.1",
-              "target": "bytes"
-            },
-            {
               "id": "bzip2 0.6.1",
               "target": "bzip2"
             },
@@ -6022,103 +6197,103 @@
               "target": "chrono"
             },
             {
-              "id": "datafusion-catalog 53.1.0",
+              "id": "datafusion-catalog 54.1.0",
               "target": "datafusion_catalog"
             },
             {
-              "id": "datafusion-catalog-listing 53.1.0",
+              "id": "datafusion-catalog-listing 54.1.0",
               "target": "datafusion_catalog_listing"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-datasource-arrow 53.1.0",
+              "id": "datafusion-datasource-arrow 54.1.0",
               "target": "datafusion_datasource_arrow"
             },
             {
-              "id": "datafusion-datasource-csv 53.1.0",
+              "id": "datafusion-datasource-csv 54.1.0",
               "target": "datafusion_datasource_csv"
             },
             {
-              "id": "datafusion-datasource-json 53.1.0",
+              "id": "datafusion-datasource-json 54.1.0",
               "target": "datafusion_datasource_json"
             },
             {
-              "id": "datafusion-datasource-parquet 53.1.0",
+              "id": "datafusion-datasource-parquet 54.1.0",
               "target": "datafusion_datasource_parquet"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-functions 53.1.0",
+              "id": "datafusion-functions 54.1.0",
               "target": "datafusion_functions"
             },
             {
-              "id": "datafusion-functions-aggregate 53.1.0",
+              "id": "datafusion-functions-aggregate 54.1.0",
               "target": "datafusion_functions_aggregate"
             },
             {
-              "id": "datafusion-functions-nested 53.1.0",
+              "id": "datafusion-functions-nested 54.1.0",
               "target": "datafusion_functions_nested"
             },
             {
-              "id": "datafusion-functions-table 53.1.0",
+              "id": "datafusion-functions-table 54.1.0",
               "target": "datafusion_functions_table"
             },
             {
-              "id": "datafusion-functions-window 53.1.0",
+              "id": "datafusion-functions-window 54.1.0",
               "target": "datafusion_functions_window"
             },
             {
-              "id": "datafusion-optimizer 53.1.0",
+              "id": "datafusion-optimizer 54.1.0",
               "target": "datafusion_optimizer"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-adapter 53.1.0",
+              "id": "datafusion-physical-expr-adapter 54.1.0",
               "target": "datafusion_physical_expr_adapter"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-optimizer 53.1.0",
+              "id": "datafusion-physical-optimizer 54.1.0",
               "target": "datafusion_physical_optimizer"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
-              "id": "datafusion-sql 53.1.0",
+              "id": "datafusion-sql 54.1.0",
               "target": "datafusion_sql"
             },
             {
@@ -6128,6 +6303,10 @@
             {
               "id": "futures 0.3.32",
               "target": "futures"
+            },
+            {
+              "id": "indexmap 2.14.0",
+              "target": "indexmap"
             },
             {
               "id": "itertools 0.14.0",
@@ -6154,15 +6333,7 @@
               "target": "parquet"
             },
             {
-              "id": "rand 0.9.4",
-              "target": "rand"
-            },
-            {
-              "id": "regex 1.12.3",
-              "target": "regex"
-            },
-            {
-              "id": "sqlparser 0.61.0",
+              "id": "sqlparser 0.62.0",
               "target": "sqlparser"
             },
             {
@@ -6198,7 +6369,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6206,14 +6377,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-catalog 53.1.0": {
+    "datafusion-catalog 54.1.0": {
       "name": "datafusion-catalog",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-catalog/53.1.0/download",
-          "sha256": "37cefde60b26a7f4ff61e9d2ff2833322f91df2b568d7238afe67bde5bdffb66"
+          "url": "https://static.crates.io/crates/datafusion-catalog/54.1.0/download",
+          "sha256": "06afd1e38dd27bbb1258685a1fc6524df6aff4e07b25b393a47de59635178d99"
         }
       },
       "targets": [
@@ -6246,35 +6417,35 @@
               "target": "dashmap"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -6314,7 +6485,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6322,14 +6493,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-catalog-listing 53.1.0": {
+    "datafusion-catalog-listing 54.1.0": {
       "name": "datafusion-catalog-listing",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-catalog-listing/53.1.0/download",
-          "sha256": "17e112307715d6a7a331111a4c2330ff54bc237183511c319e3708a4cff431fb"
+          "url": "https://static.crates.io/crates/datafusion-catalog-listing/54.1.0/download",
+          "sha256": "f0668fb32c12065ec242be0e5b4bc62bd7a06a0be3ecd83791ef877e4be67e02"
         }
       },
       "targets": [
@@ -6358,39 +6529,39 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-catalog 53.1.0",
+              "id": "datafusion-catalog 54.1.0",
               "target": "datafusion_catalog"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-adapter 53.1.0",
+              "id": "datafusion-physical-expr-adapter 54.1.0",
               "target": "datafusion_physical_expr_adapter"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
@@ -6422,7 +6593,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6430,14 +6601,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-common 53.1.0": {
+    "datafusion-common 54.1.0": {
       "name": "datafusion-common",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-common/53.1.0/download",
-          "sha256": "d72a11ca44a95e1081870d3abb80c717496e8a7acb467a1d3e932bb636af5cc2"
+          "url": "https://static.crates.io/crates/datafusion-common/54.1.0/download",
+          "sha256": "ca43b263cdff57042cfa8fb817fb3469f4878933380dccff25f5e793580abbf9"
         }
       },
       "targets": [
@@ -6472,10 +6643,6 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
             },
@@ -6484,15 +6651,23 @@
               "target": "arrow_ipc"
             },
             {
+              "id": "arrow-schema 58.3.0",
+              "target": "arrow_schema"
+            },
+            {
               "id": "chrono 0.4.45",
               "target": "chrono"
+            },
+            {
+              "id": "foldhash 0.2.0",
+              "target": "foldhash"
             },
             {
               "id": "half 2.7.1",
               "target": "half"
             },
             {
-              "id": "hashbrown 0.16.1",
+              "id": "hashbrown 0.17.1",
               "target": "hashbrown"
             },
             {
@@ -6524,12 +6699,16 @@
               "target": "recursive"
             },
             {
-              "id": "sqlparser 0.61.0",
+              "id": "sqlparser 0.62.0",
               "target": "sqlparser"
             },
             {
               "id": "tokio 1.53.1",
               "target": "tokio"
+            },
+            {
+              "id": "uuid 1.24.0",
+              "target": "uuid"
             }
           ],
           "selects": {
@@ -6542,16 +6721,7 @@
           }
         },
         "edition": "2024",
-        "proc_macro_deps": {
-          "common": [
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
-            }
-          ],
-          "selects": {}
-        },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6559,14 +6729,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-common-runtime 53.1.0": {
+    "datafusion-common-runtime 54.1.0": {
       "name": "datafusion-common-runtime",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-common-runtime/53.1.0/download",
-          "sha256": "89f4afaed29670ec4fd6053643adc749fe3f4bc9d1ce1b8c5679b22c67d12def"
+          "url": "https://static.crates.io/crates/datafusion-common-runtime/54.1.0/download",
+          "sha256": "05f0ba2b864792bdca4d76c59a1de0ab6e1b61946596b9936888dbd6360035f2"
         }
       },
       "targets": [
@@ -6606,7 +6776,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6614,14 +6784,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-datasource 53.1.0": {
+    "datafusion-datasource 54.1.0": {
       "name": "datafusion-datasource",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-datasource/53.1.0/download",
-          "sha256": "e9fb386e1691355355a96419978a0022b7947b44d4a24a6ea99f00b6b485cbb6"
+          "url": "https://static.crates.io/crates/datafusion-datasource/54.1.0/download",
+          "sha256": "b840a8bce0bcbf5afad02946d438591e7c373f7afccaf3d874c04485772514dd"
         }
       },
       "targets": [
@@ -6679,39 +6849,39 @@
               "target": "chrono"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-adapter 53.1.0",
+              "id": "datafusion-physical-expr-adapter 54.1.0",
               "target": "datafusion_physical_expr_adapter"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -6741,6 +6911,10 @@
             {
               "id": "object_store 0.13.2",
               "target": "object_store"
+            },
+            {
+              "id": "parking_lot 0.12.5",
+              "target": "parking_lot"
             },
             {
               "id": "rand 0.9.4",
@@ -6775,7 +6949,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6783,14 +6957,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-datasource-arrow 53.1.0": {
+    "datafusion-datasource-arrow 54.1.0": {
       "name": "datafusion-datasource-arrow",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-datasource-arrow/53.1.0/download",
-          "sha256": "ffa6c52cfed0734c5f93754d1c0175f558175248bf686c944fb05c373e5fc096"
+          "url": "https://static.crates.io/crates/datafusion-datasource-arrow/54.1.0/download",
+          "sha256": "a24cc0b9cf6e367f27f27406eff13abf48a11b72446aaa40b3105c0ded5c17d9"
         }
       },
       "targets": [
@@ -6833,35 +7007,35 @@
               "target": "bytes"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -6893,7 +7067,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -6901,14 +7075,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-datasource-csv 53.1.0": {
+    "datafusion-datasource-csv 54.1.0": {
       "name": "datafusion-datasource-csv",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-datasource-csv/53.1.0/download",
-          "sha256": "503f29e0582c1fc189578d665ff57d9300da1f80c282777d7eb67bb79fb8cdca"
+          "url": "https://static.crates.io/crates/datafusion-datasource-csv/54.1.0/download",
+          "sha256": "e1abe56b2a7a2d1d6de5117dd1a203181e267f28529faa5da546947621b697d7"
         }
       },
       "targets": [
@@ -6941,35 +7115,35 @@
               "target": "bytes"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -7001,7 +7175,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7009,14 +7183,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-datasource-json 53.1.0": {
+    "datafusion-datasource-json 54.1.0": {
       "name": "datafusion-datasource-json",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-datasource-json/53.1.0/download",
-          "sha256": "e33804749abc8d0c8cb7473228483cb8070e524c6f6086ee1b85a64debe2b3d2"
+          "url": "https://static.crates.io/crates/datafusion-datasource-json/54.1.0/download",
+          "sha256": "9c3e467f0611ad7bdd5aad17c63c9bb6182d04e5282e5496d897ea2b49c024ba"
         }
       },
       "targets": [
@@ -7049,35 +7223,35 @@
               "target": "bytes"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -7087,10 +7261,6 @@
             {
               "id": "object_store 0.13.2",
               "target": "object_store"
-            },
-            {
-              "id": "serde_json 1.0.151",
-              "target": "serde_json"
             },
             {
               "id": "tokio 1.53.1",
@@ -7113,7 +7283,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7121,14 +7291,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-datasource-parquet 53.1.0": {
+    "datafusion-datasource-parquet 54.1.0": {
       "name": "datafusion-datasource-parquet",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-datasource-parquet/53.1.0/download",
-          "sha256": "32a8e0365e0e08e8ff94d912f0ababcf9065a1a304018ba90b1fc83c855b4997"
+          "url": "https://static.crates.io/crates/datafusion-datasource-parquet/54.1.0/download",
+          "sha256": "4cc35b92cd560082155e80d9c826929c852d3c51543f4affd3a51c464a0aab3a"
         }
       },
       "targets": [
@@ -7161,51 +7331,55 @@
               "target": "bytes"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions 54.1.0",
+              "target": "datafusion_functions"
+            },
+            {
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-adapter 53.1.0",
+              "id": "datafusion-physical-expr-adapter 54.1.0",
               "target": "datafusion_physical_expr_adapter"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-pruning 53.1.0",
+              "id": "datafusion-pruning 54.1.0",
               "target": "datafusion_pruning"
             },
             {
-              "id": "datafusion-session 53.1.0",
+              "id": "datafusion-session 54.1.0",
               "target": "datafusion_session"
             },
             {
@@ -7249,7 +7423,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7257,14 +7431,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-doc 53.1.0": {
+    "datafusion-doc 54.1.0": {
       "name": "datafusion-doc",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-doc/53.1.0/download",
-          "sha256": "8de6ac0df1662b9148ad3c987978b32cbec7c772f199b1d53520c8fa764a87ee"
+          "url": "https://static.crates.io/crates/datafusion-doc/54.1.0/download",
+          "sha256": "d69bb69d8769e34f76839c960dbde24c1ac0c885a79b6c3c2287bdc56ec67891"
         }
       },
       "targets": [
@@ -7287,7 +7461,7 @@
           "**"
         ],
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7295,14 +7469,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-execution 53.1.0": {
+    "datafusion-execution 54.1.0": {
       "name": "datafusion-execution",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-execution/53.1.0/download",
-          "sha256": "c03c7fbdaefcca4ef6ffe425a5fc2325763bfb426599bb0bf4536466efabe709"
+          "url": "https://static.crates.io/crates/datafusion-execution/54.1.0/download",
+          "sha256": "d8eac0a09bc8d263f52025cad9e001da4d8138d633fa288edda4d06b1772eae6"
         }
       },
       "targets": [
@@ -7335,23 +7509,19 @@
               "target": "arrow_buffer"
             },
             {
-              "id": "chrono 0.4.45",
-              "target": "chrono"
-            },
-            {
               "id": "dashmap 6.2.1",
               "target": "dashmap"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -7395,7 +7565,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7403,14 +7573,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-expr 53.1.0": {
+    "datafusion-expr 54.1.0": {
       "name": "datafusion-expr",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-expr/53.1.0/download",
-          "sha256": "574b9b6977fedbd2a611cbff12e5caf90f31640ad9dc5870f152836d94bad0dd"
+          "url": "https://static.crates.io/crates/datafusion-expr/54.1.0/download",
+          "sha256": "eeb14d374767ee0fc62dc79a5ba8bcf8a63c14e993c7d992d0e63adfa23d77d3"
         }
       },
       "targets": [
@@ -7447,31 +7617,35 @@
               "target": "arrow"
             },
             {
+              "id": "arrow-schema 58.3.0",
+              "target": "arrow_schema"
+            },
+            {
               "id": "chrono 0.4.45",
               "target": "chrono"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-functions-window-common 53.1.0",
+              "id": "datafusion-functions-window-common 54.1.0",
               "target": "datafusion_functions_window_common"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -7491,7 +7665,7 @@
               "target": "serde_json"
             },
             {
-              "id": "sqlparser 0.61.0",
+              "id": "sqlparser 0.62.0",
               "target": "sqlparser"
             }
           ],
@@ -7503,15 +7677,11 @@
             {
               "id": "async-trait 0.1.91",
               "target": "async_trait"
-            },
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7519,14 +7689,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-expr-common 53.1.0": {
+    "datafusion-expr-common 54.1.0": {
       "name": "datafusion-expr-common",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-expr-common/53.1.0/download",
-          "sha256": "7d7c3adf3db8bf61e92eb90cb659c8e8b734593a8f7c8e12a843c7ddba24b87e"
+          "url": "https://static.crates.io/crates/datafusion-expr-common/54.1.0/download",
+          "sha256": "b7b19a8c95522bee8cbb313d74263b85e355d2b52f42e67ef5694bf5de9e9356"
         }
       },
       "targets": [
@@ -7555,7 +7725,7 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
@@ -7570,16 +7740,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "proc_macro_deps": {
-          "common": [
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
-            }
-          ],
-          "selects": {}
-        },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7587,14 +7748,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions 53.1.0": {
+    "datafusion-functions 54.1.0": {
       "name": "datafusion-functions",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions/53.1.0/download",
-          "sha256": "f28aa4e10384e782774b10e72aca4d93ef7b31aa653095d9d4536b0a3dbc51b6"
+          "url": "https://static.crates.io/crates/datafusion-functions/54.1.0/download",
+          "sha256": "5f64c983bbbdcb729d921a2b2ac3375598719b5cc0c30345ad664936f3176fc7"
         }
       },
       "targets": [
@@ -7633,7 +7794,6 @@
             "regex_expressions",
             "sha2",
             "string_expressions",
-            "unicode-segmentation",
             "unicode_expressions",
             "uuid"
           ],
@@ -7670,24 +7830,28 @@
               "target": "chrono_tz"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
+            },
+            {
+              "id": "datafusion-physical-expr-common 54.1.0",
+              "target": "datafusion_physical_expr_common"
             },
             {
               "id": "hex 0.4.3",
@@ -7702,7 +7866,7 @@
               "target": "log"
             },
             {
-              "id": "md-5 0.10.6",
+              "id": "md-5 0.11.0",
               "target": "md5"
             },
             {
@@ -7722,12 +7886,8 @@
               "target": "regex"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
-            },
-            {
-              "id": "unicode-segmentation 1.13.2",
-              "target": "unicode_segmentation"
             },
             {
               "id": "uuid 1.24.0",
@@ -7740,13 +7900,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "datafusion-macros 53.1.0",
+              "id": "datafusion-macros 54.1.0",
               "target": "datafusion_macros"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7754,14 +7914,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-aggregate 53.1.0": {
+    "datafusion-functions-aggregate 54.1.0": {
       "name": "datafusion-functions-aggregate",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-aggregate/53.1.0/download",
-          "sha256": "00aa6217e56098ba84e0a338176fe52f0a84cca398021512c6c8c5eff806d0ad"
+          "url": "https://static.crates.io/crates/datafusion-functions-aggregate/54.1.0/download",
+          "sha256": "89bc17041e424a47ed062f43df24d84aab8b57c4c3221e5c1a5eef46d6c5718b"
         }
       },
       "targets": [
@@ -7786,40 +7946,40 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
+            },
+            {
+              "id": "foldhash 0.2.0",
+              "target": "foldhash"
             },
             {
               "id": "half 2.7.1",
@@ -7840,17 +8000,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "datafusion-macros 53.1.0",
+              "id": "datafusion-macros 54.1.0",
               "target": "datafusion_macros"
-            },
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7858,14 +8014,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-aggregate-common 53.1.0": {
+    "datafusion-functions-aggregate-common 54.1.0": {
       "name": "datafusion-functions-aggregate-common",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-aggregate-common/53.1.0/download",
-          "sha256": "b511250349407db7c43832ab2de63f5557b19a20dfd236b39ca2c04468b50d47"
+          "url": "https://static.crates.io/crates/datafusion-functions-aggregate-common/54.1.0/download",
+          "sha256": "97dd2a9e865c6108059f5b37b77934f84b50bfb108f837bd0e5c9536e03f0545"
         }
       },
       "targets": [
@@ -7890,30 +8046,26 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -7921,14 +8073,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-nested 53.1.0": {
+    "datafusion-functions-nested 54.1.0": {
       "name": "datafusion-functions-nested",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-nested/53.1.0/download",
-          "sha256": "ef13a858e20d50f0a9bb5e96e7ac82b4e7597f247515bccca4fdd2992df0212a"
+          "url": "https://static.crates.io/crates/datafusion-functions-nested/54.1.0/download",
+          "sha256": "75f0bdfeef16d96417b9632ef855645376b242e9006a126dfd0bedfc54a93f5f"
         }
       },
       "targets": [
@@ -7967,43 +8119,43 @@
               "target": "arrow_ord"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-functions 53.1.0",
+              "id": "datafusion-functions 54.1.0",
               "target": "datafusion_functions"
             },
             {
-              "id": "datafusion-functions-aggregate 53.1.0",
+              "id": "datafusion-functions-aggregate 54.1.0",
               "target": "datafusion_functions_aggregate"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "hashbrown 0.16.1",
+              "id": "hashbrown 0.17.1",
               "target": "hashbrown"
             },
             {
@@ -8017,6 +8169,10 @@
             {
               "id": "log 0.4.30",
               "target": "log"
+            },
+            {
+              "id": "memchr 2.8.0",
+              "target": "memchr"
             }
           ],
           "selects": {}
@@ -8025,17 +8181,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "datafusion-macros 53.1.0",
+              "id": "datafusion-macros 54.1.0",
               "target": "datafusion_macros"
-            },
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8043,14 +8195,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-table 53.1.0": {
+    "datafusion-functions-table 54.1.0": {
       "name": "datafusion-functions-table",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-table/53.1.0/download",
-          "sha256": "72b40d3f5bbb3905f9ccb1ce9485a9595c77b69758a7c24d3ba79e334ff51e7e"
+          "url": "https://static.crates.io/crates/datafusion-functions-table/54.1.0/download",
+          "sha256": "f4e4941673c917819616877e9993da4503e4f4739812be0bc32c5356184c6383"
         }
       },
       "targets": [
@@ -8079,19 +8231,23 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-catalog 53.1.0",
+              "id": "datafusion-catalog 54.1.0",
               "target": "datafusion_catalog"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
+              "target": "datafusion_physical_expr"
+            },
+            {
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
@@ -8107,15 +8263,11 @@
             {
               "id": "async-trait 0.1.91",
               "target": "async_trait"
-            },
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8123,14 +8275,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-window 53.1.0": {
+    "datafusion-functions-window 54.1.0": {
       "name": "datafusion-functions-window",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-window/53.1.0/download",
-          "sha256": "d4e88ec9d57c9b685d02f58bfee7be62d72610430ddcedb82a08e5d9925dbfb6"
+          "url": "https://static.crates.io/crates/datafusion-functions-window/54.1.0/download",
+          "sha256": "12dd2e16c12b84b6f6b41b19f55b366dd1c46876bb35b86896c6349067379e8d"
         }
       },
       "targets": [
@@ -8159,27 +8311,27 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions-window-common 53.1.0",
+              "id": "datafusion-functions-window-common 54.1.0",
               "target": "datafusion_functions_window_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -8193,17 +8345,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "datafusion-macros 53.1.0",
+              "id": "datafusion-macros 54.1.0",
               "target": "datafusion_macros"
-            },
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
             }
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8211,14 +8359,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-functions-window-common 53.1.0": {
+    "datafusion-functions-window-common 54.1.0": {
       "name": "datafusion-functions-window-common",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-functions-window-common/53.1.0/download",
-          "sha256": "8307bb93519b1a91913723a1130cfafeee3f72200d870d88e91a6fc5470ede5c"
+          "url": "https://static.crates.io/crates/datafusion-functions-window-common/54.1.0/download",
+          "sha256": "4cdc5e4b6f8b6ef823cc1c761f85088ad4c884fe8df64df3cbcc6b2b84698441"
         }
       },
       "targets": [
@@ -8243,18 +8391,18 @@
         "deps": {
           "common": [
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8262,14 +8410,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-macros 53.1.0": {
+    "datafusion-macros 54.1.0": {
       "name": "datafusion-macros",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-macros/53.1.0/download",
-          "sha256": "2e367e6a71051d0ebdd29b2f85d12059b38b1d1f172c6906e80016da662226bd"
+          "url": "https://static.crates.io/crates/datafusion-macros/54.1.0/download",
+          "sha256": "1a3614234dd93578c92428cb4f408e020874f0d2b7e6c90c928d9d28b5df2ceb"
         }
       },
       "targets": [
@@ -8294,7 +8442,7 @@
         "deps": {
           "common": [
             {
-              "id": "datafusion-doc 53.1.0",
+              "id": "datafusion-doc 54.1.0",
               "target": "datafusion_doc"
             },
             {
@@ -8309,7 +8457,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8317,14 +8465,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-optimizer 53.1.0": {
+    "datafusion-optimizer 54.1.0": {
       "name": "datafusion-optimizer",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-optimizer/53.1.0/download",
-          "sha256": "e929015451a67f77d9d8b727b2bf3a40c4445fdef6cdc53281d7d97c76888ace"
+          "url": "https://static.crates.io/crates/datafusion-optimizer/54.1.0/download",
+          "sha256": "a0635620b050b81bb92764e99250868f654e2cd5ad1bece413283b3f73c83179"
         }
       },
       "targets": [
@@ -8363,19 +8511,19 @@
               "target": "chrono"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
@@ -8406,7 +8554,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8414,14 +8562,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-physical-expr 53.1.0": {
+    "datafusion-physical-expr 54.1.0": {
       "name": "datafusion-physical-expr",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-physical-expr/53.1.0/download",
-          "sha256": "4b1e68aba7a4b350401cfdf25a3d6f989ad898a7410164afe9ca52080244cb59"
+          "url": "https://static.crates.io/crates/datafusion-physical-expr/54.1.0/download",
+          "sha256": "8cabf7a86eb70b816729e33c81bf7767c936ee1226f607a114f5dac2decac8d0"
         }
       },
       "targets": [
@@ -8452,31 +8600,27 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -8484,7 +8628,7 @@
               "target": "half"
             },
             {
-              "id": "hashbrown 0.16.1",
+              "id": "hashbrown 0.17.1",
               "target": "hashbrown"
             },
             {
@@ -8515,16 +8659,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "proc_macro_deps": {
-          "common": [
-            {
-              "id": "paste 1.0.15",
-              "target": "paste"
-            }
-          ],
-          "selects": {}
-        },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8532,14 +8667,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-physical-expr-adapter 53.1.0": {
+    "datafusion-physical-expr-adapter 54.1.0": {
       "name": "datafusion-physical-expr-adapter",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-physical-expr-adapter/53.1.0/download",
-          "sha256": "ea22315f33cf2e0adc104e8ec42e285f6ed93998d565c65e82fec6a9ee9f9db4"
+          "url": "https://static.crates.io/crates/datafusion-physical-expr-adapter/54.1.0/download",
+          "sha256": "de222e04f7e6744501555a54ab0abe26bfdfebee380af79a9bdc175704246859"
         }
       },
       "targets": [
@@ -8568,23 +8703,23 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions 53.1.0",
+              "id": "datafusion-functions 54.1.0",
               "target": "datafusion_functions"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -8595,7 +8730,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8603,14 +8738,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-physical-expr-common 53.1.0": {
+    "datafusion-physical-expr-common 54.1.0": {
       "name": "datafusion-physical-expr-common",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-physical-expr-common/53.1.0/download",
-          "sha256": "b04b45ea8ad3ac2d78f2ea2a76053e06591c9629c7a603eda16c10649ecf4362"
+          "url": "https://static.crates.io/crates/datafusion-physical-expr-common/54.1.0/download",
+          "sha256": "72d0d0057fc5a502d45c870cb6d47c66eb7bdd5edb1bd71ad6f3f724975ac2a8"
         }
       },
       "targets": [
@@ -8635,10 +8770,6 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
             },
@@ -8647,15 +8778,15 @@
               "target": "chrono"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "hashbrown 0.16.1",
+              "id": "hashbrown 0.17.1",
               "target": "hashbrown"
             },
             {
@@ -8669,12 +8800,16 @@
             {
               "id": "parking_lot 0.12.5",
               "target": "parking_lot"
+            },
+            {
+              "id": "pin-project 1.1.13",
+              "target": "pin_project"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8682,14 +8817,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-physical-optimizer 53.1.0": {
+    "datafusion-physical-optimizer 54.1.0": {
       "name": "datafusion-physical-optimizer",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-physical-optimizer/53.1.0/download",
-          "sha256": "7cb13397809a425918f608dfe8653f332015a3e330004ab191b4404187238b95"
+          "url": "https://static.crates.io/crates/datafusion-physical-optimizer/54.1.0/download",
+          "sha256": "86046eed10950c5f9aaed9acfd148e9bd2e1dfdfe4f9aef607d1447b271e4183"
         }
       },
       "targets": [
@@ -8724,35 +8859,35 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
-              "id": "datafusion-pruning 53.1.0",
+              "id": "datafusion-pruning 54.1.0",
               "target": "datafusion_pruning"
             },
             {
@@ -8767,7 +8902,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8775,14 +8910,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-physical-plan 53.1.0": {
+    "datafusion-physical-plan 54.1.0": {
       "name": "datafusion-physical-plan",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-physical-plan/53.1.0/download",
-          "sha256": "5edc023675791af9d5fb4cc4c24abf5f7bd3bd4dcf9e5bd90ea1eff6976dcc79"
+          "url": "https://static.crates.io/crates/datafusion-physical-plan/54.1.0/download",
+          "sha256": "9bc84da934c903407ba297971ebcc020c4c1a38aafd765d6c144c76eff3fa6a1"
         }
       },
       "targets": [
@@ -8807,12 +8942,16 @@
         "deps": {
           "common": [
             {
-              "id": "ahash 0.8.12",
-              "target": "ahash"
-            },
-            {
               "id": "arrow 58.3.0",
               "target": "arrow"
+            },
+            {
+              "id": "arrow-data 58.3.0",
+              "target": "arrow_data"
+            },
+            {
+              "id": "arrow-ipc 58.3.0",
+              "target": "arrow_ipc"
             },
             {
               "id": "arrow-ord 58.3.0",
@@ -8823,39 +8962,39 @@
               "target": "arrow_schema"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-common-runtime 53.1.0",
+              "id": "datafusion-common-runtime 54.1.0",
               "target": "datafusion_common_runtime"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions 53.1.0",
+              "id": "datafusion-functions 54.1.0",
               "target": "datafusion_functions"
             },
             {
-              "id": "datafusion-functions-aggregate-common 53.1.0",
+              "id": "datafusion-functions-aggregate-common 54.1.0",
               "target": "datafusion_functions_aggregate_common"
             },
             {
-              "id": "datafusion-functions-window-common 53.1.0",
+              "id": "datafusion-functions-window-common 54.1.0",
               "target": "datafusion_functions_window_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
@@ -8867,7 +9006,7 @@
               "target": "half"
             },
             {
-              "id": "hashbrown 0.16.1",
+              "id": "hashbrown 0.17.1",
               "target": "hashbrown"
             },
             {
@@ -8911,7 +9050,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8919,14 +9058,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-pruning 53.1.0": {
+    "datafusion-pruning 54.1.0": {
       "name": "datafusion-pruning",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-pruning/53.1.0/download",
-          "sha256": "ac8c76860e355616555081cab5968cec1af7a80701ff374510860bcd567e365a"
+          "url": "https://static.crates.io/crates/datafusion-pruning/54.1.0/download",
+          "sha256": "eb63eeac6de19be40f487b65dd84e546195f783c5a9928618e0c4f2a3569b0d7"
         }
       },
       "targets": [
@@ -8955,32 +9094,28 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
-              "id": "datafusion-expr-common 53.1.0",
+              "id": "datafusion-expr-common 54.1.0",
               "target": "datafusion_expr_common"
             },
             {
-              "id": "datafusion-physical-expr 53.1.0",
+              "id": "datafusion-physical-expr 54.1.0",
               "target": "datafusion_physical_expr"
             },
             {
-              "id": "datafusion-physical-expr-common 53.1.0",
+              "id": "datafusion-physical-expr-common 54.1.0",
               "target": "datafusion_physical_expr_common"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
-            },
-            {
-              "id": "itertools 0.14.0",
-              "target": "itertools"
             },
             {
               "id": "log 0.4.30",
@@ -8990,7 +9125,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -8998,14 +9133,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-session 53.1.0": {
+    "datafusion-session 54.1.0": {
       "name": "datafusion-session",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-session/53.1.0/download",
-          "sha256": "5412111aa48e2424ba926112e192f7a6b7e4ccb450145d25ce5ede9f19dc491e"
+          "url": "https://static.crates.io/crates/datafusion-session/54.1.0/download",
+          "sha256": "5f961d209177f91bd014db5cbb2c33b7d28a2597b9003e77f17aeb712964315a"
         }
       },
       "targets": [
@@ -9030,19 +9165,19 @@
         "deps": {
           "common": [
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-execution 53.1.0",
+              "id": "datafusion-execution 54.1.0",
               "target": "datafusion_execution"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-physical-plan 53.1.0",
+              "id": "datafusion-physical-plan 54.1.0",
               "target": "datafusion_physical_plan"
             },
             {
@@ -9062,7 +9197,7 @@
           ],
           "selects": {}
         },
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -9070,14 +9205,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "datafusion-sql 53.1.0": {
+    "datafusion-sql 54.1.0": {
       "name": "datafusion-sql",
-      "version": "53.1.0",
+      "version": "54.1.0",
       "package_url": "https://github.com/apache/datafusion",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/datafusion-sql/53.1.0/download",
-          "sha256": "fa0d133ddf8b9b3b872acac900157f783e7b879fe9a6bccf389abebbfac45ec1"
+          "url": "https://static.crates.io/crates/datafusion-sql/54.1.0/download",
+          "sha256": "b1d71cb454da682b2af7488e1fc1ddd72ee1b28f19297b8ccad73f0a21ee9a69"
         }
       },
       "targets": [
@@ -9123,15 +9258,15 @@
               "target": "chrono"
             },
             {
-              "id": "datafusion-common 53.1.0",
+              "id": "datafusion-common 54.1.0",
               "target": "datafusion_common"
             },
             {
-              "id": "datafusion-expr 53.1.0",
+              "id": "datafusion-expr 54.1.0",
               "target": "datafusion_expr"
             },
             {
-              "id": "datafusion-functions-nested 53.1.0",
+              "id": "datafusion-functions-nested 54.1.0",
               "target": "datafusion_functions_nested"
             },
             {
@@ -9151,14 +9286,14 @@
               "target": "regex"
             },
             {
-              "id": "sqlparser 0.61.0",
+              "id": "sqlparser 0.62.0",
               "target": "sqlparser"
             }
           ],
           "selects": {}
         },
         "edition": "2024",
-        "version": "53.1.0"
+        "version": "54.1.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -9387,6 +9522,72 @@
         },
         "edition": "2018",
         "version": "0.10.7"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "digest 0.11.3": {
+      "name": "digest",
+      "version": "0.11.3",
+      "package_url": "https://github.com/RustCrypto/traits",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/digest/0.11.3/download",
+          "sha256": "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "digest",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "digest",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "block-api",
+            "default",
+            "oid"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "block-buffer 0.12.1",
+              "target": "block_buffer"
+            },
+            {
+              "id": "const-oid 0.10.2",
+              "target": "const_oid"
+            },
+            {
+              "id": "crypto-common 0.2.2",
+              "target": "crypto_common",
+              "alias": "common"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.11.3"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -10279,6 +10480,13 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "default",
+            "std"
+          ],
+          "selects": {}
+        },
         "edition": "2021",
         "version": "0.2.0"
       },
@@ -11781,7 +11989,7 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion 53.1.0",
+              "id": "datafusion 54.1.0",
               "target": "datafusion"
             },
             {
@@ -12275,11 +12483,11 @@
               "target": "arrow"
             },
             {
-              "id": "datafusion 53.1.0",
+              "id": "datafusion 54.1.0",
               "target": "datafusion"
             },
             {
-              "id": "datafusion-datasource 53.1.0",
+              "id": "datafusion-datasource 54.1.0",
               "target": "datafusion_datasource"
             },
             {
@@ -12606,7 +12814,7 @@
         "deps": {
           "common": [
             {
-              "id": "datafusion 53.1.0",
+              "id": "datafusion 54.1.0",
               "target": "datafusion"
             },
             {
@@ -12718,11 +12926,11 @@
               "target": "chrono_tz"
             },
             {
-              "id": "datafusion 53.1.0",
+              "id": "datafusion 54.1.0",
               "target": "datafusion"
             },
             {
-              "id": "datafusion-functions-aggregate 53.1.0",
+              "id": "datafusion-functions-aggregate 54.1.0",
               "target": "datafusion_functions_aggregate"
             },
             {
@@ -12863,11 +13071,11 @@
               "target": "atomicwrites"
             },
             {
-              "id": "datafusion 53.1.0",
+              "id": "datafusion 54.1.0",
               "target": "datafusion"
             },
             {
-              "id": "datafusion-catalog 53.1.0",
+              "id": "datafusion-catalog 54.1.0",
               "target": "datafusion_catalog"
             },
             {
@@ -13218,6 +13426,34 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "allocator-api2",
+            "default",
+            "default-hasher",
+            "equivalent",
+            "inline-more",
+            "raw-entry"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "allocator-api2 0.2.21",
+              "target": "allocator_api2"
+            },
+            {
+              "id": "equivalent 1.0.2",
+              "target": "equivalent"
+            },
+            {
+              "id": "foldhash 0.2.0",
+              "target": "foldhash"
+            }
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.17.1"
       },
@@ -13557,6 +13793,54 @@
         ],
         "edition": "2021",
         "version": "2.3.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "hybrid-array 0.4.14": {
+      "name": "hybrid-array",
+      "version": "0.4.14",
+      "package_url": "https://github.com/RustCrypto/hybrid-array",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/hybrid-array/0.4.14/download",
+          "sha256": "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "hybrid_array",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "hybrid_array",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "deps": {
+          "common": [
+            {
+              "id": "typenum 1.20.1",
+              "target": "typenum"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2024",
+        "version": "0.4.14"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -16479,14 +16763,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "md-5 0.10.6": {
+    "md-5 0.11.0": {
       "name": "md-5",
-      "version": "0.10.6",
+      "version": "0.11.0",
       "package_url": "https://github.com/RustCrypto/hashes",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/md-5/0.10.6/download",
-          "sha256": "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+          "url": "https://static.crates.io/crates/md-5/0.11.0/download",
+          "sha256": "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
         }
       },
       "targets": [
@@ -16510,8 +16794,9 @@
         ],
         "crate_features": {
           "common": [
+            "alloc",
             "default",
-            "std"
+            "oid"
           ],
           "selects": {}
         },
@@ -16522,14 +16807,14 @@
               "target": "cfg_if"
             },
             {
-              "id": "digest 0.10.7",
+              "id": "digest 0.11.3",
               "target": "digest"
             }
           ],
           "selects": {}
         },
-        "edition": "2018",
-        "version": "0.10.6"
+        "edition": "2024",
+        "version": "0.11.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -22782,6 +23067,73 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
+    "sha2 0.11.0": {
+      "name": "sha2",
+      "version": "0.11.0",
+      "package_url": "https://github.com/RustCrypto/hashes",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/sha2/0.11.0/download",
+          "sha256": "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "sha2",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "sha2",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "default",
+            "oid"
+          ],
+          "selects": {}
+        },
+        "deps": {
+          "common": [
+            {
+              "id": "cfg-if 1.0.4",
+              "target": "cfg_if"
+            },
+            {
+              "id": "digest 0.11.3",
+              "target": "digest"
+            }
+          ],
+          "selects": {
+            "cfg(any(target_arch = \"aarch64\", target_arch = \"x86_64\", target_arch = \"x86\"))": [
+              {
+                "id": "cpufeatures 0.3.0",
+                "target": "cpufeatures"
+              }
+            ]
+          }
+        },
+        "edition": "2024",
+        "version": "0.11.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
     "shlex 2.0.1": {
       "name": "shlex",
       "version": "2.0.1",
@@ -23414,14 +23766,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "sqlparser 0.61.0": {
+    "sqlparser 0.62.0": {
       "name": "sqlparser",
-      "version": "0.61.0",
+      "version": "0.62.0",
       "package_url": "https://github.com/apache/datafusion-sqlparser-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/sqlparser/0.61.0/download",
-          "sha256": "dbf5ea8d4d7c808e1af1cbabebca9a2abe603bcefc22294c5b95018d53200cb7"
+          "url": "https://static.crates.io/crates/sqlparser/0.62.0/download",
+          "sha256": "13c6d1b651dc4edf07eead2a0c6c78016ce971bc2c10da5266861b13f25e7cec"
         }
       },
       "targets": [
@@ -23476,7 +23828,7 @@
           ],
           "selects": {}
         },
-        "version": "0.61.0"
+        "version": "0.62.0"
       },
       "license": "Apache-2.0",
       "license_ids": [
@@ -26741,6 +27093,12 @@
         "compile_data_glob": [
           "**"
         ],
+        "crate_features": {
+          "common": [
+            "const-generics"
+          ],
+          "selects": {}
+        },
         "edition": "2018",
         "version": "1.20.1"
       },
@@ -32155,10 +32513,10 @@
     "chrono 0.4.45",
     "chrono-tz 0.10.4",
     "clap 4.6.6",
-    "datafusion 53.1.0",
-    "datafusion-catalog 53.1.0",
-    "datafusion-datasource 53.1.0",
-    "datafusion-functions-aggregate 53.1.0",
+    "datafusion 54.1.0",
+    "datafusion-catalog 54.1.0",
+    "datafusion-datasource 54.1.0",
+    "datafusion-functions-aggregate 54.1.0",
     "fs4 1.1.0",
     "futures 0.3.32",
     "libc 0.2.189",

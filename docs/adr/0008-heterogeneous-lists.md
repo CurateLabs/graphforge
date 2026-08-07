@@ -23,7 +23,8 @@ and renders `"5.0"` (≠ expected `"5"`). This is ; the same coercion (surfacing
 
 Arrow enforces **one DataType per column**, and `UNWIND`'s output is a column — so preserving
 per-element type requires a value representation that is itself a single Arrow type yet carries mixed
-contents. Two candidates were evaluated in depth against DataFusion 53.1.0 / arrow 58.3.0:
+contents. Two candidates were evaluated in depth against DataFusion 53.1.0 / arrow 58.3.0
+(historical evaluation pin; the workspace later moved to DataFusion 54.x — see #467):
 
 - **Arrow `Union`** — faithfully tags each element, but is **hostile to every aggregate/compare path**:
   `min`/`max` has *no* Union arm (`internal_err!("Min/Max accumulator not implemented for type Union")`);
@@ -41,7 +42,7 @@ contents. Two candidates were evaluated in depth against DataFusion 53.1.0 / arr
 custom Cypher UDFs/UDAFs for the three semantic surfaces DataFusion cannot get right (min/max,
 ORDER BY, equality).** Homogeneous lists keep their existing primitive `new_list` path untouched.
 
-### Why tagged-struct wins (grounded in DataFusion 53.1.0)
+### Why tagged-struct wins (grounded in DataFusion 53.1.0; still applies on 54.x)
 
 A mixed list becomes a **genuinely homogeneous** `List<Struct<…>>`, so most machinery is native:
 

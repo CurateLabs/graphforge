@@ -15,7 +15,7 @@ graphforge-plan = { version = "0.5.2", path = "../graphforge-plan" }
 graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
 datafusion = { workspace = true }
 arrow-data = { workspace = true }
-datafusion-functions-aggregate = "53"
+datafusion-functions-aggregate = "54"
 chrono = "0.4"
 chrono-tz = "0.10"
 thiserror = { workspace = true }

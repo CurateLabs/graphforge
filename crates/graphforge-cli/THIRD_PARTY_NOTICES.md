@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (305)
+- Apache License 2.0 (313)
 - MIT License (72)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -1129,37 +1129,37 @@ Software.
 ## Apache License 2.0
 
 Used by:
-- datafusion 53.1.0
-- datafusion-catalog 53.1.0
-- datafusion-catalog-listing 53.1.0
-- datafusion-common 53.1.0
-- datafusion-common-runtime 53.1.0
-- datafusion-datasource 53.1.0
-- datafusion-datasource-arrow 53.1.0
-- datafusion-datasource-csv 53.1.0
-- datafusion-datasource-json 53.1.0
-- datafusion-datasource-parquet 53.1.0
-- datafusion-doc 53.1.0
-- datafusion-execution 53.1.0
-- datafusion-expr 53.1.0
-- datafusion-expr-common 53.1.0
-- datafusion-functions 53.1.0
-- datafusion-functions-aggregate 53.1.0
-- datafusion-functions-aggregate-common 53.1.0
-- datafusion-functions-nested 53.1.0
-- datafusion-functions-table 53.1.0
-- datafusion-functions-window 53.1.0
-- datafusion-functions-window-common 53.1.0
-- datafusion-macros 53.1.0
-- datafusion-optimizer 53.1.0
-- datafusion-physical-expr 53.1.0
-- datafusion-physical-expr-adapter 53.1.0
-- datafusion-physical-expr-common 53.1.0
-- datafusion-physical-optimizer 53.1.0
-- datafusion-physical-plan 53.1.0
-- datafusion-pruning 53.1.0
-- datafusion-session 53.1.0
-- datafusion-sql 53.1.0
+- datafusion 54.1.0
+- datafusion-catalog 54.1.0
+- datafusion-catalog-listing 54.1.0
+- datafusion-common 54.1.0
+- datafusion-common-runtime 54.1.0
+- datafusion-datasource 54.1.0
+- datafusion-datasource-arrow 54.1.0
+- datafusion-datasource-csv 54.1.0
+- datafusion-datasource-json 54.1.0
+- datafusion-datasource-parquet 54.1.0
+- datafusion-doc 54.1.0
+- datafusion-execution 54.1.0
+- datafusion-expr 54.1.0
+- datafusion-expr-common 54.1.0
+- datafusion-functions 54.1.0
+- datafusion-functions-aggregate 54.1.0
+- datafusion-functions-aggregate-common 54.1.0
+- datafusion-functions-nested 54.1.0
+- datafusion-functions-table 54.1.0
+- datafusion-functions-window 54.1.0
+- datafusion-functions-window-common 54.1.0
+- datafusion-macros 54.1.0
+- datafusion-optimizer 54.1.0
+- datafusion-physical-expr 54.1.0
+- datafusion-physical-expr-adapter 54.1.0
+- datafusion-physical-expr-common 54.1.0
+- datafusion-physical-optimizer 54.1.0
+- datafusion-physical-plan 54.1.0
+- datafusion-pruning 54.1.0
+- datafusion-session 54.1.0
+- datafusion-sql 54.1.0
 
 ```
 
@@ -5107,7 +5107,7 @@ Used by:
 - signal-hook-registry 1.4.8
 - smallvec 1.15.1
 - socket2 0.6.3
-- sqlparser 0.61.0
+- sqlparser 0.62.0
 - sqlparser_derive 0.5.0
 - stable_deref_trait 1.2.1
 - stacker 0.1.24
@@ -5557,12 +5557,18 @@ limitations under the License.
 Used by:
 - blake2 0.10.6
 - block-buffer 0.10.4
+- block-buffer 0.12.1
+- const-oid 0.10.2
 - cpufeatures 0.2.17
 - cpufeatures 0.3.0
 - crypto-common 0.1.7
+- crypto-common 0.2.2
 - digest 0.10.7
-- md-5 0.10.6
+- digest 0.11.3
+- hybrid-array 0.4.14
+- md-5 0.11.0
 - sha2 0.10.9
+- sha2 0.11.0
 
 ```
                               Apache License
@@ -6627,6 +6633,8 @@ Used by:
 - num-conv 0.2.2
 - oneshot 0.1.13
 - paste 1.0.15
+- pin-project 1.1.13
+- pin-project-internal 1.1.13
 - pin-project-lite 0.2.17
 - portable-atomic 1.13.1
 - prettyplease 0.2.37
