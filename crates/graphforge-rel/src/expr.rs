@@ -4,7 +4,6 @@
 //! [`ExprArena`] from a [`GraphPlan`] and produces DataFusion [`Expr`] values
 //! that can be consumed by operator lowering (#575, #576).
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -2768,15 +2767,27 @@ impl<'a> ExprLowerer<'a> {
                     if le == re && !is_het_struct_type(Some(&le)) {
                         datafusion::functions_nested::expr_fn::array_concat(vec![l, r])
                     } else if graph_value_types_compatible(&le, &re) {
-                        let target = self.expr_data_type(&l).ok_or_else(|| {
+                        // DF54: cast both sides to the nullability-widened
+                        // common type — never narrow nested fields (#467).
+                        let left_ty = self.expr_data_type(&l).ok_or_else(|| {
                             LoweringError::UnsupportedExpr(
                                 "cannot resolve path-list type for concatenation".into(),
                             )
                         })?;
-                        datafusion::functions_nested::expr_fn::array_concat(vec![
-                            l,
-                            cast(r, target),
-                        ])
+                        let right_ty = self.expr_data_type(&r).unwrap_or_else(|| left_ty.clone());
+                        let target = unify_graph_value_nullability(&left_ty, &right_ty)
+                            .unwrap_or_else(|| left_ty.clone());
+                        let left = if left_ty == target {
+                            l
+                        } else {
+                            cast(l, target.clone())
+                        };
+                        let right = if right_ty == target {
+                            r
+                        } else {
+                            cast(r, target)
+                        };
+                        datafusion::functions_nested::expr_fn::array_concat(vec![left, right])
                     } else {
                         CYPHER_LIST_PLUS.call(vec![l, r])
                     }
@@ -3592,10 +3603,6 @@ fn dynamic_het_type(arg_types: &[DataType]) -> DataType {
 }
 
 impl ScalarUDFImpl for CypherDynamicHetList {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_dynamic_het_list"
     }
@@ -3773,10 +3780,6 @@ impl CypherRelationshipDisjoint {
 }
 
 impl ScalarUDFImpl for CypherRelationshipDisjoint {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_relationship_disjoint"
     }
@@ -3857,6 +3860,44 @@ fn graph_value_types_compatible(left: &DataType, right: &DataType) -> bool {
         })
 }
 
+/// Widen field nullability across two compatible graph-value (or list) types.
+///
+/// DataFusion 54 rejects casts that *narrow* nested nullability (nullable →
+/// non-null inside `List<Struct>`). Mixed named-path segments can emit the same
+/// Cypher shape with different Arrow nullability (`cypher_path_nodes` declares
+/// non-null `node_uuid`; fixed-hop `named_struct` inherits nullable scan
+/// columns), so concatenation must cast both sides to a shared widened type.
+fn unify_graph_value_nullability(left: &DataType, right: &DataType) -> Option<DataType> {
+    use datafusion::arrow::datatypes::{Field, Fields};
+
+    match (left, right) {
+        (DataType::Struct(left), DataType::Struct(right)) if left.len() == right.len() => {
+            let mut fields = Vec::with_capacity(left.len());
+            for (left, right) in left.iter().zip(right.iter()) {
+                if left.name() != right.name() {
+                    return None;
+                }
+                let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+                fields.push(Field::new(
+                    left.name(),
+                    data_type,
+                    left.is_nullable() || right.is_nullable(),
+                ));
+            }
+            Some(DataType::Struct(Fields::from(fields)))
+        }
+        (DataType::List(left), DataType::List(right)) => {
+            let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+            Some(DataType::new_list(
+                data_type,
+                left.is_nullable() || right.is_nullable(),
+            ))
+        }
+        (left, right) if left == right => Some(left.clone()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CypherListPlus {
     signature: Signature,
@@ -3871,10 +3912,6 @@ impl CypherListPlus {
 }
 
 impl ScalarUDFImpl for CypherListPlus {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_list_plus"
     }
@@ -4288,7 +4325,15 @@ fn list_plus_return_type(arg_types: &[DataType]) -> DataType {
             .iter()
             .all(|value_type| graph_value_types_compatible(first, value_type))
     {
-        return DataType::new_list((*first).clone(), true);
+        // Widen nested nullability across variants so invoke-time
+        // `ScalarValue::cast_to` never narrows under DF54 (#467).
+        let unified = value_types
+            .iter()
+            .skip(1)
+            .try_fold((*first).clone(), |acc, ty| {
+                unify_graph_value_nullability(&acc, ty)
+            });
+        return DataType::new_list(unified.unwrap_or_else(|| (*first).clone()), true);
     }
 
     let mut variants = Vec::new();
@@ -5332,10 +5377,6 @@ impl CypherConversion {
 }
 
 impl ScalarUDFImpl for CypherConversion {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         match self.kind {
             CypherConversionKind::Integer => "cypher_to_integer",
@@ -5556,10 +5597,6 @@ impl CypherRowMarker {
 }
 
 impl ScalarUDFImpl for CypherRowMarker {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_row_marker"
     }
@@ -5596,10 +5633,6 @@ impl CypherSize {
 }
 
 impl ScalarUDFImpl for CypherSize {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_size"
     }
@@ -5714,10 +5747,6 @@ impl CypherGraphMetadata {
 }
 
 impl ScalarUDFImpl for CypherGraphMetadata {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         match self.kind {
             GraphMetadataKind::Labels => "cypher_labels",
@@ -5811,10 +5840,6 @@ impl CypherEntityProperties {
 }
 
 impl ScalarUDFImpl for CypherEntityProperties {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_entity_properties"
     }
@@ -5904,10 +5929,6 @@ impl CypherMapKeys {
 }
 
 impl ScalarUDFImpl for CypherMapKeys {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_map_keys"
     }
@@ -6076,10 +6097,6 @@ impl CypherStaticValueAccess {
 }
 
 impl ScalarUDFImpl for CypherStaticValueAccess {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_static_value_access"
     }
@@ -6162,10 +6179,6 @@ impl CypherValueAccess {
 }
 
 impl ScalarUDFImpl for CypherValueAccess {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_value_access"
     }
@@ -6509,9 +6522,6 @@ impl CypherReverse {
 }
 
 impl ScalarUDFImpl for CypherReverse {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_reverse"
     }
@@ -6623,9 +6633,6 @@ impl CypherBoolOp {
 }
 
 impl ScalarUDFImpl for CypherBoolOp {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         match self.kind {
             CypherBoolOpKind::And => "cypher_and",
@@ -6707,9 +6714,6 @@ impl CypherCmpPred {
 }
 
 impl ScalarUDFImpl for CypherCmpPred {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_cmp_pred"
     }
@@ -6817,9 +6821,6 @@ impl CypherStringPredicate {
 }
 
 impl ScalarUDFImpl for CypherStringPredicate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         match self.kind {
             StringPredicate::Starts => "cypher_starts_with",
@@ -6891,9 +6892,6 @@ impl CypherRange {
 }
 
 impl ScalarUDFImpl for CypherRange {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_range"
     }
@@ -6987,9 +6985,6 @@ impl CypherOrderKey {
 }
 
 impl ScalarUDFImpl for CypherOrderKey {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_order_key"
     }
@@ -7134,10 +7129,6 @@ impl CypherEq {
 }
 
 impl ScalarUDFImpl for CypherEq {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_eq"
     }
@@ -7334,9 +7325,6 @@ fn cypher_in_tagged_list(
 }
 
 impl ScalarUDFImpl for CypherIn {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_in"
     }
@@ -7633,9 +7621,6 @@ impl std::hash::Hash for CypherExtreme {
     }
 }
 impl datafusion::logical_expr::AggregateUDFImpl for CypherExtreme {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &str {
         if self.is_max {
             "cypher_max"
@@ -7757,9 +7742,6 @@ impl std::hash::Hash for CypherCollect {
 }
 
 impl datafusion::logical_expr::AggregateUDFImpl for CypherCollect {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &str {
         if self.distinct {
             "cypher_collect_distinct"
@@ -7910,10 +7892,6 @@ impl std::hash::Hash for CypherPercentile {
 }
 
 impl datafusion::logical_expr::AggregateUDFImpl for CypherPercentile {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         if self.continuous {
             "cypher_percentile_cont"
@@ -8385,10 +8363,6 @@ impl CypherDateComponent {
 }
 
 impl ScalarUDFImpl for CypherDateComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_component"
     }
@@ -8449,10 +8423,6 @@ impl CypherDurationComponent {
 }
 
 impl ScalarUDFImpl for CypherDurationComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_component"
     }
@@ -8544,10 +8514,6 @@ impl CypherTemporalComponent {
 }
 
 impl ScalarUDFImpl for CypherTemporalComponent {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_component"
     }
@@ -8647,10 +8613,6 @@ impl CypherTemporalZoneStr {
 }
 
 impl ScalarUDFImpl for CypherTemporalZoneStr {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_zone_str"
     }
@@ -8763,10 +8725,6 @@ fn between_operand(
 }
 
 impl ScalarUDFImpl for CypherDurationBetween {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_between"
     }
@@ -8846,10 +8804,6 @@ impl CypherTemporalArith {
 }
 
 impl ScalarUDFImpl for CypherTemporalArith {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_temporal_arith"
     }
@@ -9013,9 +8967,6 @@ impl CypherDurationParse {
 }
 
 impl ScalarUDFImpl for CypherDurationParse {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_duration_parse"
     }
@@ -9072,10 +9023,6 @@ impl CypherDurationAdd {
 }
 
 impl ScalarUDFImpl for CypherDurationAdd {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_duration_add"
     }
@@ -9153,9 +9100,6 @@ impl CypherDurationScale {
 }
 
 impl ScalarUDFImpl for CypherDurationScale {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_duration_scale"
     }
@@ -9320,9 +9264,6 @@ fn reduce_invariant_quantifier(
 }
 
 impl ScalarUDFImpl for CypherInvariantQuantifier {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_invariant_quantifier"
     }
@@ -9360,9 +9301,6 @@ impl ScalarUDFImpl for CypherInvariantQuantifier {
 }
 
 impl ScalarUDFImpl for CypherQuantifier {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_quantifier"
     }
@@ -9648,9 +9586,6 @@ impl CypherListComp {
 }
 
 impl ScalarUDFImpl for CypherListComp {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
     fn name(&self) -> &'static str {
         "cypher_list_comprehension"
     }
@@ -9877,10 +9812,6 @@ impl CypherDateProject {
 }
 
 impl ScalarUDFImpl for CypherDateProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_project"
     }
@@ -9992,10 +9923,6 @@ impl CypherLocalTimeProject {
 }
 
 impl ScalarUDFImpl for CypherLocalTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localtime_project"
     }
@@ -10107,10 +10034,6 @@ impl CypherLocalTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherLocalTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localtime_truncate"
     }
@@ -10465,10 +10388,6 @@ impl CypherLocalDateTimeProject {
 }
 
 impl ScalarUDFImpl for CypherLocalDateTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localdatetime_project"
     }
@@ -10634,10 +10553,6 @@ impl CypherLocalDateTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherLocalDateTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_localdatetime_truncate"
     }
@@ -10860,10 +10775,6 @@ impl CypherTimeProject {
 }
 
 impl ScalarUDFImpl for CypherTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_time_project"
     }
@@ -10993,10 +10904,6 @@ impl CypherTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_time_truncate"
     }
@@ -11221,10 +11128,6 @@ impl CypherDateTimeProject {
 }
 
 impl ScalarUDFImpl for CypherDateTimeProject {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_datetime_project"
     }
@@ -11397,10 +11300,6 @@ impl CypherDateTimeTruncate {
 }
 
 impl ScalarUDFImpl for CypherDateTimeTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_datetime_truncate"
     }
@@ -11591,10 +11490,6 @@ impl CypherToString {
 }
 
 impl ScalarUDFImpl for CypherToString {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_to_string"
     }
@@ -11791,10 +11686,6 @@ impl CypherDateTruncate {
 }
 
 impl ScalarUDFImpl for CypherDateTruncate {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_date_truncate"
     }
@@ -11967,10 +11858,6 @@ impl CypherPathNodes {
 }
 
 impl ScalarUDFImpl for CypherPathNodes {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &'static str {
         "cypher_path_nodes"
     }
@@ -12348,10 +12235,6 @@ mod tests {
     }
 
     impl ScalarUDFImpl for CountingVolatilePredicate {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn name(&self) -> &'static str {
             "counting_volatile_predicate"
         }
@@ -12755,7 +12638,6 @@ mod tests {
             let invariant = function
                 .func
                 .inner()
-                .as_any()
                 .downcast_ref::<CypherInvariantQuantifier>()
                 .expect("cardinality-only quantifier UDF");
             assert_eq!(invariant.predicate, expected);
@@ -13328,7 +13210,7 @@ mod tests {
             let DfExpr::ScalarFunction(f) = e else {
                 return Option::None;
             };
-            let q = f.func.inner().as_any().downcast_ref::<CypherQuantifier>()?;
+            let q = f.func.inner().downcast_ref::<CypherQuantifier>()?;
             Some((q.elem_name.clone(), q.outer_names.clone(), f.args.clone()))
         };
 
@@ -13346,7 +13228,6 @@ mod tests {
         let outer_q = outer_fn
             .func
             .inner()
-            .as_any()
             .downcast_ref::<CypherQuantifier>()
             .unwrap();
         let (inner_elem, inner_outers, inner_args) =
@@ -16588,7 +16469,7 @@ mod tests {
     #[test]
     fn exact_zero_temporal_udf_metadata_contracts_are_total() {
         fn check<U: ScalarUDFImpl + 'static>(udf: U) {
-            assert!(udf.as_any().is::<U>());
+            assert!((&udf as &dyn ScalarUDFImpl).is::<U>());
             assert!(!udf.name().is_empty());
             let _ = udf.signature();
             assert!(udf.return_type(&[DataType::Null]).is_ok());
@@ -16706,6 +16587,37 @@ mod tests {
                 true
             )]))
         ));
+        let unified = unify_graph_value_nullability(&nested_a, &nested_b).unwrap();
+        let DataType::Struct(fields) = &unified else {
+            panic!("struct");
+        };
+        assert!(fields[0].is_nullable(), "value nullability is widened");
+        assert!(fields[1].is_nullable(), "items nullability is widened");
+        let non_null_uuid = DataType::Struct(Fields::from(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let nullable_uuid = DataType::Struct(Fields::from(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            true,
+        )]));
+        let list_target = unify_graph_value_nullability(
+            &DataType::new_list(non_null_uuid.clone(), true),
+            &DataType::new_list(nullable_uuid.clone(), true),
+        )
+        .unwrap();
+        let DataType::List(item) = &list_target else {
+            panic!("list");
+        };
+        let DataType::Struct(fields) = item.data_type() else {
+            panic!("struct element");
+        };
+        assert!(
+            fields[0].is_nullable(),
+            "DF54 path-list concat must widen node_uuid nullability"
+        );
 
         for (name, value) in [
             ("date", "2020-01-02"),

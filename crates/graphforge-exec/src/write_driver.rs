@@ -1512,7 +1512,7 @@ fn replace_empty_input(
     plan: Arc<dyn ExecutionPlan>,
     input: Arc<dyn ExecutionPlan>,
 ) -> Result<Arc<dyn ExecutionPlan>, GfError> {
-    if plan.as_any().is::<EmptyExec>() || plan.as_any().is::<PlaceholderRowExec>() {
+    if plan.is::<EmptyExec>() || plan.is::<PlaceholderRowExec>() {
         return Ok(input);
     }
     let children = plan

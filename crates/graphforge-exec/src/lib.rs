@@ -207,7 +207,6 @@ pub use algorithm_similar::{similar_algorithm, similar_projection_fingerprint};
 
 mod write_driver;
 
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -717,10 +716,6 @@ impl DisplayAs for GraphCreateExec {
 impl ExecutionPlan for GraphCreateExec {
     fn name(&self) -> &str {
         "GraphCreateExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -1373,7 +1368,7 @@ fn append_created_node_output_cols(
 /// created rows, not the summary, so the counts are read back from the exec's
 /// shared tally after execution rather than from the result batch.
 fn create_tally_in_plan(plan: &Arc<dyn ExecutionPlan>) -> Option<CreateTally> {
-    if let Some(c) = plan.as_any().downcast_ref::<GraphCreateExec>()
+    if let Some(c) = plan.downcast_ref::<GraphCreateExec>()
         && c.emits_rows()
     {
         return Some(c.effects());
@@ -1503,10 +1498,6 @@ impl DisplayAs for GraphDeleteExec {
 impl ExecutionPlan for GraphDeleteExec {
     fn name(&self) -> &str {
         "GraphDeleteExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2063,10 +2054,6 @@ impl ExecutionPlan for GraphSetExec {
         "GraphSetExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -2204,10 +2191,6 @@ impl DisplayAs for GraphRemoveExec {
 impl ExecutionPlan for GraphRemoveExec {
     fn name(&self) -> &str {
         "GraphRemoveExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -2391,10 +2374,6 @@ impl ExecutionPlan for VarLenExpandExec {
         "VarLenExpandExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -2519,10 +2498,6 @@ impl ExecutionPlan for OntologyInferExec {
         "OntologyInferExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -2631,6 +2606,13 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // relationship-list read below fetch exactly those rows (#830) instead of
     // scanning the whole file.
     let emissions = bfs_emit(cfg, &adjacency, src_ids);
+    // No matched paths → empty output under the planned schema. Avoid assembling
+    // take-columns from empty input/node batches: under DataFusion 54 an empty
+    // seed can still produce wide intermediate schemas that disagree with
+    // `out_schema` (columns vs fields mismatch).
+    if emissions.is_empty() {
+        return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+    }
     let traversed: std::collections::HashSet<u64> = emissions
         .iter()
         .flat_map(|(_, _, path)| path.iter().copied())
@@ -3258,10 +3240,6 @@ impl ExecutionPlan for ExpandExec {
         "ExpandExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -3741,10 +3719,6 @@ impl ExecutionPlan for OptionalMatchExec {
         "OptionalMatchExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -4015,10 +3989,6 @@ impl DisplayAs for UnwindExec {
 impl ExecutionPlan for UnwindExec {
     fn name(&self) -> &str {
         "UnwindExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -4953,11 +4923,20 @@ impl ExecutionSession {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, fallback_schema) = self.plan_physical(&resolved_plan, params).await?;
 
-        let batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
+        let mut batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
             .await
             .map_err(|e| GfError::Execution(e.to_string()))?;
 
-        let schema = batches.first().map_or(fallback_schema, RecordBatch::schema);
+        // DataFusion's collect may return zero batches for an empty stream.
+        // Public callers (and DF54-era optimistic publish tests) index
+        // `batches[0]` for schema/row counts; mirror the write-path terminal
+        // suffix and always surface one empty batch with the plan schema.
+        let schema = batches
+            .first()
+            .map_or_else(|| fallback_schema, RecordBatch::schema);
+        if batches.is_empty() {
+            batches.push(RecordBatch::new_empty(Arc::clone(&schema)));
+        }
         let rows_produced = batches.iter().map(|b| b.num_rows() as u64).sum();
         Ok(ExecutionResult {
             schema,
@@ -6442,10 +6421,10 @@ mod tests {
         ] {
             assert_eq!(plan.name(), expected_name);
             assert!(
-                plan.as_any().is::<GraphCreateExec>()
-                    || plan.as_any().is::<GraphDeleteExec>()
-                    || plan.as_any().is::<GraphSetExec>()
-                    || plan.as_any().is::<GraphRemoveExec>()
+                plan.is::<GraphCreateExec>()
+                    || plan.is::<GraphDeleteExec>()
+                    || plan.is::<GraphSetExec>()
+                    || plan.is::<GraphRemoveExec>()
             );
             assert_eq!(plan.children().len(), 1);
             assert_eq!(plan.properties().output_partitioning().partition_count(), 1);

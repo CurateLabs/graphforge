@@ -113,6 +113,12 @@ fn load_ontology_applies_and_promotes_mode() {
         .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
         .expect("query declared label");
     assert_eq!(r.stats.rows_produced, 0);
+    assert_eq!(
+        r.batches.len(),
+        1,
+        "zero-row MATCH must still surface one schema-bearing batch (#467)"
+    );
+    assert_eq!(r.batches[0].num_rows(), 0);
 }
 
 // Person + a KNOWS relation, so a typed traversal binds after load.

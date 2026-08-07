@@ -2537,6 +2537,8 @@ mod tests {
     ///
     /// Does not touch generation `lease.lock` files; a live GraphForge may hold those.
     fn assert_project_mutation_locks_free(state_path: &Path, phase: &str) {
+        use fs4::TryLockError;
+
         let lock_root = state_path.join("locks");
         for name in ["writer.lock", "checkpoints.lock"] {
             let path = lock_root.join(name);
@@ -2547,15 +2549,17 @@ mod tests {
                 .truncate(false)
                 .open(&path)
                 .unwrap_or_else(|error| panic!("{phase}: open {name}: {error}"));
-            match FileExt::try_lock(&file) {
-                Ok(()) => {}
-                Err(fs4::TryLockError::WouldBlock) => {
-                    panic!("{phase}: {name} was still held (issue #275 probe)")
-                }
-                Err(fs4::TryLockError::Error(error)) => {
+            let acquired = match FileExt::try_lock(&file) {
+                Ok(()) => true,
+                Err(TryLockError::WouldBlock) => false,
+                Err(TryLockError::Error(error)) => {
                     panic!("{phase}: try_lock {name}: {error}")
                 }
-            }
+            };
+            assert!(
+                acquired,
+                "{phase}: {name} was still held (issue #275 probe)"
+            );
             FileExt::unlock(&file)
                 .unwrap_or_else(|error| panic!("{phase}: unlock {name}: {error}"));
         }

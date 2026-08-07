@@ -98,6 +98,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `public_lifecycle_conformance` | `integration-test` | `crates/graphforge-api/tests/public_lifecycle_conformance.rs` | `//crates/graphforge-api:public_lifecycle_conformance` | `mapped` | #8 |
 | `graphforge-api` | `release_load_construction` | `integration-test` | `crates/graphforge-api/tests/release_load_construction.rs` | `//crates/graphforge-api:release_load_construction` | `mapped` | #8 |
 | `graphforge-api` | `strict_runtime_properties` | `integration-test` | `crates/graphforge-api/tests/strict_runtime_properties.rs` | `//crates/graphforge-api:strict_runtime_properties` | `mapped` | #8 |
+| `graphforge-api` | `varlen_empty_seed` | `integration-test` | `crates/graphforge-api/tests/varlen_empty_seed.rs` | `//crates/graphforge-api:varlen_empty_seed` | `mapped` | #8 |
 | `graphforge-api` | `value_access_semantics` | `integration-test` | `crates/graphforge-api/tests/value_access_semantics.rs` | `//crates/graphforge-api:value_access_semantics` | `mapped` | #8 |
 | `graphforge-api` | `value_semantics` | `integration-test` | `crates/graphforge-api/tests/value_semantics.rs` | `//crates/graphforge-api:value_semantics` | `mapped` | #8 |
 | `graphforge-api` | `with_aggregation` | `integration-test` | `crates/graphforge-api/tests/with_aggregation.rs` | `//crates/graphforge-api:with_aggregation` | `mapped` | #8 |

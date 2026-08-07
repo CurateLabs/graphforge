@@ -21,7 +21,7 @@ arrow = { workspace = true }
 async-trait = "0.1"
 atomicwrites = "0.4.4"
 datafusion = { workspace = true }
-datafusion-catalog = "53"
+datafusion-catalog = "54"
 fs4 = "1.1"
 parquet = { workspace = true }
 serde = { workspace = true }

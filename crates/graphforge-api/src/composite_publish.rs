@@ -1739,7 +1739,9 @@ mod tests {
 
     #[test]
     fn optimistic_distinct_creates_rebase_and_both_publish() {
-        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TempDir::new().unwrap();
         GraphForge::new(directory.path().to_str()).unwrap();
         let results = publish_concurrently(
@@ -1761,7 +1763,9 @@ mod tests {
 
     #[test]
     fn optimistic_same_property_change_is_a_write_conflict() {
-        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TempDir::new().unwrap();
         let bootstrap = GraphForge::new(directory.path().to_str()).unwrap();
         bootstrap
@@ -1790,7 +1794,9 @@ mod tests {
 
     #[test]
     fn optimistic_delete_and_property_change_publish_exactly_one_complete_result() {
-        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TempDir::new().unwrap();
         let bootstrap = GraphForge::new(directory.path().to_str()).unwrap();
         bootstrap
@@ -1815,6 +1821,10 @@ mod tests {
         let rows = reopened
             .execute("MATCH (n:Person) RETURN n.nickname AS nickname")
             .unwrap();
+        assert!(
+            !rows.batches.is_empty(),
+            "empty MATCH must still surface one schema-bearing batch"
+        );
         assert!(rows.batches[0].num_rows() <= 1);
         if rows.batches[0].num_rows() == 1 {
             let nicknames = rows.batches[0]
@@ -1847,7 +1857,9 @@ mod tests {
 
     #[test]
     fn optimistic_retry_budget_is_bounded() {
-        let _serial = OPTIMISTIC_PUBLISH_SERIAL.lock().unwrap();
+        let _serial = OPTIMISTIC_PUBLISH_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = TempDir::new().unwrap();
         GraphForge::new(directory.path().to_str()).unwrap();
         let results = publish_concurrently(
