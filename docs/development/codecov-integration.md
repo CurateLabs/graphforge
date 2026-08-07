@@ -111,7 +111,7 @@ Codecov will:
 
 ### On Codecov Dashboard
 
-Visit: https://codecov.io/gh/DecisionNerd/graphforge
+Visit: https://codecov.io/gh/CurateLabs/graphforge
 
 **Dashboard features:**
 - Coverage trends over time
@@ -260,7 +260,7 @@ uv run pytest tests/ --cov=src --cov-branch --cov-report=term
 
 ## Resources
 
-- [Codecov Dashboard](https://codecov.io/gh/DecisionNerd/graphforge)
+- [Codecov Dashboard](https://codecov.io/gh/CurateLabs/graphforge)
 - [Codecov Documentation](https://docs.codecov.com/)
 - [GitHub Actions Integration](https://docs.codecov.com/docs/github-actions)
 - [Coverage.py Documentation](https://coverage.readthedocs.io/)
