@@ -3,10 +3,13 @@
 <p align="center">
   <a href="https://pypi.org/project/graphforge/"><img src="https://img.shields.io/pypi/v/graphforge.svg?label=PyPI&logo=pypi" alt="PyPI version" /></a>
   <a href="https://www.npmjs.com/package/@curatelabs/graphforge"><img src="https://img.shields.io/npm/v/%40curatelabs/graphforge.svg?label=npm&logo=npm" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@curatelabs/graphforge-cli"><img src="https://img.shields.io/npm/v/%40curatelabs%2Fgraphforge-cli.svg?label=CLI&logo=npm" alt="CLI npm version" /></a>
+  <a href="https://www.npmjs.com/package/@curatelabs/graphforge-agent-skills"><img src="https://img.shields.io/npm/v/%40curatelabs%2Fgraphforge-agent-skills.svg?label=skills&logo=npm" alt="agent-skills npm version" /></a>
+  <a href="https://github.com/CurateLabs/graphforge/releases/latest"><img src="https://img.shields.io/github/v/release/CurateLabs/graphforge?label=GitHub%20Release&logo=github" alt="GitHub Release" /></a>
   <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white" alt="Python 3.10 or newer" /></a>
   <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
-  <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI&logo=github" alt="Test Suite status" /></a>
+  <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI%20Gate&logo=github" alt="CI Gate status" /></a>
   <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
   <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
@@ -339,8 +342,8 @@ heads and stale commits before any platform matrix build starts.
 
 | Version | Focus | Status |
 |---------|-------|--------|
-| **v0.5.1** | Coordinated release across crates, PyPI, npm, CLI, and docs | **Current** |
-| v0.5.x | Swift + Kotlin bindings (UniFFI) and follow-on surfaces | Planned |
+| **v0.5.2** | Coordinated release across crates, PyPI, npm, CLI, skills, and docs | **Current** |
+| v0.5.x | Follow-on surfaces (mobile bindings abandoned for now) | Planned |
 | v1.0 | Long-term API stability commitment | Future |
 
 **Next steps:** [install](docs/guide/installation.md) → [quick start](docs/guide/quickstart.md)
