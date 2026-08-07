@@ -1,7 +1,7 @@
 # GraphForge Roadmap
 
-**Last Updated:** 2026-08-01
-**Current release line:** v0.5.1 (see [installation](../guide/installation.md))
+**Last Updated:** 2026-08-07
+**Current release line:** v0.5.2 (see [installation](../guide/installation.md))
 
 ---
 
@@ -9,27 +9,36 @@
 
 This roadmap describes **product surfaces and versions**, not internal delivery
 milestones. Where a GitHub milestone name appears elsewhere in operator docs
-(for example **M1** for the coordinated v0.5.1 publication), it is paired with
+(for example **M1** for the coordinated v0.5.x publication), it is paired with
 plain-language purpose there; this page stays version- and outcome-oriented.
 
 ---
 
-## v0.5.1 — Coordinated release (current)
+## v0.5.2 — Coordinated release (current)
 
-GraphForge **v0.5.1** is the current coordinated release across Rust crates,
+GraphForge **v0.5.2** is the current coordinated release across Rust crates,
 PyPI, npm bindings/CLI/skills, and public docs. Install from the published
-packages (see [installation](../guide/installation.md)). The incomplete v0.5.0
-registry publication remains documented historical incident evidence and is not
-the completion target.
+packages (see [installation](../guide/installation.md)).
+
+- GitHub Release: https://github.com/CurateLabs/graphforge/releases/tag/v0.5.2
+- PyPI: https://pypi.org/project/graphforge/0.5.2/
+- npm: `@curatelabs/graphforge`, `@curatelabs/graphforge-cli`,
+  `@curatelabs/graphforge-agent-skills` at `0.5.2`
+- Docs: https://docs.graphforge.sh/
 
 Capability surface matches the shipped v0.5 engine: openCypher, seven
 analyst-intent verbs, Parquet projects, and thin Python/Node bindings.
 
-Swift and Kotlin UniFFI bindings remain **planned** after this coordinated
-release; they are not part of the v0.5.1 core package set.
+Mobile bindings (Swift/Kotlin/UniFFI) are **not** part of the current core
+package set.
 
 See [Publishing](../engineering/PUBLISHING.md) for artifact destinations and
 [release process](../development/release-process.md) for operator sequence.
+
+### Prior coordinated line
+
+**v0.5.1** was the first complete coordinated registry publication after the
+incomplete v0.5.0 surface. Prefer v0.5.2 for new installs.
 
 ---
 
