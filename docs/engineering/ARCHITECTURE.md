@@ -95,6 +95,11 @@ architecture deep-dives in [`../book/architecture/`](../book/architecture/overvi
   [`OBSERVABILITY.md`](OBSERVABILITY.md).
 - **Correctness bar:** TCK + non-Cypher surface inventories; wrapper/logical-plan tests
   alone are insufficient (`AGENTS.md`).
+- **Build system:** Bazel (Bazelisk) owns CI Rust compilation and the mapped test
+  graph; Cargo manifests remain ecosystem inputs. See
+  [`../development/bazel.md`](../development/bazel.md). Publish credentials stay
+  outside cacheable Bazel actions. Swift/Kotlin UniFFI bindings are not an M2
+  build-migration deliverable.
 
 ## Decisions
 

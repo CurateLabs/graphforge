@@ -18,6 +18,13 @@ repository-maintained change history file.
 
 ## 2. Prove the candidate
 
+CI Rust compilation and the mapped test graph are Bazel-owned under required
+check **`CI Gate`** (see [bazel.md](bazel.md) and
+[bazel-migration-cutover.md](bazel-migration-cutover.md)). Binding RC and publish
+lanes must consume Bazel-built (or equivalent) natives rather than silently
+recompiling a different native graph. Publish credentials and OIDC stay in
+release workflows — never in cacheable Bazel actions.
+
 The Binding Release Candidate workflow must retain the manifest, Python, npm,
 crates, and evidence partitions for the same commit. Before any registry write,
 the exact retained bytes must pass:

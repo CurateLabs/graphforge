@@ -22,6 +22,8 @@ provenance IDs, and structured errors ([`../releases/roadmap.md`](../releases/ro
 | Clean-install success | Quickstart smokes after publish | Manual/release verification | Pass from public registries | Release operator |
 | Docs usability | Docs build; link integrity | `docs.yml` / Starlight (`docs-site/`) | Green build | Docs owners |
 | Scale honesty | Fixed-hop LIMIT materialization ratios | Scale-limit CI gate | ≤3× rows on 10× edges for LIMIT 1000 shape | Maintainers |
+| Bazel CI correctness | Authoritative `//:ci_rust_tests` + drift/ledger | `Bazel Bootstrap` under `CI Gate` | Green on Rust-classified PRs | Maintainers |
+| Bazel remote-cache health | Remote hits, cold/warm walls, affected-input isolation | `dist/bazel-*-observation.json`, checked-in `perf-sample.json` | Hits on warm identical-SHA; cold correct without cache | Maintainers |
 
 ## Service health
 
@@ -60,8 +62,13 @@ aggregate CI signals.
 | Docs build failure | `docs.yml` / Starlight build red | Medium | Docs owners | Fix content or site config |
 | Publish dry-run failure | Registry reject | High | Release operator | Stop publication; recover per plan |
 | Scale-limit shape regression | Materialization ratio gate fail | Medium | Execution owners | Investigate adjacency/fetch path; update docs if limits change |
+| Bazel remote-cache regression | Warm identical-SHA hits disappear or cold correctness fails | High | Build owners | Confirm Blacksmith Bazel caching; never add competing `--remote_cache`; see [`../development/bazel-migration-perf.md`](../development/bazel-migration-perf.md) |
 
 There is no hosted ops dashboard product; CI and release artifacts are the shared “dashboard.”
+Bazel per-run summaries and machine-readable benchmark paths are listed in
+[`../development/bazel.md`](../development/bazel.md) and
+[`../development/bazel-migration-ac-evidence.md`](../development/bazel-migration-ac-evidence.md).
+Blacksmith Cache UI: https://app.blacksmith.sh/cache.
 
 ## Privacy and safety
 

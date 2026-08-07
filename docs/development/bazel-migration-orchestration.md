@@ -213,7 +213,7 @@ canonical path).
 | Parity evidence | R7 / #6 | `docs/development/bazel-migration-parity.md` (+ CI artifacts linked from PR) | #5, #4, #3 |
 | Cache/perf benchmarks | R8 / #5 | `docs/development/bazel-migration-perf.md` + machine-readable files under `docs/development/bazel-migration-evidence/` | #4, #3, #1 close |
 | Cutover + Cargo rollback | R9 / #4 | `docs/development/bazel-migration-cutover.md` | #3, operators |
-| #1 AC evidence map | R10 / #3 | `docs/development/bazel-migration-ac-evidence.md` | #2, #1 close |
+| #1 AC evidence map | R10 / #3 | `docs/development/bazel-migration-ac-evidence.md` (+ developer guide `docs/development/bazel.md`) | #2, #1 close |
 
 PRs for modeling slices must update the migration ledger in the same change when
 they add, remap, or except targets.

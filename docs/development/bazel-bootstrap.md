@@ -103,12 +103,12 @@ skills are declared via root `//:project_skills_bundle` / `//:project-skills/man
   for lint CI until a later slice).
 - Doctests are not separate Bazel targets (documented equivalent: coverage attaches
   to crate unit-test targets; same policy as #10/#9).
-- Blacksmith `Bazel Bootstrap` runs `//:bazel_test_graph_smoke`, release bins,
-  binding smokes, and the #6 dual-build parity gate. Full `//:integration_tests`
-  and `//:bdd_tests` remain executable under Bazel for local/full runs.
+- Blacksmith `Bazel Bootstrap` runs authoritative `//:ci_rust_tests`, release bins,
+  binding smokes, and diagnostic #6 dual-build parity (one release cycle after #4).
+  Full `//:integration_tests` and `//:bdd_tests` remain executable under Bazel for
+  local/full runs.
 - Cross-OS Binding RC still produces macOS/Windows natives on those runners;
   Bazel models every certified platform and builds host-native release artifacts.
-  Sole Bazel authority is #4 after #5 cache/perf.
 - Bazel storage always enables `test-failpoints` (env-gated no-ops); Cargo release
   builds keep the const no-op body — documented dual-build parity surface.
 
@@ -149,16 +149,14 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 
 - CI runs on Blacksmith runners when `bazel` path classification is true.
 - Do **not** add `--remote_cache` in `.bazelrc` or workflow steps. Blacksmith
-  injects repository Bazel caching when org-admin enablement lands (#5).
+  injects repository Bazel caching (org-admin enablement complete; see #5).
 - Policy + measurement harness: `scripts/ci/bazel-cache-perf.py` (see
   [bazel-migration-perf.md](bazel-migration-perf.md)).
-- Org-admin must enable **Bazel Build Caching** under Blacksmith
-  [Settings → Features](https://app.blacksmith.sh/settings?tab=features) before
-  remote hits can be measured; #5 stays open until gates pass.
+- After [#4](https://github.com/CurateLabs/graphforge/issues/4), `Bazel Bootstrap`
+  is authoritative under `CI Gate` (`//:ci_rust_tests`).
 
-## Next
+## Developer entrypoint
 
-1. [#5](https://github.com/CurateLabs/graphforge/issues/5) cache/perf evidence —
-   see [bazel-migration-perf.md](bazel-migration-perf.md).
-2. [#4](https://github.com/CurateLabs/graphforge/issues/4) — `CI Gate` cutover;
-   see [bazel-migration-cutover.md](bazel-migration-cutover.md).
+Day-to-day install, extending targets, packaging handoff, troubleshooting, and
+CI/release runbooks: [bazel.md](bazel.md).
+#1 close-readiness evidence map: [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).

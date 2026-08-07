@@ -72,8 +72,7 @@ bazelisk test //:parity_suite //:bazel_test_graph_smoke
 
 ## Next
 
-1. [#4](https://github.com/CurateLabs/graphforge/issues/4) cutover — see
-   [bazel-migration-cutover.md](bazel-migration-cutover.md) (landed when #5
-   performance gates are complete).
-2. [#3](https://github.com/CurateLabs/graphforge/issues/3) — docs/observability
-   close-readiness.
+Cutover ([#4](https://github.com/CurateLabs/graphforge/issues/4)) and cache/perf
+([#5](https://github.com/CurateLabs/graphforge/issues/5)) are landed. Docs /
+#1 close-readiness: [bazel.md](bazel.md) and
+[bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
