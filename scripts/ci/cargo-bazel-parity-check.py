@@ -143,6 +143,45 @@ def check_labels_exist(root: Path, map_path: Path) -> list[str]:
     return errors
 
 
+def check_suite_membership(root: Path, map_path: Path) -> list[str]:
+    """Fail closed if a mapped integration-test label is not under //:ci_rust_tests.
+
+    Target *existence* is checked separately; this catches the hand-maintained
+    suite list forgetting to include a newly mapped test.
+    """
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    mapped_tests = sorted(
+        {
+            entry["bazel_label"]
+            for entry in payload["targets"]
+            if entry.get("status") == "mapped"
+            and entry.get("class") == "integration-test"
+            and entry.get("bazel_label")
+        }
+    )
+    if not mapped_tests:
+        return ["migration map has no mapped integration-test labels"]
+
+    result = run(
+        ["bazelisk", "query", "tests(//:ci_rust_tests)"],
+        cwd=root,
+    )
+    if result.returncode != 0:
+        return [
+            "bazelisk query tests(//:ci_rust_tests) failed:\n"
+            + (result.stderr or result.stdout)
+        ]
+
+    suite = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    errors: list[str] = []
+    for label in mapped_tests:
+        if label not in suite:
+            errors.append(
+                f"mapped integration-test not reachable from //:ci_rust_tests: {label}"
+            )
+    return errors
+
+
 def run_dual_suite(root: Path, suite_path: Path) -> tuple[list[str], list[dict[str, Any]]]:
     suite = json.loads(suite_path.read_text(encoding="utf-8"))
     errors: list[str] = []
@@ -228,13 +267,17 @@ def main(argv: list[str] | None = None) -> int:
         platform_errors = check_release_platforms(root, platforms_path, rc_path)
         errors.extend(platform_errors)
         label_errors: list[str] = []
+        suite_errors: list[str] = []
         if not args.skip_label_query:
             label_errors = check_labels_exist(root, map_path)
             errors.extend(label_errors)
+            suite_errors = check_suite_membership(root, map_path)
+            errors.extend(suite_errors)
         evidence["inventory"] = {
             "ledger_ok": ledger.returncode == 0,
             "platforms_ok": not platform_errors,
             "labels_ok": not label_errors,
+            "suite_membership_ok": not suite_errors,
             "label_query_skipped": bool(args.skip_label_query),
         }
 
