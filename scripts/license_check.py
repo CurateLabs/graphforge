@@ -184,7 +184,7 @@ def validate_canonical_repository() -> list[str]:
     cargo_root = ROOT / "Cargo.toml"
     cargo_text = cargo_root.read_text(encoding="utf-8") if cargo_root.exists() else ""
     if f'repository = "{CANONICAL_REPOSITORY}"' not in cargo_text:
-        errors.append(f"Cargo.toml must set repository = \"{CANONICAL_REPOSITORY}\"")
+        errors.append(f'Cargo.toml must set repository = "{CANONICAL_REPOSITORY}"')
 
     publishable_package_json = (
         ROOT / "crates" / "graphforge-bindings-node" / "package.json",
@@ -216,7 +216,7 @@ def validate_canonical_repository() -> list[str]:
     for path in publishable_pyproject:
         text = path.read_text(encoding="utf-8") if path.exists() else ""
         if f'Repository = "{CANONICAL_REPOSITORY}"' not in text:
-            errors.append(f"{label(path)} must set Repository = \"{CANONICAL_REPOSITORY}\"")
+            errors.append(f'{label(path)} must set Repository = "{CANONICAL_REPOSITORY}"')
 
     # Reject retired identities in first-party package manifests only (not
     # historical docs that cite transferred PR numbers).

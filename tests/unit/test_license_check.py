@@ -63,6 +63,9 @@ def test_retired_repository_identity_is_rejected_in_manifests(tmp_path: Path) ->
         license_check._text_has_retired_repository(stale.read_text(encoding="utf-8"))
         == "DecisionNerd/graphforge"
     )
-    assert license_check._text_has_retired_repository(
-        'repository = "https://github.com/CurateLabs/graphforge"\n'
-    ) is None
+    assert (
+        license_check._text_has_retired_repository(
+            'repository = "https://github.com/CurateLabs/graphforge"\n'
+        )
+        is None
+    )
