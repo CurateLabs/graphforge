@@ -72,6 +72,8 @@ pytest -m "not slow"
 - [ ] My changes generate no new warnings
 - [ ] I have run `ruff format.` and `ruff check.`
 - [ ] I have run `mypy src/` (if type hints added/changed)
+- [ ] If this changes `Cargo.lock` / crate deps, I refreshed Bazel
+      (`CARGO_BAZEL_REPIN=1`, lock/fingerprint) — Dependabot cargo PRs need this too
 
 ### Testing
 

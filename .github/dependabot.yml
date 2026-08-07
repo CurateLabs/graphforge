@@ -1,5 +1,9 @@
 # Dependabot configuration for automated dependency updates
 # https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Cargo bumps that change the lockfile also need a Bazel crate-universe repin
+# (CARGO_BAZEL_REPIN=1 / MODULE.bazel.lock + feature fingerprint). Reviewers
+# should reject Cargo-only Dependabot PRs that skip the Bazel refresh.
 
 version: 2
 updates:
@@ -61,3 +65,54 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+
+  # Rust / Cargo workspace
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "DecisionNerd"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+      # Reminder: Cargo bumps need Bazel crate-universe repin before merge.
+    groups:
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Root npm / pnpm workspace
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 3
+    reviewers:
+      - "DecisionNerd"
+    labels:
+      - "dependencies"
+      - "javascript"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
