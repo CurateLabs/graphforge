@@ -73,6 +73,9 @@ bazelisk test //:bdd_tests
 
 # Fail-closed inventory / drift / parity diagnostics
 python3 scripts/ci/cargo-bazel-drift-check.py
+# After Cargo.lock bumps (including Dependabot cargo PRs), repin Bazel:
+#   CARGO_BAZEL_REPIN=1 bazelisk sync --only=crate_index
+# then re-run the drift check and commit MODULE.bazel.lock / fingerprint outputs.
 python3 scripts/ci/bazel-migration-ledger-check.py
 python3 scripts/ci/cargo-bazel-parity-check.py --mode all \
   --write-evidence dist/cargo-bazel-parity-evidence.json
