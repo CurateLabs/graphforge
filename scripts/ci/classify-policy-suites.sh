@@ -29,6 +29,25 @@ enable_all() {
   storage=true
 }
 
+# Policy suites only care about gate scripts/workflows. Docs and similar
+# prose stay inert; anything else unmatched fails closed.
+is_inert_path() {
+  case "$1" in
+    *.md | *.mdx | *.txt | \
+      LICENSE | LICENSE-* | NOTICE | NOTICE-* | THIRD_PARTY* | AUTHORS | \
+      CHANGELOG* | CODE_OF_CONDUCT* | SECURITY.md | RELEASING.md | \
+      AGENTS.md | CONTRIBUTING.md | \
+      .github/*.md | .github/ISSUE_TEMPLATE/* | .github/PULL_REQUEST_TEMPLATE* | \
+      .github/CODEOWNERS | .editorconfig | .gitignore | .gitattributes | \
+      .mailmap)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 emit() {
   printf 'contracts=%s\n' "$contracts"
   printf 'coverage_ledger=%s\n' "$coverage_ledger"
@@ -124,6 +143,11 @@ while IFS= read -r -d '' path; do
       ;;
     scripts/ci/test-ci-storage-policy.py | .github/workflows/*.yml | .github/workflows/*.yaml)
       storage=true
+      ;;
+    *)
+      if ! is_inert_path "$path"; then
+        enable_all
+      fi
       ;;
   esac
 done <"$changed_files"

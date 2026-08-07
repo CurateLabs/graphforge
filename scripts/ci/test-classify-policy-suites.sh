@@ -43,6 +43,8 @@ assert_classification "$contracts" tests/contracts/m20-contract-matrix.json
 assert_classification "$coverage_ledger" scripts/coverage_rust_ledger.py
 assert_classification "$storage" .github/workflows/docs.yml
 assert_classification "$all" .github/workflows/test.yml
+# Unknown paths must fail closed toward full policy validation.
+assert_classification "$all" totally/unknown/path.xyz
 
 missing=$(cd "$fixture" && "$classifier" deadbeef HEAD)
 [[ "$missing" == "$all" ]] || {
