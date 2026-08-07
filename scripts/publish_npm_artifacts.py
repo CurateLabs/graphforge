@@ -87,8 +87,9 @@ def archive_matches_integrity(path: Path, integrity: str) -> bool:
 
 
 def publish_archive(path: Path) -> None:
+    """Publish one retained tarball via npm trusted publishing (OIDC) + provenance."""
     subprocess.run(
-        ["npm", "publish", str(path), "--access", "public"],
+        ["npm", "publish", str(path), "--access", "public", "--provenance"],
         cwd=ROOT,
         check=True,
         env=os.environ.copy(),
@@ -125,9 +126,6 @@ def main(argv: list[str] | None = None) -> int:
     selection.add_argument("--group", choices=tuple(GROUPS))
     selection.add_argument("--package")
     args = parser.parse_args(argv)
-    if not os.environ.get("NODE_AUTH_TOKEN", "").strip():
-        print("NODE_AUTH_TOKEN is required", file=sys.stderr)
-        return 2
 
     candidate = load_candidate_module()
     try:
@@ -149,11 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         print("requested npm package is outside the candidate", file=sys.stderr)
         return 2
     for name in names:
-        if args.package:
-            publish_archive(args.artifacts_dir / by_name[name]["path"])
-            print(f"{name}@{args.version}: accepted; public verification required")
-        else:
-            publish_one(by_name[name], args.artifacts_dir)
+        publish_one(by_name[name], args.artifacts_dir)
     return 0
 
 

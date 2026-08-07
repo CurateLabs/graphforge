@@ -10,7 +10,8 @@ are in
 - The release version is aligned across every public package surface.
 - Normal PR CI is green on the intended `main` commit.
 - The retained partitioned candidate and offline rehearsal are complete.
-- The npm token and PyPI/crates.io trusted publishing are configured.
+- PyPI, crates.io, and npm trusted publishing are configured for
+  `publish.yaml` (OIDC; no long-lived `NPM_TOKEN`).
 - A maintainer has explicitly authorized the immutable tag, GitHub Release, and
   registry writes.
 

@@ -85,16 +85,27 @@ assert "fail-fast: false" in native
 assert native.count("- graphforge-") == 5
 assert "needs: candidate-preflight" in native
 assert '--package "@curatelabs/${{ matrix.package }}"' in native
-assert "secrets.NPM_TOKEN" in native
+assert "id-token: write" in native
+assert "secrets.NPM_TOKEN" not in native
+assert "NODE_AUTH_TOKEN" not in native
 assert "secrets.CARGO_REGISTRY_TOKEN" not in native
 
 assert "needs: [candidate-preflight, npm-native]" in main
 assert "Require verified native fan-in and authorize main" in main
 assert "--node npm:@curatelabs/graphforge" in main
+assert "id-token: write" in main
+assert "secrets.NPM_TOKEN" not in main
+assert "NODE_AUTH_TOKEN" not in main
 assert "needs: [candidate-preflight, npm-main]" in cli
 assert "--node npm:@curatelabs/graphforge-cli" in cli
+assert "id-token: write" in cli
+assert "secrets.NPM_TOKEN" not in cli
+assert "NODE_AUTH_TOKEN" not in cli
 assert "needs: [candidate-preflight, npm-cli]" in skills
 assert "--node npm:@curatelabs/graphforge-agent-skills" in skills
+assert "id-token: write" in skills
+assert "secrets.NPM_TOKEN" not in skills
+assert "NODE_AUTH_TOKEN" not in skills
 
 assert "needs: candidate-preflight" in crates
 assert "timeout-minutes: 180" in crates
@@ -161,8 +172,11 @@ assert "gh release download" in write_evidence
 assert "sleep" not in write_evidence
 
 credential_workflow = CREDENTIAL_WORKFLOW.read_text(encoding="utf-8")
-assert "npm whoami" in credential_workflow
-assert "secrets.NPM_TOKEN" in credential_workflow
+assert "id-token: write" in credential_workflow
+assert "${{ secrets.NPM_TOKEN }}" not in credential_workflow
+assert "NODE_AUTH_TOKEN:" not in credential_workflow
+assert "npm whoami" not in credential_workflow
+assert "trusted-publishing" in credential_workflow
 assert "secrets.CARGO_REGISTRY_TOKEN" not in credential_workflow
 assert "crates-io-auth-action" not in credential_workflow
 for forbidden in ("npm publish", "uv publish", "cargo publish", "release:\n"):
