@@ -14,7 +14,10 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "test_fixtures",
-    srcs = glob(["tests/fixtures/**/*"]),
+    srcs = glob(
+        ["tests/fixtures/**/*"],
+        exclude = ["**/BUILD.bazel"],
+    ),
 )
 
 gf_rust_library(

@@ -9,3 +9,6 @@ build --experimental_convenience_symlinks=normal
 # Keep action logs useful without leaking secrets into cacheable outputs.
 build --announce_rc
 test --test_output=errors
+
+# CI must not silently update MODULE.bazel.lock.
+common:ci --lockfile_mode=error
