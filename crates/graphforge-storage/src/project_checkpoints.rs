@@ -1846,10 +1846,12 @@ mod tests {
                 let checkpoint =
                     open_regular_lock(&worker_path).expect("phase=holder open checkpoints.lock");
                 let acquired = match mode {
-                    CheckpointLockMode::Shared => FileExt::try_lock_shared(&checkpoint)
+                    CheckpointLockMode::Shared => crate::file_lock::try_lock_shared(&checkpoint)
                         .expect("phase=holder acquire shared checkpoints.lock"),
-                    CheckpointLockMode::Exclusive => FileExt::try_lock_exclusive(&checkpoint)
-                        .expect("phase=holder acquire exclusive checkpoints.lock"),
+                    CheckpointLockMode::Exclusive => {
+                        crate::file_lock::try_lock_exclusive(&checkpoint)
+                            .expect("phase=holder acquire exclusive checkpoints.lock")
+                    }
                 };
                 assert!(
                     acquired,
@@ -1857,7 +1859,8 @@ mod tests {
                 );
                 ready_sender.send(()).expect("phase=holder publish ready");
                 release_receiver.recv().expect("phase=holder await release");
-                FileExt::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+                crate::file_lock::unlock(&checkpoint)
+                    .expect("phase=holder release checkpoints.lock");
             })
             .expect("phase=holder spawn");
         let holder = WriterLockHolder {
@@ -1902,20 +1905,22 @@ mod tests {
                 let writer =
                     open_regular_lock(&worker_writer).expect("phase=holder open writer.lock");
                 assert!(
-                    FileExt::try_lock_exclusive(&writer).expect("phase=holder acquire writer.lock"),
+                    crate::file_lock::try_lock_exclusive(&writer)
+                        .expect("phase=holder acquire writer.lock"),
                     "phase=holder writer.lock unexpectedly busy"
                 );
                 let checkpoint = open_regular_lock(&worker_checkpoint)
                     .expect("phase=holder open checkpoints.lock");
                 assert!(
-                    FileExt::try_lock_exclusive(&checkpoint)
+                    crate::file_lock::try_lock_exclusive(&checkpoint)
                         .expect("phase=holder acquire checkpoints.lock"),
                     "phase=holder checkpoints.lock unexpectedly busy"
                 );
-                FileExt::unlock(&writer).expect("phase=holder early release writer.lock");
+                crate::file_lock::unlock(&writer).expect("phase=holder early release writer.lock");
                 ready_sender.send(()).expect("phase=holder publish ready");
                 release_receiver.recv().expect("phase=holder await release");
-                FileExt::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+                crate::file_lock::unlock(&checkpoint)
+                    .expect("phase=holder release checkpoints.lock");
             })
             .expect("phase=holder spawn");
         let holder = WriterLockHolder {
@@ -1948,10 +1953,10 @@ mod tests {
         for name in [WRITER_LOCK_FILE, CHECKPOINT_LOCK_FILE] {
             let lock = open_regular_lock(&lock_root.join(name)).unwrap();
             assert!(
-                FileExt::try_lock_exclusive(&lock).unwrap(),
+                crate::file_lock::try_lock_exclusive(&lock).unwrap(),
                 "{phase}: {name} leaked"
             );
-            FileExt::unlock(&lock).unwrap();
+            crate::file_lock::unlock(&lock).unwrap();
         }
     }
 
