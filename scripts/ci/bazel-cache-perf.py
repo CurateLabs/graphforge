@@ -525,9 +525,11 @@ def mode_collect_pairs(
 def mode_affected_inputs(root: Path, out: Path) -> int:
     """Touch one crate source; require a rebuild of that package path only.
 
-    Warm and mutated legs use distinct ``--output_base`` dirs so Blacksmith
-    remote hits on the unchanged crate are visible (same-base action-cache
-    hits hide isolation signal).
+    Warm then mutate on the **same** ``--output_base`` so the local action
+    cache retains unchanged targets. A source edit must produce local work for
+    the changed crate without a full-graph rebuild. (Distinct output bases +
+    remote cache can mask isolation: unchanged and changed actions both show
+    as remote hits with empty exec logs.)
     """
     target_file = root / "crates/graphforge-ast/src/lib.rs"
     if not target_file.is_file():
@@ -540,33 +542,34 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
     ]
+    log_text = ""
     try:
-        with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-warm-") as warm_base:
+        with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-") as shared_base:
             warm = measure_bazel(
                 root,
                 targets,
-                startup_args=[f"--output_base={warm_base}"],
+                startup_args=[f"--output_base={shared_base}"],
             )
-        if warm["exit_code"] != 0:
-            print(warm["stderr_tail"], file=sys.stderr)
-            return 1
+            if warm["exit_code"] != 0:
+                print(warm["stderr_tail"], file=sys.stderr)
+                return 1
 
-        target_file.write_text(original + marker, encoding="utf-8")
-        with tempfile.TemporaryDirectory(prefix="gf-exec-log-") as tmp:
-            log_path = Path(tmp) / "exec.json"
-            with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-mut-") as mut_base:
+            target_file.write_text(original + marker, encoding="utf-8")
+            with tempfile.TemporaryDirectory(prefix="gf-exec-log-") as tmp:
+                log_path = Path(tmp) / "exec.json"
                 mutated = measure_bazel(
                     root,
                     [
                         *targets,
                         f"--execution_log_json_file={log_path}",
                     ],
-                    startup_args=[f"--output_base={mut_base}"],
+                    startup_args=[f"--output_base={shared_base}"],
                 )
-            if mutated["exit_code"] != 0:
-                print(mutated["stderr_tail"], file=sys.stderr)
-                return 1
-            log_text = log_path.read_text(encoding="utf-8") if log_path.is_file() else ""
+                if mutated["exit_code"] != 0:
+                    print(mutated["stderr_tail"], file=sys.stderr)
+                    return 1
+                if log_path.is_file():
+                    log_text = log_path.read_text(encoding="utf-8")
     finally:
         target_file.write_text(original, encoding="utf-8")
 
@@ -588,30 +591,13 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
     core_rebuilt = any("graphforge-core" in label for label in executed_labels)
     mut_summary = mutated["process_summary"]
     warm_summary = warm["process_summary"]
-    # Remote-cache path: unchanged core should remote-hit; mutated ast needs
-    # local work (exec log and/or sandbox/local process counts).
-    remote_isolation_ok = (
-        mut_summary["remote_cache_hits"] >= 1
-        and mut_summary["local_actions"] >= 1
-        and not core_rebuilt
-        and mut_summary["total_processes"] <= max(32, warm_summary["total_processes"] + 8)
+    # Same-base path: unchanged targets stay in the action cache; the mutated
+    # crate must execute locally (sandbox/local/worker) with a small process
+    # delta vs the warm baseline.
+    isolation_ok = mut_summary["local_actions"] >= 1 and mut_summary["total_processes"] <= max(
+        8, warm_summary["total_processes"] + 4
     )
-    local_fallback_ok = (
-        not executed_labels
-        and mut_summary["local_actions"] >= 1
-        and mut_summary["total_processes"] <= max(8, warm_summary["total_processes"] + 4)
-    )
-    ok = (
-        (ast_touched and not core_rebuilt)
-        or remote_isolation_ok
-        or local_fallback_ok
-        or (
-            # Without remote cache / exec log, require some local work and no
-            # unbounded rebuild vs the warm baseline.
-            mut_summary["local_actions"] >= 1
-            and mut_summary["total_processes"] <= max(8, warm_summary["total_processes"] + 4)
-        )
-    )
+    ok = (ast_touched and not core_rebuilt) or (isolation_ok and not core_rebuilt)
     payload = {
         "schema": SCHEMA_RUN,
         "kind": "affected_inputs",
@@ -621,8 +607,8 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         "executed_labels": executed_labels[:200],
         "ast_touched": ast_touched,
         "core_rebuilt": core_rebuilt,
-        "remote_isolation_ok": bool(remote_isolation_ok),
-        "protocol": "distinct_output_base_warm_then_mutated",
+        "isolation_ok": bool(isolation_ok),
+        "protocol": "same_output_base_warm_then_mutated",
         "passed": bool(ok),
     }
     out.parent.mkdir(parents=True, exist_ok=True)

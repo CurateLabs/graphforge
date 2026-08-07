@@ -111,10 +111,10 @@ def test_observe_warm_uses_distinct_output_bases() -> None:
         raise SystemExit("observe-warm must document distinct output_base protocol")
     if "gf-bazel-prime-" not in source or "gf-bazel-warm-" not in source:
         raise SystemExit("observe-warm must use distinct temporary output bases")
-    if "distinct_output_base_warm_then_mutated" not in source:
-        raise SystemExit("affected-inputs must use distinct output bases under remote cache")
-    if "remote_isolation_ok" not in source:
-        raise SystemExit("affected-inputs must accept remote-cache isolation signal")
+    if "same_output_base_warm_then_mutated" not in source:
+        raise SystemExit("affected-inputs must warm then mutate on one output_base")
+    if "isolation_ok" not in source:
+        raise SystemExit("affected-inputs must record isolation_ok")
 
 
 def test_evaluate_thresholds() -> None:
