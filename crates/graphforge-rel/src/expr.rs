@@ -2767,15 +2767,27 @@ impl<'a> ExprLowerer<'a> {
                     if le == re && !is_het_struct_type(Some(&le)) {
                         datafusion::functions_nested::expr_fn::array_concat(vec![l, r])
                     } else if graph_value_types_compatible(&le, &re) {
-                        let target = self.expr_data_type(&l).ok_or_else(|| {
+                        // DF54: cast both sides to the nullability-widened
+                        // common type — never narrow nested fields (#467).
+                        let left_ty = self.expr_data_type(&l).ok_or_else(|| {
                             LoweringError::UnsupportedExpr(
                                 "cannot resolve path-list type for concatenation".into(),
                             )
                         })?;
-                        datafusion::functions_nested::expr_fn::array_concat(vec![
-                            l,
-                            cast(r, target),
-                        ])
+                        let right_ty = self.expr_data_type(&r).unwrap_or_else(|| left_ty.clone());
+                        let target = unify_graph_value_nullability(&left_ty, &right_ty)
+                            .unwrap_or_else(|| left_ty.clone());
+                        let left = if left_ty == target {
+                            l
+                        } else {
+                            cast(l, target.clone())
+                        };
+                        let right = if right_ty == target {
+                            r
+                        } else {
+                            cast(r, target)
+                        };
+                        datafusion::functions_nested::expr_fn::array_concat(vec![left, right])
                     } else {
                         CYPHER_LIST_PLUS.call(vec![l, r])
                     }
@@ -3848,6 +3860,44 @@ fn graph_value_types_compatible(left: &DataType, right: &DataType) -> bool {
         })
 }
 
+/// Widen field nullability across two compatible graph-value (or list) types.
+///
+/// DataFusion 54 rejects casts that *narrow* nested nullability (nullable →
+/// non-null inside `List<Struct>`). Mixed named-path segments can emit the same
+/// Cypher shape with different Arrow nullability (`cypher_path_nodes` declares
+/// non-null `node_uuid`; fixed-hop `named_struct` inherits nullable scan
+/// columns), so concatenation must cast both sides to a shared widened type.
+fn unify_graph_value_nullability(left: &DataType, right: &DataType) -> Option<DataType> {
+    use datafusion::arrow::datatypes::{Field, Fields};
+
+    match (left, right) {
+        (DataType::Struct(left), DataType::Struct(right)) if left.len() == right.len() => {
+            let mut fields = Vec::with_capacity(left.len());
+            for (left, right) in left.iter().zip(right.iter()) {
+                if left.name() != right.name() {
+                    return None;
+                }
+                let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+                fields.push(Field::new(
+                    left.name(),
+                    data_type,
+                    left.is_nullable() || right.is_nullable(),
+                ));
+            }
+            Some(DataType::Struct(Fields::from(fields)))
+        }
+        (DataType::List(left), DataType::List(right)) => {
+            let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+            Some(DataType::new_list(
+                data_type,
+                left.is_nullable() || right.is_nullable(),
+            ))
+        }
+        (left, right) if left == right => Some(left.clone()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct CypherListPlus {
     signature: Signature,
@@ -4275,7 +4325,15 @@ fn list_plus_return_type(arg_types: &[DataType]) -> DataType {
             .iter()
             .all(|value_type| graph_value_types_compatible(first, value_type))
     {
-        return DataType::new_list((*first).clone(), true);
+        // Widen nested nullability across variants so invoke-time
+        // `ScalarValue::cast_to` never narrows under DF54 (#467).
+        let unified = value_types
+            .iter()
+            .skip(1)
+            .try_fold((*first).clone(), |acc, ty| {
+                unify_graph_value_nullability(&acc, ty)
+            });
+        return DataType::new_list(unified.unwrap_or_else(|| (*first).clone()), true);
     }
 
     let mut variants = Vec::new();
@@ -16529,6 +16587,37 @@ mod tests {
                 true
             )]))
         ));
+        let unified = unify_graph_value_nullability(&nested_a, &nested_b).unwrap();
+        let DataType::Struct(fields) = &unified else {
+            panic!("struct");
+        };
+        assert!(fields[0].is_nullable(), "value nullability is widened");
+        assert!(fields[1].is_nullable(), "items nullability is widened");
+        let non_null_uuid = DataType::Struct(Fields::from(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            false,
+        )]));
+        let nullable_uuid = DataType::Struct(Fields::from(vec![Field::new(
+            "node_uuid",
+            DataType::FixedSizeBinary(16),
+            true,
+        )]));
+        let list_target = unify_graph_value_nullability(
+            &DataType::new_list(non_null_uuid.clone(), true),
+            &DataType::new_list(nullable_uuid.clone(), true),
+        )
+        .unwrap();
+        let DataType::List(item) = &list_target else {
+            panic!("list");
+        };
+        let DataType::Struct(fields) = item.data_type() else {
+            panic!("struct element");
+        };
+        assert!(
+            fields[0].is_nullable(),
+            "DF54 path-list concat must widen node_uuid nullability"
+        );
 
         for (name, value) in [
             ("date", "2020-01-02"),
