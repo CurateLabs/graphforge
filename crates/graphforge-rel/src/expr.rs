@@ -12580,7 +12580,6 @@ mod tests {
             let invariant = function
                 .func
                 .inner()
-                .as_any()
                 .downcast_ref::<CypherInvariantQuantifier>()
                 .expect("cardinality-only quantifier UDF");
             assert_eq!(invariant.predicate, expected);
@@ -13171,7 +13170,6 @@ mod tests {
         let outer_q = outer_fn
             .func
             .inner()
-            .as_any()
             .downcast_ref::<CypherQuantifier>()
             .unwrap();
         let (inner_elem, inner_outers, inner_args) =
@@ -16413,7 +16411,7 @@ mod tests {
     #[test]
     fn exact_zero_temporal_udf_metadata_contracts_are_total() {
         fn check<U: ScalarUDFImpl + 'static>(udf: U) {
-            assert!(udf.is::<U>());
+            assert!((&udf as &dyn ScalarUDFImpl).is::<U>());
             assert!(!udf.name().is_empty());
             let _ = udf.signature();
             assert!(udf.return_type(&[DataType::Null]).is_ok());

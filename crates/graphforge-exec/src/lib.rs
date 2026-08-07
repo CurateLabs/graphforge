@@ -2606,6 +2606,13 @@ fn expand_bfs(cfg: &ExpandConfig, input_batches: &[RecordBatch]) -> Result<Recor
     // relationship-list read below fetch exactly those rows (#830) instead of
     // scanning the whole file.
     let emissions = bfs_emit(cfg, &adjacency, src_ids);
+    // No matched paths → empty output under the planned schema. Avoid assembling
+    // take-columns from empty input/node batches: under DataFusion 54 an empty
+    // seed can still produce wide intermediate schemas that disagree with
+    // `out_schema` (columns vs fields mismatch).
+    if emissions.is_empty() {
+        return Ok(RecordBatch::new_empty(cfg.out_schema.clone()));
+    }
     let traversed: std::collections::HashSet<u64> = emissions
         .iter()
         .flat_map(|(_, _, path)| path.iter().copied())
