@@ -49,9 +49,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu, sticky_target: "true" }
-          - { os: blacksmith-12vcpu-macos-15, target: python-macos, sticky_target: "false" }
-          - { os: blacksmith-8vcpu-windows-2025, target: python-windows, sticky_target: "false" }
+          # Linux: Bazel cdylib + assembler (no maturin recompile).
+          - { os: blacksmith-4vcpu-ubuntu-2404, target: python-ubuntu, native_builder: bazel, sticky_target: "false", wheel_tag: cp310-abi3-manylinux_2_17_x86_64 }
+          # Host maturin retained until macOS/Windows Binding RC Bazel cutover.
+          - { os: blacksmith-12vcpu-macos-15, target: python-macos, native_builder: maturin, sticky_target: "false" }
+          - { os: blacksmith-8vcpu-windows-2025, target: python-windows, native_builder: maturin, sticky_target: "false" }
     env:
       CARGO_INCREMENTAL: 0
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -72,15 +74,17 @@ jobs:
           python-version: "3.13"
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
       - name: Mount shared Linux Cargo build disk
         if: matrix.sticky_target == 'true'
         uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
         with:
-          # Python Ubuntu and Linux Node targets share compatible release products.
+          # Retained for maturin lanes that still compile into workspace target/.
           key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
           path: target
 
       - name: Cache Cargo registry
+        if: matrix.native_builder == 'maturin'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -88,7 +92,30 @@ jobs:
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
+      - name: Install Bazelisk
+        if: matrix.native_builder == 'bazel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazelisk version
+
       - name: Build native abi3 wheel
+        if: matrix.native_builder == 'bazel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 scripts/ci/binding_rc_bazel_native.py python \
+            --out dist/graphforge-bazel.whl \
+            --wheel-tag "${{ matrix.wheel_tag }}"
+
+      - name: Build native abi3 wheel
+        if: matrix.native_builder == 'maturin'
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           command: build
@@ -99,7 +126,7 @@ jobs:
       # manylinux maturin writes into the mounted target as root; reclaim it
       # before the native contracts can launch Cargo on the host runner.
       - name: Reclaim sticky-disk ownership after maturin
-        if: matrix.sticky_target == 'true'
+        if: matrix.native_builder == 'maturin' && matrix.sticky_target == 'true'
         shell: bash
         run: |
           test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
@@ -112,6 +139,7 @@ jobs:
       # launch Cargo after that wrapper has left PATH, especially on containerized
       # Linux runners, so validate the inherited command before those contracts.
       - name: Prepare Rust compiler wrapper for native contracts
+        if: matrix.native_builder == 'maturin'
         shell: bash
         run: |
           python3 scripts/ci/prepare-rustc-wrapper.py \
@@ -119,6 +147,7 @@ jobs:
             --contract python-native-contracts
 
       - name: Verify writable Cargo target for native contracts
+        if: matrix.native_builder == 'maturin'
         shell: bash
         run: |
           test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"
@@ -223,6 +252,7 @@ jobs:
             execution_mode: native
             cross_args: ""
             node_arch: x64
+            native_builder: napi
             sticky_target: "false"
           - os: blacksmith-12vcpu-macos-15
             target: aarch64-apple-darwin
@@ -230,6 +260,7 @@ jobs:
             execution_mode: native
             cross_args: ""
             node_arch: arm64
+            native_builder: napi
             sticky_target: "false"
           - os: blacksmith-4vcpu-ubuntu-2404
             target: x86_64-unknown-linux-gnu
@@ -237,7 +268,9 @@ jobs:
             execution_mode: native
             cross_args: ""
             node_arch: x64
-            sticky_target: "true"
+            native_builder: bazel
+            platform_tag: linux-x64-gnu
+            sticky_target: "false"
           - os: blacksmith-4vcpu-ubuntu-2404
             target: aarch64-unknown-linux-gnu
             report_target: node-aarch64-unknown-linux-gnu
@@ -245,6 +278,7 @@ jobs:
             cross_args: --use-napi-cross
             arm_cflags: -D__ARM_ARCH=8
             node_arch: x64
+            native_builder: napi
             sticky_target: "true"
           - os: blacksmith-8vcpu-windows-2025
             target: x86_64-pc-windows-msvc
@@ -252,6 +286,7 @@ jobs:
             execution_mode: native
             cross_args: ""
             node_arch: x64
+            native_builder: napi
             sticky_target: "false"
             timeout_minutes: 90
     env:
@@ -276,6 +311,7 @@ jobs:
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        if: matrix.native_builder == 'napi'
         with:
           toolchain: "1.96.0"
           targets: ${{ matrix.target }}
@@ -284,11 +320,12 @@ jobs:
         if: matrix.sticky_target == 'true'
         uses: useblacksmith/stickydisk@35ba2e331a80056a42af053ee54968511de2b7c7 # v1.5.0
         with:
-          # Python Ubuntu and Linux Node targets share compatible release products.
+          # Retained for napi/cross lanes that still compile into workspace target/.
           key: ${{ github.repository }}-binding-rc-linux-rust-1.96.0-${{ hashFiles('Cargo.lock') }}-release-target-v1
           path: target
 
       - name: Cache Cargo registry
+        if: matrix.native_builder == 'napi'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -314,7 +351,29 @@ jobs:
             exit 1
           fi
 
+      - name: Install Bazelisk
+        if: matrix.native_builder == 'bazel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazelisk version
+
       - name: Build declared publish target
+        if: matrix.native_builder == 'bazel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/binding_rc_bazel_native.py node \
+            --out-dir crates/graphforge-bindings-node \
+            --platform-tag "${{ matrix.platform_tag }}"
+
+      - name: Build declared publish target
+        if: matrix.native_builder == 'napi'
         shell: bash
         env:
           CFLAGS_aarch64_unknown_linux_gnu: ${{ matrix.arm_cflags || '' }}
@@ -488,6 +547,7 @@ jobs:
           python-version: "3.13"
 
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
@@ -548,10 +608,14 @@ jobs:
           cp candidate/release-artifacts/node-addons/*.node \
             crates/graphforge-bindings-node/artifacts/
           pushd crates/graphforge-bindings-node
-          # index.js / index.d.ts are gitignored NAPI-RS outputs. Generate them
-          # here before packing the main package; matrix jobs already retained
-          # the tested native addons that napi artifacts will distribute.
-          pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu
+          # index.js / index.d.ts are gitignored. Emit loaders from a retained
+          # Linux addon via the Bazel assembler — no second native recompile.
+          linux_addon="$(ls candidate/release-artifacts/node-addons/graphforge.linux-x64-gnu.node | head -n1)"
+          test -f "$linux_addon"
+          python3 "$GITHUB_WORKSPACE/scripts/ci/binding_rc_bazel_native.py" emit-node-loaders \
+            --addon "$linux_addon" \
+            --out-dir . \
+            --platform-tag linux-x64-gnu
           test -f index.js
           test -f index.d.ts
           pnpm exec napi create-npm-dirs
