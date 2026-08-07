@@ -51,6 +51,10 @@ Companion deep-dives:
 bazelisk version   # must report 9.2.0 from .bazelversion
 ```
 
+IDE note: point the Bazel/IntelliJ or VS Code Bazel extension at this
+repo root and the pinned `.bazelversion`; do not override the toolchain
+or enable a competing remote cache. Local `cargo` remains fine for edit/build.
+
 ## Everyday local commands
 
 `make pre-push-fast` requires `bazelisk` and runs the Cargo/Bazel drift check.

@@ -16,6 +16,7 @@ jobs:
   changes:
     name: Classify Changes
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       python: ${{ steps.filter.outputs.python }}
@@ -48,7 +49,8 @@ jobs:
   policy:
     name: Repository Policy
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: changes
+    # Always run: suite classifier is self-contained (no needs.changes outputs).
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -201,12 +203,31 @@ jobs:
       - name: Verify license policy
         run: python3 scripts/license_check.py --report license-compliance-report.json
 
+      - name: Detect Cargo lock / deny / notices inputs
+        id: cargo-licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          if [[ -z "$BASE" ]]; then
+            git fetch --no-tags origin main
+            BASE="$(git merge-base origin/main HEAD)"
+          fi
+          if git diff --name-only "$BASE" "${{ github.sha }}" | grep -Eq \
+            '^(Cargo\.lock|deny\.toml|about\.toml|scripts/generate_third_party_notices\.py|THIRD_PARTY_NOTICES\.md)$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust toolchain
+        if: steps.cargo-licenses.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       - name: Cache Cargo registry
+        if: steps.cargo-licenses.outputs.run == 'true'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -215,23 +236,28 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-deny and cargo-about
+        if: steps.cargo-licenses.outputs.run == 'true'
         uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
 
       - name: Check third-party Rust license allowlist
+        if: steps.cargo-licenses.outputs.run == 'true'
         run: cargo deny check licenses
 
       - name: Fetch crate sources for offline notice generation
+        if: steps.cargo-licenses.outputs.run == 'true'
         run: cargo fetch --locked
 
       - name: Verify generated third-party notices
+        if: steps.cargo-licenses.outputs.run == 'true'
         run: python3 scripts/generate_third_party_notices.py --check
 
   python-quality:
     name: Python Quality
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
+    timeout-minutes: 20
     if: needs.changes.outputs.python == 'true'
     steps:
       - name: Checkout code
@@ -267,6 +293,7 @@ jobs:
     name: Gherkin Syntax
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
+    timeout-minutes: 15
     if: needs.changes.outputs.gherkin == 'true'
     steps:
       - name: Checkout code
@@ -305,6 +332,7 @@ jobs:
     name: Agent Skills
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
+    timeout-minutes: 15
     if: needs.changes.outputs.agent_skills == 'true'
     steps:
       - name: Checkout code
@@ -331,6 +359,7 @@ jobs:
     name: Pulumi Static Validation
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
+    timeout-minutes: 20
     if: needs.changes.outputs.pulumi == 'true'
     steps:
       - name: Checkout code
@@ -379,6 +408,7 @@ jobs:
     name: Terraform Static Validation
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
+    timeout-minutes: 20
     if: needs.changes.outputs.terraform == 'true'
     steps:
       - name: Checkout code
@@ -842,8 +872,8 @@ jobs:
           set -euo pipefail
           # Do not set --remote_cache; Blacksmith injects repository cache.
           mkdir -p dist
-          bazelisk test //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
-          bazelisk build \
+          bazelisk test --config=ci //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
+          bazelisk build --config=ci \
             //:bazel_smoke \
             //:first_party_libs \
             //:runtime_libs \
@@ -856,7 +886,7 @@ jobs:
           set -euo pipefail
           # Do not set --remote_cache; Blacksmith injects repository cache.
           mkdir -p dist
-          bazelisk build //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke \
+          bazelisk build --config=ci //:binding_cdylibs //:python_wheel_smoke //:node_package_smoke \
             2>&1 | tee dist/bazel-binding-build.log
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
 
@@ -1036,6 +1066,7 @@ jobs:
     name: CI Gate
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always()
+    timeout-minutes: 10
     needs:
       - changes
       - policy
