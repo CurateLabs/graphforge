@@ -35,8 +35,29 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[2]
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+
+
+def uses_approved(uses: str | None, action: str, *tags: str) -> bool:
+    """Accept ``action@tag`` or Dependabot-style ``action@<sha> # tag`` pins."""
+    if uses is None:
+        return False
+    for tag in tags:
+        if uses == f"{action}@{tag}":
+            return True
+    prefix = f"{action}@"
+    if not uses.startswith(prefix) or "#" not in uses:
+        return False
+    ref, _, comment = uses.partition("#")
+    sha = ref[len(prefix) :].strip()
+    note = comment.strip().split()[0] if comment.strip() else ""
+    if not _SHA_RE.match(sha):
+        return False
+    return any(note == tag or note.startswith(f"{tag}.") for tag in tags)
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_ARTIFACT_UPLOADS = Counter(
     {
@@ -206,7 +227,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
     downloaded: list[str] = []
     for step in action_steps(text, "actions/upload-artifact@"):
         uses = field(step, "uses")
-        assert uses == "actions/upload-artifact@v7", f"unapproved artifact action: {uses}"
+        assert uses_approved(uses, "actions/upload-artifact", "v7"), (
+            f"unapproved artifact action: {uses}"
+        )
         name = field(step, "name")
         assert name is not None, "artifact upload has no exact name"
         assert field(step, "if-no-files-found") == "error", (
@@ -251,7 +274,9 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):
         uses = field(step, "uses")
-        assert uses == "actions/download-artifact@v8", f"unapproved artifact action: {uses}"
+        assert uses_approved(uses, "actions/download-artifact", "v8"), (
+            f"unapproved artifact action: {uses}"
+        )
         pattern = field(step, "pattern")
         name = field(step, "name")
         selector = pattern if pattern is not None else name
@@ -334,12 +359,12 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
         uses = field(step, "uses")
         if uses is None or not uses.startswith("actions/cache/"):
             continue
-        assert uses in {"actions/cache/save@v6", "actions/cache/restore@v6"}, (
-            f"unapproved cache transfer action: {uses}"
-        )
+        assert uses_approved(uses, "actions/cache/save", "v6") or uses_approved(
+            uses, "actions/cache/restore", "v6"
+        ), f"unapproved cache transfer action: {uses}"
         key = field(step, "key")
         assert key is not None, f"{uses} step has no exact key"
-        if uses == "actions/cache/save@v6":
+        if uses_approved(uses, "actions/cache/save", "v6"):
             saved.append(key)
         else:
             assert field(step, "fail-on-cache-miss") == "true", f"restore is not fail-closed: {key}"
@@ -350,8 +375,8 @@ def cache_contracts(text: str) -> tuple[list[str], list[str]]:
 def dependency_contracts(text: str) -> list[str]:
     keys: list[str] = []
     for step in action_steps(text, "actions/cache@"):
-        assert field(step, "uses") == "actions/cache@v6", (
-            "dependency cache must use actions/cache@v6"
+        assert uses_approved(field(step, "uses"), "actions/cache", "v6"), (
+            "dependency cache must use actions/cache@v6 (tag or SHA pin)"
         )
         key = field(step, "key")
         assert key is not None, "dependency cache has no exact key"
@@ -371,11 +396,11 @@ def sticky_contracts(text: str) -> tuple[list[str], list[str]]:
     deleted: list[str] = []
     for step in action_steps(text, "useblacksmith/stickydisk"):
         uses = field(step, "uses")
-        if uses == "useblacksmith/stickydisk@v1":
+        if uses_approved(uses, "useblacksmith/stickydisk", "v1"):
             key = field(step, "key")
             assert key is not None, "sticky disk has no exact key"
             mounted.append(key)
-        elif uses == "useblacksmith/stickydisk-delete@v1":
+        elif uses_approved(uses, "useblacksmith/stickydisk-delete", "v1"):
             key = field(step, "delete-key")
             assert key is not None, "sticky disk deletion has no exact key"
             deleted.append(key)
@@ -386,7 +411,9 @@ def sticky_contracts(text: str) -> tuple[list[str], list[str]]:
 
 def validate_maturin_storage(text: str) -> None:
     for step in action_steps(text, "PyO3/maturin-action@"):
-        assert field(step, "uses") == "PyO3/maturin-action@v1", "unapproved Maturin action"
+        assert uses_approved(field(step, "uses"), "PyO3/maturin-action", "v1"), (
+            "unapproved Maturin action"
+        )
         sccache = field(step, "sccache")
         assert sccache is None or sccache.lower() == "false", (
             "Maturin-action sccache:true uses the GitHub-integrated backend; "

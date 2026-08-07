@@ -118,12 +118,12 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         load_job = jobs[load:aggregate]
         self.assertIn("needs: validate_source", load_job)
         self.assertIn("release-load-matrix.py run", load_job)
-        self.assertIn("useblacksmith/stickydisk@v1", load_job)
+        self.assertIn("useblacksmith/stickydisk@", load_job)
         self.assertIn(
             "${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3",
             load_job,
         )
-        self.assertIn("useblacksmith/stickydisk-delete@v1", load_job)
+        self.assertIn("useblacksmith/stickydisk-delete@", load_job)
         self.assertIn("needs: load", load_job)
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", load_job)
         self.assertIn("Reclaim sticky-disk ownership after maturin", load_job)
@@ -154,8 +154,8 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         self.assertLess(rust_build, node_build)
         final_job = jobs[aggregate:]
         self.assertIn("Revalidate current main and component artifacts", final_job)
-        self.assertNotIn("actions/cache/restore@v6", final_job)
-        self.assertEqual(final_job.count("actions/download-artifact@v8"), 3)
+        self.assertNotIn("actions/cache/restore@", final_job)
+        self.assertEqual(final_job.count("actions/download-artifact@"), 3)
         self.assertIn("run-id: ${{ inputs.rust_run_id }}", final_job)
         self.assertIn("run-id: ${{ inputs.binding_rc_run_id }}", final_job)
 

@@ -43,7 +43,7 @@ assert 'if test "$count" != 1; then' in locate
 assert "candidate_state=incomplete" in locate
 
 validate = section(workflow, "  validate_candidate:\n", "  dispatch_binding_rc:\n")
-assert "actions/download-artifact@v8" in validate
+assert "actions/download-artifact@" in validate
 for group in ("manifest", "python", "npm", "crates", "evidence"):
     assert (
         f"M1-Release-Candidate-{group}-${{{{ needs.resolve_source.outputs.release_sha }}}}"
