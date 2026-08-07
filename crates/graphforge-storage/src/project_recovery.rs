@@ -8,7 +8,6 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use fs4::fs_std::FileExt;
 use graphforge_core::{GfError, ProjectErrorCode};
 use uuid::Uuid;
 
@@ -86,7 +85,7 @@ fn acquire_recovery_lock(root: &Path) -> Result<File, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
-    if !FileExt::try_lock_exclusive(&writer_lock).map_err(storage_io)? {
+    if !crate::file_lock::try_lock_exclusive(&writer_lock).map_err(storage_io)? {
         return Err(project_error(
             ProjectErrorCode::WriterBusy,
             "phase=RECOVERY committed=false cause=live_writer_owns_kernel_lock",
@@ -114,7 +113,7 @@ fn recover_journals(
             ));
         };
         let transaction_lock = open_transaction_lock(root, transaction_uuid)?;
-        if !FileExt::try_lock_exclusive(&transaction_lock).map_err(storage_io)? {
+        if !crate::file_lock::try_lock_exclusive(&transaction_lock).map_err(storage_io)? {
             // A live optimistic writer owns this exact attempt. The global
             // commit lock prevents it from publishing during this recovery
             // pass, while its transaction lease prevents false abandonment.
@@ -266,7 +265,7 @@ fn cleanup_abandoned_generation(
     let lease_path = generation_path.join("lease.lock");
     let _lease = if lease_path.exists() {
         let lease = open_regular_lock(&lease_path)?;
-        if !FileExt::try_lock_exclusive(&lease).map_err(storage_io)? {
+        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
             return Ok(0);
         }
         Some(lease)
@@ -472,9 +471,9 @@ mod tests {
         let lock = open_regular_lock(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            if FileExt::try_lock_exclusive(&lock).unwrap() {
+            if crate::file_lock::try_lock_exclusive(&lock).unwrap() {
                 let acquired_at = Instant::now();
-                FileExt::unlock(&lock).unwrap();
+                crate::file_lock::unlock(&lock).unwrap();
                 assert!(
                     acquired_at < deadline,
                     "writer.lock remained owned after recovery completed"
@@ -1004,7 +1003,7 @@ mod tests {
         open_or_initialize_project(root.path()).unwrap();
         let lock_dir = ensure_machine_directory(root.path(), Path::new(LOCKS_DIR)).unwrap();
         let lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE)).unwrap();
-        FileExt::lock_exclusive(&lock).unwrap();
+        crate::file_lock::lock_exclusive(&lock).unwrap();
 
         let error = recover_project_transactions(root.path()).unwrap_err();
 

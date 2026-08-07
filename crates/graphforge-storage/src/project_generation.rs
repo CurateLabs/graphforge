@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::{Condvar, Mutex, OnceLock};
 
 use atomicwrites::{AllowOverwrite, AtomicFile};
-use fs4::fs_std::FileExt;
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -109,7 +108,7 @@ struct GenerationLease(File);
 
 impl Drop for GenerationLease {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        let _ = crate::file_lock::unlock(&self.0);
     }
 }
 
@@ -946,7 +945,7 @@ fn write_new_synced(path: &Path, bytes: &[u8], name: &str) -> Result<(), GfError
 fn lock_project_root(path: &Path) -> Result<File, GfError> {
     let root = File::open(path)
         .map_err(|error| GfError::Storage(format!("failed to open project root: {error}")))?;
-    FileExt::lock_exclusive(&root)
+    crate::file_lock::lock_exclusive(&root)
         .map_err(|error| GfError::Storage(format!("failed to lock project root: {error}")))?;
     Ok(root)
 }
@@ -1304,7 +1303,7 @@ fn open_regular_file(path: &Path) -> Result<File, std::io::Error> {
 fn acquire_generation_lease(path: &Path) -> Result<GenerationLease, GfError> {
     let handle = open_regular_file(path)
         .map_err(|_| corrupt("selected generation lease is missing or invalid"))?;
-    FileExt::lock_shared(&handle)
+    crate::file_lock::lock_shared(&handle)
         .map_err(|_| corrupt("selected generation lease cannot be acquired"))?;
     Ok(GenerationLease(handle))
 }
@@ -1837,9 +1836,9 @@ mod tests {
         let resolved = resolve_project_generation(root.path()).unwrap();
         let lease = open_generation_lease(root.path(), generation);
 
-        assert!(!FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(!crate::file_lock::try_lock_exclusive(&lease).unwrap());
         drop(resolved);
-        assert!(FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(crate::file_lock::try_lock_exclusive(&lease).unwrap());
     }
 
     #[test]
@@ -1850,9 +1849,9 @@ mod tests {
         let lease = open_generation_lease(root.path(), generation);
 
         drop(resolved);
-        assert!(!FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(!crate::file_lock::try_lock_exclusive(&lease).unwrap());
         drop(cloned);
-        assert!(FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(crate::file_lock::try_lock_exclusive(&lease).unwrap());
     }
 
     #[cfg(unix)]
@@ -1863,10 +1862,10 @@ mod tests {
         let duplicated_lease = resolved._lease_handle.0.try_clone().unwrap();
         let lease = open_generation_lease(root.path(), generation);
 
-        assert!(!FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(!crate::file_lock::try_lock_exclusive(&lease).unwrap());
         drop(resolved);
         assert!(duplicated_lease.metadata().is_ok());
-        assert!(FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(crate::file_lock::try_lock_exclusive(&lease).unwrap());
     }
 
     #[test]
@@ -1927,7 +1926,7 @@ mod tests {
 
         assert_code(error, "GF_PROJECT_CORRUPT");
         let lease = open_generation_lease(root.path(), generation);
-        assert!(FileExt::try_lock_exclusive(&lease).unwrap());
+        assert!(crate::file_lock::try_lock_exclusive(&lease).unwrap());
     }
 
     #[test]

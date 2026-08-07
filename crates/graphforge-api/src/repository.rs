@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_storage as storage;
 use serde::{Deserialize, Serialize};
@@ -654,7 +654,7 @@ impl RepositoryContext {
             .truncate(false)
             .open(self.contained_path(SKILLS_LOCK)?)
             .map_err(|error| GfError::Storage(error.to_string()))?;
-        FileExt::lock_exclusive(&lock).map_err(|error| GfError::Storage(error.to_string()))?;
+        FileExt::lock(&lock).map_err(|error| GfError::Storage(error.to_string()))?;
         Ok(lock)
     }
 

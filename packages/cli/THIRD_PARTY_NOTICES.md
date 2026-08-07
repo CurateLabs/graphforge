@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (304)
+- Apache License 2.0 (305)
 - MIT License (72)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -5062,6 +5062,7 @@ Used by:
 - fnv 1.0.7
 - form_urlencoded 1.2.2
 - fs4 0.13.1
+- fs4 1.1.0
 - glob 0.3.3
 - hashbrown 0.14.5
 - hashbrown 0.15.5
