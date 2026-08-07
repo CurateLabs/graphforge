@@ -531,6 +531,7 @@ def validate_ci_gate_cutover(text: str) -> None:
         job_id
         for job_id, body in jobs.items()
         if job_runs_command(body, "bazelisk test //:ci_rust_tests")
+        or job_runs_command(body, "bazelisk test --config=ci //:ci_rust_tests")
     ]
     assert len(authoritative) == 1, (
         "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
