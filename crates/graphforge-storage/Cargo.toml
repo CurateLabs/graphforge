@@ -22,7 +22,7 @@ async-trait = "0.1"
 atomicwrites = "0.4.4"
 datafusion = { workspace = true }
 datafusion-catalog = "53"
-fs4 = "0.13"
+fs4 = "1.1"
 parquet = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

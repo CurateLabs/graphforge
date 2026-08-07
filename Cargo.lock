@@ -1836,6 +1836,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2023,7 +2033,7 @@ dependencies = [
  "arrow",
  "cucumber",
  "datafusion",
- "fs4",
+ "fs4 1.1.0",
  "futures",
  "graphforge-core",
  "graphforge-cypher",
@@ -2261,7 +2271,7 @@ dependencies = [
  "atomicwrites",
  "datafusion",
  "datafusion-catalog",
- "fs4",
+ "fs4 1.1.0",
  "graphforge-core",
  "graphforge-ir",
  "graphforge-ontology",
@@ -3978,7 +3988,7 @@ dependencies = [
  "downcast-rs",
  "fastdivide",
  "fnv",
- "fs4",
+ "fs4 0.13.1",
  "htmlescape",
  "itertools 0.14.0",
  "levenshtein_automata",
