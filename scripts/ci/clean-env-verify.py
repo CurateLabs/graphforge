@@ -73,10 +73,38 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+# crates.io HTML pages reject the programmatic UA with 404; npmjs.com often
+# returns 403 to datacenter clients. Prefer registry/API URLs for package
+# identity, and use a browser-like UA only when probing human HTML hosts.
+BROWSER_LIKE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+PROGRAMMATIC_UA = "graphforge-clean-env-verify/1.0"
+HTML_HOST_SUFFIXES = (
+    "crates.io",
+    "www.npmjs.com",
+    "docs.graphforge.sh",
+    "github.com",
+    "pypi.org",
+)
+
+
+def _user_agent_for(url: str) -> str:
+    host = urlparse(url).hostname or ""
+    if any(host == suffix or host.endswith("." + suffix) for suffix in HTML_HOST_SUFFIXES):
+        return BROWSER_LIKE_UA
+    return PROGRAMMATIC_UA
+
+
 def default_fetcher(url: str, timeout: float = 30.0) -> tuple[int, bytes, dict[str, str]]:
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "graphforge-clean-env-verify/1.0"},
+        headers={
+            "User-Agent": _user_agent_for(url),
+            "Accept": "*/*",
+        },
         method="GET",
     )
     try:
@@ -209,15 +237,21 @@ def registry_urls(version: str, crates: tuple[str, ...], docs_base: str) -> dict
     urls = {
         "pypi_json": f"https://pypi.org/pypi/graphforge/{version}/json",
         "pypi_project": f"https://pypi.org/project/graphforge/{version}/",
+        # Registry version documents are the anonymous, bot-reachable package
+        # links. www.npmjs.com often 403s datacenter clients even for published
+        # packages; human browsers still resolve the marketing pages.
         "npm_node": f"https://registry.npmjs.org/@curatelabs/graphforge/{version}",
         "npm_node_page": f"https://www.npmjs.com/package/@curatelabs/graphforge/v/{version}",
         "npm_cli": f"https://registry.npmjs.org/@curatelabs/graphforge-cli/{version}",
         "npm_cli_page": f"https://www.npmjs.com/package/@curatelabs/graphforge-cli/v/{version}",
         "npm_skills": f"https://registry.npmjs.org/@curatelabs/graphforge-agent-skills/{version}",
         "npm_skills_page": f"https://www.npmjs.com/package/@curatelabs/graphforge-agent-skills/v/{version}",
+        "docs_home": f"{docs}/",
         "docs_quickstart": f"{docs}/guide/quickstart/",
         "docs_installation": f"{docs}/guide/installation/",
+        "docs_licensing": f"{docs}/legal/licensing/",
         "github_release": (f"https://github.com/CurateLabs/graphforge/releases/tag/v{version}"),
+        "github_license": "https://github.com/CurateLabs/graphforge/blob/main/LICENSE",
     }
     for crate in crates:
         urls[f"crates_{crate}"] = f"https://crates.io/api/v1/crates/{crate}/{version}"
@@ -545,33 +579,63 @@ def lane_cargo(ctx: Context) -> LaneResult:
 
 
 def lane_urls(ctx: Context) -> LaneResult:
+    """Resolve anonymous docs + package links for the published version.
+
+    Required checks use bot-reachable endpoints (docs, PyPI project page,
+    npm registry version documents, crates.io API version documents, GitHub
+    Release, licensing). Optional human HTML pages (www.npmjs.com, crates.io
+    crate pages) are probed when reachable and recorded as notes when a CDN
+    blocks automation — they do not fail the lane when the registry document
+    for the same package already resolved.
+    """
     result = LaneResult(name="urls", issue=LANE_ISSUES["urls"], ok=False)
     urls = registry_urls(ctx.version, ctx.crates, ctx.docs_base)
-    keys = [
+    required = [
+        "docs_home",
         "docs_quickstart",
         "docs_installation",
+        "docs_licensing",
         "pypi_project",
+        "npm_node",
+        "npm_cli",
+        "npm_skills",
+        "github_release",
+        "github_license",
+        *[f"crates_{crate}" for crate in ctx.crates],
+    ]
+    optional_html = [
         "npm_node_page",
         "npm_cli_page",
         "npm_skills_page",
-        "github_release",
         *[f"crates_page_{crate}" for crate in ctx.crates],
     ]
     resolved: dict[str, int] = {}
     failures: list[str] = []
-    for key in keys:
+    optional_blocked: list[str] = []
+    for key in required + optional_html:
         url = urls[key]
         status, _, _ = ctx.fetch(url)
         resolved[key] = status
         result.commands.append(f"GET {url}")
-        if status >= 400:
+        if key in required and status >= 400:
             failures.append(f"{key} -> {status}")
+        elif key in optional_html and status >= 400:
+            optional_blocked.append(f"{key} -> {status}")
     result.artifacts["statuses"] = resolved
+    if optional_blocked:
+        result.notes.append(
+            "optional human HTML pages blocked for this client (CDN/bot policy); "
+            "registry/API counterparts already required: " + ", ".join(optional_blocked)
+        )
     if failures:
         result.error = "URL resolve failures: " + ", ".join(failures)
         return result
     result.ok = True
-    result.notes.append(f"resolved {len(keys)} docs/package URLs")
+    optional_ok = len(optional_html) - len(optional_blocked)
+    note = f"resolved {len(required)} required docs/package URLs"
+    if optional_html:
+        note += f"; {optional_ok} optional HTML ok"
+    result.notes.append(note)
     return result
 
 
