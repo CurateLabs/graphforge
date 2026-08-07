@@ -1789,7 +1789,8 @@ mod tests {
                 let writer =
                     open_regular_lock(&worker_path).expect("phase=holder open writer.lock");
                 assert!(
-                    crate::file_lock::try_lock_exclusive(&writer).expect("phase=holder acquire writer.lock"),
+                    crate::file_lock::try_lock_exclusive(&writer)
+                        .expect("phase=holder acquire writer.lock"),
                     "phase=holder writer.lock unexpectedly busy"
                 );
                 ready_sender.send(()).expect("phase=holder publish ready");
@@ -2757,7 +2758,10 @@ mod tests {
         let lock_root = root.join(LOCKS_DIR);
         for name in [WRITER_LOCK_FILE, CHECKPOINT_LOCK_FILE] {
             let lock = open_regular_lock(&lock_root.join(name)).unwrap();
-            assert!(crate::file_lock::try_lock_exclusive(&lock).unwrap(), "{name} leaked");
+            assert!(
+                crate::file_lock::try_lock_exclusive(&lock).unwrap(),
+                "{name} leaked"
+            );
             crate::file_lock::unlock(&lock).unwrap();
         }
     }
