@@ -16,6 +16,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 APACHE_SPDX = "Apache-2.0"
 CANONICAL_LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+CANONICAL_REPOSITORY = "https://github.com/CurateLabs/graphforge"
+CANONICAL_REPOSITORY_GIT = "git+https://github.com/CurateLabs/graphforge.git"
+RETIRED_REPOSITORY_MARKERS = (
+    "DecisionNerd/graphforge",
+    "decisionnerd/graphforge",
+    "graphforge-legecy",
+    "github.com/DecisionNerd/graphforge",
+)
 
 CARGO_PACKAGE_DIRS = tuple(
     ROOT / "crates" / name
@@ -60,29 +68,39 @@ THIRD_PARTY_NOTICE_COPIES = (
     ROOT / "packages" / "cli" / "THIRD_PARTY_NOTICES.md",
 )
 MANIFEST_EXPECTATIONS = {
-    ROOT / "Cargo.toml": ('license = "Apache-2.0"',),
-    ROOT / "pyproject.toml": ('license = "Apache-2.0"',),
+    ROOT / "Cargo.toml": (
+        'license = "Apache-2.0"',
+        f'repository = "{CANONICAL_REPOSITORY}"',
+    ),
+    ROOT / "pyproject.toml": (
+        'license = "Apache-2.0"',
+        f'Repository = "{CANONICAL_REPOSITORY}"',
+    ),
     ROOT / "package.json": ('"license": "Apache-2.0"',),
     ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml": (
         'license = "Apache-2.0"',
         'license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]',
+        f'Repository = "{CANONICAL_REPOSITORY}"',
     ),
     ROOT / "crates" / "graphforge-bindings-node" / "package.json": (
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',
         '"THIRD_PARTY_NOTICES.md"',
+        f'"{CANONICAL_REPOSITORY_GIT}"',
     ),
     ROOT / "packages" / "agent-skills" / "package.json": (
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',
+        f'"{CANONICAL_REPOSITORY_GIT}"',
     ),
     ROOT / "packages" / "cli" / "package.json": (
         '"license": "Apache-2.0"',
         '"LICENSE"',
         '"NOTICE"',
         '"THIRD_PARTY_NOTICES.md"',
+        f'"{CANONICAL_REPOSITORY_GIT}"',
     ),
     ROOT / "docs-site" / "package.json": ('"license": "Apache-2.0"',),
     ROOT / "tests" / "features" / "node" / "package.json": ('"license": "Apache-2.0"',),
@@ -152,6 +170,75 @@ def validate_forbidden_claims(paths: Iterable[Path] | None = None) -> list[str]:
     return errors
 
 
+def _text_has_retired_repository(text: str) -> str | None:
+    lowered = text.lower()
+    for marker in RETIRED_REPOSITORY_MARKERS:
+        if marker.lower() in lowered:
+            return marker
+    return None
+
+
+def validate_canonical_repository() -> list[str]:
+    """Ensure publishable package metadata names CurateLabs/graphforge only."""
+    errors: list[str] = []
+    cargo_root = ROOT / "Cargo.toml"
+    cargo_text = cargo_root.read_text(encoding="utf-8") if cargo_root.exists() else ""
+    if f'repository = "{CANONICAL_REPOSITORY}"' not in cargo_text:
+        errors.append(f"Cargo.toml must set repository = \"{CANONICAL_REPOSITORY}\"")
+
+    publishable_package_json = (
+        ROOT / "crates" / "graphforge-bindings-node" / "package.json",
+        ROOT / "packages" / "agent-skills" / "package.json",
+        ROOT / "packages" / "cli" / "package.json",
+    )
+    for path in publishable_package_json:
+        try:
+            package = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{label(path)} is unreadable: {exc}")
+            continue
+        repo = package.get("repository")
+        repo_url = repo.get("url") if isinstance(repo, dict) else repo
+        if repo_url != CANONICAL_REPOSITORY_GIT:
+            errors.append(
+                f"{label(path)} repository.url must be {CANONICAL_REPOSITORY_GIT!r}, "
+                f"got {repo_url!r}"
+            )
+        bugs = package.get("bugs")
+        bugs_url = bugs.get("url") if isinstance(bugs, dict) else None
+        if bugs_url != f"{CANONICAL_REPOSITORY}/issues":
+            errors.append(f"{label(path)} bugs.url must point at {CANONICAL_REPOSITORY}/issues")
+
+    publishable_pyproject = (
+        ROOT / "pyproject.toml",
+        ROOT / "crates" / "graphforge-bindings-py" / "pyproject.toml",
+    )
+    for path in publishable_pyproject:
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if f'Repository = "{CANONICAL_REPOSITORY}"' not in text:
+            errors.append(f"{label(path)} must set Repository = \"{CANONICAL_REPOSITORY}\"")
+
+    # Reject retired identities in first-party package manifests only (not
+    # historical docs that cite transferred PR numbers).
+    manifest_globs = ("Cargo.toml", "package.json", "pyproject.toml")
+    for path in tracked_text_paths():
+        if path.name not in manifest_globs:
+            continue
+        if IGNORED_PARTS.intersection(path.parts):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        marker = _text_has_retired_repository(text)
+        if marker is not None:
+            errors.append(
+                f"{label(path)} names retired repository identity {marker!r}; "
+                f"use {CANONICAL_REPOSITORY}"
+            )
+    return errors
+
+
 def validate_repository() -> list[str]:
     """Return all Apache-2.0 policy violations in the current tree."""
     errors: list[str] = []
@@ -195,6 +282,8 @@ def validate_repository() -> list[str]:
             errors.append(f"{label(path)} lacks Apache-2.0 license metadata")
         if path.parent in CARGO_PACKAGE_DIRS and "license-file.workspace = true" not in text:
             errors.append(f"{label(path)} does not package the workspace LICENSE")
+        if path.parent in CARGO_PACKAGE_DIRS and "repository.workspace = true" not in text:
+            errors.append(f"{label(path)} does not inherit workspace repository metadata")
 
     for path in ROOT.rglob("package.json"):
         if IGNORED_PARTS.intersection(path.parts):
@@ -220,6 +309,7 @@ def validate_repository() -> list[str]:
         if required not in contributing:
             errors.append(f"CONTRIBUTING.md does not route contributors to {required}")
 
+    errors.extend(validate_canonical_repository())
     errors.extend(validate_forbidden_claims())
     return errors
 
@@ -230,6 +320,7 @@ def build_report(errors: list[str]) -> dict[str, Any]:
         "status": "pass" if not errors else "fail",
         "spdx_expression": APACHE_SPDX,
         "license_sha256": CANONICAL_LICENSE_SHA256,
+        "canonical_repository": CANONICAL_REPOSITORY,
         "license_copies": [label(path) for path in LICENSE_COPIES],
         "notice_copies": [label(path) for path in NOTICE_COPIES],
         "third_party_notice_copies": [label(path) for path in THIRD_PARTY_NOTICE_COPIES],

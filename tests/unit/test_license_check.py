@@ -49,3 +49,20 @@ def test_report_records_apache_spdx() -> None:
     report = license_check.build_report([])
     assert report["status"] == "pass"
     assert report["spdx_expression"] == "Apache-2.0"
+    assert report["canonical_repository"] == license_check.CANONICAL_REPOSITORY
+
+
+def test_retired_repository_identity_is_rejected_in_manifests(tmp_path: Path) -> None:
+    stale = tmp_path / "Cargo.toml"
+    stale.write_text(
+        'repository = "https://github.com/DecisionNerd/graphforge"\n',
+        encoding="utf-8",
+    )
+    # Exercise the marker helper used by validate_canonical_repository.
+    assert (
+        license_check._text_has_retired_repository(stale.read_text(encoding="utf-8"))
+        == "DecisionNerd/graphforge"
+    )
+    assert license_check._text_has_retired_repository(
+        'repository = "https://github.com/CurateLabs/graphforge"\n'
+    ) is None
