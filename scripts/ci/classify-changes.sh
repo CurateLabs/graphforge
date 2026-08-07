@@ -35,6 +35,25 @@ enable_all() {
   bazel=true
 }
 
+# Paths that do not affect CI Gate suites. Anything else unmatched must
+# fail closed via enable_all so Bazel-mapped test data cannot merge untested.
+is_inert_path() {
+  case "$1" in
+    *.md | *.mdx | *.txt | \
+      LICENSE | LICENSE-* | NOTICE | NOTICE-* | THIRD_PARTY* | AUTHORS | \
+      CHANGELOG* | CODE_OF_CONDUCT* | SECURITY.md | RELEASING.md | \
+      AGENTS.md | CONTRIBUTING.md | \
+      .github/*.md | .github/ISSUE_TEMPLATE/* | .github/PULL_REQUEST_TEMPLATE* | \
+      .github/CODEOWNERS | .editorconfig | .gitignore | .gitattributes | \
+      .mailmap)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 # Cargo package metadata does not affect compiled behavior. Treat a manifest
 # edit as metadata-only only when both revisions exist and every changed line is
 # a recognized packaging field. Dependency, feature, profile, or target edits
@@ -241,6 +260,34 @@ while IFS= read -r -d '' path; do
       bindings=true
       pulumi=true
       terraform=true
+      ;;
+
+    # Bazel-mapped hermetic test data (resource_inputs / filegroups). These are
+    # not *.rs, so they must be classified explicitly or they would fall through
+    # to the fail-closed default below.
+    tests/tck/* | tests/tck/**/* | \
+      tests/release_workflows/* | tests/release_workflows/**/* | \
+      crates/*/tests/*goldens/* | crates/*/tests/*goldens/**/* | \
+      crates/*/tests/**/*.snap | \
+      crates/*/tests/fixtures/* | crates/*/tests/fixtures/**/* | \
+      crates/*/tests/corpus/* | crates/*/tests/corpus/**/* | \
+      docs/contracts/examples/* | docs/contracts/examples/**/* | \
+      docs/reference/* | docs/reference/**/*)
+      rust=true
+      bazel=true
+      ;;
+
+    examples/agent_grounding/* | examples/agent_grounding/**/*)
+      rust=true
+      bazel=true
+      bindings=true
+      ;;
+
+    *)
+      if ! is_inert_path "$path"; then
+        # Unknown / unmapped path: fail closed toward full validation.
+        enable_all
+      fi
       ;;
   esac
 done <"$changed_files"

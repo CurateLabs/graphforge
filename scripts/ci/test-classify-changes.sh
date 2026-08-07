@@ -135,6 +135,22 @@ assert_classification "$bazel_only" \
   docs/development/bazel-migration-evidence/perf-sample.json bazel-cache-perf-evidence
 assert_classification "$none" "docs/a file with spaces.md" docs-only
 
+# Fail-closed: formerly inert Bazel-mapped test data must enable Rust+Bazel.
+assert_classification "$rust_only" \
+  tests/tck/features/clauses/match/Match1.feature tck-feature
+assert_classification "$rust_only" \
+  crates/graphforge-ir/tests/ir_goldens/golden__parameter.snap ir-golden-snap
+assert_classification "$rust_only" \
+  crates/graphforge-ontology/tests/fixtures/hr.json ontology-fixture
+assert_classification "$rust_only" \
+  crates/graphforge-cypher/tests/corpus/valid.json cypher-corpus
+assert_classification "$binding_rust" \
+  examples/agent_grounding/ecommerce_agent.ipynb grounding-notebook
+assert_classification "$rust_only" \
+  tests/release_workflows/atomic-recovery/workflow.feature release-workflow-feature
+# Unknown paths must fail closed toward full validation.
+assert_classification "$all" totally/unknown/path.xyz unknown-path
+
 # Packaging-only Cargo metadata must not compile the workspace.
 perl -0pi -e 's/license = "MIT"/license = "Apache-2.0"/' "$fixture/Cargo.toml"
 git -C "$fixture" add Cargo.toml
