@@ -44,7 +44,10 @@ workflow = WORKFLOW.read_text(encoding="utf-8")
 assert "default: v0.5.2" not in workflow
 assert "recovery_overlay_sha:" in workflow
 assert "cancel-in-progress: false" in workflow
-assert "group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}" in workflow
+assert (
+    "group: publish-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}"
+    in workflow
+)
 assert 'test "$release_version" != 0.5.0' in workflow
 assert "candidate/v0.5.0-artifacts.json" not in workflow
 assert "v0.5.0-npm-amendment.json" not in workflow
