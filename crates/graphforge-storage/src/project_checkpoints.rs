@@ -1848,8 +1848,10 @@ mod tests {
                 let acquired = match mode {
                     CheckpointLockMode::Shared => crate::file_lock::try_lock_shared(&checkpoint)
                         .expect("phase=holder acquire shared checkpoints.lock"),
-                    CheckpointLockMode::Exclusive => crate::file_lock::try_lock_exclusive(&checkpoint)
-                        .expect("phase=holder acquire exclusive checkpoints.lock"),
+                    CheckpointLockMode::Exclusive => {
+                        crate::file_lock::try_lock_exclusive(&checkpoint)
+                            .expect("phase=holder acquire exclusive checkpoints.lock")
+                    }
                 };
                 assert!(
                     acquired,
@@ -1857,7 +1859,8 @@ mod tests {
                 );
                 ready_sender.send(()).expect("phase=holder publish ready");
                 release_receiver.recv().expect("phase=holder await release");
-                crate::file_lock::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+                crate::file_lock::unlock(&checkpoint)
+                    .expect("phase=holder release checkpoints.lock");
             })
             .expect("phase=holder spawn");
         let holder = WriterLockHolder {
@@ -1902,7 +1905,8 @@ mod tests {
                 let writer =
                     open_regular_lock(&worker_writer).expect("phase=holder open writer.lock");
                 assert!(
-                    crate::file_lock::try_lock_exclusive(&writer).expect("phase=holder acquire writer.lock"),
+                    crate::file_lock::try_lock_exclusive(&writer)
+                        .expect("phase=holder acquire writer.lock"),
                     "phase=holder writer.lock unexpectedly busy"
                 );
                 let checkpoint = open_regular_lock(&worker_checkpoint)
@@ -1915,7 +1919,8 @@ mod tests {
                 crate::file_lock::unlock(&writer).expect("phase=holder early release writer.lock");
                 ready_sender.send(()).expect("phase=holder publish ready");
                 release_receiver.recv().expect("phase=holder await release");
-                crate::file_lock::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+                crate::file_lock::unlock(&checkpoint)
+                    .expect("phase=holder release checkpoints.lock");
             })
             .expect("phase=holder spawn");
         let holder = WriterLockHolder {
