@@ -171,6 +171,10 @@ fn encode_type(
     data_type: &DataType,
 ) -> Result<(), CanonicalArrowError> {
     match data_type {
+        // Tag `01` is reserved for Arrow Null in canonical-fingerprints-v1.
+        // Empty MATCH projections under DF54 can surface Null-typed property
+        // columns when no concrete values establish a type (#467).
+        DataType::Null => writer.u8(0x01)?,
         DataType::Boolean => writer.u8(0x02)?,
         DataType::Int32 => writer.u8(0x12)?,
         DataType::Int64 => writer.u8(0x13)?,
@@ -605,6 +609,20 @@ mod tests {
             encode_type(&mut writer, &DataType::Date32),
             Err(CanonicalArrowError::Unsupported(DataType::Date32))
         ));
+
+        let mut null_writer = CanonicalWriter::new();
+        encode_type(&mut null_writer, &DataType::Null).unwrap();
+        assert_eq!(null_writer.finish(), vec![0x01]);
+        let null_batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "absent",
+                DataType::Null,
+                true,
+            )])),
+            vec![Arc::new(arrow::array::NullArray::new(0)) as ArrayRef],
+        )
+        .unwrap();
+        assert_ne!(result_fingerprint(&[null_batch]).unwrap(), [0; 32]);
     }
 
     #[test]
