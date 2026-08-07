@@ -240,6 +240,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "dist/bazel-affected-inputs.json\n"
                 "dist/bazel-cache-perf-ci-observation.json\n"
                 "dist/bazel-representative-build.summary.json\n"
+                "dist/perf-sample-collected.json\n"
                 "docs/development/bazel-migration-evidence/perf-sample.json"
             ),
         }, f"artifact upload contains unapproved bytes: {path}"

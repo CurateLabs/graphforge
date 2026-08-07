@@ -67,12 +67,54 @@ def test_evaluate_pending_allow() -> None:
     evidence = ROOT / "docs/development/bazel-migration-evidence/perf-sample.json"
     if not evidence.is_file():
         raise SystemExit(f"missing evidence scaffold {evidence}")
-    pending = run_check(["--mode", "evaluate", "--evidence", str(evidence), "--allow-pending"])
-    if pending.returncode != 0:
-        raise SystemExit(f"allow-pending evaluate failed:\n{pending.stdout}\n{pending.stderr}")
-    strict = run_check(["--mode", "evaluate", "--evidence", str(evidence)])
-    if strict.returncode == 0:
-        raise SystemExit("strict evaluate must fail while status is pending_org_admin")
+    # Checked-in sample is complete after #5 measurement; strict evaluate must pass.
+    complete = run_check(["--mode", "evaluate", "--evidence", str(evidence)])
+    if complete.returncode != 0:
+        raise SystemExit(
+            f"strict evaluate must pass on complete checked-in sample:\n"
+            f"{complete.stdout}\n{complete.stderr}"
+        )
+    allow = run_check(["--mode", "evaluate", "--evidence", str(evidence), "--allow-pending"])
+    if allow.returncode != 0:
+        raise SystemExit(f"allow-pending evaluate failed:\n{allow.stdout}\n{allow.stderr}")
+
+    # Pending fixture still requires --allow-pending for a green evaluate.
+    with tempfile.TemporaryDirectory(prefix="gf-cache-pending-") as tmp:
+        path = Path(tmp) / "pending.json"
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        payload["status"] = "pending_org_admin"
+        payload["pairs"] = []
+        payload["observations"] = {
+            "remote_cache_hits_on_identical_sha": False,
+            "cache_unavailable_cold_correct": False,
+            "affected_inputs_isolation": False,
+        }
+        payload["gates"] = {
+            "passed": False,
+            "reason": "pending_org_admin_and_paired_sample",
+        }
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        pending_ok = run_check(["--mode", "evaluate", "--evidence", str(path), "--allow-pending"])
+        if pending_ok.returncode != 0:
+            raise SystemExit(
+                f"allow-pending evaluate failed on pending fixture:\n"
+                f"{pending_ok.stdout}\n{pending_ok.stderr}"
+            )
+        pending_strict = run_check(["--mode", "evaluate", "--evidence", str(path)])
+        if pending_strict.returncode == 0:
+            raise SystemExit("strict evaluate must fail while status is pending_org_admin")
+
+
+def test_observe_warm_uses_distinct_output_bases() -> None:
+    source = Path(CHECK).read_text(encoding="utf-8")
+    if "distinct_output_base_prime_then_warm" not in source:
+        raise SystemExit("observe-warm must document distinct output_base protocol")
+    if "gf-bazel-prime-" not in source or "gf-bazel-warm-" not in source:
+        raise SystemExit("observe-warm must use distinct temporary output bases")
+    if "default_output_base_warm_then_mutated" not in source:
+        raise SystemExit("affected-inputs must warm then mutate on the default output_base")
+    if "isolation_ok" not in source:
+        raise SystemExit("affected-inputs must record isolation_ok")
 
 
 def test_evaluate_thresholds() -> None:
@@ -130,6 +172,7 @@ def main() -> None:
     test_policy_passes_on_repo()
     test_policy_fails_on_competing_flag()
     test_evaluate_pending_allow()
+    test_observe_warm_uses_distinct_output_bases()
     test_evaluate_thresholds()
     print("bazel-cache-perf tests passed")
 

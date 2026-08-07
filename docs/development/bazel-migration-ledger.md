@@ -349,12 +349,11 @@ Primary `test.yml` sticky key pattern:
 
 - Required CI jobs use `blacksmith-*-ubuntu-*` / Blacksmith-hosted runners (see
   `.github/workflows/test.yml` and related gates).
-- **Org-admin dependency for #5:** enable **Bazel Build Caching** for this repository
-  in Blacksmith. Ledger freeze does **not** wait on that enablement.
-- Do not configure repository `--remote_cache`; Blacksmith injects cache for Bazel jobs.
-- #5 harness/docs: [bazel-migration-perf.md](bazel-migration-perf.md) +
+- **#5 cache evidence:** Bazel Build Caching is enabled; remote hits observed and
+  ≥10 cold/warm pairs checked in under
   `docs/development/bazel-migration-evidence/perf-sample.json` (strict evaluate
-  stays blocked until org-admin enablement + ≥10 paired runs).
+  passes). See [bazel-migration-perf.md](bazel-migration-perf.md).
+- Do not configure repository `--remote_cache`; Blacksmith injects cache for Bazel jobs.
 
 ## Update rules
 
