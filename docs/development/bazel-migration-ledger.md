@@ -174,15 +174,16 @@ Frozen scan of `.github/workflows/`, `scripts/`, and `Makefile` for `cargo`,
 **27** files. Representative required path is `CI Gate` via
 `.github/workflows/test.yml` on Blacksmith runners.
 
-### Sticky Cargo `target/` disks (retire only after #4 evidence)
+### Sticky Cargo `target/` disks (#4 cutover)
 
-Workflows using `useblacksmith/stickydisk` at freeze:
+After [#4](https://github.com/CurateLabs/graphforge/issues/4), Test Suite
+(`.github/workflows/test.yml`) no longer mounts PR job-isolated Cargo sticky
+disks. Retained sticky workflows (packaging / retained tools):
 - `.github/workflows/binding-release-candidate.yml`
-- `.github/workflows/test.yml`
 - `.github/workflows/m1-release-certification.yml`
 - `.github/workflows/fuzz.yml`
 
-Primary `test.yml` sticky key pattern:
+Retired PR sticky key pattern (do not reintroduce without rollback docs):
 `${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1` → `target/`.
 
 ### Sites by file
@@ -195,7 +196,7 @@ Primary `test.yml` sticky key pattern:
 | `.github/workflows/fuzz.yml` | 6 | cargo-fuzz (retained-tool candidate) |
 | `.github/workflows/m1-release-certification.yml` | 4 | Release load certification |
 | `.github/workflows/non-cypher-surface-gate.yml` | 4 | Non-Cypher surface gate |
-| `.github/workflows/test.yml` | 6 | Required CI Gate compile/test/bindings |
+| `.github/workflows/test.yml` | 6 | Required CI Gate (Bazel authority + Cargo lint/bindings; #4 cutover) |
 | `.github/workflows/visualization-limits-stress.yml` | 1 | Visualization stress |
 | `Makefile` | 17 | Developer/CI mirrors |
 | `scripts/ci/clean-env-verify.py` | 1 | Build/test/package command site |

@@ -24,8 +24,9 @@ Still forbidden
   partitions (1-day transfer vs 30-day publication groups).
 
 Expected Binding RC Linux sticky keys use repository + lane + rustc +
-Cargo.lock hash + ``release-target-v1``. PR sticky keys stay job-isolated with
-``${{ github.job }}`` and ``target-v1``.
+Cargo.lock hash + ``release-target-v1``. After #4 cutover, Test Suite no longer
+mounts PR job-isolated Cargo ``target/`` sticky disks; Binding RC / fuzz / M1
+release-load retain sticky for packaging and retained-tool lanes.
 
 This module inventories workflow storage steps and fails closed on drift.
 """
@@ -83,14 +84,17 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
+        # test.yml: policy + rust-lint + python/node binding + windows locks (5);
+        # Binding RC: 3. PR Cargo sticky disks retired after #4 cutover.
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 8,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
 EXPECTED_STICKY_KEYS = Counter(
     {
-        "${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1": 5,
+        # PR job-isolated Cargo target/ sticky disks retired after #4.
+        # Binding RC / fuzz / M1 release-load retain sticky for packaging lanes.
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -402,9 +406,30 @@ def validate_test_suite_trigger(text: str) -> None:
     )
 
 
+def validate_ci_gate_cutover(text: str) -> None:
+    """#4: Bazel authority under CI Gate; Cargo rust-test + PR sticky retired."""
+    assert "  rust-test:" not in text, (
+        "Cargo rust-test job must stay retired after CI Gate cutover (#4)"
+    )
+    assert "name: Rust Tests" not in text, (
+        "Cargo Rust Tests job display name must stay retired after cutover (#4)"
+    )
+    assert "useblacksmith/stickydisk@v1" not in text, (
+        "Test Suite must not mount Cargo sticky disks after cutover (#4)"
+    )
+    assert "name: CI Gate" in text, "required check context must remain CI Gate"
+    assert "bazelisk test //:ci_rust_tests" in text, (
+        "authoritative Bazel Rust test graph //:ci_rust_tests missing from Test Suite"
+    )
+    assert "needs.rust-test.result" not in text, (
+        "CI Gate must not aggregate the retired rust-test job"
+    )
+
+
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
     validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
+    validate_ci_gate_cutover(texts[WORKFLOWS / "test.yml"])
 
     artifact_uploads: list[str] = []
     artifact_downloads: list[str] = []

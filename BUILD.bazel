@@ -216,8 +216,8 @@ build_test(
     ],
 )
 
-# Representative #8 surface for Blacksmith Bazel Bootstrap (excludes full TCK BDD
-# wall-time; BDD remains in //:bdd_tests for explicit/full runs).
+# Representative #8 surface for Blacksmith cache/perf measurement (#5).
+# Excludes full API BDD wall-time; BDD remains in //:bdd_tests / //:ci_rust_tests.
 test_suite(
     name = "bazel_test_graph_smoke",
     tests = [
@@ -234,6 +234,19 @@ test_suite(
         # One mid-size API integration binary as the public-facade probe.
         "//crates/graphforge-api:clear",
         "//crates/graphforge-api:value_semantics",
+    ],
+)
+
+# Authoritative PR Rust compile/test graph under CI Gate after #4 cutover.
+# Replaces the retired Cargo `rust-test` workspace job.
+test_suite(
+    name = "ci_rust_tests",
+    tests = [
+        ":unit_tests",
+        ":integration_tests",
+        ":snapshot_tests",
+        ":cli_tests",
+        ":bdd_tests",
     ],
 )
 

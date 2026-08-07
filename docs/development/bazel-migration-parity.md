@@ -20,23 +20,26 @@ Bootstrap: [bazel-bootstrap.md](bazel-bootstrap.md).
 | Representative suite | `tools/bazel/parity/parity_suite.json` / `//:parity_suite` |
 | Host release bins | `//:release_bins` (CLI + all 11 API examples) |
 | Packaging tags | `assemble_bazel_binding_packages.py --wheel-tag` / `--platform-tag` |
-| CI | `Bazel Bootstrap` dual-build steps; required check remains `CI Gate` |
+| CI | `Bazel Bootstrap` (authoritative after #4) + diagnostic dual-build parity; required check remains `CI Gate` |
 
 ## Acceptance mapping
 
 | #6 / #1 AC theme | Evidence |
 | --- | --- |
-| Every mapped test/public contract same pass/fail on Cargo and Bazel at one SHA | `cargo-bazel-parity-check.py --mode all` writes `dist/cargo-bazel-parity-evidence.json`; Cargo `rust-test` + Bazel Bootstrap remain dual-build under `CI Gate` |
+| Every mapped test/public contract same pass/fail on Cargo and Bazel at one SHA | `cargo-bazel-parity-check.py --mode all` writes `dist/cargo-bazel-parity-evidence.json`; after #4, Bazel `//:ci_rust_tests` is authoritative and parity remains diagnostic for one release cycle |
 | Linux/macOS/Windows + Node cross-target release evidence | Platform inventory covers Binding RC contract + `napi.targets` (incl. `aarch64-unknown-linux-gnu`); host `//:release_bins` + binding smokes build under Bazel |
 | Unmapped target / unjustified exception fails ledger | `bazel-migration-ledger-check.py` rejects `unmapped` rows and `stub` exceptions |
 
 ## Dual-build contract
 
-- Cargo remains required for ordinary CI compilation/tests through #4 cutover.
-- Bazel Bootstrap runs drift, ledger, release-platform inventory, smoke tests,
-  release bins, binding packaging, and the dual-build parity suite.
-- Required check name stays **`CI Gate`**. Do not make Bazel the sole path yet.
-- Do **not** set `--remote_cache` (Blacksmith injects cache; enablement is #5).
+- After [#4](https://github.com/CurateLabs/graphforge/issues/4) cutover, Bazel
+  `//:ci_rust_tests` is authoritative under `CI Gate`. Cargo `rust-test` is
+  retired; see [bazel-migration-cutover.md](bazel-migration-cutover.md).
+- Bazel Bootstrap runs drift, ledger, release-platform inventory, authoritative
+  Rust tests, release bins, binding packaging, and diagnostic dual-build parity
+  for one release cycle.
+- Required check name stays **`CI Gate`**.
+- Do **not** set `--remote_cache` (Blacksmith injects cache).
 
 ## Local commands
 
@@ -69,8 +72,8 @@ bazelisk test //:parity_suite //:bazel_test_graph_smoke
 
 ## Next
 
-1. [#5](https://github.com/CurateLabs/graphforge/issues/5) — see
-   [bazel-migration-perf.md](bazel-migration-perf.md) (org-admin Bazel Build
-   Caching still required for remote hits / close).
-2. [#4](https://github.com/CurateLabs/graphforge/issues/4) — only after #5 is
-   honestly closable.
+1. [#4](https://github.com/CurateLabs/graphforge/issues/4) cutover — see
+   [bazel-migration-cutover.md](bazel-migration-cutover.md) (landed when #5
+   performance gates are complete).
+2. [#3](https://github.com/CurateLabs/graphforge/issues/3) — docs/observability
+   close-readiness.

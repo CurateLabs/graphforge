@@ -41,20 +41,21 @@ assert_classification() {
 }
 
 none=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+# After #4 cutover, rust classification always enables Bazel authority.
+rust_only=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 python_only=$'rust=false\npython=true\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+gherkin_rust=$'rust=true\npython=false\ngherkin=true\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
+binding_rust=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 binding_python=$'rust=false\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
-binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
+binding_rust_python=$'rust=true\npython=true\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 binding_only=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=false'
 binding_agent_skills=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
 agent_skills_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=true\npulumi=false\nterraform=false\nbazel=false'
 pulumi_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=false\nbazel=false'
 terraform_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=true\nbazel=false'
 binding_iac=$'rust=false\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
-rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
-rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=false'
+rust_binding_iac=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
+rust_iac=$'rust=true\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=true\nterraform=true\nbazel=true'
 all=$'rust=true\npython=true\ngherkin=true\nbindings=true\nagent_skills=true\npulumi=true\nterraform=true\nbazel=true'
 bazel_only=$'rust=false\npython=false\ngherkin=false\nbindings=false\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
 rust_bindings_bazel=$'rust=true\npython=false\ngherkin=false\nbindings=true\nagent_skills=false\npulumi=false\nterraform=false\nbazel=true'
@@ -129,6 +130,7 @@ assert_classification "$bazel_only" scripts/ci/bazel-migration-ledger-check.py b
 assert_classification "$bazel_only" docs/development/bazel-migration-parity.md bazel-parity-doc
 assert_classification "$bazel_only" scripts/ci/bazel-cache-perf.py bazel-cache-perf-harness
 assert_classification "$bazel_only" docs/development/bazel-migration-perf.md bazel-cache-perf-doc
+assert_classification "$bazel_only" docs/development/bazel-migration-cutover.md bazel-cutover-doc
 assert_classification "$bazel_only" \
   docs/development/bazel-migration-evidence/perf-sample.json bazel-cache-perf-evidence
 assert_classification "$none" "docs/a file with spaces.md" docs-only
