@@ -83,5 +83,6 @@ handoff). Fuzz retains its sticky disk as a justified retained tool.
 
 ## Next
 
-[#3](https://github.com/CurateLabs/graphforge/issues/3) — docs/observability/#1
-close-readiness evidence map.
+[#3](https://github.com/CurateLabs/graphforge/issues/3) docs/observability/#1
+close-readiness: [bazel.md](bazel.md) and
+[bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
