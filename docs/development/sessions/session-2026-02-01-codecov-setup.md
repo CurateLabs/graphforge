@@ -78,7 +78,7 @@ Badge already present, verified URL is correct:
 
 3. **Add the secret:**
    - **Name:** `CODECOV_TOKEN`
-   - **Value:** `7d70de5b-7352-4300-8ed0-ae82ecb3b452`
+   - **Value:** `[REDACTED — rotate any Codecov token that appeared in git history]`
 
 4. **Click "Add secret"**
 
@@ -242,7 +242,7 @@ Once coverage is uploaded, visit:
 1. ✅ **Add `CODECOV_TOKEN` secret** to GitHub repository
    - Go to: Settings > Secrets and variables > Actions
    - Name: `CODECOV_TOKEN`
-   - Value: `7d70de5b-7352-4300-8ed0-ae82ecb3b452`
+   - Value: `[REDACTED — rotate any Codecov token that appeared in git history]`
 
 2. ✅ **Commit and push changes**
    ```bash
