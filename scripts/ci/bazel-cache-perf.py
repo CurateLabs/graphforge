@@ -535,7 +535,9 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         print(f"missing {target_file}", file=sys.stderr)
         return 1
     original = target_file.read_text(encoding="utf-8")
-    marker = "\n// graphforge-bazel-cache-perf-mutation\n"
+    # Unique per invocation so prior CI probe uploads cannot remote-hit the
+    # mutated action (a fixed marker becomes a permanent remote-cache entry).
+    marker = f"\n// graphforge-bazel-cache-perf-mutation {time.time_ns()}-{os.getpid()}\n"
     targets = [
         "build",
         "//crates/graphforge-ast:graphforge_ast",
