@@ -59,6 +59,8 @@ assert "needs.locate_candidate.result == 'success'" in dispatch
 assert "needs.validate_candidate.result != 'success'" in dispatch
 assert "inputs.create_release" in dispatch
 assert "gh workflow run binding-release-candidate.yml" in dispatch
+assert '--repo "$GITHUB_REPOSITORY"' in dispatch
+assert "--ref main" in dispatch
 
 release = workflow.split("  create_release:\n", 1)[1]
 assert "inputs.create_release" in release

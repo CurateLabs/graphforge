@@ -192,7 +192,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ needs.resolve_source.outputs.release_sha }}
         run: |
+          # --repo avoids gh inferring the repository from a local .git
+          # (this job has no checkout).
           gh workflow run binding-release-candidate.yml \
+            --repo "$GITHUB_REPOSITORY" \
             --ref main \
             -f "commit_sha=$RELEASE_SHA"
 
