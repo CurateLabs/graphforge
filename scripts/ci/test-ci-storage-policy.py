@@ -406,23 +406,126 @@ def validate_test_suite_trigger(text: str) -> None:
     )
 
 
+def workflow_jobs(text: str) -> dict[str, str]:
+    """Split a workflow into top-level job_id -> job body (after the job key line)."""
+    lines = text.splitlines()
+    try:
+        jobs_index = next(
+            index for index, line in enumerate(lines) if line.rstrip() == "jobs:"
+        )
+    except StopIteration as exc:
+        raise AssertionError("workflow is missing a top-level jobs: mapping") from exc
+    jobs: dict[str, str] = {}
+    current: str | None = None
+    body: list[str] = []
+    for line in lines[jobs_index + 1 :]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            if current is not None:
+                body.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 2 and line.rstrip().endswith(":") and not line.lstrip().startswith("- "):
+            if current is not None:
+                jobs[current] = "\n".join(body)
+            current = line.strip()[:-1]
+            body = []
+            continue
+        if current is None:
+            continue
+        if indent < 2:
+            break
+        body.append(line)
+    if current is not None:
+        jobs[current] = "\n".join(body)
+    assert jobs, "workflow jobs: mapping is empty"
+    return jobs
+
+
+def job_display_name(job_body: str) -> str | None:
+    for line in job_body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("name:"):
+            return stripped.split(":", 1)[1].strip().strip("'\"")
+    return None
+
+
+def job_needs(job_body: str) -> set[str]:
+    lines = job_body.splitlines()
+    needed: set[str] = set()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("needs:"):
+            continue
+        value = stripped.split(":", 1)[1].strip()
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1]
+            needed.update(part.strip().strip("'\"") for part in inner.split(",") if part.strip())
+            break
+        if value and value not in {"|", ">"}:
+            needed.add(value.strip("'\""))
+            break
+        indent = len(line) - len(line.lstrip())
+        for follow in lines[index + 1 :]:
+            if not follow.strip():
+                continue
+            follow_indent = len(follow) - len(follow.lstrip())
+            if follow_indent <= indent:
+                break
+            item = follow.strip()
+            if item.startswith("- "):
+                needed.add(item[2:].strip().strip("'\""))
+            elif item.startswith("[") and item.endswith("]"):
+                inner = item[1:-1]
+                needed.update(
+                    part.strip().strip("'\"") for part in inner.split(",") if part.strip()
+                )
+        break
+    return {item for item in needed if item}
+
+
+def job_runs_command(job_body: str, needle: str) -> bool:
+    return needle in job_body
+
+
 def validate_ci_gate_cutover(text: str) -> None:
     """#4: Bazel authority under CI Gate; Cargo rust-test + PR sticky retired."""
-    assert "  rust-test:" not in text, (
+    jobs = workflow_jobs(text)
+    assert "rust-test" not in jobs, (
         "Cargo rust-test job must stay retired after CI Gate cutover (#4)"
     )
-    assert "name: Rust Tests" not in text, (
-        "Cargo Rust Tests job display name must stay retired after cutover (#4)"
+    for job_id, body in jobs.items():
+        assert job_display_name(body) != "Rust Tests", (
+            f"job {job_id!r} must not restore retired Cargo Rust Tests display name"
+        )
+        sticky, _ = sticky_contracts(body)
+        assert not sticky, f"Test Suite job {job_id!r} must not mount Cargo sticky disks (#4)"
+
+    authoritative = [
+        job_id
+        for job_id, body in jobs.items()
+        if job_runs_command(body, "bazelisk test //:ci_rust_tests")
+    ]
+    assert len(authoritative) == 1, (
+        "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
     )
-    assert "useblacksmith/stickydisk@v1" not in text, (
-        "Test Suite must not mount Cargo sticky disks after cutover (#4)"
+    auth_job = authoritative[0]
+
+    gate_jobs = [
+        job_id for job_id, body in jobs.items() if job_display_name(body) == "CI Gate"
+    ]
+    assert len(gate_jobs) == 1, "required check context must remain exactly one CI Gate job"
+    gate_id = gate_jobs[0]
+    gate_body = jobs[gate_id]
+    needed = job_needs(gate_body)
+    assert auth_job in needed, (
+        f"CI Gate must depend on authoritative Bazel job {auth_job!r} (needs={sorted(needed)})"
     )
-    assert "name: CI Gate" in text, "required check context must remain CI Gate"
-    assert "bazelisk test //:ci_rust_tests" in text, (
-        "authoritative Bazel Rust test graph //:ci_rust_tests missing from Test Suite"
+    assert "rust-test" not in needed, "CI Gate must not aggregate the retired rust-test job"
+    assert f"needs.{auth_job}.result" in gate_body, (
+        f"CI Gate must require {auth_job}.result via require-gates.sh"
     )
-    assert "needs.rust-test.result" not in text, (
-        "CI Gate must not aggregate the retired rust-test job"
+    assert "needs.rust-test.result" not in gate_body, (
+        "CI Gate must not reference needs.rust-test.result"
     )
 
 
