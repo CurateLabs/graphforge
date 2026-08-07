@@ -1821,6 +1821,153 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum CheckpointLockMode {
+        Shared,
+        Exclusive,
+    }
+
+    /// Hold `checkpoints.lock` (shared or exclusive) while `action` runs.
+    ///
+    /// Writer is not held — the issue #275 CI signature is writer free +
+    /// checkpoints contended.
+    fn while_checkpoint_lock_is_held<T>(
+        root: &Path,
+        mode: CheckpointLockMode,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        let checkpoint_path = root.join(LOCKS_DIR).join(CHECKPOINT_LOCK_FILE);
+        let worker_path = checkpoint_path.clone();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = mpsc::sync_channel(0);
+        let worker = std::thread::Builder::new()
+            .name("checkpoint-lock-holder".into())
+            .spawn(move || {
+                let checkpoint =
+                    open_regular_lock(&worker_path).expect("phase=holder open checkpoints.lock");
+                let acquired = match mode {
+                    CheckpointLockMode::Shared => FileExt::try_lock_shared(&checkpoint)
+                        .expect("phase=holder acquire shared checkpoints.lock"),
+                    CheckpointLockMode::Exclusive => FileExt::try_lock_exclusive(&checkpoint)
+                        .expect("phase=holder acquire exclusive checkpoints.lock"),
+                };
+                assert!(
+                    acquired,
+                    "phase=holder checkpoints.lock unexpectedly busy mode={mode:?}"
+                );
+                ready_sender.send(()).expect("phase=holder publish ready");
+                release_receiver.recv().expect("phase=holder await release");
+                FileExt::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+            })
+            .expect("phase=holder spawn");
+        let holder = WriterLockHolder {
+            release: Some(release_sender),
+            worker: Some(worker),
+        };
+        if let Err(error) = ready_receiver.recv_timeout(TEST_DEADLINE) {
+            drop(ready_receiver);
+            let cleanup = holder.finish();
+            panic!("phase=main await held checkpoints.lock error={error}; cleanup={cleanup:?}");
+        }
+        let result = catch_unwind(AssertUnwindSafe(action));
+        let cleanup = holder.finish();
+        match result {
+            Ok(value) => {
+                cleanup.unwrap_or_else(|error| panic!("phase=main holder cleanup error={error}"));
+                value
+            }
+            Err(original) => {
+                let _ = cleanup;
+                resume_unwind(original);
+            }
+        }
+    }
+
+    /// Reproduce the issue #275 schedule: acquire writer then checkpoints, unlock
+    /// writer early, leave checkpoints held while `action` runs.
+    fn while_checkpoint_held_after_writer_released<T>(
+        root: &Path,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        let lock_root = root.join(LOCKS_DIR);
+        let writer_path = lock_root.join(WRITER_LOCK_FILE);
+        let checkpoint_path = lock_root.join(CHECKPOINT_LOCK_FILE);
+        let worker_writer = writer_path.clone();
+        let worker_checkpoint = checkpoint_path.clone();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+        let (release_sender, release_receiver) = mpsc::sync_channel(0);
+        let worker = std::thread::Builder::new()
+            .name("checkpoint-early-writer-release".into())
+            .spawn(move || {
+                let writer =
+                    open_regular_lock(&worker_writer).expect("phase=holder open writer.lock");
+                assert!(
+                    FileExt::try_lock_exclusive(&writer).expect("phase=holder acquire writer.lock"),
+                    "phase=holder writer.lock unexpectedly busy"
+                );
+                let checkpoint = open_regular_lock(&worker_checkpoint)
+                    .expect("phase=holder open checkpoints.lock");
+                assert!(
+                    FileExt::try_lock_exclusive(&checkpoint)
+                        .expect("phase=holder acquire checkpoints.lock"),
+                    "phase=holder checkpoints.lock unexpectedly busy"
+                );
+                FileExt::unlock(&writer).expect("phase=holder early release writer.lock");
+                ready_sender.send(()).expect("phase=holder publish ready");
+                release_receiver.recv().expect("phase=holder await release");
+                FileExt::unlock(&checkpoint).expect("phase=holder release checkpoints.lock");
+            })
+            .expect("phase=holder spawn");
+        let holder = WriterLockHolder {
+            release: Some(release_sender),
+            worker: Some(worker),
+        };
+        if let Err(error) = ready_receiver.recv_timeout(TEST_DEADLINE) {
+            drop(ready_receiver);
+            let cleanup = holder.finish();
+            panic!(
+                "phase=main await early-writer-release schedule error={error}; cleanup={cleanup:?}"
+            );
+        }
+        let result = catch_unwind(AssertUnwindSafe(action));
+        let cleanup = holder.finish();
+        match result {
+            Ok(value) => {
+                cleanup.unwrap_or_else(|error| panic!("phase=main holder cleanup error={error}"));
+                value
+            }
+            Err(original) => {
+                let _ = cleanup;
+                resume_unwind(original);
+            }
+        }
+    }
+
+    fn assert_mutation_locks_free(root: &Path, phase: &str) {
+        let lock_root = root.join(LOCKS_DIR);
+        for name in [WRITER_LOCK_FILE, CHECKPOINT_LOCK_FILE] {
+            let lock = open_regular_lock(&lock_root.join(name)).unwrap();
+            assert!(
+                FileExt::try_lock_exclusive(&lock).unwrap(),
+                "{phase}: {name} leaked"
+            );
+            FileExt::unlock(&lock).unwrap();
+        }
+    }
+
+    fn assert_checkpoint_mutation_busy_message(error: &GfError) {
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        match error {
+            GfError::Project { message, .. } => {
+                assert_eq!(
+                    message, "checkpoint mutation could not acquire checkpoints.lock",
+                    "expected issue #275 WriterBusy message, got {message}"
+                );
+            }
+            other => panic!("expected Project WriterBusy, got {other}"),
+        }
+    }
+
     struct BoundedChild {
         child: std::process::Child,
         reaped: bool,
@@ -2253,6 +2400,103 @@ mod tests {
         assert!(FileExt::try_lock_exclusive(&checkpoint).unwrap());
         FileExt::unlock(&checkpoint).unwrap();
         drop(retained);
+    }
+
+    fn expect_mutation_locks_busy(root: &Path) -> GfError {
+        match acquire_mutation_locks(root) {
+            Ok(_locks) => panic!("expected WriterBusy acquiring mutation locks"),
+            Err(error) => error,
+        }
+    }
+
+    fn ensure_mutation_lock_files(root: &Path) {
+        let locks = acquire_mutation_locks(root).unwrap();
+        drop(locks);
+    }
+
+    #[test]
+    fn shared_checkpoint_reader_blocks_mutation_with_issue_275_message() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        ensure_mutation_lock_files(directory.path());
+        let error =
+            while_checkpoint_lock_is_held(directory.path(), CheckpointLockMode::Shared, || {
+                expect_mutation_locks_busy(directory.path())
+            });
+        assert_checkpoint_mutation_busy_message(&error);
+    }
+
+    #[test]
+    fn exclusive_checkpoint_holder_without_writer_blocks_mutation_with_issue_275_message() {
+        // Models revert post-handoff / recovery-style windows: writer free,
+        // checkpoints.lock still exclusive.
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        ensure_mutation_lock_files(directory.path());
+        let error =
+            while_checkpoint_lock_is_held(directory.path(), CheckpointLockMode::Exclusive, || {
+                expect_mutation_locks_busy(directory.path())
+            });
+        assert_checkpoint_mutation_busy_message(&error);
+    }
+
+    #[test]
+    fn early_writer_release_while_checkpoint_held_produces_issue_275_message() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        ensure_mutation_lock_files(directory.path());
+        let error = while_checkpoint_held_after_writer_released(directory.path(), || {
+            expect_mutation_locks_busy(directory.path())
+        });
+        assert_checkpoint_mutation_busy_message(&error);
+    }
+
+    #[test]
+    fn open_list_then_mutation_leaves_checkpoint_locks_free() {
+        // Rules out a same-thread shared-lock leak on the #275 failing sequence
+        // (open/list/read then immediate mutation).
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(275), "Before"),
+        )
+        .unwrap();
+        let (_row, opened) = open_checkpoint_generation(directory.path(), "Before").unwrap();
+        drop(opened);
+        let listed = list_checkpoints(directory.path()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_mutation_locks_free(
+            directory.path(),
+            "after open_checkpoint_generation and list",
+        );
+
+        let locks = acquire_mutation_locks(directory.path()).unwrap();
+        drop(locks);
+        assert_mutation_locks_free(directory.path(), "after uncontended acquire_mutation_locks");
+
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(276), "After"),
+        )
+        .unwrap();
+        assert_mutation_locks_free(directory.path(), "after second create_checkpoint");
+    }
+
+    #[test]
+    fn recover_project_transactions_releases_checkpoint_before_returning() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        create_checkpoint(
+            directory.path(),
+            &create_request(Uuid::from_u128(277), "Retained"),
+        )
+        .unwrap();
+        crate::recover_project_transactions(directory.path()).unwrap();
+        assert_mutation_locks_free(
+            directory.path(),
+            "after recover_project_transactions return",
+        );
     }
 
     #[test]
