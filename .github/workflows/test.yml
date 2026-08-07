@@ -858,6 +858,13 @@ jobs:
           python3 scripts/ci/test-bazel-migration-ledger-check.py
           python3 scripts/ci/test-cargo-bazel-parity-check.py
 
+      # Live suite-membership gate: every mapped integration-test label must be
+      # reachable from tests(//:ci_rust_tests). Required path must exercise the
+      # live bazelisk query (unit-test harness may skip it).
+      - name: Live suite-membership inventory (fail-closed)
+        run: |
+          python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory
+
       - name: Blacksmith remote-cache policy + harness unit tests
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.

@@ -570,6 +570,18 @@ def validate_ci_gate_cutover(text: str) -> None:
     assert not job_runs_command(jobs[auth_job], "cargo-bazel-parity-check.py --mode all"), (
         "authoritative bazel-bootstrap must not run dual-build parity"
     )
+    assert job_runs_command(jobs[auth_job], "cargo-bazel-parity-check.py --mode inventory"), (
+        "authoritative bazel-bootstrap must run live suite-membership inventory"
+    )
+    inventory_lines = [
+        line
+        for line in jobs[auth_job].splitlines()
+        if "cargo-bazel-parity-check.py --mode inventory" in line
+    ]
+    assert inventory_lines, "live inventory command line must be present in bazel-bootstrap"
+    assert all("--skip-label-query" not in line for line in inventory_lines), (
+        "authoritative bazel-bootstrap inventory must not skip bazelisk label query"
+    )
 
 
 def main() -> None:
