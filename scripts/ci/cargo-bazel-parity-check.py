@@ -168,17 +168,14 @@ def check_suite_membership(root: Path, map_path: Path) -> list[str]:
     )
     if result.returncode != 0:
         return [
-            "bazelisk query tests(//:ci_rust_tests) failed:\n"
-            + (result.stderr or result.stdout)
+            "bazelisk query tests(//:ci_rust_tests) failed:\n" + (result.stderr or result.stdout)
         ]
 
     suite = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     errors: list[str] = []
     for label in mapped_tests:
         if label not in suite:
-            errors.append(
-                f"mapped integration-test not reachable from //:ci_rust_tests: {label}"
-            )
+            errors.append(f"mapped integration-test not reachable from //:ci_rust_tests: {label}")
     return errors
 
 

@@ -115,8 +115,7 @@ def main() -> None:
 
         if not suite_errors or "orphan_test" not in suite_errors[0]:
             raise SystemExit(
-                "expected suite-membership check to report orphan_test, got:\n"
-                + repr(suite_errors)
+                "expected suite-membership check to report orphan_test, got:\n" + repr(suite_errors)
             )
 
     print("cargo-bazel parity check tests passed")
