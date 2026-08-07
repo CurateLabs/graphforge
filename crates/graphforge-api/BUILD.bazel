@@ -367,6 +367,15 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "varlen_empty_seed",
+    srcs = ["tests/varlen_empty_seed.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "with_aggregation",
     srcs = ["tests/with_aggregation.rs"],
     crate = ":graphforge_api",
@@ -439,6 +448,7 @@ test_suite(
         ":strict_runtime_properties",
         ":value_access_semantics",
         ":value_semantics",
+        ":varlen_empty_seed",
         ":with_aggregation",
         ":xor_scaling",
     ],

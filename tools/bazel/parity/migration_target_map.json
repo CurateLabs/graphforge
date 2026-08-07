@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 90,
+  "cargo_target_count": 91,
   "targets": [
     {
       "package": "graphforge-api",
@@ -452,6 +452,16 @@
       "bazel_label": "//crates/graphforge-api:value_semantics",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "varlen_empty_seed",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/varlen_empty_seed.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:varlen_empty_seed",
+      "exception_id": null,
+      "notes": "#8; DF54 empty var-len expand regression (#467)"
     },
     {
       "package": "graphforge-api",
