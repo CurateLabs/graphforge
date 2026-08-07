@@ -1055,14 +1055,15 @@ mod tests {
 
         let schema = Arc::new(Schema::empty());
         let child: Arc<dyn ExecutionPlan> = Arc::new(EmptyExec::new(Arc::clone(&schema)));
-        let probe = ProbeExec::new(Arc::clone(&child), 3, true, true);
+        let probe: Arc<dyn ExecutionPlan> =
+            Arc::new(ProbeExec::new(Arc::clone(&child), 3, true, true));
         assert_eq!(probe.name(), "DemandProbeExec");
         assert!(probe.is::<ProbeExec>());
         assert!(format!("{probe:?}").contains("ordinal: 3"));
         assert!(
             format!(
                 "{}",
-                datafusion::physical_plan::displayable(&probe).one_line()
+                datafusion::physical_plan::displayable(probe.as_ref()).one_line()
             )
             .contains("side=input")
         );
@@ -1070,13 +1071,14 @@ mod tests {
         assert_eq!(probe.schema(), schema);
 
         let demand = Arc::new(QueryDemand::new());
-        let guard = DemandGuardExec::new(child, Arc::clone(&demand), 2);
+        let guard: Arc<dyn ExecutionPlan> =
+            Arc::new(DemandGuardExec::new(child, Arc::clone(&demand), 2));
         assert!(guard.is::<DemandGuardExec>());
         assert!(format!("{guard:?}").contains("cancel_after: 2"));
         assert!(
             format!(
                 "{}",
-                datafusion::physical_plan::displayable(&guard).one_line()
+                datafusion::physical_plan::displayable(guard.as_ref()).one_line()
             )
             .contains("cancel_after=2")
         );
