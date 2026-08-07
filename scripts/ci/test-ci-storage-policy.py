@@ -410,9 +410,7 @@ def workflow_jobs(text: str) -> dict[str, str]:
     """Split a workflow into top-level job_id -> job body (after the job key line)."""
     lines = text.splitlines()
     try:
-        jobs_index = next(
-            index for index, line in enumerate(lines) if line.rstrip() == "jobs:"
-        )
+        jobs_index = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
     except StopIteration as exc:
         raise AssertionError("workflow is missing a top-level jobs: mapping") from exc
     jobs: dict[str, str] = {}
@@ -510,9 +508,7 @@ def validate_ci_gate_cutover(text: str) -> None:
     )
     auth_job = authoritative[0]
 
-    gate_jobs = [
-        job_id for job_id, body in jobs.items() if job_display_name(body) == "CI Gate"
-    ]
+    gate_jobs = [job_id for job_id, body in jobs.items() if job_display_name(body) == "CI Gate"]
     assert len(gate_jobs) == 1, "required check context must remain exactly one CI Gate job"
     gate_id = gate_jobs[0]
     gate_body = jobs[gate_id]
