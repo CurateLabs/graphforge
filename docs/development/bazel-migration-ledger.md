@@ -41,9 +41,15 @@ Cargo metadata does **not** emit separate targets for `#[cfg(test)]` unit module
 doctests. For migration accounting:
 
 - **Unit tests** → owned with the package `lib` (or `bin`) row; prove under Bazel via
-  that crate's test configuration in #8/#10/#9.
-- **Doctests** → same attachment, or a documented equivalent if Bazel doctest support
-  differs (must not silently drop coverage).
+  that crate's `gf_rust_test` / `rust_test(crate = ...)` target (e.g.
+  `//crates/graphforge-ir:graphforge_ir_test`).
+- **Doctests** → do **not** attach to `rust_test(crate = ...)`. `rules_rust` requires an
+  explicit `rust_doc_test` (via `gf_rust_doc_test`) folded into `//:unit_tests` /
+  `//:ci_rust_tests`. Runnable Rust doc examples live in `graphforge-ir`;
+  `graphforge-ontology` has a `no_run` example still covered by
+  `//crates/graphforge-ontology:graphforge_ontology_doc_test`. Other first-party crates
+  currently have no Rust doctest fences that need a target (storage uses text-only
+  fences). Must not silently drop coverage or waive via the unit-test attachment.
 
 ## Cargo target ledger
 
@@ -126,10 +132,10 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-exec` | `var_len_expand` | `integration-test` | `crates/graphforge-exec/tests/var_len_expand.rs` | `//crates/graphforge-exec:var_len_expand` | `mapped` | #8 |
 | `graphforge-exec` | `write_statement` | `integration-test` | `crates/graphforge-exec/tests/write_statement.rs` | `//crates/graphforge-exec:write_statement` | `mapped` | #8 |
 | `graphforge-io` | `graphforge_io` | `lib` | `crates/graphforge-io/src/lib.rs` | `//crates/graphforge-io:graphforge_io` | `mapped` | #9; unit tests `//crates/graphforge-io:graphforge_io_test` |
-| `graphforge-ir` | `graphforge_ir` | `lib` | `crates/graphforge-ir/src/lib.rs` | `//crates/graphforge-ir:graphforge_ir` | `mapped` | #10; unit tests `//crates/graphforge-ir:graphforge_ir_test` |
+| `graphforge-ir` | `graphforge_ir` | `lib` | `crates/graphforge-ir/src/lib.rs` | `//crates/graphforge-ir:graphforge_ir` | `mapped` | #10; unit tests `//crates/graphforge-ir:graphforge_ir_test`; doctests `//crates/graphforge-ir:graphforge_ir_doc_test` |
 | `graphforge-ir` | `golden` | `integration-test` | `crates/graphforge-ir/tests/golden.rs` | `//crates/graphforge-ir:golden` | `mapped` | #8 |
 | `graphforge-knowledge` | `graphforge_knowledge` | `lib` | `crates/graphforge-knowledge/src/lib.rs` | `//crates/graphforge-knowledge:graphforge_knowledge` | `mapped` | #9; unit tests `//crates/graphforge-knowledge:graphforge_knowledge_test` |
-| `graphforge-ontology` | `graphforge_ontology` | `lib` | `crates/graphforge-ontology/src/lib.rs` | `//crates/graphforge-ontology:graphforge_ontology` | `mapped` | #10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test` |
+| `graphforge-ontology` | `graphforge_ontology` | `lib` | `crates/graphforge-ontology/src/lib.rs` | `//crates/graphforge-ontology:graphforge_ontology` | `mapped` | #10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test`; doctests `//crates/graphforge-ontology:graphforge_ontology_doc_test` |
 | `graphforge-ontology` | `integration` | `integration-test` | `crates/graphforge-ontology/tests/integration.rs` | `//crates/graphforge-ontology:integration` | `mapped` | #8 |
 | `graphforge-plan` | `graphforge_plan` | `lib` | `crates/graphforge-plan/src/lib.rs` | `//crates/graphforge-plan:graphforge_plan` | `mapped` | #10; unit tests `//crates/graphforge-plan:graphforge_plan_test` |
 | `graphforge-provenance` | `graphforge_provenance` | `lib` | `crates/graphforge-provenance/src/lib.rs` | `//crates/graphforge-provenance:graphforge_provenance` | `mapped` | #10; unit tests `//crates/graphforge-provenance:graphforge_provenance_test` |

@@ -102,13 +102,47 @@ def check_release_platforms(root: Path, platforms_path: Path, rc_path: Path) -> 
     return errors
 
 
-def check_labels_exist(root: Path, map_path: Path) -> list[str]:
+TEST_CLASSES = frozenset({"integration-test"})
+CI_RUST_TESTS_SUITE = "//:ci_rust_tests"
+
+
+def mapped_labels(map_path: Path, *, classes: frozenset[str] | None = None) -> set[str]:
     payload = json.loads(map_path.read_text(encoding="utf-8"))
-    labels = {
-        entry["bazel_label"]
-        for entry in payload["targets"]
-        if entry.get("status") == "mapped" and entry.get("bazel_label")
-    }
+    labels: set[str] = set()
+    for entry in payload["targets"]:
+        if entry.get("status") != "mapped":
+            continue
+        label = entry.get("bazel_label")
+        if not label:
+            continue
+        if classes is not None and entry.get("class") not in classes:
+            continue
+        labels.add(label)
+    return labels
+
+
+def check_suite_membership(suite_members: set[str], mapped_tests: set[str]) -> list[str]:
+    """Fail closed when a mapped test-class label is outside the CI suite."""
+    errors: list[str] = []
+    for label in sorted(mapped_tests - suite_members):
+        errors.append(
+            f"mapped test-class label not reachable from tests({CI_RUST_TESTS_SUITE}): {label}"
+        )
+    return errors
+
+
+def query_suite_tests(root: Path, suite: str = CI_RUST_TESTS_SUITE) -> tuple[set[str], list[str]]:
+    result = run(["bazelisk", "query", f"tests({suite})"], cwd=root)
+    if result.returncode != 0:
+        return set(), [
+            f"bazelisk query tests({suite}) failed:\n" + (result.stderr or result.stdout)
+        ]
+    members = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    return members, []
+
+
+def check_labels_exist(root: Path, map_path: Path) -> list[str]:
+    labels = mapped_labels(map_path)
     platforms = json.loads((root / DEFAULT_PLATFORMS).read_text(encoding="utf-8"))
     for value in (platforms.get("host_release_artifacts") or {}).values():
         if isinstance(value, str) and value.startswith("//"):
@@ -141,6 +175,14 @@ def check_labels_exist(root: Path, map_path: Path) -> list[str]:
         if label not in found:
             errors.append(f"bazel label missing from query results: {label}")
     return errors
+
+
+def check_mapped_tests_in_ci_suite(root: Path, map_path: Path) -> list[str]:
+    mapped_tests = mapped_labels(map_path, classes=TEST_CLASSES)
+    members, query_errors = query_suite_tests(root)
+    if query_errors:
+        return query_errors
+    return check_suite_membership(members, mapped_tests)
 
 
 def run_dual_suite(root: Path, suite_path: Path) -> tuple[list[str], list[dict[str, Any]]]:
@@ -228,13 +270,17 @@ def main(argv: list[str] | None = None) -> int:
         platform_errors = check_release_platforms(root, platforms_path, rc_path)
         errors.extend(platform_errors)
         label_errors: list[str] = []
+        suite_errors: list[str] = []
         if not args.skip_label_query:
             label_errors = check_labels_exist(root, map_path)
             errors.extend(label_errors)
+            suite_errors = check_mapped_tests_in_ci_suite(root, map_path)
+            errors.extend(suite_errors)
         evidence["inventory"] = {
             "ledger_ok": ledger.returncode == 0,
             "platforms_ok": not platform_errors,
             "labels_ok": not label_errors,
+            "suite_membership_ok": not suite_errors,
             "label_query_skipped": bool(args.skip_label_query),
         }
 

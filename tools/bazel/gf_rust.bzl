@@ -2,7 +2,14 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_shared_library", "rust_test")
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_binary",
+    "rust_doc_test",
+    "rust_library",
+    "rust_shared_library",
+    "rust_test",
+)
 
 def gf_rust_library(name, deps = [], compile_data = [], crate_features = [], **kwargs):
     """rust_library wired to crate_universe deps for this package's Cargo.toml."""
@@ -32,6 +39,21 @@ def gf_rust_test(name, crate, deps = [], crate_features = [], **kwargs):
         edition = "2024",
         proc_macro_deps = all_crate_deps(proc_macro_dev = True),
         deps = all_crate_deps(normal_dev = True) + deps,
+        **kwargs
+    )
+
+def gf_rust_doc_test(name, crate, deps = [], crate_features = [], **kwargs):
+    """Documentation-test target for a gf_rust_library (`rustdoc --test`).
+
+    Doctests do **not** run under `gf_rust_test` / `rust_test(crate = ...)`.
+    Crates with runnable (or `no_run`) Rust doc examples need an explicit
+    `gf_rust_doc_test` folded into `//:unit_tests` / `//:ci_rust_tests`.
+    """
+    rust_doc_test(
+        name = name,
+        crate = crate,
+        crate_features = crate_features,
+        deps = deps,
         **kwargs
     )
 

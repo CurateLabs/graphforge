@@ -761,7 +761,7 @@
       "status": "mapped",
       "bazel_label": "//crates/graphforge-ir:graphforge_ir",
       "exception_id": null,
-      "notes": "#10; unit tests `//crates/graphforge-ir:graphforge_ir_test`"
+      "notes": "#10; unit tests `//crates/graphforge-ir:graphforge_ir_test`; doctests `//crates/graphforge-ir:graphforge_ir_doc_test`"
     },
     {
       "package": "graphforge-knowledge",
@@ -781,7 +781,7 @@
       "status": "mapped",
       "bazel_label": "//crates/graphforge-ontology:graphforge_ontology",
       "exception_id": null,
-      "notes": "#10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test`"
+      "notes": "#10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test`; doctests `//crates/graphforge-ontology:graphforge_ontology_doc_test`"
     },
     {
       "package": "graphforge-ontology",
