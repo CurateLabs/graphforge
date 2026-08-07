@@ -33,7 +33,10 @@ def main() -> None:
         assert "--registry npm" in job
         assert job.count("release_action.py authorize") == 1
         assert job.count("scripts/publish_npm_artifacts.py") == 1
-        assert "secrets.NPM_TOKEN" in job
+        assert "id-token: write" in job
+        assert "secrets.NPM_TOKEN" not in job
+        assert "NODE_AUTH_TOKEN" not in job
+        assert 'node-version: "24"' in job
         assert not re.search(r"(?m)(?:^|\s|[;&|])sleep(?:\s|$)", job)
     print("publish CLI contract tests passed")
 

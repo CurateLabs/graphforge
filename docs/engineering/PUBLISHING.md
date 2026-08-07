@@ -82,8 +82,8 @@ The release-event workflow runs `release-publish-preflight.py`, validates the
 complete partitioned candidate and offline rehearsal, and obtains fresh public
 registry truth before any registry write. The release tag must resolve to the
 reviewed `main` SHA, and Cargo, Python, Node, CLI, and skills versions must match
-the tag. `npm whoami` runs only in an npm write step so registry credentials
-remain isolated.
+the tag. npm write steps use trusted publishing (GitHub Actions OIDC) with
+provenance and do not project a long-lived `NPM_TOKEN`.
 
 Required TESTING.md gates (TCK, contract gates applicable to the release, binding RC evidence)
 must be green on the **same SHA** that is tagged for publication.

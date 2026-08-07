@@ -284,13 +284,14 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - name: Download manifest and npm partition
         env:
@@ -332,12 +333,10 @@ jobs:
       - name: Publish one exact native tarball
         if: steps.authorize.outputs.publish == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
           MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
         run: |
-          npm whoami
           python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package "@curatelabs/${{ matrix.package }}"
       - name: Observe native npm once after an accepted write
         if: steps.authorize.outputs.publish == 'true'
@@ -362,13 +361,14 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - name: Download manifest and npm partition
         env:
@@ -408,12 +408,10 @@ jobs:
       - name: Publish exact npm main tarball once
         if: steps.authorize.outputs.publish == 'true'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
           MANIFEST_NAME: ${{ needs.candidate-preflight.outputs.manifest_name }}
         run: |
-          npm whoami
           python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package @curatelabs/graphforge
       - name: Observe npm main once after an accepted write
         if: steps.authorize.outputs.publish == 'true'
@@ -437,18 +435,18 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - name: Download, authorize, and publish CLI if absent
         env:
           GH_TOKEN: ${{ github.token }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
           RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
@@ -467,7 +465,6 @@ jobs:
             attempt="v$RELEASE_VERSION-attempt-npm-graphforge-cli.json"
             python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-cli --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
             gh release upload "$RELEASE_TAG" "$attempt" --clobber
-            npm whoami
             python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package @curatelabs/graphforge-cli
             accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             receipt="v$RELEASE_VERSION-accepted-npm-graphforge-cli.json"
@@ -484,18 +481,18 @@ jobs:
     permissions:
       actions: read
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.candidate-preflight.outputs.release_sha }}
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - name: Download, authorize, and publish skills if absent
         env:
           GH_TOKEN: ${{ github.token }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RUN_ID: ${{ needs.candidate-preflight.outputs.candidate_run_id }}
           RELEASE_SHA: ${{ needs.candidate-preflight.outputs.release_sha }}
           RELEASE_VERSION: ${{ needs.candidate-preflight.outputs.release_version }}
@@ -514,7 +511,6 @@ jobs:
             attempt="v$RELEASE_VERSION-attempt-npm-graphforge-agent-skills.json"
             python3 scripts/ci/release_action.py attempt --manifest "candidate/$MANIFEST_NAME" --node npm:@curatelabs/graphforge-agent-skills --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --out "$attempt"
             gh release upload "$RELEASE_TAG" "$attempt" --clobber
-            npm whoami
             python3 scripts/publish_npm_artifacts.py --release-record "candidate/$MANIFEST_NAME" --artifacts-dir candidate/release-artifacts --expected-sha "$RELEASE_SHA" --version "$RELEASE_VERSION" --package @curatelabs/graphforge-agent-skills
             accepted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             receipt="v$RELEASE_VERSION-accepted-npm-graphforge-agent-skills.json"

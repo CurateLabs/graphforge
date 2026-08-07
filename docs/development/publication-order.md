@@ -37,9 +37,10 @@ Before a maintainer authorizes publication (publish-track or human close):
 4. `evidence/offline-rehearsal.json` proves the exact partitions passed clean
    Python, Node/native, CLI, and skills consumers and crate/dependency checks
    with zero registry writes.
-5. PyPI and crates.io trusted publishing are configured for
-   `CurateLabs/graphforge` and `publish.yaml`; the npm token has scoped
-   public-package write access and Bypass 2FA.
+5. PyPI, crates.io, and npm trusted publishing are configured for
+   `CurateLabs/graphforge` and `publish.yaml` (OIDC; no long-lived
+   `NPM_TOKEN`). Each of the eight `@curatelabs` npm packages must list that
+   workflow as a trusted publisher.
 6. The maintainer explicitly enables the immutable tag and GitHub Release
    identity. Implementation CI and ordinary issue close do not run Binding RC
    or the human-close cascade.
@@ -88,8 +89,8 @@ The independent work is:
 - PyPI may run independently with OIDC and the Python partition.
 - crates.io may run independently with its short-lived trusted-publishing token
   and the crates partition; crates remain in the checked topological order below.
-- the five native npm packages run as a fail-slow parallel matrix with only the
-  npm token and npm partition.
+- the five native npm packages run as a fail-slow parallel matrix with npm
+  trusted publishing (OIDC + provenance) and the npm partition.
 
 The npm dependency fan-in is strict:
 

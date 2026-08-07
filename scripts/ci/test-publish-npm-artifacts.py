@@ -59,4 +59,10 @@ assert publisher.GROUPS["skills"] == slice(7, 8)
 source = SCRIPT.read_text(encoding="utf-8")
 assert "time.sleep" not in source
 assert "while " not in source
+assert "--provenance" in source
+assert "NODE_AUTH_TOKEN is required" not in source
+# --package and --group both resume through publish_one (no direct publish_archive bypass).
+assert "for name in names:" in source
+assert "publish_one(by_name[name], args.artifacts_dir)" in source
+assert "if args.package:" not in source or "publish_archive(args.artifacts_dir" not in source
 print("publish npm artifact tests passed")
