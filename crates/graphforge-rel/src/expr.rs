@@ -3855,6 +3855,13 @@ fn graph_value_types_compatible(left: &DataType, right: &DataType) -> bool {
                     (DataType::List(left), DataType::List(right)) => {
                         left.data_type() == right.data_type()
                     }
+                    (DataType::LargeList(left), DataType::LargeList(right)) => {
+                        left.data_type() == right.data_type()
+                    }
+                    (
+                        DataType::FixedSizeList(left, left_len),
+                        DataType::FixedSizeList(right, right_len),
+                    ) => left_len == right_len && left.data_type() == right.data_type(),
                     (left, right) => left == right,
                 }
         })
@@ -3890,6 +3897,23 @@ fn unify_graph_value_nullability(left: &DataType, right: &DataType) -> Option<Da
             let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
             Some(DataType::new_list(
                 data_type,
+                left.is_nullable() || right.is_nullable(),
+            ))
+        }
+        (DataType::LargeList(left), DataType::LargeList(right)) => {
+            let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+            Some(DataType::new_large_list(
+                data_type,
+                left.is_nullable() || right.is_nullable(),
+            ))
+        }
+        (DataType::FixedSizeList(left, left_len), DataType::FixedSizeList(right, right_len))
+            if left_len == right_len =>
+        {
+            let data_type = unify_graph_value_nullability(left.data_type(), right.data_type())?;
+            Some(DataType::new_fixed_size_list(
+                data_type,
+                *left_len,
                 left.is_nullable() || right.is_nullable(),
             ))
         }
@@ -16617,6 +16641,42 @@ mod tests {
         assert!(
             fields[0].is_nullable(),
             "DF54 path-list concat must widen node_uuid nullability"
+        );
+        let large = unify_graph_value_nullability(
+            &DataType::new_large_list(non_null_uuid.clone(), true),
+            &DataType::new_large_list(nullable_uuid.clone(), true),
+        )
+        .unwrap();
+        assert!(matches!(large, DataType::LargeList(_)));
+        let fixed = unify_graph_value_nullability(
+            &DataType::new_fixed_size_list(non_null_uuid, 2, true),
+            &DataType::new_fixed_size_list(nullable_uuid, 2, true),
+        )
+        .unwrap();
+        assert!(matches!(fixed, DataType::FixedSizeList(_, 2)));
+        assert!(
+            unify_graph_value_nullability(
+                &DataType::new_fixed_size_list(
+                    DataType::Struct(Fields::from(vec![Field::new(
+                        "node_uuid",
+                        DataType::FixedSizeBinary(16),
+                        false,
+                    )])),
+                    2,
+                    true,
+                ),
+                &DataType::new_fixed_size_list(
+                    DataType::Struct(Fields::from(vec![Field::new(
+                        "node_uuid",
+                        DataType::FixedSizeBinary(16),
+                        true,
+                    )])),
+                    3,
+                    true,
+                ),
+            )
+            .is_none(),
+            "FixedSizeList widths must match"
         );
 
         for (name, value) in [
