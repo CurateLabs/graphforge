@@ -37,11 +37,13 @@ hits regress:
 | Pair collector (≥10 cold/warm) | `--mode collect-pairs` (CI runs when hits observed + evidence incomplete) |
 | Affected-input isolation probe | `--mode affected-inputs` |
 | Gate evaluator (≥10 pairs, #1 thresholds) | `--mode evaluate` |
-| CI wiring | `Bazel Bootstrap` in `.github/workflows/test.yml` |
-| Checked-in sample status | `perf-sample.json` → `complete` (10 pairs; gates passed) |
+| CI wiring | Required: `Bazel Bootstrap` (policy + harness unit tests). Diagnostics: `Bazel Diagnostics` (observe/collect; **not** in `CI Gate` `needs`) |
+| Checked-in sample status | `perf-sample.json` → `complete` (10 pairs; **one-shot M2 evidence**) |
 
-CI may still pass `--allow-pending` for harness readiness. The #5 close gate is
-strict `evaluate` (no `--allow-pending`) against the checked-in complete sample.
+`perf-sample.json` is **one-shot M2 close evidence**, not a live PR regression
+gate. Required bootstrap runs `--mode policy` and harness unit tests only.
+`Bazel Diagnostics` may still observe/collect and roll up `evaluate` for
+dashboards; failures there do not fail `CI Gate`.
 
 ## Measurement plan
 

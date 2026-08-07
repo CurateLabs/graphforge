@@ -20,7 +20,7 @@ Bootstrap: [bazel-bootstrap.md](bazel-bootstrap.md).
 | Representative suite | `tools/bazel/parity/parity_suite.json` / `//:parity_suite` |
 | Host release bins | `//:release_bins` (CLI + all 11 API examples) |
 | Packaging tags | `assemble_bazel_binding_packages.py --wheel-tag` / `--platform-tag` |
-| CI | `Bazel Bootstrap` (authoritative after #4) + diagnostic dual-build parity; required check remains `CI Gate` |
+| CI | `Bazel Bootstrap` (authoritative under `CI Gate`) + non-required `Bazel Diagnostics` dual-build parity |
 
 ## Acceptance mapping
 
@@ -36,8 +36,9 @@ Bootstrap: [bazel-bootstrap.md](bazel-bootstrap.md).
   `//:ci_rust_tests` is authoritative under `CI Gate`. Cargo `rust-test` is
   retired; see [bazel-migration-cutover.md](bazel-migration-cutover.md).
 - Bazel Bootstrap runs drift, ledger, release-platform inventory, authoritative
-  Rust tests, release bins, binding packaging, and diagnostic dual-build parity
-  for one release cycle.
+  Rust tests, release bins, and binding packaging.
+- Non-required `Bazel Diagnostics` runs dual-build parity for one release cycle
+  (not in `CI Gate` `needs`).
 - Required check name stays **`CI Gate`**.
 - Do **not** set `--remote_cache` (Blacksmith injects cache).
 

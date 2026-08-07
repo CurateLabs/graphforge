@@ -546,11 +546,28 @@ def validate_ci_gate_cutover(text: str) -> None:
         f"CI Gate must depend on authoritative Bazel job {auth_job!r} (needs={sorted(needed)})"
     )
     assert "rust-test" not in needed, "CI Gate must not aggregate the retired rust-test job"
+    assert "bazel-diagnostics" not in needed, (
+        "CI Gate must not require bazel-diagnostics (non-required diagnostic lane)"
+    )
     assert f"needs.{auth_job}.result" in gate_body, (
         f"CI Gate must require {auth_job}.result via require-gates.sh"
     )
     assert "needs.rust-test.result" not in gate_body, (
         "CI Gate must not reference needs.rust-test.result"
+    )
+    assert "needs.bazel-diagnostics.result" not in gate_body, (
+        "CI Gate must not reference needs.bazel-diagnostics.result"
+    )
+    assert "bazel-diagnostics" in jobs, "diagnostic dual-build/cache observe job must exist"
+    diag_body = jobs["bazel-diagnostics"]
+    assert job_runs_command(diag_body, "cargo-bazel-parity-check.py"), (
+        "bazel-diagnostics must run dual-build parity"
+    )
+    assert "|| echo" not in diag_body, (
+        "bazel-diagnostics must fail closed; no fabricated zero-hit JSON fallback"
+    )
+    assert not job_runs_command(jobs[auth_job], "cargo-bazel-parity-check.py --mode all"), (
+        "authoritative bazel-bootstrap must not run dual-build parity"
     )
 
 

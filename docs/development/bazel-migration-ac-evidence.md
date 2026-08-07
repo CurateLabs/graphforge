@@ -68,8 +68,8 @@ Developer guide: [bazel.md](bazel.md).
 | Warm observation | `dist/bazel-warm-observation.json` |
 | Affected-input probe | `dist/bazel-affected-inputs.json` |
 | CI observation rollup | `dist/bazel-cache-perf-ci-observation.json` |
-| Checked-in ≥10-pair sample | [bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json) |
-| Diagnostic dual-build parity (one release cycle) | `dist/cargo-bazel-parity-evidence.json` |
+| Checked-in ≥10-pair sample (one-shot M2 evidence) | [bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json) |
+| Diagnostic dual-build parity (one release cycle; non-required) | `dist/cargo-bazel-parity-evidence.json` via `Bazel Diagnostics` |
 | Blacksmith Cache dashboard | https://app.blacksmith.sh/cache |
 | Authoritative Rust test log | `dist/bazel-ci-rust-tests.log` |
 

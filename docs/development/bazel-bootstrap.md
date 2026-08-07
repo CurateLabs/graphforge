@@ -104,7 +104,8 @@ skills are declared via root `//:project_skills_bundle` / `//:project-skills/man
 - Doctests are not separate Bazel targets (documented equivalent: coverage attaches
   to crate unit-test targets; same policy as #10/#9).
 - Blacksmith `Bazel Bootstrap` runs authoritative `//:ci_rust_tests`, release bins,
-  binding smokes, and diagnostic #6 dual-build parity (one release cycle after #4).
+  and binding smokes under `CI Gate`. Diagnostic #6 dual-build parity and cache
+  observe/collect run in non-required `Bazel Diagnostics`.
   Full `//:integration_tests` and `//:bdd_tests` remain executable under Bazel for
   local/full runs.
 - Cross-OS Binding RC still produces macOS/Windows natives on those runners;
