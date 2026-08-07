@@ -38,12 +38,15 @@ not silently ignore new targets.
 ### Unit tests and doctests
 
 Cargo metadata does **not** emit separate targets for `#[cfg(test)]` unit modules or
-doctests. For migration accounting:
+doctests. For migration accounting and CI:
 
 - **Unit tests** → owned with the package `lib` (or `bin`) row; prove under Bazel via
-  that crate's test configuration in #8/#10/#9.
-- **Doctests** → same attachment, or a documented equivalent if Bazel doctest support
-  differs (must not silently drop coverage).
+  `gf_rust_test` / `rust_test(crate = ...)` (covers `#[cfg(test)]` modules only).
+- **Doctests** → **not** covered by `rust_test(crate = ...)`. Crates with runnable
+  rustdoc examples must declare an explicit `gf_rust_doc_test` /
+  `rust_doc_test` target and include it in `//:ci_rust_tests` (via
+  `//:first_party_lib_tests`). Today: `//crates/graphforge-ir:graphforge_ir_doc_test`
+  and `//crates/graphforge-ontology:graphforge_ontology_doc_test`.
 
 ## Cargo target ledger
 

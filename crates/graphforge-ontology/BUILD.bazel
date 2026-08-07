@@ -1,6 +1,12 @@
 """Bazel targets for graphforge-ontology (#10 foundation + #8 integration)."""
 
-load("//tools/bazel:gf_rust.bzl", "gf_rust_integration_test", "gf_rust_library", "gf_rust_test")
+load(
+    "//tools/bazel:gf_rust.bzl",
+    "gf_rust_doc_test",
+    "gf_rust_integration_test",
+    "gf_rust_library",
+    "gf_rust_test",
+)
 
 exports_files(["Cargo.toml"])
 
@@ -26,6 +32,14 @@ gf_rust_test(
     ],
 )
 
+gf_rust_doc_test(
+    name = "graphforge_ontology_doc_test",
+    crate = ":graphforge_ontology",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+    ],
+)
+
 gf_rust_integration_test(
     name = "integration",
     srcs = ["tests/integration.rs"],
@@ -39,6 +53,7 @@ gf_rust_integration_test(
 test_suite(
     name = "ontology_tests",
     tests = [
+        ":graphforge_ontology_doc_test",
         ":graphforge_ontology_test",
         ":integration",
     ],
