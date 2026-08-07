@@ -58,6 +58,8 @@ def uses_approved(uses: str | None, action: str, *tags: str) -> bool:
     if not _SHA_RE.match(sha):
         return False
     return any(note == tag or note.startswith(f"{tag}.") for tag in tags)
+
+
 WORKFLOWS = ROOT / ".github" / "workflows"
 EXPECTED_ARTIFACT_UPLOADS = Counter(
     {
