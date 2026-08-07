@@ -3,9 +3,6 @@ name: Test Suite
 on:
   pull_request:
     branches: ["main"]
-  # Temporary API trigger path while Actions webhooks are throttled (outage).
-  # Prefer pull_request events when they deliver; dispatch reads the branch ref.
-  workflow_dispatch:
 
 permissions:
   contents: read
