@@ -281,14 +281,15 @@ class Coordinator:
     def run_preflight(self, environment: Mapping[str, str]) -> None:
         missing = [
             name
-            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm")
+            for name in ("cargo", "rustc", "rustup", "uv", "node", "pnpm", "bazelisk")
             if not shutil.which(name)
         ]
         if missing:
             raise ValidationError(
                 "missing prerequisite(s): "
                 + ", ".join(missing)
-                + ". Install the pinned toolchain described in docs/development/contributing.md."
+                + ". Install the pinned toolchain described in docs/development/contributing.md "
+                "(Bazelisk: docs/development/bazel.md)."
             )
         heavy_stages = tuple(stage for stage in self.cache_stages if stage.heavy)
         warm_cache = bool(heavy_stages) and all(

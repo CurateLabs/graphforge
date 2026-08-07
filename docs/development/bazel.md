@@ -53,9 +53,13 @@ bazelisk version   # must report 9.2.0 from .bazelversion
 
 ## Everyday local commands
 
+`make pre-push-fast` requires `bazelisk` and runs the Cargo/Bazel drift check.
+`make bazel-test` wraps the authoritative suite below.
+
 ```bash
 # Authoritative CI-equivalent Rust test graph
-bazelisk test //:ci_rust_tests
+make bazel-test
+# equivalent: bazelisk test //:ci_rust_tests
 
 # Libraries, CLI, resources, release bins
 bazelisk build //:first_party_libs //:cli_bins //:resource_inputs //:release_bins
