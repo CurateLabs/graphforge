@@ -525,11 +525,10 @@ def mode_collect_pairs(
 def mode_affected_inputs(root: Path, out: Path) -> int:
     """Touch one crate source; require a rebuild of that package path only.
 
-    Warm then mutate on the **same** ``--output_base`` so the local action
-    cache retains unchanged targets. A source edit must produce local work for
-    the changed crate without a full-graph rebuild. (Distinct output bases +
-    remote cache can mask isolation: unchanged and changed actions both show
-    as remote hits with empty exec logs.)
+    Uses the process default ``--output_base`` (already warm from earlier CI
+    smoke builds on Blacksmith). Warm then mutate on that same base so the
+    local action cache retains unchanged targets; a source edit must produce
+    local work without a full-graph rebuild.
     """
     target_file = root / "crates/graphforge-ast/src/lib.rs"
     if not target_file.is_file():
@@ -544,32 +543,26 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
     ]
     log_text = ""
     try:
-        with tempfile.TemporaryDirectory(prefix="gf-bazel-aff-") as shared_base:
-            warm = measure_bazel(
-                root,
-                targets,
-                startup_args=[f"--output_base={shared_base}"],
-            )
-            if warm["exit_code"] != 0:
-                print(warm["stderr_tail"], file=sys.stderr)
-                return 1
+        warm = measure_bazel(root, targets)
+        if warm["exit_code"] != 0:
+            print(warm["stderr_tail"], file=sys.stderr)
+            return 1
 
-            target_file.write_text(original + marker, encoding="utf-8")
-            with tempfile.TemporaryDirectory(prefix="gf-exec-log-") as tmp:
-                log_path = Path(tmp) / "exec.json"
-                mutated = measure_bazel(
-                    root,
-                    [
-                        *targets,
-                        f"--execution_log_json_file={log_path}",
-                    ],
-                    startup_args=[f"--output_base={shared_base}"],
-                )
-                if mutated["exit_code"] != 0:
-                    print(mutated["stderr_tail"], file=sys.stderr)
-                    return 1
-                if log_path.is_file():
-                    log_text = log_path.read_text(encoding="utf-8")
+        target_file.write_text(original + marker, encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="gf-exec-log-") as tmp:
+            log_path = Path(tmp) / "exec.json"
+            mutated = measure_bazel(
+                root,
+                [
+                    *targets,
+                    f"--execution_log_json_file={log_path}",
+                ],
+            )
+            if mutated["exit_code"] != 0:
+                print(mutated["stderr_tail"], file=sys.stderr)
+                return 1
+            if log_path.is_file():
+                log_text = log_path.read_text(encoding="utf-8")
     finally:
         target_file.write_text(original, encoding="utf-8")
 
@@ -608,7 +601,7 @@ def mode_affected_inputs(root: Path, out: Path) -> int:
         "ast_touched": ast_touched,
         "core_rebuilt": core_rebuilt,
         "isolation_ok": bool(isolation_ok),
-        "protocol": "same_output_base_warm_then_mutated",
+        "protocol": "default_output_base_warm_then_mutated",
         "passed": bool(ok),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
