@@ -794,8 +794,9 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.bazel == 'true'
-    # Authoritative //:ci_rust_tests + diagnostic parity + cache observation.
-    timeout-minutes: 120
+    # Authoritative drift/ledger/tests/binding smokes only. Diagnostics live in
+    # bazel-diagnostics (not required by CI Gate).
+    timeout-minutes: 90
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -827,14 +828,14 @@ jobs:
           python3 scripts/ci/test-bazel-migration-ledger-check.py
           python3 scripts/ci/test-cargo-bazel-parity-check.py
 
-      - name: Blacksmith remote-cache policy + perf harness tests (#5)
+      - name: Blacksmith remote-cache policy + harness unit tests
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
+          # Strict evaluate of checked-in perf-sample.json is one-shot M2
+          # evidence (see bazel-migration-perf.md), not a live regression gate;
+          # observation/collect lives in bazel-diagnostics.
           python3 scripts/ci/bazel-cache-perf.py --mode policy
           python3 scripts/ci/test-bazel-cache-perf.py
-          # Strict evaluate: #5 evidence is complete (no --allow-pending).
-          python3 scripts/ci/bazel-cache-perf.py --mode evaluate \
-            --evidence docs/development/bazel-migration-evidence/perf-sample.json
 
       - name: Authoritative Bazel Rust tests + first-party libs/CLI/resources
         run: |
@@ -859,6 +860,27 @@ jobs:
             2>&1 | tee dist/bazel-binding-build.log
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
 
+  bazel-diagnostics:
+    # Non-required: dual-build parity + cache observe/collect. Must not be in
+    # ci-gate needs. Fail closed on harness crashes (no fabricated JSON).
+    name: Bazel Diagnostics
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.bazel == 'true'
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Bazelisk
+        run: |
+          sudo curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+          bazelisk version
+
       - name: Same-SHA Cargo/Bazel dual-build parity (diagnostic, one release cycle)
         run: |
           # Cargo is no longer authoritative under CI Gate (#4). Keep same-SHA
@@ -879,18 +901,21 @@ jobs:
             --write dist/bazel-warm-observation.json
           python3 scripts/ci/bazel-cache-perf.py --mode affected-inputs \
             --write dist/bazel-affected-inputs.json
-          if [[ -f dist/bazel-representative-build.log ]]; then
-            python3 scripts/ci/bazel-cache-perf.py --mode parse-log \
-              --log dist/bazel-representative-build.log \
-              > dist/bazel-representative-build.summary.json || \
-              echo '{"remote_cache_hits":0,"raw":null}' > dist/bazel-representative-build.summary.json
-          else
-            echo '{"remote_cache_hits":0,"raw":null,"note":"missing build log"}' \
-              > dist/bazel-representative-build.summary.json
-          fi
+          # Representative build for log parse (fail closed; no fabricated hits).
+          bazelisk build \
+            //:bazel_smoke \
+            //:first_party_libs \
+            //:runtime_libs \
+            //:cli_bins \
+            //:resource_inputs \
+            //:release_bins 2>&1 | tee dist/bazel-representative-build.log
+          python3 scripts/ci/bazel-cache-perf.py --mode parse-log \
+            --log dist/bazel-representative-build.log \
+            > dist/bazel-representative-build.summary.json
           # Collect ≥10 cold/warm pairs only when remote hits are observed and
           # checked-in evidence is still incomplete. Skip the long loop when the
-          # org-admin remote cache is still inactive.
+          # org-admin remote cache is still inactive. Checked-in perf-sample.json
+          # is one-shot M2 evidence, not a live regression gate.
           status="$(python3 - <<'PY'
           import json
           from pathlib import Path
@@ -947,6 +972,8 @@ jobs:
           mod = importlib.util.module_from_spec(spec)
           assert spec.loader is not None
           spec.loader.exec_module(mod)
+          # One-shot M2 evidence evaluation for observation rollup only; not a
+          # required CI Gate regression gate.
           eval_payload = mod.evaluate_evidence(evidence)
           evidence["gates"] = {
               "passed": bool(eval_payload.get("passed")),
@@ -972,6 +999,7 @@ jobs:
               "org_admin_blocker_likely": not hits,
               "evidence_status": evidence.get("status"),
               "evaluate": eval_payload,
+              "note": "perf-sample.json is one-shot M2 evidence; not a live CI Gate gate",
           }
           (dist / "bazel-cache-perf-ci-observation.json").write_text(
               json.dumps(summary, indent=2, sort_keys=True) + "\n",

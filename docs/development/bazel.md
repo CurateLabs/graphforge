@@ -169,10 +169,11 @@ Short form:
 | `dist/bazel-warm-observation.json` | Warm identical-SHA observation |
 | `dist/bazel-affected-inputs.json` | Affected-input isolation probe |
 | `dist/bazel-cache-perf-ci-observation.json` | CI rollup for cache/perf |
-| `docs/development/bazel-migration-evidence/perf-sample.json` | Checked-in ≥10-pair sample + gate results |
-| `dist/cargo-bazel-parity-evidence.json` | Diagnostic dual-build parity (one release cycle) |
+| `docs/development/bazel-migration-evidence/perf-sample.json` | One-shot M2 ≥10-pair evidence (not a live CI Gate regression gate) |
+| `dist/cargo-bazel-parity-evidence.json` | Diagnostic dual-build parity (`Bazel Diagnostics`, not required) |
 
-CI uploads the cache/perf set as `bazel-cache-perf-evidence-<run_id>`.
+`Bazel Diagnostics` uploads the cache/perf set as
+`bazel-cache-perf-evidence-<run_id>` (non-required).
 
 ### Common failures
 
@@ -191,7 +192,7 @@ CI uploads the cache/perf set as `bazel-cache-perf-evidence-<run_id>`.
 - After intentional dependency changes, always refresh Bazel lock/fingerprint
   (commands above).
 - For one release cycle after cutover, same-SHA dual-build parity remains a
-  **diagnostic** under `Bazel Bootstrap`.
+  **diagnostic** under non-required `Bazel Diagnostics` (not in `CI Gate`).
 - Temporary CI rollback to Cargo `rust-test` is documented in
   [bazel-migration-cutover.md](bazel-migration-cutover.md). Prefer fixing Bazel
   root causes.
