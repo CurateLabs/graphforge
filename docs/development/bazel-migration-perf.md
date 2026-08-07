@@ -151,5 +151,5 @@ Close [#5](https://github.com/CurateLabs/graphforge/issues/5) only when:
 3. Cache-unavailable cold correctness and affected-input isolation are proven.
 4. Exact SHA + Blacksmith dashboard links are in closure notes.
 
-Do **not** start [#4](https://github.com/CurateLabs/graphforge/issues/4) until #5 is
-honestly closable.
+[#5](https://github.com/CurateLabs/graphforge/issues/5) is closed with complete
+evidence. Cutover: [bazel-migration-cutover.md](bazel-migration-cutover.md) / [#4](https://github.com/CurateLabs/graphforge/issues/4).

@@ -437,12 +437,7 @@ jobs:
           toolchain: "1.96.0"
           components: clippy, rustfmt
 
-      - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
-          path: target
-
+      # No Cargo sticky disk after #4 cutover; fmt/clippy remain Cargo diagnostics.
       - name: Cache Cargo registry
         uses: actions/cache@v6
         with:
@@ -456,43 +451,6 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --workspace -- -D warnings
-
-  rust-test:
-    name: Rust Tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    timeout-minutes: 30
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      BDD_TIMING_DIR: target/bdd-timings
-      BDD_RUNNER_LABEL: blacksmith-4vcpu-ubuntu-2404
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.96.0"
-
-      - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
-          path: target
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-
-      - name: Run workspace tests once
-        run: cargo test --workspace --no-fail-fast
 
   python-binding:
     name: Python Binding
@@ -527,12 +485,8 @@ jobs:
       - name: Install workspace dependencies for cross-package publication tests
         run: pnpm install --frozen-lockfile
 
-      - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
-          path: target
-
+      # PR binding assembly still uses maturin for acceptance suites; sticky
+      # Cargo target/ disks are retired after #4 (Binding RC retains sticky).
       - name: Cache Cargo build
         uses: actions/cache@v6
         with:
@@ -677,12 +631,8 @@ jobs:
         with:
           toolchain: "1.96.0"
 
-      - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
-          path: target
-
+      # PR binding assembly still uses napi for acceptance suites; sticky
+      # Cargo target/ disks are retired after #4 (Binding RC retains sticky).
       - name: Cache Cargo build
         uses: actions/cache@v6
         with:
@@ -791,20 +741,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Mount Cargo build disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: ${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1
-          path: target
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
-
       - name: Download same-SHA Python wheel
         uses: actions/download-artifact@v8
         with:
@@ -836,7 +772,7 @@ jobs:
           --output "${{ runner.temp }}/concurrency-short-evidence"
 
   # #[cfg(windows)] project-root lock unit tests in graphforge-storage do not run on
-  # Linux rust-test. Host them here — not on Binding RC python-windows (#2700).
+  # Linux Bazel CI. Host them here — not on Binding RC python-windows (#2700).
   windows-graphforge-storage-locks:
     name: Windows graphforge-storage Locks
     runs-on: blacksmith-4vcpu-windows-2025
@@ -870,13 +806,14 @@ jobs:
           --no-fail-fast
 
   bazel-bootstrap:
+    # Job display name kept for continuity; this is the authoritative Rust
+    # compile/test path under CI Gate after #4 cutover.
     name: Bazel Bootstrap
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.bazel == 'true'
-    # Pair collection (when evidence is incomplete) re-builds the representative
-    # surface across distinct output bases; allow a long but finite window.
-    timeout-minutes: 360
+    # Authoritative //:ci_rust_tests + diagnostic parity + cache observation.
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -906,15 +843,16 @@ jobs:
           # Do not set --remote_cache; Blacksmith injects repository cache.
           python3 scripts/ci/bazel-cache-perf.py --mode policy
           python3 scripts/ci/test-bazel-cache-perf.py
-          python3 scripts/ci/bazel-cache-perf.py --mode evaluate --allow-pending \
+          # Strict evaluate: #5 evidence is complete (no --allow-pending).
+          python3 scripts/ci/bazel-cache-perf.py --mode evaluate \
             --evidence docs/development/bazel-migration-evidence/perf-sample.json
 
-      - name: Bazel smoke + first-party libs/tests/CLI/resources
+      - name: Authoritative Bazel Rust tests + first-party libs/CLI/resources
         run: |
           set -euo pipefail
           # Do not set --remote_cache; Blacksmith injects repository cache.
           mkdir -p dist
-          bazelisk test //:bazel_test_graph_smoke 2>&1 | tee dist/bazel-test-graph-smoke.log
+          bazelisk test //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
           bazelisk build \
             //:bazel_smoke \
             //:first_party_libs \
@@ -932,9 +870,10 @@ jobs:
             2>&1 | tee dist/bazel-binding-build.log
           python3 scripts/ci/test-assemble-bazel-binding-packages.py
 
-      - name: Same-SHA Cargo/Bazel dual-build parity
+      - name: Same-SHA Cargo/Bazel dual-build parity (diagnostic, one release cycle)
         run: |
-          # Dual-build remains under CI Gate; Bazel is not sole authority yet (#4).
+          # Cargo is no longer authoritative under CI Gate (#4). Keep same-SHA
+          # parity as a diagnostic for one release cycle; see cutover rollback doc.
           # Do not set --remote_cache; Blacksmith injects repository cache.
           mkdir -p dist
           python3 scripts/ci/cargo-bazel-parity-check.py \
@@ -1089,7 +1028,6 @@ jobs:
       - pulumi-static
       - terraform-static
       - rust-lint
-      - rust-test
       - python-binding
       - node-binding
       - concurrency-matrix
@@ -1110,7 +1048,6 @@ jobs:
           "${{ needs.pulumi-static.result }}"
           "${{ needs.terraform-static.result }}"
           "${{ needs.rust-lint.result }}"
-          "${{ needs.rust-test.result }}"
           "${{ needs.python-binding.result }}"
           "${{ needs.node-binding.result }}"
           "${{ needs.concurrency-matrix.result }}"

@@ -24,8 +24,9 @@ Still forbidden
   partitions (1-day transfer vs 30-day publication groups).
 
 Expected Binding RC Linux sticky keys use repository + lane + rustc +
-Cargo.lock hash + ``release-target-v1``. PR sticky keys stay job-isolated with
-``${{ github.job }}`` and ``target-v1``.
+Cargo.lock hash + ``release-target-v1``. After #4 cutover, Test Suite no longer
+mounts PR job-isolated Cargo ``target/`` sticky disks; Binding RC / fuzz / M1
+release-load retain sticky for packaging and retained-tool lanes.
 
 This module inventories workflow storage steps and fails closed on drift.
 """
@@ -83,14 +84,17 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 10,
+        # test.yml: policy + rust-lint + python/node binding + windows locks (5);
+        # Binding RC: 3. PR Cargo sticky disks retired after #4 cutover.
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 8,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
 )
 EXPECTED_STICKY_KEYS = Counter(
     {
-        "${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1": 5,
+        # PR job-isolated Cargo target/ sticky disks retired after #4.
+        # Binding RC / fuzz / M1 release-load retain sticky for packaging lanes.
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -402,9 +406,129 @@ def validate_test_suite_trigger(text: str) -> None:
     )
 
 
+def workflow_jobs(text: str) -> dict[str, str]:
+    """Split a workflow into top-level job_id -> job body (after the job key line)."""
+    lines = text.splitlines()
+    try:
+        jobs_index = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
+    except StopIteration as exc:
+        raise AssertionError("workflow is missing a top-level jobs: mapping") from exc
+    jobs: dict[str, str] = {}
+    current: str | None = None
+    body: list[str] = []
+    for line in lines[jobs_index + 1 :]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            if current is not None:
+                body.append(line)
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 2 and line.rstrip().endswith(":") and not line.lstrip().startswith("- "):
+            if current is not None:
+                jobs[current] = "\n".join(body)
+            current = line.strip()[:-1]
+            body = []
+            continue
+        if current is None:
+            continue
+        if indent < 2:
+            break
+        body.append(line)
+    if current is not None:
+        jobs[current] = "\n".join(body)
+    assert jobs, "workflow jobs: mapping is empty"
+    return jobs
+
+
+def job_display_name(job_body: str) -> str | None:
+    for line in job_body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("name:"):
+            return stripped.split(":", 1)[1].strip().strip("'\"")
+    return None
+
+
+def job_needs(job_body: str) -> set[str]:
+    lines = job_body.splitlines()
+    needed: set[str] = set()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("needs:"):
+            continue
+        value = stripped.split(":", 1)[1].strip()
+        if value.startswith("[") and value.endswith("]"):
+            inner = value[1:-1]
+            needed.update(part.strip().strip("'\"") for part in inner.split(",") if part.strip())
+            break
+        if value and value not in {"|", ">"}:
+            needed.add(value.strip("'\""))
+            break
+        indent = len(line) - len(line.lstrip())
+        for follow in lines[index + 1 :]:
+            if not follow.strip():
+                continue
+            follow_indent = len(follow) - len(follow.lstrip())
+            if follow_indent <= indent:
+                break
+            item = follow.strip()
+            if item.startswith("- "):
+                needed.add(item[2:].strip().strip("'\""))
+            elif item.startswith("[") and item.endswith("]"):
+                inner = item[1:-1]
+                needed.update(
+                    part.strip().strip("'\"") for part in inner.split(",") if part.strip()
+                )
+        break
+    return {item for item in needed if item}
+
+
+def job_runs_command(job_body: str, needle: str) -> bool:
+    return needle in job_body
+
+
+def validate_ci_gate_cutover(text: str) -> None:
+    """#4: Bazel authority under CI Gate; Cargo rust-test + PR sticky retired."""
+    jobs = workflow_jobs(text)
+    assert "rust-test" not in jobs, (
+        "Cargo rust-test job must stay retired after CI Gate cutover (#4)"
+    )
+    for job_id, body in jobs.items():
+        assert job_display_name(body) != "Rust Tests", (
+            f"job {job_id!r} must not restore retired Cargo Rust Tests display name"
+        )
+        sticky, _ = sticky_contracts(body)
+        assert not sticky, f"Test Suite job {job_id!r} must not mount Cargo sticky disks (#4)"
+
+    authoritative = [
+        job_id
+        for job_id, body in jobs.items()
+        if job_runs_command(body, "bazelisk test //:ci_rust_tests")
+    ]
+    assert len(authoritative) == 1, (
+        "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
+    )
+    auth_job = authoritative[0]
+
+    gate_jobs = [job_id for job_id, body in jobs.items() if job_display_name(body) == "CI Gate"]
+    assert len(gate_jobs) == 1, "required check context must remain exactly one CI Gate job"
+    gate_id = gate_jobs[0]
+    gate_body = jobs[gate_id]
+    needed = job_needs(gate_body)
+    assert auth_job in needed, (
+        f"CI Gate must depend on authoritative Bazel job {auth_job!r} (needs={sorted(needed)})"
+    )
+    assert "rust-test" not in needed, "CI Gate must not aggregate the retired rust-test job"
+    assert f"needs.{auth_job}.result" in gate_body, (
+        f"CI Gate must require {auth_job}.result via require-gates.sh"
+    )
+    assert "needs.rust-test.result" not in gate_body, (
+        "CI Gate must not reference needs.rust-test.result"
+    )
+
+
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
     validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
+    validate_ci_gate_cutover(texts[WORKFLOWS / "test.yml"])
 
     artifact_uploads: list[str] = []
     artifact_downloads: list[str] = []

@@ -118,6 +118,7 @@ while IFS= read -r -d '' path; do
       docs/development/bazel-migration-ledger.md | \
       docs/development/bazel-migration-perf.md | \
       docs/development/bazel-migration-baseline.md | \
+      docs/development/bazel-migration-cutover.md | \
       docs/development/bazel-migration-evidence/* | \
       docs/development/bazel-migration-evidence/**/* | \
       scripts/ci/cargo-bazel-drift-check.py | \
@@ -243,5 +244,11 @@ while IFS= read -r -d '' path; do
       ;;
   esac
 done <"$changed_files"
+
+# After #4 cutover, Bazel is the authoritative Rust compile/test path under
+# CI Gate. Any Rust-classified change must also enable the Bazel job.
+if [[ "$rust" == "true" ]]; then
+  bazel=true
+fi
 
 emit

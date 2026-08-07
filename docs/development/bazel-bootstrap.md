@@ -158,7 +158,7 @@ CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party
 
 ## Next
 
-1. Complete [#5](https://github.com/CurateLabs/graphforge/issues/5) after org-admin
-   enablement + ≥10 paired cold/warm runs (strict `evaluate` without
-   `--allow-pending`).
-2. Then [#4](https://github.com/CurateLabs/graphforge/issues/4) — `CI Gate` cutover.
+1. [#5](https://github.com/CurateLabs/graphforge/issues/5) cache/perf evidence —
+   see [bazel-migration-perf.md](bazel-migration-perf.md).
+2. [#4](https://github.com/CurateLabs/graphforge/issues/4) — `CI Gate` cutover;
+   see [bazel-migration-cutover.md](bazel-migration-cutover.md).

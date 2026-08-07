@@ -14,15 +14,14 @@ Wall-clock targets and the dual-track table live in
 `publish.yaml` consumes a retained Binding RC candidate (no rebuild-on-write)
 after a GitHub Release / release identity exists for that SHA.
 
-Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. Native PR
-jobs use Blacksmith sticky disks for job-isolated Cargo `target/` directories,
-while registry and pnpm dependencies use the colocated cache through upstream
-`actions/cache@v6` and `actions/setup-node@v6`. Cargo-lock changes create fresh
-sticky disks; inactive disks expire under Blacksmith's retention policy.
-The M1 host-native release load matrix also mounts a sticky `target/` so maturin, Cargo,
-and napi share one build volume instead of a second root-disk tree.
-Binding RC is expected to use the same Blacksmith-first sticky + colocated-cache
-model (see storage policy tests); put `target/` on sticky disks, not in
+Linux jobs run on the pinned `blacksmith-4vcpu-ubuntu-2404` image. After the
+Bazel CI Gate cutover (#4), Test Suite no longer mounts job-isolated Cargo
+`target/` sticky disks; authoritative Rust compile/test is Bazel under
+`Bazel Bootstrap` (`//:ci_rust_tests`). Registry and pnpm dependencies still use
+the colocated cache through upstream `actions/cache@v6` and `actions/setup-node`.
+Binding RC and the M1 host-native release load matrix retain sticky `target/`
+volumes so maturin, Cargo, and napi share one build volume for packaging lanes
+(see storage policy tests); put `target/` on sticky disks there, not in
 `actions/cache` blobs.
 
 ### Blacksmith-first CI storage policy
@@ -51,10 +50,9 @@ ${{ github.repository }}-binding-rc-linux-rust-<toolchain>-${{ hashFiles('Cargo.
 ${{ github.repository }}-release_candidate-rust-<toolchain>-${{ hashFiles('Cargo.lock') }}-release-target-v1
 ```
 
-PR sticky keys stay job-isolated:
-`${{ github.repository }}-${{ github.job }}-${{ hashFiles('Cargo.lock') }}-target-v1`.
-macOS/Windows RC cells use larger Blacksmith runners + colocated registry cache;
-use sticky disks there only when the platform supports them.
+PR Test Suite sticky keys are retired after #4. macOS/Windows RC cells use
+larger Blacksmith runners + colocated registry cache; use sticky disks there
+only when the platform supports them.
 
 ## Pull-request contract
 
@@ -64,12 +62,11 @@ use sticky disks there only when the platform supports them.
   ADR 0014 domain-dependency directions, and license compliance.
 - Documentation and packaging-metadata-only changes do not compile Rust or
   native bindings.
-- Rust changes run formatting and Clippy in one clean job and workspace tests
-  in another. The workspace test already contains the Rust BDD target, so CI
-  does not compile it twice. The same Rust classification also runs the Windows
-  `graphforge-storage` `project_generation` lock unit tests on
-  `blacksmith-4vcpu-windows-2025` (Linux workspace tests cannot execute those
-  `#[cfg(windows)]` cases).
+- Rust changes run Cargo formatting/Clippy (`Rust Quality`) and authoritative
+  Bazel tests (`Bazel Bootstrap` → `//:ci_rust_tests`, including API BDD). The
+  same Rust classification also runs the Windows `graphforge-storage`
+  `project_generation` lock unit tests on `blacksmith-4vcpu-windows-2025`
+  (Linux Bazel CI cannot execute those `#[cfg(windows)]` cases).
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
   static-validation gates run only when their owned surfaces change. Shared
   GraphForge configuration and infrastructure contract fixtures run both IaC
@@ -92,8 +89,10 @@ use sticky disks there only when the platform supports them.
 ### `test.yml` — Test Suite
 
 Runs the change classifier, repository policy, and only the applicable Rust,
-Python, Gherkin, native binding, Pulumi, or Terraform jobs. Pull-request native
-acceptance is Linux-only and uses Cargo's `dev` profile.
+Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
+native binding acceptance is Linux-only and uses Cargo's `dev` profile for
+maturin/napi assembly. Authoritative Rust compile/test is Bazel
+(`//:ci_rust_tests`) under `Bazel Bootstrap`.
 When Rust surfaces change, `Windows graphforge-storage Locks` runs
 `cargo test -p graphforge-storage project_generation::tests:: --lib` on
 `blacksmith-4vcpu-windows-2025` so the `#[cfg(windows)]` project-root lock unit

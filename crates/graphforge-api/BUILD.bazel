@@ -62,7 +62,12 @@ _API_TEST_DATA = [
 
 gf_rust_integration_test(
     name = "bdd_timing",
-    srcs = ["tests/bdd_timing.rs"],
+    # #[path = "bdd/..."] modules must be declared as srcs for hermetic compile.
+    srcs = [
+        "tests/bdd_timing.rs",
+        "tests/bdd/fixture.rs",
+        "tests/bdd/timing.rs",
+    ],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "large",
@@ -146,7 +151,11 @@ gf_rust_integration_test(
 
 gf_rust_integration_test(
     name = "fixed_hop_limit",
-    srcs = ["tests/fixed_hop_limit.rs"],
+    # #[path = "support/project_fixture.rs"] must be declared as srcs.
+    srcs = [
+        "tests/fixed_hop_limit.rs",
+        "tests/support/project_fixture.rs",
+    ],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "large",
