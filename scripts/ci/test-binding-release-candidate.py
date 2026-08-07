@@ -105,14 +105,23 @@ def required_section(text: str, start: str, end: str) -> str:
 
 
 def assert_active_lines(section: str, *expected: str) -> None:
-    """Require exact, non-commented workflow lines."""
+    """Require exact, non-commented workflow lines.
+
+    Expectations ending in ``@`` match any SHA-pinned ``uses: …@<sha> # tag`` line
+    with that prefix (Dependabot-style action pins).
+    """
     active = {
         line.strip()
         for line in section.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
     for line in expected:
-        assert line in active, f"missing active workflow line: {line}"
+        if line.endswith("@"):
+            assert any(entry.startswith(line) for entry in active), (
+                f"missing active workflow line prefix: {line}"
+            )
+        else:
+            assert line in active, f"missing active workflow line: {line}"
 
 
 def workflow_step(section: str, marker: str) -> str:
@@ -132,14 +141,14 @@ def validate_python_evidence_policy(workflow_text: str) -> None:
     native_step = "Clean-install and execute native contract"
     write_step = "Write target evidence"
     stage_step = "Stage Python report for aggregate job"
-    transfer_step = "uses: actions/upload-artifact@v7"
+    transfer_step = "uses: actions/upload-artifact@"
     assert workflow_text.count(prepare_step) == 1
     python_job = required_section(workflow_text, "  python:\n", "  node:\n")
     assert (
         python_job.count("PYTHON_RC_EVIDENCE_DIR: ${{ runner.temp }}/graphforge-python-rc-evidence")
         == 4
     )
-    _, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@v1")
+    _, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@")
     assert maturin_found, "missing maturin build marker"
     assert (
         post_maturin.index(prepare_step)
@@ -234,10 +243,10 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(node_job, "timeout-minutes: ${{ matrix.timeout_minutes || 60 }}")
 
-    assert node_job.count("actions/cache@v6") == 1
-    assert "actions/cache/restore@v6" not in node_job
-    assert "actions/cache/save@v6" not in node_job
-    assert node_job.count("actions/upload-artifact@v7") == 2
+    assert node_job.count("actions/cache@") == 1
+    assert "actions/cache/restore@" not in node_job
+    assert "actions/cache/save@" not in node_job
+    assert node_job.count("actions/upload-artifact@") == 2
     assert_active_lines(
         node_job,
         "name: binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}",
@@ -254,7 +263,7 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert "path: target" not in workflow_step(node_job, "name: Cache Cargo registry")
     assert "key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}" in node_job
-    assert node_job.index("uses: dtolnay/rust-toolchain@master") < node_job.index(
+    assert node_job.index("uses: dtolnay/rust-toolchain@") < node_job.index(
         "Build declared publish target"
     )
 
@@ -282,7 +291,7 @@ def validate_windows_node_cold_start_policy(workflow_text: str) -> None:
     )
     assert_active_lines(
         aggregate,
-        "uses: actions/download-artifact@v8",
+        "uses: actions/download-artifact@",
         "pattern: binding-rc-report-${{ github.run_id }}-*",
         "path: binding-rc-reports",
         "merge-multiple: true",
@@ -385,7 +394,7 @@ def main() -> None:
         "duplicate Windows matrix entry",
     )
     install_marker = "      - name: Install workspace dependencies"
-    for cache_action in ("actions/cache/restore@v6", "actions/cache/save@v6"):
+    for cache_action in ("actions/cache/restore@", "actions/cache/save@"):
         injected = (
             "      - name: Unapproved Windows cache transfer\n"
             f"        uses: {cache_action}\n"
@@ -455,7 +464,7 @@ def main() -> None:
     prepare_marker = "Prepare writable Python RC evidence directory"
     native_marker = "Clean-install and execute native contract"
     write_marker = "Write target evidence"
-    transfer_marker = "uses: actions/upload-artifact@v7"
+    transfer_marker = "uses: actions/upload-artifact@"
     for marker, active_line in (
         (
             prepare_marker,
@@ -506,11 +515,11 @@ def main() -> None:
     for marker in (
         "  python:\n",
         "  node:\n",
-        "uses: PyO3/maturin-action@v1",
+        "uses: PyO3/maturin-action@",
         "Prepare writable Python RC evidence directory",
         "Clean-install and execute native contract",
         "Write target evidence",
-        "uses: actions/upload-artifact@v7",
+        "uses: actions/upload-artifact@",
     ):
         rejected_python_evidence_policy(rc_workflow_text.replace(marker, "", 1))
     wrapper_step = "Prepare Rust compiler wrapper for native contracts"
@@ -524,7 +533,7 @@ def main() -> None:
         < rc_workflow_text.index(target_step)
         < rc_workflow_text.index(native_step)
     )
-    post_maturin_python = rc_workflow_text.split("uses: PyO3/maturin-action@v1", 1)[1].split(
+    post_maturin_python = rc_workflow_text.split("uses: PyO3/maturin-action@", 1)[1].split(
         "  node:", 1
     )[0]
     assert "CARGO_TARGET_DIR: ${{ github.workspace }}/target" in rc_workflow_text
@@ -551,7 +560,7 @@ def main() -> None:
     assert "cargo test --release -p graphforge-storage" not in python_job
     assert "project_generation::tests::" not in python_job
     assert "Clean-install and execute native contract" in python_job
-    assert "uses: PyO3/maturin-action@v1" in python_job
+    assert "uses: PyO3/maturin-action@" in python_job
     test_workflow_text = (ROOT / ".github/workflows/test.yml").read_text()
     windows_locks_job = required_section(
         test_workflow_text,
@@ -581,8 +590,8 @@ def main() -> None:
     assert "architecture: ${{ matrix.node_arch }}" in rc_workflow_text
     assert 'test "$(node -p \'process.arch\')" = "$EXPECTED_NODE_ARCH"' in rc_workflow_text
     assert "scripts/ci/prepare-rustc-wrapper.py" in rc_workflow_text
-    assert rc_workflow_text.count("uses: useblacksmith/stickydisk@v1") == 3
-    assert rc_workflow_text.count("uses: actions/cache@v6") == 3
+    assert rc_workflow_text.count("uses: useblacksmith/stickydisk@") == 3
+    assert rc_workflow_text.count("uses: actions/cache@") == 3
     shared_linux_key = (
         "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
         "${{ hashFiles('Cargo.lock') }}-release-target-v1"
