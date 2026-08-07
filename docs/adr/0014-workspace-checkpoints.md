@@ -167,6 +167,23 @@ Registry changes hold ADR 0013's project `writer.lock` and then
 flush, atomic replace, and directory flush. No other lock order is permitted.
 An interruption exposes exactly the previous or next valid registry revision.
 
+Acquisition is nonblocking (`try_lock_*`). Contention returns `GF_WRITER_BUSY`
+with a precise message:
+
+- `checkpoint mutation could not acquire writer.lock` when the writer is held;
+- `checkpoint mutation could not acquire checkpoints.lock` when the writer was
+  acquired but `checkpoints.lock` is held (shared reader, exclusive mutator, or
+  a same-project window that released the writer first);
+- `checkpoint read could not acquire checkpoints.lock` for shared read contention.
+
+Release order is the reverse of acquisition: unlock `checkpoints.lock`, then
+`writer.lock`. Recovery and mutation guards must not drop the writer while still
+holding `checkpoints.lock`, so concurrent mutators never observe "writer free,
+checkpoints busy" solely because of recovery teardown. Revert may still transfer
+the writer into publication while retaining `checkpoints.lock` until the revert
+returns; that window is intentional same-project contention and surfaces the
+checkpoints-specific `GF_WRITER_BUSY` message.
+
 ### Creation, deletion, and idempotency
 
 `checkpoint` resolves and leases `CURRENT`, validates the complete selected
@@ -206,9 +223,10 @@ actor_uuid_bytes_if_present)`, using the same exact presence-byte rules.
 
 Mutation and recovery lock order is always project `writer.lock`, then
 `checkpoints.lock`, then post-lock generation resolution/lease/validation.
-The selected generation lease is held through registry publication. Deletion
-does not acquire the generation lease; any independent open lease continues to
-protect its generation from cleanup.
+Release is always `checkpoints.lock` then `writer.lock`. The selected
+generation lease is held through registry publication. Deletion does not
+acquire the generation lease; any independent open lease continues to protect
+its generation from cleanup.
 
 ### Retention, leases, and recovery
 

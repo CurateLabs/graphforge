@@ -2533,6 +2533,30 @@ mod tests {
         }
     }
 
+    /// Assert `writer.lock` and `checkpoints.lock` are free for exclusive acquire.
+    ///
+    /// Does not touch generation `lease.lock` files; a live GraphForge may hold those.
+    fn assert_project_mutation_locks_free(state_path: &Path, phase: &str) {
+        let lock_root = state_path.join("locks");
+        for name in ["writer.lock", "checkpoints.lock"] {
+            let path = lock_root.join(name);
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap_or_else(|error| panic!("{phase}: open {name}: {error}"));
+            assert!(
+                FileExt::try_lock_exclusive(&file)
+                    .unwrap_or_else(|error| panic!("{phase}: try_lock {name}: {error}")),
+                "{phase}: {name} was still held (issue #275 probe)"
+            );
+            FileExt::unlock(&file)
+                .unwrap_or_else(|error| panic!("{phase}: unlock {name}: {error}"));
+        }
+    }
+
     fn test_skill_manifest() -> (Vec<u8>, [SkillBundleFile<'static>; 2]) {
         let files = [
             SkillBundleFile {
@@ -3575,6 +3599,13 @@ mod tests {
         assert_eq!(preview.source_generation_uuid, first.generation_uuid);
         assert_eq!(preview.current_generation_uuid, second.generation_uuid);
 
+        // Issue #275: if WriterBusy fires on an isolated project, distinguish a
+        // pre-existing held lock (after diff/preview) from an acquire-path bug.
+        assert_project_mutation_locks_free(
+            &context.state_path,
+            "after diff_checkpoints and preview_revert_to_checkpoint",
+        );
+
         let generation_count = || {
             fs::read_dir(context.state_path.join("generations"))
                 .unwrap()
@@ -3603,11 +3634,18 @@ mod tests {
                 .unwrap();
         assert_eq!(snapshot.operation_uuid, first_operation);
 
+        assert_project_mutation_locks_free(&context.state_path, "after first revert_to_checkpoint");
+
         let replay_receipt = graph.revert_to_checkpoint(request).unwrap();
         assert_eq!(replay_receipt.schema, first_receipt.schema);
         assert_eq!(replay_receipt.batches[0].num_rows(), 1);
         assert_eq!(generation_count(), before_revert_count + 1);
         drop(graph);
+
+        assert_project_mutation_locks_free(
+            &context.state_path,
+            "after drop of GraphForge that performed revert",
+        );
 
         let reopened = crate::GraphForge::new(Some(context.state_path.to_str().unwrap())).unwrap();
         let checkpoints = reopened

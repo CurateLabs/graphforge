@@ -78,6 +78,10 @@ pub fn recover_project_transactions(
         recover_journals(&root, &transactions_root, &selected, &retained, &mut report)?;
     }
     report.preserved_unknown_entries += count_unknown_generation_entries(&root, &retained)?;
+    // Release checkpoints.lock before writer.lock so concurrent mutators never
+    // observe the issue #275 signature (writer free, checkpoints still held).
+    // Matches MutationLocks::Drop order in project_checkpoints.
+    drop(checkpoint_roots);
     drop(writer_lock);
     Ok(report)
 }
