@@ -13,7 +13,10 @@ are in
 - PyPI, crates.io, and npm trusted publishing are configured for
   `publish.yaml` (OIDC; no long-lived `NPM_TOKEN`).
 - A maintainer has explicitly authorized the immutable tag, GitHub Release, and
-  registry writes.
+  registry writes (GitHub Environment `release` reviewers on `publish.yaml`
+  registry jobs).
+- Recovery dispatches must pass `release_tag`, `recovery_reason`, and an
+  explicit reviewed `recovery_overlay_sha` (not floating `main`).
 
 ## Release
 
