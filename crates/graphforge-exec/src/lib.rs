@@ -4923,11 +4923,20 @@ impl ExecutionSession {
         let resolved_plan = self.resolve_row_count_expressions(plan, params).await?;
         let (physical, fallback_schema) = self.plan_physical(&resolved_plan, params).await?;
 
-        let batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
+        let mut batches = collect(Arc::clone(&physical), self.ctx.task_ctx())
             .await
             .map_err(|e| GfError::Execution(e.to_string()))?;
 
-        let schema = batches.first().map_or(fallback_schema, RecordBatch::schema);
+        // DataFusion's collect may return zero batches for an empty stream.
+        // Public callers (and DF54-era optimistic publish tests) index
+        // `batches[0]` for schema/row counts; mirror the write-path terminal
+        // suffix and always surface one empty batch with the plan schema.
+        let schema = batches
+            .first()
+            .map_or_else(|| fallback_schema, RecordBatch::schema);
+        if batches.is_empty() {
+            batches.push(RecordBatch::new_empty(Arc::clone(&schema)));
+        }
         let rows_produced = batches.iter().map(|b| b.num_rows() as u64).sum();
         Ok(ExecutionResult {
             schema,
