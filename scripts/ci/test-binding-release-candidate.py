@@ -549,7 +549,7 @@ def main() -> None:
     assert 'test "$CARGO_TARGET_DIR" = "$GITHUB_WORKSPACE/target"' in python_job_body
     assert "cargo_target_state=unwritable" in python_job_body
     assert "cargo_target_state=ready" in python_job_body
-    # Bazelisk install uses chmod +x; forbid chmod on the Cargo sticky reclaim path.
+    # Bazelisk install uses sudo install -m 0755; forbid chmod on the Cargo sticky reclaim path.
     maturin_lane = python_job_body.split("uses: PyO3/maturin-action@", 1)[1]
     assert "chmod" not in maturin_lane
     assert python_job_body.count('sudo chown -R "$(id -u):$(id -g)" "$CARGO_TARGET_DIR"') == 1

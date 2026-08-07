@@ -900,14 +900,22 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Bazelisk
         run: |
-          sudo curl -fsSL \
-            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
-            -o /usr/local/bin/bazelisk
-          sudo chmod +x /usr/local/bin/bazelisk
+          version=1.26.0
+          # SHA-256 of bazelisk-linux-amd64 from
+          # https://github.com/bazelbuild/bazelisk/releases/tag/v1.26.0
+          # Computed locally: curl -fsSL … | shasum -a 256
+          checksum=6539c12842ad76966f3d493e8f80d67caa84ec4a000e220d5459833c967c12bc
+          tmp=$(mktemp)
+          curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v${version}/bazelisk-linux-amd64" \
+            -o "$tmp"
+          printf '%s  %s\n' "$checksum" "$tmp" | shasum -a 256 --check
+          sudo install -m 0755 "$tmp" /usr/local/bin/bazelisk
+          rm -f "$tmp"
           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
           bazelisk version
 
