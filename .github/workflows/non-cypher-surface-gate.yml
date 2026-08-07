@@ -18,11 +18,11 @@ jobs:
     env:
       EVIDENCE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.EVIDENCE_SHA }}
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: stable
 
@@ -142,7 +142,7 @@ jobs:
           PY
 
       - name: Retain Rust report for M1 certification
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
           path: non-cypher-evidence/

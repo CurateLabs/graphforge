@@ -27,7 +27,7 @@ jobs:
       bazel: ${{ steps.filter.outputs.bazel }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -51,7 +51,7 @@ jobs:
     needs: changes
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -129,14 +129,14 @@ jobs:
           python3 scripts/ci/api-bdd-policy.py --check-issues
           python3 scripts/ci/test-api-bdd-policy.py
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: >-
           steps.policy-suites.outputs.release == 'true' ||
           steps.policy-suites.outputs.cli_publish == 'true'
         with:
           node-version: "20"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         if: >-
           steps.policy-suites.outputs.release == 'true' ||
           steps.policy-suites.outputs.cli_publish == 'true'
@@ -202,12 +202,12 @@ jobs:
         run: python3 scripts/license_check.py --report license-compliance-report.json
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -215,7 +215,7 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
 
       - name: Install cargo-deny and cargo-about
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
 
@@ -235,15 +235,14 @@ jobs:
     if: needs.changes.outputs.python == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -271,13 +270,11 @@ jobs:
     if: needs.changes.outputs.gherkin == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: pnpm
@@ -311,13 +308,11 @@ jobs:
     if: needs.changes.outputs.agent_skills == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: pnpm
@@ -339,10 +334,9 @@ jobs:
     if: needs.changes.outputs.pulumi == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: npm
@@ -356,12 +350,12 @@ jobs:
           npm run format:check
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
@@ -374,7 +368,7 @@ jobs:
           uv run ruff format --check .
 
       - name: Install Pulumi CLI
-        uses: pulumi/actions@v7
+        uses: pulumi/actions@8e5e406f4007fca908480587cb9893c07090f58d # v7.0.0
         with:
           pulumi-version: 3.254.0
 
@@ -388,10 +382,9 @@ jobs:
     if: needs.changes.outputs.terraform == 'true'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.25.x"
           cache-dependency-path: iac/terraform/provider/go.sum
@@ -405,7 +398,7 @@ jobs:
           go vet ./...
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v4
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: "1.11.4"
           terraform_wrapper: false
@@ -426,17 +419,16 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
           components: clippy, rustfmt
 
       # No Cargo sticky disk after #4 cutover; fmt/clippy remain Cargo diagnostics.
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -459,23 +451,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
       - name: Install pnpm for cross-package publication tests
-        uses: pnpm/action-setup@v4
-
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Set up Node for cross-package publication tests
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
@@ -485,7 +475,7 @@ jobs:
       # PR binding assembly still uses maturin for acceptance suites; sticky
       # Cargo target/ disks are retired after #4 (Binding RC retains sticky).
       - name: Cache Cargo build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -532,7 +522,7 @@ jobs:
 
       - name: Restore SNAP ego-Facebook fixture
         id: snap-fixture
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.graphforge/datasets/snap-ego-facebook.txt.gz
           key: ${{ runner.os }}-snap-ego-facebook-v1
@@ -591,7 +581,7 @@ jobs:
             --output dist/python-binding-parity-evidence.json
 
       - name: Upload same-SHA wheel for concurrency matrix
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-python-wheel-${{ github.sha }}
           path: dist/*.whl
@@ -611,27 +601,25 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       # PR binding assembly still uses napi for acceptance suites; sticky
       # Cargo target/ disks are retired after #4 (Binding RC retains sticky).
       - name: Cache Cargo build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -684,7 +672,7 @@ jobs:
             --output crates/graphforge-bindings-node/node-binding-parity-evidence.json
 
       - name: Upload same-SHA addon for concurrency matrix
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pr-node-addon-${{ github.sha }}
           path: |
@@ -711,41 +699,39 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
-
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - name: Set up Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
       - name: Download same-SHA Python wheel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: pr-python-wheel-${{ github.sha }}
           path: dist
 
       - name: Download same-SHA Node addon
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: pr-node-addon-${{ github.sha }}
           path: crates/graphforge-bindings-node
@@ -781,15 +767,14 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -813,14 +798,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Bazelisk
         run: |
-          sudo curl -fsSL \
-            "https://github.com/bazelbuild/bazelisk/releases/download/v1.26.0/bazelisk-linux-amd64" \
-            -o /usr/local/bin/bazelisk
-          sudo chmod +x /usr/local/bin/bazelisk
+          version=1.26.0
+          # SHA-256 of bazelisk-linux-amd64 from
+          # https://github.com/bazelbuild/bazelisk/releases/tag/v1.26.0
+          # Computed locally: curl -fsSL … | shasum -a 256
+          checksum=6539c12842ad76966f3d493e8f80d67caa84ec4a000e220d5459833c967c12bc
+          tmp=$(mktemp)
+          curl -fsSL \
+            "https://github.com/bazelbuild/bazelisk/releases/download/v${version}/bazelisk-linux-amd64" \
+            -o "$tmp"
+          printf '%s  %s\n' "$checksum" "$tmp" | shasum -a 256 --check
+          sudo install -m 0755 "$tmp" /usr/local/bin/bazelisk
+          rm -f "$tmp"
           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
           bazelisk version
 
@@ -990,7 +982,7 @@ jobs:
 
       - name: Upload Cargo/Bazel parity evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cargo-bazel-parity-evidence-${{ github.run_id }}
           path: dist/cargo-bazel-parity-evidence.json
@@ -999,7 +991,7 @@ jobs:
 
       - name: Upload Bazel cache/perf observation (#5)
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bazel-cache-perf-evidence-${{ github.run_id }}
           path: |
@@ -1032,8 +1024,7 @@ jobs:
       - bazel-bootstrap
     steps:
       - name: Checkout gate implementation
-        uses: actions/checkout@v7
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Require every applicable gate
         run: >-
           scripts/ci/require-gates.sh
