@@ -101,7 +101,7 @@ def main() -> None:
 
         real_run = mod.run
 
-        def fake_run(cmd, cwd=None):  # noqa: ANN001
+        def fake_run(cmd, cwd=None):
             if len(cmd) >= 3 and cmd[0] == "bazelisk" and cmd[1] == "query":
                 # Empty suite → orphan label is missing.
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
