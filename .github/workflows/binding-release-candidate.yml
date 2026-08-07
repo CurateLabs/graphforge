@@ -19,6 +19,7 @@ jobs:
   validate_source:
     name: Validate post-merge main SHA
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
     outputs:
       evidence_sha: ${{ steps.source.outputs.evidence_sha }}
     steps:
@@ -488,6 +489,7 @@ jobs:
     if: always() && needs.validate_source.result == 'success'
     needs: [validate_source, python, node]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: read
