@@ -85,6 +85,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `m22_m18_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m18_public_surface.rs` | `//crates/graphforge-api:m22_m18_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m22_m19_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m19_public_surface.rs` | `//crates/graphforge-api:m22_m19_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m22_provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_provider_public_surface.rs` | `//crates/graphforge-api:m22_provider_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `m4_entry_baseline` | `integration-test` | `crates/graphforge-api/tests/m4_entry_baseline.rs` | `//crates/graphforge-api:m4_entry_baseline` | `mapped` | #8 |
 | `graphforge-api` | `max_bipartite_matching` | `integration-test` | `crates/graphforge-api/tests/max_bipartite_matching.rs` | `//crates/graphforge-api:max_bipartite_matching` | `mapped` | #8 |
 | `graphforge-api` | `max_cardinality_matching` | `integration-test` | `crates/graphforge-api/tests/max_cardinality_matching.rs` | `//crates/graphforge-api:max_cardinality_matching` | `mapped` | #8 |
 | `graphforge-api` | `max_weight_matching` | `integration-test` | `crates/graphforge-api/tests/max_weight_matching.rs` | `//crates/graphforge-api:max_weight_matching` | `mapped` | #8 |
@@ -340,6 +341,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `Makefile` | 271 | `cargo test -p graphforge-exec --release --test bench_traversal_scaling -- --ignored --nocapture --test-threads=1` |
 | `Makefile` | 274 | `cargo test -p graphforge-api --release --test fixed_hop_limit release_fixed_hop_limit_1m_10m -- --ignored --nocapture --test-threads=1` |
 | `Makefile` | 278 | `cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1` |
+| `Makefile` | 292 | `cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1` |
 | `Makefile` | 326 | `cargo check --workspace` |
 | `Makefile` | 329 | `cargo clippy --workspace -- -D warnings` |
 | `Makefile` | 332 | `cargo fmt --all` |

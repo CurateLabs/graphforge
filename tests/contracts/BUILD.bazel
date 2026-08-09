@@ -1,0 +1,10 @@
+"""Versioned test contracts consumed by CI validators and Rust harnesses."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"], exclude = ["BUILD.bazel"]))
+
+filegroup(
+    name = "m4_entry_matrix",
+    srcs = ["m4-entry-matrix.json"],
+)

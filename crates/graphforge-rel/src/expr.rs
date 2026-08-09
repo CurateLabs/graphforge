@@ -3852,10 +3852,8 @@ fn graph_value_types_compatible(left: &DataType, right: &DataType) -> bool {
                     (DataType::Struct(_), DataType::Struct(_)) => {
                         graph_value_types_compatible(left.data_type(), right.data_type())
                     }
-                    (DataType::List(left), DataType::List(right)) => {
-                        left.data_type() == right.data_type()
-                    }
-                    (DataType::LargeList(left), DataType::LargeList(right)) => {
+                    (DataType::List(left), DataType::List(right))
+                    | (DataType::LargeList(left), DataType::LargeList(right)) => {
                         left.data_type() == right.data_type()
                     }
                     (

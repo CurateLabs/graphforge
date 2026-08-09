@@ -1,0 +1,235 @@
+{
+  "schema": "graphforge-m4-entry-matrix/1",
+  "issue": 334,
+  "epic_issue": 335,
+  "parity_owner_issue": 337,
+  "exit_owner_issue": 345,
+  "public_persistence_owner_issue": 338,
+  "citation": "M4 implementation issues cite this contract and docs/development/m4-entry-baseline.md as their before/after evidence source.",
+  "current_runtime": {
+    "id": "fixed-two-worker",
+    "status": "supported",
+    "tokio_worker_threads": 2,
+    "public_resource_policy": false,
+    "datafusion_partitions": "implementation-default",
+    "notes": "graphforge-api build_runtime hardcodes tokio::runtime::Builder::worker_threads(2). No public API can request 1/2/4/8/automatic today; DataFusion partitioning follows its existing default policy and must be recorded as observed, not as a requested policy."
+  },
+  "deferred_runtime_configurations": [
+    {
+      "id": "threads-1",
+      "requested_workers": 1,
+      "status": "deferred",
+      "owner_issue": 337
+    },
+    {
+      "id": "threads-2",
+      "requested_workers": 2,
+      "status": "deferred",
+      "owner_issue": 337,
+      "notes": "Distinct from the hardcoded supported fixed-two-worker path: #337 must prove an explicit policy request of 2 workers, not merely the current hardcoded default."
+    },
+    {
+      "id": "threads-4",
+      "requested_workers": 4,
+      "status": "deferred",
+      "owner_issue": 337
+    },
+    {
+      "id": "threads-8",
+      "requested_workers": 8,
+      "status": "deferred",
+      "owner_issue": 337
+    },
+    {
+      "id": "threads-automatic",
+      "requested_workers": "automatic",
+      "status": "deferred",
+      "owner_issue": 337
+    }
+  ],
+  "parity_assertions": [
+    "canonical_arrow_schema",
+    "row_ordering",
+    "result_fingerprint",
+    "structured_errors",
+    "cancellation_outcome",
+    "resource_limit_behavior"
+  ],
+  "fixtures": [
+    {
+      "id": "synthetic-small",
+      "kind": "deterministic-synthetic",
+      "matrix": "short_ci",
+      "nodes": 5,
+      "edges": 5,
+      "density_note": "Person/KNOWS(+LIKES) e2e-shaped fixture with vector property for KNN",
+      "opt_in": false
+    },
+    {
+      "id": "synthetic-1m-edges",
+      "kind": "deterministic-synthetic",
+      "matrix": "large_manual",
+      "edges": 1000000,
+      "reuse": "fixed_hop_limit release path / GF_FIXED_HOP_BENCH_*",
+      "opt_in": true
+    },
+    {
+      "id": "synthetic-10m-edges",
+      "kind": "deterministic-synthetic",
+      "matrix": "large_manual",
+      "edges": 10000000,
+      "reuse": "fixed_hop_limit release path / GF_FIXED_HOP_BENCH_*",
+      "opt_in": true
+    },
+    {
+      "id": "livejournal-cached",
+      "kind": "external-cached-project",
+      "matrix": "large_manual",
+      "env": "GF_LIVEJOURNAL_PROJECT",
+      "opt_in": true,
+      "ci_download": false
+    }
+  ],
+  "workloads": [
+    {
+      "id": "fixed-hop-limit",
+      "class": "fixed-hop-LIMIT",
+      "surface": "GraphForge::execute",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": [
+        "rows_produced_equals_limit",
+        "demand_cancellation_intact",
+        "no_eager_round_robin_repartition"
+      ]
+    },
+    {
+      "id": "scan-count",
+      "class": "full-scan-count",
+      "surface": "GraphForge::execute",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": ["schema", "row_count", "determinism"]
+    },
+    {
+      "id": "aggregate-top-n",
+      "class": "aggregate-top-N",
+      "surface": "GraphForge::execute",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": ["schema", "row_count", "ordering", "determinism"]
+    },
+    {
+      "id": "pagerank",
+      "class": "iterative-graph-algorithm",
+      "surface": "GraphForge::rank",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": ["schema", "row_count", "determinism"]
+    },
+    {
+      "id": "exact-cosine-knn",
+      "class": "exact-vector-search",
+      "surface": "GraphForge::similar",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": ["schema", "row_count", "determinism"]
+    },
+    {
+      "id": "node2vec",
+      "class": "embedding-workload",
+      "surface": "GraphForge::analyze_embedding",
+      "short_ci": true,
+      "large_manual": true,
+      "structural_gates": ["schema", "row_count", "determinism"]
+    }
+  ],
+  "metrics": {
+    "structural_gates": [
+      "output_rows",
+      "result_fingerprint",
+      "schema_fields",
+      "io_rows_read_decoded_materialized",
+      "demand_partitions_iterations",
+      "configuration_classification"
+    ],
+    "hardware_specific_observations": [
+      "wall_time_ms",
+      "peak_rss_bytes",
+      "cpu_model",
+      "logical_cpus",
+      "os",
+      "memory_bytes",
+      "accelerator_identity"
+    ],
+    "may_be_unavailable": [
+      "spill_bytes",
+      "datafusion_target_partitions_observed"
+    ]
+  },
+  "matrices": {
+    "short_ci": {
+      "fixture": "synthetic-small",
+      "runtime": "fixed-two-worker",
+      "pass_fail": ["structural_gates", "parity_assertions_on_supported_runtime"],
+      "report_only": ["wall_time_ms", "peak_rss_bytes"],
+      "forbidden": [
+        "timing_absolute_thresholds",
+        "sleeps",
+        "retries",
+        "ignored_correctness_assertions",
+        "fabricated_deferred_runtime_results"
+      ]
+    },
+    "large_manual": {
+      "fixtures": [
+        "synthetic-1m-edges",
+        "synthetic-10m-edges",
+        "livejournal-cached"
+      ],
+      "runtime": "fixed-two-worker",
+      "requires_documented_commands": true,
+      "records": [
+        "hardware_identity",
+        "dataset_identity",
+        "commit",
+        "build_profile",
+        "structural_metrics",
+        "wall_time_ms",
+        "peak_rss_bytes"
+      ]
+    }
+  },
+  "discovery_evidence": [
+    {
+      "id": "lower-level-8m-128m",
+      "classification": "discovery_not_public_facade_baseline",
+      "approx_nodes": 8000000,
+      "approx_edges": 128000000,
+      "path": "lower-level Rust construction/execution (not GraphForge::new public snapshot path)",
+      "public_facade_owner_issue": 338,
+      "notes": "Retain as qualified discovery evidence only. Do not present as an accepted public-product baseline until #338 and public-facade reruns prove the supported path."
+    }
+  ],
+  "evidence_artifact": {
+    "schema": "graphforge-m4-entry-evidence/1",
+    "required_fields": [
+      "schema",
+      "contract_schema",
+      "source_sha",
+      "build_profile",
+      "runtime_configuration",
+      "hardware",
+      "workloads",
+      "deferred_configurations",
+      "discovery_evidence"
+    ]
+  },
+  "known_limitations": [
+    "Eager Parquet materialization into single-partition MemTable remains observable.",
+    "CSR-to-hash-map expansion remains on analyst/traversal paths (#340).",
+    "Algorithm kernels remain serial (#342-#344).",
+    "Public snapshot envelope still bounds GraphForge::new scale claims (#338).",
+    "Wall-clock numbers are hardware-specific and never CI pass/fail gates."
+  ]
+}
