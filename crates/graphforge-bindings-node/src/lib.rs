@@ -3049,6 +3049,7 @@ impl GraphForge {
                 }
                 None => defaults.max_rebase_attempts,
             },
+            resource: defaults.resource,
         };
         let inner = graphforge_api::GraphForge::new_with_options(path.as_deref(), options)
             .map_err(|e| to_napi_err(&e))?;

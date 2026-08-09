@@ -1559,8 +1559,9 @@ mod tests {
         left: CompositeTransactionRequest,
         right: CompositeTransactionRequest,
     ) -> [Result<RecordBatch, GfError>; 2] {
-        let left_graph =
-            Arc::new(GraphForge::new_with_options(directory.path().to_str(), options).unwrap());
+        let left_graph = Arc::new(
+            GraphForge::new_with_options(directory.path().to_str(), options.clone()).unwrap(),
+        );
         let right_graph =
             Arc::new(GraphForge::new_with_options(directory.path().to_str(), options).unwrap());
         *OPTIMISTIC_PUBLISH_BARRIER
@@ -1842,7 +1843,8 @@ mod tests {
         let directory = TempDir::new().unwrap();
         GraphForge::new(directory.path().to_str()).unwrap();
         let options = optimistic_options(1);
-        let stale = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
+        let stale =
+            GraphForge::new_with_options(directory.path().to_str(), options.clone()).unwrap();
         let concurrent = GraphForge::new_with_options(directory.path().to_str(), options).unwrap();
         concurrent
             .publish_composite_transaction(graph_request(151, 152, "concurrent"))

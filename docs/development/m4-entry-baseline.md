@@ -2,17 +2,19 @@
 
 **Contract:** [`tests/contracts/m4-entry-matrix.json`](../tests/contracts/m4-entry-matrix.json)  
 **Harness:** `cargo test -p graphforge-api --test m4_entry_baseline`  
-**Owner issues:** entry #334 · resource-policy parity #337 · public persistence #338 · exit #345 · epic #335
+**Owner issues:** entry #334 · resource-policy parity #337 · public persistence #338 · exit #345 · epic #335  
+**Resource policy:** [Embedded Execution Resource Policy](execution-resource-policy.md)
 
-This is the accepted **before** evidence source for every M4 implementation
+This is the accepted **before/after** evidence source for every M4 implementation
 issue. Later PRs cite this gate for structural before/after comparisons.
 Wall-clock numbers are hardware-specific observations, never CI pass/fail
 thresholds.
 
 ## What this gate measures
 
-Public Rust facade workloads under the **currently supported** fixed two-worker
-Tokio runtime (`GraphForge` hardcodes `worker_threads(2)`):
+Public Rust facade workloads under the **default Explicit** two-worker /
+two-partition resource policy (preserving pre-#337 semantics), plus executed
+thread-parity cells when the machine budget allows:
 
 | Workload id | Class | Surface |
 |---|---|---|
@@ -27,12 +29,12 @@ Tokio runtime (`GraphForge` hardcodes `worker_threads(2)`):
 
 | Configuration | Status | Notes |
 |---|---|---|
-| Fixed two-worker facade | **supported** | Honest current implementation |
-| Requested `1` / `2` / `4` / `8` / `automatic` | **deferred → #337** | Defined in the contract with exact parity assertions; **not executed** by #334 |
+| Default Explicit two-worker / two-partition | **supported** | `GraphForgeOptions::default().resource` |
+| Requested `1` / `2` / `4` / `8` / `automatic` | **supported via #337** | Executed by the harness when within budget; otherwise recorded `unavailable` |
 
-Closing #334 does **not** claim the deferred matrix ran. #337 owns making those
-policies executable and proving schema / ordering / fingerprint / errors /
-cancellation / resource-limit parity.
+#337 owns proving schema / ordering / fingerprint / errors / cancellation /
+resource-limit parity across those cells under
+[`ExecutionResourcePolicy`](execution-resource-policy.md).
 
 ## Matrices
 
@@ -43,9 +45,9 @@ make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture
 ```
 
-Pass/fail uses structural gates and determinism only. Timing and peak RSS are
-printed as observations. Absolute millisecond thresholds, sleeps, retries, and
-ignored correctness assertions are forbidden.
+Pass/fail uses structural gates, determinism, and thread-parity fingerprints.
+Timing and peak RSS are printed as observations. Absolute millisecond
+thresholds, sleeps, retries, and ignored correctness assertions are forbidden.
 
 ### Large manual / scheduled
 
@@ -72,7 +74,7 @@ I/O / demand counters where applicable, configuration classification.
 CPU model, logical CPUs, OS, memory, accelerator identity when present.
 
 **May be unavailable:** spill bytes (not yet universally instrumented), observed
-DataFusion target partitions.
+DataFusion target partitions, thread-parity cells over the host budget.
 
 ## Honest bottlenecks retained
 
@@ -93,7 +95,8 @@ reruns (#345).
 Before/after evidence source:
 
 - Contract: `tests/contracts/m4-entry-matrix.json` (`graphforge-m4-entry-matrix/1`)
-- Docs: this page and [`benchmarks/m4_entry_baseline.md`](../benchmarks/m4_entry_baseline.md)
+- Docs: this page, [`execution-resource-policy.md`](execution-resource-policy.md),
+  and [`benchmarks/m4_entry_baseline.md`](../benchmarks/m4_entry_baseline.md)
 - Harness: `crates/graphforge-api/tests/m4_entry_baseline.rs`
 
 Every M4 child (#336–#344) should compare against this gate’s structural

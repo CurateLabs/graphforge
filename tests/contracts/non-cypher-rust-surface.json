@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "d867e276ca262c52acd087475d4cc3b3ebf2295b0419d50926b5c9048f35ce27",
+  "public_method_digest": "d8a5dfb183304861b206160023d5a4d82f8a4e0e93600914a2a5dd03ed6991d0",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -24,7 +24,8 @@
       "ProviderRerankedFindResult": "introspection",
       "RecordBatch": "introspection",
       "ResolvedBeliefProjection": "introspection",
-      "SearchIndexOptions": "introspection"
+      "SearchIndexOptions": "introspection",
+      "ExecutionResourcePolicy": "introspection"
     },
     "overrides": {
       "GraphForge.index": "release-tested",
@@ -41,6 +42,8 @@
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
+      "GraphForge.resource_diagnostics": "introspection",
+      "GraphForge.resource_policy": "introspection",
       "GraphForge.export_portable": "designed-only",
       "GraphForge.import_portable": "designed-only",
       "GraphForge.preview_revert_to_checkpoint": "designed-only",

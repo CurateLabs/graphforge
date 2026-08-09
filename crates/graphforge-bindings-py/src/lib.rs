@@ -2372,6 +2372,7 @@ impl GraphForge {
                     &GfError::Validation("max_rebase_attempts must not exceed 32".into()),
                 )
             })?,
+            ..GraphForgeOptions::default()
         };
         let inner = py
             .detach(|| graphforge_api::GraphForge::new_with_options(path.as_deref(), options))

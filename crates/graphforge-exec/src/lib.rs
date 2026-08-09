@@ -4308,6 +4308,36 @@ impl QueryPlanner for GraphForgeQueryPlanner {
 // ExecutionSession
 // ---------------------------------------------------------------------------
 
+/// Resource knobs applied when constructing an [`ExecutionSession`] (#337).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionResourceConfig {
+    /// DataFusion `target_partitions`.
+    pub target_partitions: usize,
+    /// DataFusion batch size.
+    pub batch_size: usize,
+    /// Memory pool budget in bytes.
+    pub memory_budget_bytes: u64,
+    /// Whether spill-to-disk is enabled.
+    pub spill_enabled: bool,
+    /// Absolute spill directory when spill is enabled.
+    pub spill_directory: Option<PathBuf>,
+    /// Optional spill byte cap.
+    pub spill_max_bytes: Option<u64>,
+}
+
+impl Default for SessionResourceConfig {
+    fn default() -> Self {
+        Self {
+            target_partitions: 2,
+            batch_size: 8_192,
+            memory_budget_bytes: 512 * 1024 * 1024,
+            spill_enabled: false,
+            spill_directory: None,
+            spill_max_bytes: None,
+        }
+    }
+}
+
 /// A configured DataFusion [`SessionContext`] ready to execute [`GraphPlan`]s.
 ///
 /// Construct via [`ExecutionSession::new`] (read/query) or
@@ -4350,6 +4380,7 @@ impl ExecutionSession {
             PathBuf::new(),
             OntologyMode::Exploratory,
             None,
+            &SessionResourceConfig::default(),
         ))
     }
 
@@ -4363,7 +4394,14 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
     ) -> Result<Self, GfError> {
-        Ok(Self::build(catalog, ontology, dir, mode, None))
+        Ok(Self::build(
+            catalog,
+            ontology,
+            dir,
+            mode,
+            None,
+            &SessionResourceConfig::default(),
+        ))
     }
 
     /// Like [`new_with_target`](Self::new_with_target) but reusing a
@@ -4382,7 +4420,36 @@ impl ExecutionSession {
         mode: OntologyMode,
         provider: Arc<PersistentAdjacencyProvider>,
     ) -> Result<Self, GfError> {
-        Ok(Self::build(catalog, ontology, dir, mode, Some(provider)))
+        Self::new_with_target_provider_and_resources(
+            catalog,
+            ontology,
+            dir,
+            mode,
+            provider,
+            &SessionResourceConfig::default(),
+        )
+    }
+
+    /// Like [`new_with_target_and_provider`] with an explicit resource policy.
+    ///
+    /// # Errors
+    /// Returns [`GfError`] if session construction fails.
+    pub fn new_with_target_provider_and_resources(
+        catalog: GraphCatalog,
+        ontology: Option<OntologyHandle>,
+        dir: PathBuf,
+        mode: OntologyMode,
+        provider: Arc<PersistentAdjacencyProvider>,
+        resources: &SessionResourceConfig,
+    ) -> Result<Self, GfError> {
+        Ok(Self::build(
+            catalog,
+            ontology,
+            dir,
+            mode,
+            Some(provider),
+            resources,
+        ))
     }
 
     fn build(
@@ -4391,6 +4458,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
+        resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the
         // extension planner via SessionConfig extension. Read-only sessions
@@ -4408,10 +4476,32 @@ impl ExecutionSession {
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
         let config = datafusion::prelude::SessionConfig::new()
-            .with_extension(Arc::new(AdjacencyProviderExt(provider)));
+            .with_extension(Arc::new(AdjacencyProviderExt(provider)))
+            .with_target_partitions(resources.target_partitions)
+            .with_batch_size(resources.batch_size);
+
+        let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
+        let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_memory_limit(memory_budget, 1.0);
+        if resources.spill_enabled
+            && let Some(dir) = &resources.spill_directory
+        {
+            let _ = std::fs::create_dir_all(dir);
+            runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+            if let Some(max) = resources.spill_max_bytes {
+                runtime_builder = runtime_builder.with_max_temp_directory_size(max);
+            }
+        }
+        let runtime_env = Arc::new(
+            runtime_builder
+                .build()
+                .expect("DataFusion RuntimeEnv construction"),
+        );
+
         let state = SessionStateBuilder::new()
             .with_default_features()
             .with_config(config)
+            .with_runtime_env(runtime_env)
             .with_query_planner(Arc::new(GraphForgeQueryPlanner))
             // Runs after DataFusion's default rules, when terminal fetches and
             // eager round-robin exchanges are visible (#1269).

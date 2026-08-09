@@ -4,6 +4,7 @@ use std::sync::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use graphforge_core::{ApiErrorCode, GfError};
 
 use crate::CancellationToken;
+use crate::resource_policy::{ExecutionResourcePolicy, NormalizedResourcePolicy};
 
 /// Embedded project-write coordination policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -20,7 +21,7 @@ pub enum ProjectWriteMode {
 }
 
 /// Validated construction options for an embedded [`crate::GraphForge`] facade.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphForgeOptions {
     /// Project write policy. Defaults to [`ProjectWriteMode::SingleWriter`].
     pub write_mode: ProjectWriteMode,
@@ -28,6 +29,8 @@ pub struct GraphForgeOptions {
     pub write_queue_capacity: usize,
     /// Maximum optimistic rebase attempts after the initial staging attempt.
     pub max_rebase_attempts: u32,
+    /// Bounded per-instance execution resource policy (#337).
+    pub resource: ExecutionResourcePolicy,
 }
 
 impl Default for GraphForgeOptions {
@@ -36,12 +39,13 @@ impl Default for GraphForgeOptions {
             write_mode: ProjectWriteMode::SingleWriter,
             write_queue_capacity: 64,
             max_rebase_attempts: 3,
+            resource: ExecutionResourcePolicy::default(),
         }
     }
 }
 
 impl GraphForgeOptions {
-    pub(crate) fn validate(self) -> Result<Self, GfError> {
+    pub(crate) fn validate(self) -> Result<(Self, NormalizedResourcePolicy), GfError> {
         if !(1..=65_536).contains(&self.write_queue_capacity) {
             return Err(validation(
                 "write_queue_capacity must be between 1 and 65536",
@@ -50,7 +54,8 @@ impl GraphForgeOptions {
         if self.max_rebase_attempts > 32 {
             return Err(validation("max_rebase_attempts must not exceed 32"));
         }
-        Ok(self)
+        let resource = self.resource.clone().normalize()?;
+        Ok((self, resource))
     }
 }
 
@@ -80,7 +85,7 @@ pub(crate) enum WritePermit<'a> {
 }
 
 impl WriteCoordinator {
-    pub(crate) fn new(options: GraphForgeOptions) -> Self {
+    pub(crate) fn new(options: &GraphForgeOptions) -> Self {
         Self {
             mode: options.write_mode,
             visibility: RwLock::new(()),
@@ -243,7 +248,7 @@ mod tests {
     use super::*;
 
     fn queued(capacity: usize) -> Arc<WriteCoordinator> {
-        Arc::new(WriteCoordinator::new(GraphForgeOptions {
+        Arc::new(WriteCoordinator::new(&GraphForgeOptions {
             write_mode: ProjectWriteMode::QueuedWriter,
             write_queue_capacity: capacity,
             ..GraphForgeOptions::default()
@@ -384,11 +389,12 @@ mod tests {
     fn defaults_and_bounds_are_stable() {
         let defaults = GraphForgeOptions::default();
         assert_eq!(defaults.write_mode, ProjectWriteMode::SingleWriter);
-        assert!(defaults.validate().is_ok());
+        assert_eq!(defaults.resource.tokio_worker_threads, Some(2));
+        assert!(defaults.clone().validate().is_ok());
         assert!(
             GraphForgeOptions {
                 write_queue_capacity: 0,
-                ..defaults
+                ..defaults.clone()
             }
             .validate()
             .is_err()

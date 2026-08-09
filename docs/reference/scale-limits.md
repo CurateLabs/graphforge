@@ -73,10 +73,11 @@ M4 before/after performance work uses the versioned entry contract in
 [`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
 and the public-facade harness documented in
 [M4 Entry Baseline](../development/m4-entry-baseline.md). The short CI matrix
-gates on structural correctness under the fixed two-worker runtime; thread
-configurations `1`/`2`/`4`/`8`/automatic are deferred to #337. Lower-level
-8M-node/128M-edge reports remain discovery evidence until #338 proves the
-public path.
+gates on structural correctness under the default Explicit two-worker resource
+policy; thread configurations `1`/`2`/`4`/`8`/automatic are executed under
+[Embedded Execution Resource Policy](../development/execution-resource-policy.md)
+(#337) when the machine budget allows. Lower-level 8M-node/128M-edge reports
+remain discovery evidence until #338 proves the public path.
 
 ```bash
 make m4-entry-matrix-check
