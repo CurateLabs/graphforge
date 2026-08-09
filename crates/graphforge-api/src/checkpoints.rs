@@ -2695,9 +2695,11 @@ mod tests {
             max_rebase_attempts: 2,
             ..crate::GraphForgeOptions::default()
         };
-        let mut graph =
-            GraphForge::new_with_options(Some(directory.path().to_str().unwrap()), write_options)
-                .unwrap();
+        let mut graph = GraphForge::new_with_options(
+            Some(directory.path().to_str().unwrap()),
+            write_options.clone(),
+        )
+        .unwrap();
         graph.execute("CREATE (:Person {name: 'before'})").unwrap();
         graph
             .checkpoint(CheckpointRequest {
