@@ -512,21 +512,17 @@ impl GraphForge {
         *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);
     }
 
-<<<<<<< HEAD
-    fn open_dir_with_options(
-        dir: PathBuf,
-        options: GraphForgeOptions,
-        resource_policy: resource_policy::NormalizedResourcePolicy,
-    ) -> Result<Self, GfError> {
-=======
     /// Structural evidence for the graph open/materialization strategy.
     #[must_use]
     pub fn graph_open_evidence(&self) -> &graphforge_storage::GraphFilesOpenEvidence {
         &self.graph_open_evidence
     }
 
-    fn open_dir_with_options(dir: PathBuf, options: GraphForgeOptions) -> Result<Self, GfError> {
->>>>>>> b9d8e4d (feat(api): publish and reopen file-backed graph generations)
+    fn open_dir_with_options(
+        dir: PathBuf,
+        options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+    ) -> Result<Self, GfError> {
         if !dir.exists() {
             return Err(GfError::Storage(format!(
                 "path does not exist: {}",

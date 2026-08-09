@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use graphforge_core::canonical::{CANONICAL_CONTRACT_VERSION, CanonicalDomain, fingerprint};
@@ -15,6 +15,7 @@ use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::project_failpoint;
 use crate::project_publication::{ProjectParticipant, ProjectParticipantEncoding};
 
 /// Capability ID for graph storage.
@@ -242,6 +243,15 @@ pub fn stage_graph_tree(
         evidence.bytes_validated = evidence.bytes_validated.saturating_add(entry.byte_length);
         evidence.files_copied = evidence.files_copied.saturating_add(1);
         evidence.bytes_copied = evidence.bytes_copied.saturating_add(entry.byte_length);
+        // Fail after at least one graph file is durable so interrupted staging
+        // can prove CURRENT remains on the prior complete generation.
+        project_failpoint::hit(
+            "project.after_graph_file_staged",
+            None,
+            None,
+            "GRAPH_TREE_STAGING",
+            false,
+        )?;
     }
     sync_directory_tree(&destination_root)?;
     verify_graph_tree(&destination_root, inventory)?;
@@ -566,31 +576,14 @@ fn ensure_empty_directory(target: &Path) -> Result<(), GfError> {
 
 fn copy_regular_file(source: &Path, destination: &Path) -> Result<[u8; 32], GfError> {
     reject_link(source)?;
-    let mut input =
-        File::open(source).map_err(|error| storage("open graph source file", source, error))?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .map_err(|error| storage("create graph destination file", destination, error))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|error| storage("read graph source file", source, error))?;
-        if read == 0 {
-            break;
-        }
-        output
-            .write_all(&buffer[..read])
-            .map_err(|error| storage("write graph destination file", destination, error))?;
-        hasher.update(&buffer[..read]);
-    }
-    output
-        .sync_all()
-        .map_err(|error| storage("fsync graph destination file", destination, error))?;
-    Ok(hasher.finalize().into())
+    // Prefer filesystem copy so sparse/holey sources stay sparse when the OS
+    // supports it (Linux copy_file_range). Digest the destination so staged
+    // bytes remain verified without assembling them into one buffer.
+    fs::copy(source, destination)
+        .map_err(|error| storage("copy graph source file", destination, error))?;
+    let digest = hash_file(destination)?;
+    sync_file(destination)?;
+    Ok(digest)
 }
 
 fn hash_file(path: &Path) -> Result<[u8; 32], GfError> {
@@ -805,5 +798,214 @@ mod tests {
         assert_eq!(error.code(), "GF_UNSUPPORTED_PROJECT_FORMAT");
         inventory.format_version = GRAPH_FILES_FORMAT_VERSION;
         validate_inventory_contract(&inventory).unwrap();
+    }
+
+    #[test]
+    fn mid_graph_tree_staging_failure_leaves_current_and_recovery_cleans() {
+        const ENABLE_COOKIE: &str = "graphforge-internal-subprocess-v1";
+        const HELPER: &str =
+            "graph_files::tests::subprocess_mid_graph_tree_staging_writer";
+
+        let root = tempfile::tempdir().unwrap();
+        crate::open_or_initialize_project(root.path()).unwrap();
+        let parent = publish_graph_files_fixture(root.path(), &[("a.parquet", b"aaa")]);
+
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("a.parquet"), b"aaa").unwrap();
+        fs::write(source.path().join("b.parquet"), b"bbb").unwrap();
+        let (inventory, files) = capture_graph_files(source.path()).unwrap();
+        assert!(inventory.file_count >= 2);
+
+        let transaction_uuid = uuid::Uuid::now_v7();
+        let generation_uuid = uuid::Uuid::now_v7();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(HELPER)
+            .arg("--nocapture")
+            .env("GRAPHFORGE_TEST_GRAPH_FILES_ROOT", root.path())
+            .env("GRAPHFORGE_TEST_GRAPH_TREE_SOURCE", source.path())
+            .env(
+                "GRAPHFORGE_TEST_TRANSACTION_UUID",
+                transaction_uuid.hyphenated().to_string(),
+            )
+            .env(
+                "GRAPHFORGE_TEST_GENERATION_UUID",
+                generation_uuid.hyphenated().to_string(),
+            )
+            .env(
+                "GRAPHFORGE_TEST_GRAPH_FILES_PARTICIPANT",
+                serde_json::to_string(&participant_json(&files)).unwrap(),
+            )
+            .env("GRAPHFORGE_PROJECT_FAILPOINTS", ENABLE_COOKIE)
+            .env(
+                "GRAPHFORGE_PROJECT_FAILPOINT",
+                "project.after_graph_file_staged.error",
+            )
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "mid-tree staging helper must exit after the injected error"
+        );
+
+        let current = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(current.generation_uuid(), parent);
+        assert!(
+            root.path()
+                .join("generations")
+                .join(generation_uuid.hyphenated().to_string())
+                .exists(),
+            "incomplete attempt should still be on disk before recovery"
+        );
+
+        let report = crate::recover_project_transactions(root.path()).unwrap();
+        assert_eq!(report.selected_generation_uuid, parent);
+        assert!(
+            !root
+                .path()
+                .join("generations")
+                .join(generation_uuid.hyphenated().to_string())
+                .exists(),
+            "recovery must clean the incomplete graph-tree attempt"
+        );
+        let reopened = crate::resolve_project_generation(root.path()).unwrap();
+        assert_eq!(reopened.generation_uuid(), parent);
+        let inventory = reopened.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(inventory.file_count, 1);
+    }
+
+    #[test]
+    fn subprocess_mid_graph_tree_staging_writer() {
+        let Ok(root) = std::env::var("GRAPHFORGE_TEST_GRAPH_FILES_ROOT") else {
+            return;
+        };
+        let source = PathBuf::from(std::env::var("GRAPHFORGE_TEST_GRAPH_TREE_SOURCE").unwrap());
+        let transaction_uuid =
+            uuid::Uuid::parse_str(&std::env::var("GRAPHFORGE_TEST_TRANSACTION_UUID").unwrap())
+                .unwrap();
+        let generation_uuid =
+            uuid::Uuid::parse_str(&std::env::var("GRAPHFORGE_TEST_GENERATION_UUID").unwrap())
+                .unwrap();
+        let participant_raw = std::env::var("GRAPHFORGE_TEST_GRAPH_FILES_PARTICIPANT").unwrap();
+        let files = participant_from_json(&participant_raw);
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid,
+            generation_uuid,
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let error = (|| {
+            let outcome =
+                crate::stage_project_generation_with_graph_tree(&root, &request, Some(&source))?;
+            let crate::ProjectStageOutcome::Staged(staged) = outcome else {
+                panic!("fresh graph/files transaction unexpectedly replayed");
+            };
+            staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?;
+            Ok::<(), GfError>(())
+        })()
+        .expect_err("configured graph-tree failpoint did not fire");
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("GRAPH_TREE_STAGING"));
+    }
+
+    fn publish_graph_files_fixture(container: &Path, files: &[(&str, &[u8])]) -> uuid::Uuid {
+        let source = tempfile::tempdir().unwrap();
+        for (relative, bytes) in files {
+            let path = source.path().join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, bytes).unwrap();
+        }
+        let (_, files_participant) = capture_graph_files(source.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, files_participant);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: uuid::Uuid::now_v7(),
+            generation_uuid: uuid::Uuid::now_v7(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let expected = request.generation_uuid;
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(container, &request, Some(source.path()))
+                .unwrap()
+        else {
+            panic!("fresh graph/files fixture unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        expected
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct ParticipantWire {
+        capability_id: String,
+        capability_version: u32,
+        record_family_id: String,
+        record_version: u32,
+        encoding: String,
+        schema_fingerprint: [u8; 32],
+        row_count: u64,
+        bytes: Vec<u8>,
+    }
+
+    fn participant_json(participant: &ProjectParticipant) -> ParticipantWire {
+        ParticipantWire {
+            capability_id: participant.capability_id.clone(),
+            capability_version: participant.capability_version,
+            record_family_id: participant.record_family_id.clone(),
+            record_version: participant.record_version,
+            encoding: match participant.encoding {
+                ProjectParticipantEncoding::Json => "json".into(),
+                ProjectParticipantEncoding::Arrow => "arrow".into(),
+                ProjectParticipantEncoding::Parquet => "parquet".into(),
+            },
+            schema_fingerprint: participant.schema_fingerprint,
+            row_count: participant.row_count,
+            bytes: participant.bytes.clone(),
+        }
+    }
+
+    fn participant_from_json(raw: &str) -> ProjectParticipant {
+        let wire: ParticipantWire = serde_json::from_str(raw).unwrap();
+        ProjectParticipant {
+            capability_id: wire.capability_id,
+            capability_version: wire.capability_version,
+            record_family_id: wire.record_family_id,
+            record_version: wire.record_version,
+            encoding: match wire.encoding.as_str() {
+                "json" => ProjectParticipantEncoding::Json,
+                "arrow" => ProjectParticipantEncoding::Arrow,
+                "parquet" => ProjectParticipantEncoding::Parquet,
+                other => panic!("unknown encoding {other}"),
+            },
+            schema_fingerprint: wire.schema_fingerprint,
+            row_count: wire.row_count,
+            bytes: wire.bytes,
+        }
     }
 }

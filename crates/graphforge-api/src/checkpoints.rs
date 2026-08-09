@@ -161,6 +161,11 @@ impl CheckpointView {
     pub fn generation_uuid(&self) -> Uuid {
         self.checkpoint.generation_uuid
     }
+    /// Structural evidence for how the pinned graph workspace was opened.
+    #[must_use]
+    pub fn graph_open_evidence(&self) -> &graphforge_storage::GraphFilesOpenEvidence {
+        self.graph.graph_open_evidence()
+    }
     /// Execute a read-only Cypher statement against the pinned generation.
     pub fn execute(&self, cypher: &str) -> Result<ExecutionResult, GfError> {
         self.graph.execute_read_only(cypher)

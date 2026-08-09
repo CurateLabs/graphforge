@@ -89,11 +89,20 @@ New publications use the file-backed path. Portable interchange currently return
 structured unsupported error for file-backed trees (copy the project directory
 instead); legacy snapshot generations remain portable.
 
+Public persistence past the legacy 2 GiB snapshot envelope is proven by the
+ignored oversize fixture in `file_backed_graph_generation` (sparse padding beside
+a queryable graph; evidence under `build/file-backed-oversize-evidence.json`).
+That is not a universal size ceiling and does not download 8M/128M data in CI.
+
 ```bash
 make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline
 cargo test -p graphforge-api --test file_backed_graph_generation
 make bench-m4-entry
+# Optional large-class persistence proof (ignored; local only):
+GF_FILE_BACKED_OVERSIZE_EVIDENCE_OUT=build/file-backed-oversize-evidence.json \
+  cargo test -p graphforge-api --test file_backed_graph_generation \
+  oversize_file_backed_generation_exceeds_legacy_snapshot_envelope -- --ignored --nocapture
 ```
 
 ## Adjacency index build (#336)
