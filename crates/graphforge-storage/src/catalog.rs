@@ -1983,6 +1983,7 @@ mod tests {
     async fn query_providers_build_streaming_parquet_plan_not_memtable() {
         let dir = TempDir::new().unwrap();
         let nodes = dir.path().join("topology/nodes.parquet");
+        std::fs::create_dir_all(nodes.parent().unwrap()).unwrap();
         write_nodes_parquet(&nodes);
         let edges = dir.path().join("topology/edges/KNOWS.parquet");
         write_edge_parquet(&edges);
@@ -1990,10 +1991,7 @@ mod tests {
         let ctx = SessionContext::new();
         let state = ctx.state();
         let cases: Vec<(&str, Arc<dyn TableProvider>)> = vec![
-            (
-                "nodes",
-                Arc::new(TopologyNodeTable::new(nodes.clone())),
-            ),
+            ("nodes", Arc::new(TopologyNodeTable::new(nodes.clone()))),
             ("edges", Arc::new(TypedEdgeTable::open(dir.path(), "KNOWS"))),
             ("union", Arc::new(UnionEdgeTable::open(dir.path()))),
             (
@@ -2049,13 +2047,11 @@ mod tests {
             .join("KNOWS.parquet");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let n = 20usize;
-        let uuids = FixedSizeBinaryArray::try_from_iter(
-            (0..n).map(|i| {
-                let mut bytes = vec![0u8; 16];
-                bytes[15] = i as u8;
-                bytes
-            }),
-        )
+        let uuids = FixedSizeBinaryArray::try_from_iter((0..n).map(|i| {
+            let mut bytes = vec![0u8; 16];
+            bytes[15] = i as u8;
+            bytes
+        }))
         .unwrap();
         let src = FixedSizeBinaryArray::try_from_iter((0..n).map(|_| vec![1u8; 16])).unwrap();
         let dst = FixedSizeBinaryArray::try_from_iter((0..n).map(|_| vec![2u8; 16])).unwrap();

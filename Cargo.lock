@@ -2300,6 +2300,7 @@ dependencies = [
  "datafusion",
  "datafusion-catalog",
  "fs4 1.1.0",
+ "futures",
  "graphforge-core",
  "graphforge-ir",
  "graphforge-ontology",

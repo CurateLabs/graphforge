@@ -71,6 +71,14 @@ impl ParquetFragment {
 #[derive(Clone, Debug)]
 pub struct IoConcurrencyExt(pub Arc<tokio::sync::Semaphore>);
 
+impl IoConcurrencyExt {
+    /// Build a semaphore with at least one permit.
+    #[must_use]
+    pub fn new(permits: usize) -> Self {
+        Self(Arc::new(tokio::sync::Semaphore::new(permits.max(1))))
+    }
+}
+
 /// Streaming Parquet scan over deterministic file fragments.
 #[derive(Clone)]
 pub struct GraphForgeParquetExec {
@@ -177,10 +185,6 @@ impl ExecutionPlan for GraphForgeParquetExec {
         "GraphForgeParquetExec"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -232,6 +236,7 @@ impl ExecutionPlan for GraphForgeParquetExec {
         };
 
         let schema = Arc::clone(&self.schema);
+        let stream_schema = Arc::clone(&schema);
         let base_schema = Arc::clone(&self.base_schema);
         let projection = self.projection.clone();
         let limit = self.limit;
@@ -255,19 +260,19 @@ impl ExecutionPlan for GraphForgeParquetExec {
                 Some(frag) if !frag.exists => {
                     vec![RecordBatch::new_empty(Arc::clone(&schema))]
                 }
-                Some(frag) => read_fragment_batches(
-                    &frag,
-                    &base_schema,
-                    projection.as_deref(),
-                    batch_size,
-                )?,
+                Some(frag) => {
+                    read_fragment_batches(&frag, &base_schema, projection.as_deref(), batch_size)?
+                }
             };
             let batches = apply_limit(batches, limit);
             Ok::<_, DataFusionError>(stream::iter(batches.into_iter().map(Ok)))
         })
         .try_flatten();
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            stream_schema,
+            stream,
+        )))
     }
 }
 
@@ -297,7 +302,9 @@ fn read_fragment_batches(
     batch_size: usize,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
     let file = File::open(&fragment.path).map_err(|e| {
-        DataFusionError::External(format!("open parquet {}: {e}", path_label(&fragment.path)).into())
+        DataFusionError::External(
+            format!("open parquet {}: {e}", path_label(&fragment.path)).into(),
+        )
     })?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         DataFusionError::External(format!("corrupt or unreadable parquet: {e}").into())
@@ -321,9 +328,8 @@ fn read_fragment_batches(
 
     let mut out = Vec::new();
     for batch in reader {
-        let mut batch = batch.map_err(|e| {
-            DataFusionError::External(format!("parquet decode failed: {e}").into())
-        })?;
+        let mut batch = batch
+            .map_err(|e| DataFusionError::External(format!("parquet decode failed: {e}").into()))?;
         if fragment.normalize_topology {
             batch = normalize_topology_nodes(vec![batch])?
                 .into_iter()
@@ -348,9 +354,11 @@ fn read_fragment_batches(
     }
     if out.is_empty() {
         let empty = match projection {
-            Some(indices) => RecordBatch::new_empty(Arc::new(base_schema.project(indices).map_err(
-                |e| DataFusionError::ArrowError(Box::new(e), Some("empty projection".into())),
-            )?)),
+            Some(indices) => {
+                RecordBatch::new_empty(Arc::new(base_schema.project(indices).map_err(|e| {
+                    DataFusionError::ArrowError(Box::new(e), Some("empty projection".into()))
+                })?))
+            }
             None => RecordBatch::new_empty(Arc::clone(base_schema)),
         };
         out.push(empty);
@@ -426,10 +434,6 @@ impl ExecutionPlan for OrderedPartitionStreamExec {
         "OrderedPartitionStreamExec"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
@@ -484,14 +488,15 @@ pub fn scan_fragments(
     limit: Option<usize>,
     batch_size: usize,
 ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-    let exec = GraphForgeParquetExec::try_new(base_schema, fragments, projection, limit, batch_size)?;
+    let exec =
+        GraphForgeParquetExec::try_new(base_schema, fragments, projection, limit, batch_size)?;
     Ok(exec.into_ordered_plan())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{UInt64Array};
+    use arrow::array::UInt64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion::physical_plan::collect;
     use datafusion::prelude::SessionContext;
@@ -535,21 +540,15 @@ mod tests {
         write_edges(&path, 8);
         let table_schema = edge_schema();
         let fragments = vec![ParquetFragment::for_path(path.clone(), false)];
-        let plan = GraphForgeParquetExec::try_new(
-            table_schema.clone(),
-            fragments,
-            None,
-            None,
-            4,
-        )
-        .unwrap()
-        .into_ordered_plan();
+        let plan = GraphForgeParquetExec::try_new(table_schema.clone(), fragments, None, None, 4)
+            .unwrap()
+            .into_ordered_plan();
         assert_eq!(plan.name(), "GraphForgeParquetExec");
         // Corrupt after planning — proves scan did not consume the payload.
         std::fs::write(&path, b"not-a-parquet-file").unwrap();
         let ctx = SessionContext::new();
         let task = ctx.task_ctx();
-        let err = collect(plan.execute(0, task).unwrap()).await.unwrap_err();
+        let err = collect(plan, task).await.unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("corrupt") || msg.contains("unreadable") || msg.contains("parquet"),
@@ -577,7 +576,9 @@ mod tests {
             .build();
         let ctx = SessionContext::new_with_state(state);
         let task = ctx.task_ctx();
-        let batches = collect(plan.execute(0, task).unwrap()).await.unwrap();
+        let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, task)
+            .await
+            .unwrap();
         assert!(
             batches.len() >= 2,
             "expected multiple bounded batches, got {}",
@@ -586,7 +587,10 @@ mod tests {
         assert!(
             batches.iter().all(|b| b.num_rows() <= 4),
             "batch_size 4 violated: {:?}",
-            batches.iter().map(RecordBatch::num_rows).collect::<Vec<_>>()
+            batches
+                .iter()
+                .map(RecordBatch::num_rows)
+                .collect::<Vec<_>>()
         );
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 10);
@@ -610,7 +614,7 @@ mod tests {
         assert_eq!(plan.schema().field(0).name(), "edge_id");
         assert_eq!(plan.schema().field(1).name(), "dst_id");
         let ctx = SessionContext::new();
-        let batches = collect(plan.execute(0, ctx.task_ctx()).unwrap())
+        let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, ctx.task_ctx())
             .await
             .unwrap();
         assert_eq!(batches[0].num_columns(), 2);
@@ -629,7 +633,7 @@ mod tests {
         )
         .unwrap();
         let ctx = SessionContext::new();
-        let batches = collect(plan.execute(0, ctx.task_ctx()).unwrap())
+        let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, ctx.task_ctx())
             .await
             .unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
@@ -649,7 +653,10 @@ mod tests {
         .unwrap();
         assert_eq!(plan.fragment_count(), 1);
         assert_eq!(plan.batch_size(), 128);
-        let display = format!("{}", datafusion::physical_plan::displayable(&plan).one_line());
+        let display = format!(
+            "{}",
+            datafusion::physical_plan::displayable(&plan).one_line()
+        );
         assert!(display.contains("GraphForgeParquetExec"), "{display}");
         assert!(display.contains("batch_size=128"), "{display}");
     }
@@ -674,9 +681,12 @@ mod tests {
             )
             .unwrap();
             let file = File::create(path).unwrap();
-            let mut writer =
-                ArrowWriter::try_new(file, schema.clone(), Some(WriterProperties::builder().build()))
-                    .unwrap();
+            let mut writer = ArrowWriter::try_new(
+                file,
+                schema.clone(),
+                Some(WriterProperties::builder().build()),
+            )
+            .unwrap();
             writer.write(&batch).unwrap();
             writer.close().unwrap();
         }
@@ -694,9 +704,7 @@ mod tests {
         .into_ordered_plan();
         assert_eq!(plan.name(), "OrderedPartitionStreamExec");
         let ctx = SessionContext::new();
-        let batches = collect(plan.execute(0, ctx.task_ctx()).unwrap())
-            .await
-            .unwrap();
+        let batches = collect(plan, ctx.task_ctx()).await.unwrap();
         let ids = batches
             .iter()
             .flat_map(|b| {

@@ -4478,12 +4478,11 @@ impl ExecutionSession {
             },
         );
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
-        let io_concurrency = resources.io_concurrency.max(1);
         let config = datafusion::prelude::SessionConfig::new()
             .with_extension(Arc::new(AdjacencyProviderExt(provider)))
-            .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt(Arc::new(
-                tokio::sync::Semaphore::new(io_concurrency),
-            ))))
+            .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt::new(
+                resources.io_concurrency,
+            )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
 
