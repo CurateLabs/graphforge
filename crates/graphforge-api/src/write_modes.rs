@@ -85,7 +85,7 @@ pub(crate) enum WritePermit<'a> {
 }
 
 impl WriteCoordinator {
-    pub(crate) fn new(options: GraphForgeOptions) -> Self {
+    pub(crate) fn new(options: &GraphForgeOptions) -> Self {
         Self {
             mode: options.write_mode,
             visibility: RwLock::new(()),
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     fn queued(capacity: usize) -> Arc<WriteCoordinator> {
-        Arc::new(WriteCoordinator::new(GraphForgeOptions {
+        Arc::new(WriteCoordinator::new(&GraphForgeOptions {
             write_mode: ProjectWriteMode::QueuedWriter,
             write_queue_capacity: capacity,
             ..GraphForgeOptions::default()

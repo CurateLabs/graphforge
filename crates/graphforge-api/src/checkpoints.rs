@@ -741,7 +741,8 @@ impl GraphForge {
         }
         let container_root = self.resolved_generation.container_root().to_path_buf();
         let clock = self.clock.lock().expect("clock lock poisoned").clone();
-        let write_options = self.write_options;
+        let write_options = self.write_options.clone();
+        let resource_policy = self.resource_policy.clone();
         let select_clock = Arc::clone(&clock);
         let prepared = std::cell::RefCell::new(None);
         let (receipt, resolved) = graphforge_storage::revert_checkpoint(
@@ -759,7 +760,8 @@ impl GraphForge {
                     container_root.clone(),
                     generation.clone(),
                     true,
-                    write_options,
+                    write_options.clone(),
+                    resource_policy.clone(),
                 )?));
                 Ok(())
             },

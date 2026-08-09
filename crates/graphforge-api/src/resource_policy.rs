@@ -153,8 +153,7 @@ fn resource_limit(message: impl Into<String>) -> GfError {
 
 fn logical_cpus() -> usize {
     thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
+        .map_or(1, usize::from)
         .clamp(MIN_THREADS, MAX_THREADS)
 }
 
@@ -198,6 +197,7 @@ impl ExecutionResourcePolicy {
     ///
     /// # Errors
     /// Returns [`GfError::Validation`] for unsafe/unsupported settings.
+    #[allow(clippy::too_many_lines)]
     pub fn normalize(self) -> Result<NormalizedResourcePolicy, GfError> {
         let observed = logical_cpus();
         let (tokio_workers, partitions, io_conc, compute) = match self.mode {
@@ -302,10 +302,10 @@ impl ExecutionResourcePolicy {
                 ));
             };
             let dir = validate_spill_directory(dir)?;
-            if let Some(max) = self.spill.max_bytes {
-                if max == 0 {
-                    return Err(validation("spill.max_bytes must be greater than zero"));
-                }
+            if let Some(max) = self.spill.max_bytes
+                && max == 0
+            {
+                return Err(validation("spill.max_bytes must be greater than zero"));
             }
             (true, Some(dir), self.spill.max_bytes)
         } else {
@@ -348,19 +348,13 @@ impl NormalizedResourcePolicy {
 /// Instance-owned heavy-query admission gate.
 pub(crate) struct HeavyQueryAdmission {
     slots: Arc<tokio::sync::Semaphore>,
-    limit: usize,
 }
 
 impl HeavyQueryAdmission {
     pub(crate) fn new(limit: usize) -> Self {
         Self {
             slots: Arc::new(tokio::sync::Semaphore::new(limit)),
-            limit,
         }
-    }
-
-    pub(crate) fn limit(&self) -> usize {
-        self.limit
     }
 
     pub(crate) fn available_permits(&self) -> usize {

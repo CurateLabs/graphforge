@@ -483,9 +483,8 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(options.clone())),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&options)),
             write_options: options,
-            resource_policy: resource_policy.clone(),
             heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
                 resource_policy.max_concurrent_heavy_queries,
             )),
@@ -501,6 +500,7 @@ impl GraphForge {
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
             runtime: build_runtime(&resource_policy)?,
+            resource_policy,
         })
     }
 
@@ -555,6 +555,10 @@ impl GraphForge {
         let dir = workspace.path().to_path_buf();
 
         let runtime_catalog = load_runtime_catalog(&dir);
+        let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
+            resource_policy.max_concurrent_heavy_queries,
+        ));
+        let runtime = build_runtime(&resource_policy)?;
 
         let graph = Self {
             identity: GraphIdentity::new(),
@@ -573,12 +577,10 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(write_options.clone())),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&write_options)),
             write_options,
-            resource_policy: resource_policy.clone(),
-            heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
-                resource_policy.max_concurrent_heavy_queries,
-            )),
+            resource_policy,
+            heavy_query_admission,
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -590,7 +592,7 @@ impl GraphForge {
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
-            runtime: build_runtime(&resource_policy)?,
+            runtime,
         };
         if !read_only {
             graph.reconcile_algorithm_runs()?;
@@ -862,7 +864,7 @@ impl GraphForge {
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
-            self.session_resource_config(),
+            &self.session_resource_config(),
         )?;
 
         let result = self.block_on(async {
@@ -1129,7 +1131,7 @@ impl GraphForge {
     ) -> Result<graphforge_exec::SendableRecordBatchStream, GfError> {
         use graphforge_exec::ExecutionSession;
 
-        let _admission = self.admit_heavy_query_owned()?;
+        let admission = self.admit_heavy_query_owned()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -1192,7 +1194,7 @@ impl GraphForge {
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
-            self.session_resource_config(),
+            &self.session_resource_config(),
         )?;
 
         // Build the stream on the instance's long-lived runtime so the tasks it
@@ -1203,7 +1205,7 @@ impl GraphForge {
         // Admission is intentionally released after stream construction: the
         // stream is demand-driven and may outlive this call; holding the slot
         // for the full consumer lifetime would serialize all streaming clients.
-        drop(_admission);
+        drop(admission);
         Ok(shape_stream(
             stream,
             self.ontology_mode,
@@ -2636,7 +2638,7 @@ impl GraphForge {
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
-            self.session_resource_config(),
+            &self.session_resource_config(),
         )?;
         let physical = self.block_on(async move { session.explain_physical(&plan).await })?;
 

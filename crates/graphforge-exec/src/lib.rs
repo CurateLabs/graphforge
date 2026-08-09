@@ -4380,7 +4380,7 @@ impl ExecutionSession {
             PathBuf::new(),
             OntologyMode::Exploratory,
             None,
-            SessionResourceConfig::default(),
+            &SessionResourceConfig::default(),
         ))
     }
 
@@ -4400,7 +4400,7 @@ impl ExecutionSession {
             dir,
             mode,
             None,
-            SessionResourceConfig::default(),
+            &SessionResourceConfig::default(),
         ))
     }
 
@@ -4426,7 +4426,7 @@ impl ExecutionSession {
             dir,
             mode,
             provider,
-            SessionResourceConfig::default(),
+            &SessionResourceConfig::default(),
         )
     }
 
@@ -4440,7 +4440,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         provider: Arc<PersistentAdjacencyProvider>,
-        resources: SessionResourceConfig,
+        resources: &SessionResourceConfig,
     ) -> Result<Self, GfError> {
         Ok(Self::build(
             catalog,
@@ -4458,7 +4458,7 @@ impl ExecutionSession {
         dir: PathBuf,
         mode: OntologyMode,
         shared_provider: Option<Arc<PersistentAdjacencyProvider>>,
-        resources: SessionResourceConfig,
+        resources: &SessionResourceConfig,
     ) -> Self {
         // The session-scoped adjacency provider (#761), threaded to the
         // extension planner via SessionConfig extension. Read-only sessions
@@ -4480,15 +4480,16 @@ impl ExecutionSession {
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
 
+        let memory_budget = usize::try_from(resources.memory_budget_bytes).unwrap_or(usize::MAX);
         let mut runtime_builder = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
-            .with_memory_limit(resources.memory_budget_bytes as usize, 1.0);
-        if resources.spill_enabled {
-            if let Some(dir) = &resources.spill_directory {
-                let _ = std::fs::create_dir_all(dir);
-                runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
-                if let Some(max) = resources.spill_max_bytes {
-                    runtime_builder = runtime_builder.with_max_temp_directory_size(max);
-                }
+            .with_memory_limit(memory_budget, 1.0);
+        if resources.spill_enabled
+            && let Some(dir) = &resources.spill_directory
+        {
+            let _ = std::fs::create_dir_all(dir);
+            runtime_builder = runtime_builder.with_temp_file_path(dir.clone());
+            if let Some(max) = resources.spill_max_bytes {
+                runtime_builder = runtime_builder.with_max_temp_directory_size(max);
             }
         }
         let runtime_env = Arc::new(
