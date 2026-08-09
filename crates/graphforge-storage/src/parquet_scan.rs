@@ -13,10 +13,12 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
+use datafusion::common::stats::Precision;
+use datafusion::common::{ColumnStatistics, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType, SchedulingType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
@@ -40,31 +42,51 @@ pub struct ParquetFragment {
     pub rel_type_name: Option<String>,
     /// Apply [`normalize_topology_nodes`] after decode (legacy `type_id` files).
     pub normalize_topology: bool,
+    /// Footer-only row count when known (no row-group decode).
+    pub exact_rows: Option<usize>,
 }
 
 impl ParquetFragment {
     /// Fragment for a single known path; `exists` is probed without reading bytes.
+    ///
+    /// When the file exists, the Parquet footer is opened for an exact row count
+    /// so DataFusion can keep CollectLeft joins (MemTable parity). Row groups are
+    /// not decoded.
     #[must_use]
     pub fn for_path(path: PathBuf, normalize_topology: bool) -> Self {
         let exists = path.exists();
+        let exact_rows = if exists {
+            footer_num_rows(&path)
+        } else {
+            Some(0)
+        };
         Self {
             path,
             exists,
             rel_type_name: None,
             normalize_topology,
+            exact_rows,
         }
     }
 
     /// Union-edge fragment tagged with `rel_type_name` (file already listed).
     #[must_use]
     pub fn for_union_edge(path: PathBuf, rel_type_name: String) -> Self {
+        let exact_rows = footer_num_rows(&path);
         Self {
             path,
             exists: true,
             rel_type_name: Some(rel_type_name),
             normalize_topology: false,
+            exact_rows,
         }
     }
+}
+
+fn footer_num_rows(path: &Path) -> Option<usize> {
+    let file = File::open(path).ok()?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+    usize::try_from(builder.metadata().file_metadata().num_rows()).ok()
 }
 
 /// Session extension carrying the #337 I/O concurrency semaphore.
@@ -103,12 +125,16 @@ impl fmt::Debug for GraphForgeParquetExec {
             .field("batch_size", &self.batch_size)
             .field("limit", &self.limit)
             .field("projection", &self.projection)
-            .finish()
+            .field("schema", &self.schema)
+            .finish_non_exhaustive()
     }
 }
 
 impl GraphForgeParquetExec {
-    /// Build a streaming plan. Does not open Parquet footers or decode row groups.
+    /// Build a streaming plan. Does not decode Parquet row groups.
+    ///
+    /// Fragments may already carry footer-only row counts for DataFusion
+    /// statistics; this constructor itself performs no I/O.
     ///
     /// # Errors
     /// Returns [`DataFusionError`] when the projection indices are invalid.
@@ -127,12 +153,17 @@ impl GraphForgeParquetExec {
             None => Arc::clone(&base_schema),
         };
         let partition_count = fragments.len().max(1);
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(Arc::clone(&schema)),
-            Partitioning::UnknownPartitioning(partition_count),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let props = Arc::new(
+            PlanProperties::new(
+                EquivalenceProperties::new(Arc::clone(&schema)),
+                Partitioning::UnknownPartitioning(partition_count),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )
+            // Match MemTable / MemorySourceConfig so DF keeps CollectLeft joins
+            // and does not insert eager RoundRobinBatch exchanges (#339 / #1269).
+            .with_scheduling_type(SchedulingType::Cooperative),
+        );
         Ok(Self {
             schema,
             base_schema,
@@ -181,7 +212,7 @@ impl DisplayAs for GraphForgeParquetExec {
 }
 
 impl ExecutionPlan for GraphForgeParquetExec {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "GraphForgeParquetExec"
     }
 
@@ -212,6 +243,45 @@ impl ExecutionPlan for GraphForgeParquetExec {
             (a, b) => a.or(b),
         };
         Some(Arc::new(cloned))
+    }
+
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> Result<Arc<Statistics>, DataFusionError> {
+        let column_statistics = self
+            .schema
+            .fields()
+            .iter()
+            .map(|_| ColumnStatistics::new_unknown())
+            .collect();
+        let num_rows = match partition {
+            None => {
+                if self.fragments.is_empty() {
+                    Some(0usize)
+                } else {
+                    self.fragments
+                        .iter()
+                        .map(|f| f.exact_rows)
+                        .try_fold(0usize, |acc, rows| Some(acc.saturating_add(rows?)))
+                }
+            }
+            Some(idx) => {
+                if self.fragments.is_empty() {
+                    (idx == 0).then_some(0usize)
+                } else {
+                    self.fragments.get(idx).and_then(|f| f.exact_rows)
+                }
+            }
+        };
+        Ok(Arc::new(Statistics {
+            num_rows: match num_rows {
+                Some(n) => Precision::Exact(n),
+                None => Precision::Absent,
+            },
+            total_byte_size: Precision::Absent,
+            column_statistics,
+        }))
     }
 
     fn execute(
@@ -341,12 +411,10 @@ fn read_fragment_batches(
         if let Some(stem) = fragment.rel_type_name.as_deref() {
             batch = tag_rel_type_name(&batch, stem)?;
         }
-        if post_process {
-            if let Some(indices) = projection {
-                batch = batch.project(indices).map_err(|e| {
-                    DataFusionError::ArrowError(Box::new(e), Some("post-process projection".into()))
-                })?;
-            }
+        if post_process && let Some(indices) = projection {
+            batch = batch.project(indices).map_err(|e| {
+                DataFusionError::ArrowError(Box::new(e), Some("post-process projection".into()))
+            })?;
         }
         // Ensure output schema matches the plan (field nullability / metadata).
         let batch = align_schema(batch, base_schema, projection)?;
@@ -409,12 +477,15 @@ struct OrderedPartitionStreamExec {
 impl OrderedPartitionStreamExec {
     fn new(input: Arc<dyn ExecutionPlan>) -> Self {
         let schema = input.schema();
-        let props = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let props = Arc::new(
+            PlanProperties::new(
+                EquivalenceProperties::new(schema),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )
+            .with_scheduling_type(SchedulingType::Cooperative),
+        );
         Self { input, props }
     }
 }
@@ -430,7 +501,7 @@ impl DisplayAs for OrderedPartitionStreamExec {
 }
 
 impl ExecutionPlan for OrderedPartitionStreamExec {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "OrderedPartitionStreamExec"
     }
 
