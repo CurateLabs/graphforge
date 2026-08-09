@@ -164,6 +164,19 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "m4_entry_baseline",
+    srcs = ["tests/m4_entry_baseline.rs"],
+    crate = ":graphforge_api",
+    compile_data = [
+        "//tests/contracts:m4_entry_matrix",
+    ],
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "graph_internal_metadata",
     srcs = ["tests/graph_internal_metadata.rs"],
     crate = ":graphforge_api",
@@ -426,6 +439,7 @@ test_suite(
         ":existential_subquery",
         ":facade_methods",
         ":fixed_hop_limit",
+        ":m4_entry_baseline",
         ":graph_internal_metadata",
         ":inference_provenance",
         ":knowledge_isolation",

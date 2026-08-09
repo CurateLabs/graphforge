@@ -1,6 +1,6 @@
 # GraphForge Scale Limits
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-09
 
 GraphForge is designed for research and notebook workflows on
 [GSI](graph-scale-index.md) Levels **01–06** (`XS`–`MD`, V &lt; 10M). This
@@ -66,6 +66,23 @@ GF_LIVEJOURNAL_PROJECT=/path/to/cached/project \
 
 See [Traversal Scaling](https://github.com/CurateLabs/graphforge/blob/main/benchmarks/traversal_scaling.md)
 for the fixed-hop and variable-length benchmark methodology.
+
+## M4 Embedded Performance Entry Gate
+
+M4 before/after performance work uses the versioned entry contract in
+[`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
+and the public-facade harness documented in
+[M4 Entry Baseline](../development/m4-entry-baseline.md). The short CI matrix
+gates on structural correctness under the fixed two-worker runtime; thread
+configurations `1`/`2`/`4`/`8`/automatic are deferred to #337. Lower-level
+8M-node/128M-edge reports remain discovery evidence until #338 proves the
+public path.
+
+```bash
+make m4-entry-matrix-check
+cargo test -p graphforge-api --test m4_entry_baseline
+make bench-m4-entry
+```
 
 ---
 

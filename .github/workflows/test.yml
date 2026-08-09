@@ -115,6 +115,12 @@ jobs:
         if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-non-cypher-surface-gate.py
 
+      - name: Test M4 entry baseline contract
+        if: steps.policy-suites.outputs.contracts == 'true'
+        run: |
+          python3 scripts/ci/m4-entry-matrix.py validate
+          python3 scripts/ci/test-m4-entry-matrix.py
+
       - name: Test Rust coverage ledger failure modes
         if: steps.policy-suites.outputs.coverage_ledger == 'true'
         run: python3 scripts/ci/test-rust-coverage-ledger.py

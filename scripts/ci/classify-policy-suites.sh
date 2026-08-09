@@ -85,6 +85,8 @@ while IFS= read -r -d '' path; do
       tests/contracts/m20-contract-matrix.json | \
       scripts/ci/m21-contract-gate.py | scripts/ci/test-m21-contract-gate.py | \
       tests/contracts/m21-contract-matrix.json | \
+      scripts/ci/m4-entry-matrix.py | scripts/ci/test-m4-entry-matrix.py | \
+      tests/contracts/m4-entry-matrix.json | \
       scripts/ci/checkpoint-recovery-gate.py | scripts/ci/test-checkpoint-recovery-gate.py | \
       tests/contracts/checkpoint-recovery-matrix.json | \
       scripts/ci/concurrency-short-gate.py | scripts/ci/test-concurrency-short-gate.py | \

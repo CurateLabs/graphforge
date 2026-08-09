@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry m4-entry-matrix-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -283,6 +283,13 @@ bench-fixed-hop-limit:  ## Run the #1248 fixed-hop LIMIT benchmark (release, 1M/
 bench-fixed-hop-livejournal:  ## Run the #1269/#1271 cached LiveJournal LIMIT matrix (requires GF_LIVEJOURNAL_PROJECT)
 	@test -n "$$GF_LIVEJOURNAL_PROJECT" || (echo "GF_LIVEJOURNAL_PROJECT is required" && exit 2)
 	cargo test -p graphforge-api --release --test fixed_hop_limit release_livejournal_fixed_hop_limits -- --ignored --nocapture --test-threads=1
+
+m4-entry-matrix-check:  ## Validate the versioned M4 entry baseline contract (#334)
+	python3 scripts/ci/m4-entry-matrix.py validate
+	python3 scripts/ci/test-m4-entry-matrix.py
+
+bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
+	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 
 native-consumers:  ## Run audited M18/M19 consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py
