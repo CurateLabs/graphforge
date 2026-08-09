@@ -175,7 +175,7 @@ pub use catalog::{
     EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
     UnionEdgeTable, list_edge_property_stems, list_property_stems, read_edge_properties,
     read_edges, read_edges_filtered, read_edges_filtered_observed, read_nodes, read_nodes_filtered,
-    read_nodes_filtered_observed, read_properties,
+    read_nodes_filtered_observed, read_properties, read_properties_batched,
 };
 
 pub mod parquet_scan;

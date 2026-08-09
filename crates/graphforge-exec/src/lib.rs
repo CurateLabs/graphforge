@@ -133,6 +133,7 @@ pub(crate) mod algorithm_k_core;
 pub(crate) mod algorithm_matching_blossom;
 pub(crate) mod algorithm_matching_state;
 pub(crate) mod algorithm_neighbors;
+pub(crate) mod algorithm_arrow_sink;
 pub(crate) mod algorithm_output;
 #[allow(
     dead_code,

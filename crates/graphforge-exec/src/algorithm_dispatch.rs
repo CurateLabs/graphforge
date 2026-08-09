@@ -8,9 +8,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::algorithms::{Algorithm, AlgorithmResultSchema};
 
+use crate::algorithm_arrow_sink::{decode_logical_rows, AlgorithmArrowSink};
 use crate::algorithm_graph::AdjacencyGraph;
 
 /// Structured failures produced by Rust algorithm dispatch.
@@ -166,6 +168,8 @@ pub(crate) struct AlgorithmLimits {
     pub iterations: u64,
     /// Maximum aggregate exact-solver states retained or generated.
     pub states: u64,
+    /// Internal Arrow shaping batch size (from #337 resource policy).
+    pub batch_size: usize,
 }
 
 impl Default for AlgorithmLimits {
@@ -176,6 +180,7 @@ impl Default for AlgorithmLimits {
             output_rows: 10_000_000,
             iterations: 10_000,
             states: 10_000_000,
+            batch_size: 8_192,
         }
     }
 }
@@ -216,6 +221,19 @@ impl AlgorithmControl {
 
     pub(crate) fn configured_limits(&self) -> AlgorithmLimits {
         self.limits
+    }
+
+    /// Internal Arrow shaping batch size for bounded columnar sinks (#341).
+    pub(crate) fn batch_size(&self) -> usize {
+        self.limits.batch_size.max(1)
+    }
+
+    /// Open a columnar output sink for `algorithm`.
+    pub(crate) fn output_sink(
+        &self,
+        algorithm: Algorithm,
+    ) -> Result<AlgorithmArrowSink, AlgorithmError> {
+        AlgorithmArrowSink::new(algorithm, self)
     }
 
     /// Check cancellation and consume one cooperative iteration.
@@ -342,11 +360,56 @@ pub(crate) enum AlgorithmValue {
     Float64(f64),
 }
 
-/// Typed logical rows returned by one Rust handler.
+/// Columnar Arrow result produced by one Rust handler via [`AlgorithmArrowSink`].
+///
+/// Handlers append directly into the sink; this type retains the finished public
+/// `RecordBatch` only — never a second complete `Vec<Vec<AlgorithmValue>>`.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AlgorithmOutput {
     pub schema: AlgorithmResultSchema,
-    pub rows: Vec<Vec<AlgorithmValue>>,
+    pub(crate) batch: RecordBatch,
+    /// Number of internal batches before public coalesce.
+    pub(crate) internal_batch_count: usize,
+    /// Peak rows retained in the active builder window (≤ batch_size).
+    pub(crate) peak_builder_rows: usize,
+}
+
+impl AlgorithmOutput {
+    /// Number of public result rows.
+    pub(crate) fn num_rows(&self) -> usize {
+        self.batch.num_rows()
+    }
+
+    /// Borrow the canonical public Arrow batch.
+    pub(crate) fn record_batch(&self) -> &RecordBatch {
+        &self.batch
+    }
+
+    /// Decode logical rows for assertions. Does not store a retained row graph.
+    pub(crate) fn rows(&self) -> Vec<Vec<AlgorithmValue>> {
+        decode_logical_rows(&self.schema, &self.batch).unwrap_or_default()
+    }
+
+    /// Shape one or more logical rows through the shared columnar sink.
+    pub(crate) fn from_rows(
+        algorithm: Algorithm,
+        control: &AlgorithmControl,
+        rows: impl IntoIterator<Item = Vec<AlgorithmValue>>,
+    ) -> Result<Self, AlgorithmError> {
+        let mut sink = control.output_sink(algorithm)?;
+        for row in rows {
+            sink.append_row(&row)?;
+        }
+        sink.finish()
+    }
+
+    /// Empty canonical result for `algorithm`.
+    pub(crate) fn empty(
+        algorithm: Algorithm,
+        control: &AlgorithmControl,
+    ) -> Result<Self, AlgorithmError> {
+        control.output_sink(algorithm)?.finish()
+    }
 }
 
 /// Required dependency review attached to each registered capability.
@@ -439,7 +502,7 @@ impl AlgorithmRegistry {
                 algorithm: algorithm_name(algorithm),
             })?;
         let output = handler.execute(graph, control)?;
-        control.check_output_rows(output.rows.len())?;
+        control.check_output_rows(output.num_rows())?;
         control.check_cancelled()?;
         Ok(output)
     }
@@ -491,26 +554,48 @@ mod tests {
             _graph: &AdjacencyGraph,
             control: &AlgorithmControl,
         ) -> Result<AlgorithmOutput, AlgorithmError> {
-            let rows = match self.behavior {
-                Behavior::Rows(count) => vec![Vec::new(); count],
+            match self.behavior {
+                Behavior::Rows(count) => {
+                    let mut sink = control.output_sink(self.algorithm)?;
+                    let placeholders = placeholder_row(self.algorithm);
+                    for _ in 0..count {
+                        sink.append_row(&placeholders)?;
+                    }
+                    sink.finish()
+                }
                 Behavior::Checkpoints(count) => {
                     for _ in 0..count {
                         control.checkpoint()?;
                     }
-                    Vec::new()
+                    AlgorithmOutput::empty(self.algorithm, control)
                 }
                 Behavior::NonConverge(count) => {
                     for _ in 0..count {
-                        control.checkpoint()?;
+                        control.checkpoint();
                     }
-                    return Err(control.non_convergence());
+                    Err(control.non_convergence())
                 }
-            };
-            Ok(AlgorithmOutput {
-                schema: self.algorithm.result_schema(),
-                rows,
-            })
+            }
         }
+    }
+
+    fn placeholder_row(algorithm: Algorithm) -> Vec<AlgorithmValue> {
+        use graphforge_core::algorithms::AlgorithmFieldType;
+        algorithm
+            .result_schema()
+            .fields
+            .iter()
+            .map(|field| match field.data_type {
+                AlgorithmFieldType::Uuid => AlgorithmValue::Uuid([0; 16]),
+                AlgorithmFieldType::UuidList => AlgorithmValue::UuidList(Vec::new()),
+                AlgorithmFieldType::Float32List => AlgorithmValue::Float32List(Vec::new()),
+                AlgorithmFieldType::Utf8 => AlgorithmValue::Utf8(String::new()),
+                AlgorithmFieldType::Boolean => AlgorithmValue::Boolean(false),
+                AlgorithmFieldType::UInt64 => AlgorithmValue::UInt64(0),
+                AlgorithmFieldType::Int64 => AlgorithmValue::Int64(0),
+                AlgorithmFieldType::Float64 => AlgorithmValue::Float64(0.0),
+            })
+            .collect()
     }
 
     fn degree() -> Algorithm {
@@ -542,7 +627,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.schema, degree().result_schema());
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.num_rows(), 1);
         assert_eq!(registry.capabilities()[0].backend, "rust");
         assert_eq!(registry.capabilities()[0].dependency, REVIEW);
     }
@@ -627,6 +712,7 @@ mod tests {
             output_rows: 1,
             iterations: 10,
             states: 10,
+            batch_size: AlgorithmLimits::default().batch_size,
         };
         assert_eq!(
             registry

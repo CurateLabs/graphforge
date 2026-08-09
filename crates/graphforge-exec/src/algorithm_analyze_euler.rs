@@ -978,10 +978,7 @@ mod tests {
             let algorithm = Algorithm::Analyze(algorithm);
             let batch = shape_algorithm_output(
                 algorithm,
-                &AlgorithmOutput {
-                    schema: algorithm.result_schema(),
-                    rows: Vec::new(),
-                },
+                &AlgorithmOutput::empty(algorithm, &control()).unwrap(),
             )
             .unwrap();
             let schema = batch.schema();

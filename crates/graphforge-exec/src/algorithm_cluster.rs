@@ -447,7 +447,7 @@ fn community_output(
     algorithm: ClusterAlgorithm,
     control: &AlgorithmControl,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
-    let mut rows = Vec::with_capacity(graph.node_ids().len());
+    let mut sink = control.output_sink(Algorithm::Cluster(algorithm))?;
     let mut work = 0_usize;
     for (index, &node_id) in graph.node_ids().iter().enumerate() {
         checkpoint_chunk(control, &mut work)?;
@@ -456,15 +456,12 @@ fn community_output(
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
         let community = i64::try_from(communities[index])
             .map_err(|_| execution("community count exceeds Int64 result range"))?;
-        rows.push(vec![
+        sink.append_row(&[
             AlgorithmValue::Uuid(uuid),
             AlgorithmValue::Int64(community),
-        ]);
+        ])?;
     }
-    Ok(AlgorithmOutput {
-        schema: Algorithm::Cluster(algorithm).result_schema(),
-        rows,
-    })
+    sink.finish()
 }
 
 fn label_output(
@@ -473,22 +470,19 @@ fn label_output(
     algorithm: ClusterAlgorithm,
     control: &AlgorithmControl,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
-    let mut rows = Vec::with_capacity(labels.len());
+    let mut sink = control.output_sink(Algorithm::Cluster(algorithm))?;
     let mut work = 0_usize;
     for (&node_id, &community) in graph.node_ids().iter().zip(labels) {
         checkpoint_chunk(control, &mut work)?;
         let uuid = graph
             .node_uuid(node_id)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
-        rows.push(vec![
+        sink.append_row(&[
             AlgorithmValue::Uuid(uuid),
             AlgorithmValue::Int64(community),
-        ]);
+        ])?;
     }
-    Ok(AlgorithmOutput {
-        schema: Algorithm::Cluster(algorithm).result_schema(),
-        rows,
-    })
+    sink.finish()
 }
 
 impl RustAlgorithm for Components {
@@ -530,7 +524,8 @@ impl RustAlgorithm for Components {
         }
 
         let mut ids = HashMap::new();
-        let mut rows = Vec::with_capacity(graph.node_ids().len());
+        let algorithm = Algorithm::Cluster(ClusterAlgorithm::Components);
+        let mut sink = control.output_sink(algorithm)?;
         for (index, &node_id) in graph.node_ids().iter().enumerate() {
             if index.is_multiple_of(16_384) {
                 control.checkpoint()?;
@@ -550,16 +545,12 @@ impl RustAlgorithm for Components {
                 .ok_or_else(|| AlgorithmError::Execution {
                     message: "selected node has no UUID identity".into(),
                 })?;
-            rows.push(vec![
+            sink.append_row(&[
                 AlgorithmValue::Uuid(uuid),
                 AlgorithmValue::Int64(community_id),
-            ]);
+            ])?;
         }
-
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Cluster(ClusterAlgorithm::Components).result_schema(),
-            rows,
-        })
+        sink.finish()
     }
 }
 
@@ -2193,7 +2184,7 @@ mod tests {
 
     fn community_ids(output: &AlgorithmOutput) -> Vec<i64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Int64(value) => value,
@@ -2255,7 +2246,7 @@ mod tests {
         assert!(
             execute_leiden(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
         assert_eq!(
@@ -2334,7 +2325,7 @@ mod tests {
         assert!(
             execute_label_propagation(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
     }
@@ -2449,7 +2440,7 @@ mod tests {
         assert!(
             execute_speaker_listener(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
     }
@@ -3437,7 +3428,7 @@ mod tests {
         let graph = AdjacencyGraph::with_test_edges(6, &[(0, 1), (2, 3), (2, 3), (3, 3)]);
         let output = execute_components(&graph, AlgorithmLimits::default()).unwrap();
         assert_eq!(
-            output.rows,
+            output.rows(),
             [0_i64, 0, 1, 1, 2, 3]
                 .into_iter()
                 .enumerate()
@@ -3462,7 +3453,7 @@ mod tests {
         assert!(
             execute_components(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
         let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
@@ -3552,7 +3543,7 @@ mod tests {
             first.schema,
             Algorithm::Cluster(ClusterAlgorithm::Louvain).result_schema()
         );
-        assert_eq!(first.rows[0][0], AlgorithmValue::Uuid(0_u128.to_be_bytes()));
+        assert_eq!(first.rows()[0][0], AlgorithmValue::Uuid(0_u128.to_be_bytes()));
     }
 
     #[test]
@@ -3596,7 +3587,7 @@ mod tests {
         assert!(
             execute_louvain(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
     }

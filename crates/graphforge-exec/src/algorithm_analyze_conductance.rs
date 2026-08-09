@@ -254,6 +254,7 @@ mod tests {
                         output_rows: limits.2,
                         iterations: limits.3,
                         states: AlgorithmLimits::default().states,
+                        batch_size: AlgorithmLimits::default().batch_size,
                     },
                     AlgorithmCancellation::default(),
                 );

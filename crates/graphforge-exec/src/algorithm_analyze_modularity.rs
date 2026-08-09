@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use graphforge_core::algorithms::{Algorithm, AnalyzeAlgorithm};
 
 use crate::algorithm_dispatch::{
-    AlgorithmControl, AlgorithmError, AlgorithmOutput, AlgorithmValue,
+    AlgorithmControl, AlgorithmError, AlgorithmLimits, AlgorithmOutput, AlgorithmValue,
 };
 use crate::algorithm_partition::ResolvedPartitionMap;
 
@@ -130,10 +130,12 @@ pub(crate) fn modularity(
 /// Shape the stable scalar result owned by the modularity contract.
 pub(crate) fn modularity_output(value: f64) -> Result<AlgorithmOutput, AlgorithmError> {
     let value = finite(value)?;
-    Ok(AlgorithmOutput {
-        schema: Algorithm::Analyze(AnalyzeAlgorithm::Modularity).result_schema(),
-        rows: vec![vec![AlgorithmValue::Float64(value)]],
-    })
+    crate::algorithm_output::shape_logical_rows(
+        Algorithm::Analyze(AnalyzeAlgorithm::Modularity),
+        [vec![AlgorithmValue::Float64(value)]],
+        AlgorithmLimits::default().batch_size,
+        AlgorithmLimits::default().output_rows,
+    )
 }
 
 fn canonical(mut edge: ModularityEdge) -> ModularityEdge {
@@ -350,7 +352,7 @@ mod tests {
         let algorithm = Algorithm::Analyze(AnalyzeAlgorithm::Modularity);
         let output = modularity_output(0.25).unwrap();
         assert_eq!(output.schema, algorithm.result_schema());
-        assert_eq!(output.rows, [vec![AlgorithmValue::Float64(0.25)]]);
+        assert_eq!(output.rows(), [vec![AlgorithmValue::Float64(0.25)]]);
         let batch = shape_algorithm_output(algorithm, &output).unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 1);
@@ -453,6 +455,7 @@ mod tests {
                         output_rows: limits.2,
                         iterations: limits.3,
                         states: AlgorithmLimits::default().states,
+                        batch_size: AlgorithmLimits::default().batch_size,
                     },
                     AlgorithmCancellation::default(),
                 ),

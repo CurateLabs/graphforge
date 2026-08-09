@@ -9,17 +9,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanBuilder, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float32Builder,
-    Float64Builder, Int64Builder, ListBuilder, StringBuilder, UInt32Array, UInt64Builder,
+    Array, ArrayRef, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, UInt32Array,
 };
-use arrow::compute::{concat_batches, take};
+use arrow::compute::take;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, AlgorithmFieldType};
 
+use crate::algorithm_arrow_sink::{schema_version, shape_error, AlgorithmArrowSink};
 use crate::algorithm_dispatch::{AlgorithmError, AlgorithmOutput, AlgorithmValue};
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = schema_version();
 
 /// Append node properties to a node-oriented algorithm batch by public UUID.
 ///
@@ -31,7 +31,21 @@ pub(crate) fn materialize_node_properties(
     batch: &RecordBatch,
 ) -> Result<RecordBatch, AlgorithmError> {
     materialize_node_properties_with(batch, stems, |stem| {
-        graphforge_storage::read_properties(dir, stem)
+        // Stream property tables as bounded batches; never concat the full table (#341).
+        graphforge_storage::read_properties_batched(dir, stem, 8_192)
+            .map_err(|error| materialization_error(error.to_string()))
+    })
+}
+
+/// Same as [`materialize_node_properties`] with an explicit property batch size.
+pub(crate) fn materialize_node_properties_with_batch_size(
+    dir: &Path,
+    stems: &[String],
+    batch: &RecordBatch,
+    batch_size: usize,
+) -> Result<RecordBatch, AlgorithmError> {
+    materialize_node_properties_with(batch, stems, |stem| {
+        graphforge_storage::read_properties_batched(dir, stem, batch_size.max(1))
             .map_err(|error| materialization_error(error.to_string()))
     })
 }
@@ -63,35 +77,47 @@ where
         .collect();
 
     for stem in ordered_stems {
-        let batches = load(&stem)?;
-        if batches.is_empty() {
+        let property_batches = load(&stem)?;
+        let property_batches: Vec<_> = property_batches
+            .into_iter()
+            .filter(|candidate| candidate.num_rows() > 0)
+            .collect();
+        if property_batches.is_empty() {
             continue;
         }
-        let schema = batches[0].schema();
-        if batches.iter().any(|candidate| candidate.schema() != schema) {
+        let schema = property_batches[0].schema();
+        if property_batches
+            .iter()
+            .any(|candidate| candidate.schema() != schema)
+        {
             return Err(materialization_error(format!(
                 "property table {stem:?} returned inconsistent batch schemas"
             )));
         }
-        let combined = concat_batches(&schema, &batches)
-            .map_err(|error| materialization_error(error.to_string()))?;
-        let property_uuids =
-            uuid_column(&combined, "node_uuid", &format!("property table {stem:?}"))?;
-        let mut row_by_uuid = HashMap::with_capacity(property_uuids.len());
-        for row in 0..property_uuids.len() {
-            if property_uuids.is_null(row) {
-                return Err(materialization_error(format!(
-                    "property table {stem:?} contains a NULL node_uuid"
-                )));
-            }
-            let uuid = uuid_at(property_uuids, row, &stem)?;
-            let row = u32::try_from(row).map_err(|_| {
-                materialization_error(format!("property table {stem:?} exceeds the row limit"))
-            })?;
-            if row_by_uuid.insert(uuid, row).is_some() {
-                return Err(materialization_error(format!(
-                    "property table {stem:?} contains duplicate rows for one node_uuid"
-                )));
+
+        let mut row_by_uuid: HashMap<[u8; 16], (usize, u32)> =
+            HashMap::with_capacity(property_batches.iter().map(RecordBatch::num_rows).sum());
+        for (batch_index, property_batch) in property_batches.iter().enumerate() {
+            let property_uuids = uuid_column(
+                property_batch,
+                "node_uuid",
+                &format!("property table {stem:?}"),
+            )?;
+            for row in 0..property_uuids.len() {
+                if property_uuids.is_null(row) {
+                    return Err(materialization_error(format!(
+                        "property table {stem:?} contains a NULL node_uuid"
+                    )));
+                }
+                let uuid = uuid_at(property_uuids, row, &stem)?;
+                let row = u32::try_from(row).map_err(|_| {
+                    materialization_error(format!("property table {stem:?} exceeds the row limit"))
+                })?;
+                if row_by_uuid.insert(uuid, (batch_index, row)).is_some() {
+                    return Err(materialization_error(format!(
+                        "property table {stem:?} contains duplicate rows for one node_uuid"
+                    )));
+                }
             }
         }
 
@@ -110,7 +136,8 @@ where
                 key,
                 (
                     field.clone(),
-                    combined.column(index).clone(),
+                    property_batches.clone(),
+                    index,
                     row_by_uuid.clone(),
                 ),
             );
@@ -119,22 +146,19 @@ where
 
     let mut fields: Vec<Arc<Field>> = batch.schema().fields().iter().cloned().collect();
     let mut columns = batch.columns().to_vec();
-    for ((_stem, _name), (field, values, row_by_uuid)) in properties {
-        let indices = UInt32Array::from(
-            (0..node_uuids.len())
-                .map(|row| {
-                    if node_uuids.is_null(row) {
-                        None
-                    } else {
-                        uuid_at(node_uuids, row, "algorithm result")
-                            .ok()
-                            .and_then(|uuid| row_by_uuid.get(&uuid).copied())
-                    }
-                })
-                .collect::<Vec<_>>(),
-        );
-        let gathered = take(values.as_ref(), &indices, None)
-            .map_err(|error| materialization_error(error.to_string()))?;
+    for ((_stem, _name), (field, property_batches, column_index, row_by_uuid)) in properties {
+        let locations: Vec<Option<(usize, u32)>> = (0..node_uuids.len())
+            .map(|row| {
+                if node_uuids.is_null(row) {
+                    None
+                } else {
+                    uuid_at(node_uuids, row, "algorithm result")
+                        .ok()
+                        .and_then(|uuid| row_by_uuid.get(&uuid).copied())
+                }
+            })
+            .collect();
+        let gathered = gather_property_column(&property_batches, column_index, &locations)?;
         fields.push(Arc::new(field.as_ref().clone().with_nullable(true)));
         columns.push(gathered);
     }
@@ -144,6 +168,43 @@ where
         batch.schema().metadata().clone(),
     ));
     RecordBatch::try_new(schema, columns).map_err(|error| materialization_error(error.to_string()))
+}
+
+fn gather_property_column(
+    batches: &[RecordBatch],
+    column_index: usize,
+    locations: &[Option<(usize, u32)>],
+) -> Result<ArrayRef, AlgorithmError> {
+    use arrow::compute::kernels::zip::zip;
+    use arrow::array::BooleanArray;
+
+    let mut merged: Option<ArrayRef> = None;
+    for (batch_index, batch) in batches.iter().enumerate() {
+        let indices = UInt32Array::from(
+            locations
+                .iter()
+                .map(|location| match location {
+                    Some((owned_batch, row)) if *owned_batch == batch_index => Some(*row),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let taken = take(batch.column(column_index).as_ref(), &indices, None)
+            .map_err(|error| materialization_error(error.to_string()))?;
+        merged = Some(match merged {
+            None => taken,
+            Some(base) => {
+                let use_overlay = BooleanArray::from(
+                    (0..taken.len())
+                        .map(|row| Some(!taken.is_null(row)))
+                        .collect::<Vec<_>>(),
+                );
+                zip(&use_overlay, &taken, &base)
+                    .map_err(|error| materialization_error(error.to_string()))?
+            }
+        });
+    }
+    merged.ok_or_else(|| materialization_error("property gather missing batches"))
 }
 
 fn uuid_column<'a>(
@@ -171,7 +232,7 @@ fn uuid_at(
         .map_err(|_| materialization_error(format!("{source} contains a malformed node_uuid")))
 }
 
-/// Convert typed logical handler rows into the canonical public Arrow batch.
+/// Return the canonical public Arrow batch already shaped by [`AlgorithmArrowSink`].
 pub(crate) fn shape_algorithm_output(
     algorithm: Algorithm,
     output: &AlgorithmOutput,
@@ -182,261 +243,33 @@ pub(crate) fn shape_algorithm_output(
             "handler returned a non-canonical logical schema",
         ));
     }
-    for (row_index, row) in output.rows.iter().enumerate() {
-        if row.len() != expected.fields.len() {
-            return Err(shape_error(format!(
-                "row {row_index} has {} values but schema requires {}",
-                row.len(),
-                expected.fields.len()
-            )));
-        }
+    if output.batch.schema().metadata().get("graphforge.algorithm")
+        != Some(&algorithm.as_str().to_owned())
+    {
+        return Err(shape_error("handler batch metadata is non-canonical"));
     }
+    Ok(output.batch.clone())
+}
 
-    let mut fields = Vec::with_capacity(expected.fields.len());
-    let mut columns = Vec::with_capacity(expected.fields.len());
-    for (column_index, logical) in expected.fields.iter().enumerate() {
-        if matches!(logical.name, "node_id" | "edge_id" | "src_id" | "dst_id") {
-            return Err(shape_error(
-                "public algorithm schema contains a surrogate field",
-            ));
-        }
-        fields.push(Field::new(
-            logical.name,
-            arrow_type(logical.data_type),
-            logical.nullable,
+/// Shape logical rows through the shared columnar sink (tests and tiny scalar outputs).
+pub(crate) fn shape_logical_rows(
+    algorithm: Algorithm,
+    rows: impl IntoIterator<Item = Vec<AlgorithmValue>>,
+    batch_size: usize,
+    output_limit: u64,
+) -> Result<AlgorithmOutput, AlgorithmError> {
+    let mut sink = AlgorithmArrowSink::with_limits(algorithm, batch_size, output_limit)?;
+    if sink.schema() != &algorithm.result_schema() {
+        return Err(shape_error(
+            "handler returned a non-canonical logical schema",
         ));
-        columns.push(build_column(
-            logical.data_type,
-            logical.nullable,
-            logical.name,
-            column_index,
-            &output.rows,
-        )?);
     }
-
-    let metadata = HashMap::from([
-        (
-            "graphforge.algorithm".to_owned(),
-            algorithm.as_str().to_owned(),
-        ),
-        (
-            "graphforge.verb".to_owned(),
-            algorithm.verb().as_str().to_owned(),
-        ),
-        (
-            "graphforge.algorithm_schema_version".to_owned(),
-            SCHEMA_VERSION.to_owned(),
-        ),
-    ]);
-    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
-    RecordBatch::try_new(schema, columns).map_err(|error| shape_error(error.to_string()))
-}
-
-fn arrow_type(logical: AlgorithmFieldType) -> DataType {
-    match logical {
-        AlgorithmFieldType::Uuid => DataType::FixedSizeBinary(16),
-        AlgorithmFieldType::UuidList => DataType::List(Arc::new(Field::new(
-            "item",
-            DataType::FixedSizeBinary(16),
-            false,
-        ))),
-        AlgorithmFieldType::Float32List => {
-            DataType::List(Arc::new(Field::new("item", DataType::Float32, false)))
-        }
-        AlgorithmFieldType::Utf8 => DataType::Utf8,
-        AlgorithmFieldType::Boolean => DataType::Boolean,
-        AlgorithmFieldType::UInt64 => DataType::UInt64,
-        AlgorithmFieldType::Int64 => DataType::Int64,
-        AlgorithmFieldType::Float64 => DataType::Float64,
+    for row in rows {
+        sink.append_row(&row)?;
     }
+    sink.finish()
 }
 
-fn build_column(
-    data_type: AlgorithmFieldType,
-    nullable: bool,
-    name: &str,
-    column_index: usize,
-    rows: &[Vec<AlgorithmValue>],
-) -> Result<ArrayRef, AlgorithmError> {
-    match data_type {
-        AlgorithmFieldType::Uuid => build_uuid(nullable, name, column_index, rows),
-        AlgorithmFieldType::UuidList => build_uuid_list(nullable, name, column_index, rows),
-        AlgorithmFieldType::Float32List => build_float32_list(nullable, name, column_index, rows),
-        AlgorithmFieldType::Utf8 => {
-            let mut builder = StringBuilder::new();
-            for value in column_values(rows, column_index) {
-                match value {
-                    AlgorithmValue::Utf8(value) => builder.append_value(value),
-                    AlgorithmValue::Null if nullable => builder.append_null(),
-                    other => return Err(type_error(name, "Utf8", other)),
-                }
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        AlgorithmFieldType::Boolean => {
-            let mut builder = BooleanBuilder::new();
-            for value in column_values(rows, column_index) {
-                match value {
-                    AlgorithmValue::Boolean(value) => builder.append_value(*value),
-                    AlgorithmValue::Null if nullable => builder.append_null(),
-                    other => return Err(type_error(name, "Boolean", other)),
-                }
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        AlgorithmFieldType::UInt64 => {
-            let mut builder = UInt64Builder::new();
-            for value in column_values(rows, column_index) {
-                match value {
-                    AlgorithmValue::UInt64(value) => builder.append_value(*value),
-                    AlgorithmValue::Null if nullable => builder.append_null(),
-                    other => return Err(type_error(name, "UInt64", other)),
-                }
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        AlgorithmFieldType::Int64 => {
-            let mut builder = Int64Builder::new();
-            for value in column_values(rows, column_index) {
-                match value {
-                    AlgorithmValue::Int64(value) => builder.append_value(*value),
-                    AlgorithmValue::Null if nullable => builder.append_null(),
-                    other => return Err(type_error(name, "Int64", other)),
-                }
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-        AlgorithmFieldType::Float64 => {
-            let mut builder = Float64Builder::new();
-            for value in column_values(rows, column_index) {
-                match value {
-                    AlgorithmValue::Float64(value) if value.is_finite() => {
-                        builder.append_value(*value);
-                    }
-                    AlgorithmValue::Null if nullable => builder.append_null(),
-                    AlgorithmValue::Float64(_) => {
-                        return Err(shape_error(format!(
-                            "field {name:?} contains a non-finite Float64"
-                        )));
-                    }
-                    other => return Err(type_error(name, "Float64", other)),
-                }
-            }
-            Ok(Arc::new(builder.finish()))
-        }
-    }
-}
-
-fn build_uuid(
-    nullable: bool,
-    name: &str,
-    column_index: usize,
-    rows: &[Vec<AlgorithmValue>],
-) -> Result<ArrayRef, AlgorithmError> {
-    let mut builder = FixedSizeBinaryBuilder::new(16);
-    for value in column_values(rows, column_index) {
-        match value {
-            AlgorithmValue::Uuid(value) => builder
-                .append_value(value)
-                .map_err(|error| shape_error(error.to_string()))?,
-            AlgorithmValue::Null if nullable => builder.append_null(),
-            other => return Err(type_error(name, "FixedSizeBinary(16)", other)),
-        }
-    }
-    Ok(Arc::new(builder.finish()))
-}
-
-fn build_uuid_list(
-    nullable: bool,
-    name: &str,
-    column_index: usize,
-    rows: &[Vec<AlgorithmValue>],
-) -> Result<ArrayRef, AlgorithmError> {
-    let mut builder = ListBuilder::new(FixedSizeBinaryBuilder::new(16)).with_field(Arc::new(
-        Field::new("item", DataType::FixedSizeBinary(16), false),
-    ));
-    for value in column_values(rows, column_index) {
-        match value {
-            AlgorithmValue::UuidList(values) => {
-                for value in values {
-                    builder
-                        .values()
-                        .append_value(value)
-                        .map_err(|error| shape_error(error.to_string()))?;
-                }
-                builder.append(true);
-            }
-            AlgorithmValue::Null if nullable => builder.append(false),
-            other => return Err(type_error(name, "List<FixedSizeBinary(16)>", other)),
-        }
-    }
-    Ok(Arc::new(builder.finish()))
-}
-
-fn build_float32_list(
-    nullable: bool,
-    name: &str,
-    column_index: usize,
-    rows: &[Vec<AlgorithmValue>],
-) -> Result<ArrayRef, AlgorithmError> {
-    let mut builder = ListBuilder::new(Float32Builder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::Float32,
-        false,
-    )));
-    for value in column_values(rows, column_index) {
-        match value {
-            AlgorithmValue::Float32List(values) if values.iter().all(|value| value.is_finite()) => {
-                for value in values {
-                    builder.values().append_value(*value);
-                }
-                builder.append(true);
-            }
-            AlgorithmValue::Null if nullable => builder.append(false),
-            AlgorithmValue::Float32List(_) => {
-                return Err(shape_error(format!(
-                    "field {name:?} contains a non-finite Float32"
-                )));
-            }
-            other => return Err(type_error(name, "List<Float32>", other)),
-        }
-    }
-    Ok(Arc::new(builder.finish()))
-}
-
-fn column_values(
-    rows: &[Vec<AlgorithmValue>],
-    column_index: usize,
-) -> impl Iterator<Item = &AlgorithmValue> {
-    rows.iter().map(move |row| &row[column_index])
-}
-
-fn type_error(name: &str, expected: &str, actual: &AlgorithmValue) -> AlgorithmError {
-    shape_error(format!(
-        "field {name:?} requires {expected}, received {}",
-        value_kind(actual)
-    ))
-}
-
-fn value_kind(value: &AlgorithmValue) -> &'static str {
-    match value {
-        AlgorithmValue::Null => "Null",
-        AlgorithmValue::Uuid(_) => "Uuid",
-        AlgorithmValue::UuidList(_) => "UuidList",
-        AlgorithmValue::Float32List(_) => "Float32List",
-        AlgorithmValue::Utf8(_) => "Utf8",
-        AlgorithmValue::Boolean(_) => "Boolean",
-        AlgorithmValue::UInt64(_) => "UInt64",
-        AlgorithmValue::Int64(_) => "Int64",
-        AlgorithmValue::Float64(_) => "Float64",
-    }
-}
-
-fn shape_error(message: impl Into<String>) -> AlgorithmError {
-    AlgorithmError::Execution {
-        message: format!("invalid algorithm output: {}", message.into()),
-    }
-}
 
 fn materialization_error(message: impl Into<String>) -> AlgorithmError {
     AlgorithmError::Execution {
@@ -505,20 +338,34 @@ mod tests {
     }
 
     fn output(algorithm: Algorithm, populated: bool) -> AlgorithmOutput {
-        let schema = algorithm.result_schema();
-        AlgorithmOutput {
-            schema,
-            rows: populated
-                .then(|| {
-                    schema
-                        .fields
-                        .iter()
-                        .map(|field| value_for(field.data_type))
-                        .collect()
-                })
-                .into_iter()
-                .collect(),
-        }
+        let rows = populated
+            .then(|| {
+                algorithm
+                    .result_schema()
+                    .fields
+                    .iter()
+                    .map(|field| value_for(field.data_type))
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        shape_logical_rows(algorithm, rows, 8_192, u64::MAX).unwrap()
+    }
+
+    fn try_shape_row(
+        algorithm: Algorithm,
+        row: Vec<AlgorithmValue>,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        shape_logical_rows(algorithm, [row], 8_192, u64::MAX)
+    }
+
+    fn canonical_row(algorithm: Algorithm) -> Vec<AlgorithmValue> {
+        algorithm
+            .result_schema()
+            .fields
+            .iter()
+            .map(|field| value_for(field.data_type))
+            .collect()
     }
 
     #[test]
@@ -577,39 +424,40 @@ mod tests {
     #[test]
     fn nullable_weight_preserves_null() {
         let algorithm = Algorithm::Analyze(AnalyzeAlgorithm::MinimumSpanningTree);
-        let mut output = output(algorithm, true);
-        let weight = output
-            .schema
+        let weight = algorithm
+            .result_schema()
             .fields
             .iter()
             .position(|field| field.name == "weight")
             .unwrap();
-        output.rows[0][weight] = AlgorithmValue::Null;
-        let batch = shape_algorithm_output(algorithm, &output).unwrap();
+        let mut row = canonical_row(algorithm);
+        row[weight] = AlgorithmValue::Null;
+        let shaped = try_shape_row(algorithm, row).unwrap();
+        let batch = shape_algorithm_output(algorithm, &shaped).unwrap();
         assert_eq!(batch.column(weight).null_count(), 1);
     }
 
     #[test]
     fn row_width_type_and_nullability_mismatches_are_rejected() {
         let algorithm = Algorithm::Rank(RankAlgorithm::Degree);
-        let mut wrong_width = output(algorithm, true);
-        wrong_width.rows[0].pop();
+        let mut wrong_width = canonical_row(algorithm);
+        wrong_width.pop();
         assert!(matches!(
-            shape_algorithm_output(algorithm, &wrong_width),
+            try_shape_row(algorithm, wrong_width),
             Err(AlgorithmError::Execution { .. })
         ));
 
-        let mut wrong_type = output(algorithm, true);
-        wrong_type.rows[0][0] = AlgorithmValue::Utf8("not-a-uuid".into());
+        let mut wrong_type = canonical_row(algorithm);
+        wrong_type[0] = AlgorithmValue::Utf8("not-a-uuid".into());
         assert!(matches!(
-            shape_algorithm_output(algorithm, &wrong_type),
+            try_shape_row(algorithm, wrong_type),
             Err(AlgorithmError::Execution { .. })
         ));
 
-        let mut null_non_nullable = output(algorithm, true);
-        null_non_nullable.rows[0][0] = AlgorithmValue::Null;
+        let mut null_non_nullable = canonical_row(algorithm);
+        null_non_nullable[0] = AlgorithmValue::Null;
         assert!(matches!(
-            shape_algorithm_output(algorithm, &null_non_nullable),
+            try_shape_row(algorithm, null_non_nullable),
             Err(AlgorithmError::Execution { .. })
         ));
     }
@@ -624,10 +472,10 @@ mod tests {
             Err(AlgorithmError::Execution { .. })
         ));
 
-        let mut nonfinite = output(algorithm, true);
-        nonfinite.rows[0][1] = AlgorithmValue::Float64(f64::NAN);
+        let mut nonfinite = canonical_row(algorithm);
+        nonfinite[1] = AlgorithmValue::Float64(f64::NAN);
         assert!(matches!(
-            shape_algorithm_output(algorithm, &nonfinite),
+            try_shape_row(algorithm, nonfinite),
             Err(AlgorithmError::Execution { .. })
         ));
     }
@@ -825,23 +673,22 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::IsDag),
             Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring),
         ] {
-            let canonical = output(algorithm, true);
-            for (index, field) in canonical.schema.fields.iter().enumerate() {
+            let canonical = canonical_row(algorithm);
+            for (index, field) in algorithm.result_schema().fields.iter().enumerate() {
                 let mut wrong_type = canonical.clone();
-                wrong_type.rows[0][index] = AlgorithmValue::Utf8("wrong-type".into());
+                wrong_type[index] = AlgorithmValue::Utf8("wrong-type".into());
                 if field.data_type == AlgorithmFieldType::Utf8 {
-                    wrong_type.rows[0][index] = AlgorithmValue::Boolean(false);
+                    wrong_type[index] = AlgorithmValue::Boolean(false);
                 }
-                let error = shape_algorithm_output(algorithm, &wrong_type)
-                    .expect_err("logical output type mismatch");
+                let error = try_shape_row(algorithm, wrong_type).expect_err("logical output type mismatch");
                 assert!(error.to_string().contains(field.name));
 
                 let mut null = canonical.clone();
-                null.rows[0][index] = AlgorithmValue::Null;
-                match shape_algorithm_output(algorithm, &null) {
+                null[index] = AlgorithmValue::Null;
+                match try_shape_row(algorithm, null) {
                     Ok(batch) => {
                         assert!(field.nullable);
-                        assert_eq!(batch.column(index).null_count(), 1);
+                        assert_eq!(batch.record_batch().column(index).null_count(), 1);
                     }
                     Err(error) => {
                         assert!(!field.nullable);
@@ -861,25 +708,75 @@ mod tests {
                 AlgorithmValue::Float64(f64::INFINITY),
             ),
         ] {
-            let mut malformed = output(algorithm, true);
+            let mut malformed = canonical_row(algorithm);
             let index = malformed
-                .schema
-                .fields
                 .iter()
-                .position(|field| {
+                .zip(algorithm.result_schema().fields.iter())
+                .position(|(_, field)| {
                     matches!(
                         field.data_type,
                         AlgorithmFieldType::Float32List | AlgorithmFieldType::Float64
                     )
                 })
                 .unwrap();
-            malformed.rows[0][index] = replacement;
+            malformed[index] = replacement;
             assert!(
-                shape_algorithm_output(algorithm, &malformed)
+                try_shape_row(algorithm, malformed)
                     .unwrap_err()
                     .to_string()
                     .contains("non-finite")
             );
         }
+    }
+
+    #[test]
+    fn bounded_batches_preserve_fingerprint_and_avoid_row_dup() {
+        let algorithm = Algorithm::Rank(RankAlgorithm::Degree);
+        let rows: Vec<Vec<AlgorithmValue>> = (0..17)
+            .map(|index| {
+                let mut uuid = [0_u8; 16];
+                uuid[15] = index as u8;
+                vec![
+                    AlgorithmValue::Uuid(uuid),
+                    AlgorithmValue::Float64(f64::from(index)),
+                ]
+            })
+            .collect();
+        let small = shape_logical_rows(algorithm, rows.clone(), 4, u64::MAX).unwrap();
+        let large = shape_logical_rows(algorithm, rows, 64, u64::MAX).unwrap();
+        assert!(small.internal_batch_count > 1, "small batch size must roll over");
+        assert_eq!(large.internal_batch_count, 1);
+        assert!(
+            small.peak_builder_rows <= 4,
+            "peak builder rows must stay within batch_size"
+        );
+        assert_eq!(
+            shape_algorithm_output(algorithm, &small).unwrap(),
+            shape_algorithm_output(algorithm, &large).unwrap()
+        );
+        assert_eq!(small.rows(), large.rows());
+    }
+
+    #[test]
+    fn property_enrichment_gathers_across_property_batches_without_concat() {
+        let one = [1; 16];
+        let two = [2; 16];
+        let input = node_result(&[two, one]);
+        let first = property_batch(&[two], "name", Arc::new(StringArray::from(vec![Some("Bob")])));
+        let second = property_batch(&[one], "name", Arc::new(StringArray::from(vec![Some("Ada")])));
+        let result = materialize_node_properties_with(&input, &["Person".into()], |_| {
+            Ok(vec![first.clone(), second.clone()])
+        })
+        .unwrap();
+        let name = result
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            name.iter().collect::<Vec<_>>(),
+            vec![Some("Bob"), Some("Ada")]
+        );
     }
 }
