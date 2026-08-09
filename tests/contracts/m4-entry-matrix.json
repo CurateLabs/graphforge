@@ -7,43 +7,43 @@
   "public_persistence_owner_issue": 338,
   "citation": "M4 implementation issues cite this contract and docs/development/m4-entry-baseline.md as their before/after evidence source.",
   "current_runtime": {
-    "id": "fixed-two-worker",
+    "id": "policy-default-two-worker",
     "status": "supported",
     "tokio_worker_threads": 2,
-    "public_resource_policy": false,
-    "datafusion_partitions": "implementation-default",
-    "notes": "graphforge-api build_runtime hardcodes tokio::runtime::Builder::worker_threads(2). No public API can request 1/2/4/8/automatic today; DataFusion partitioning follows its existing default policy and must be recorded as observed, not as a requested policy."
+    "public_resource_policy": true,
+    "datafusion_partitions": 2,
+    "notes": "Default Explicit ExecutionResourcePolicy preserves pre-#337 two-worker / two-partition semantics. Callers may request 1/2/4/8/automatic through GraphForgeOptions.resource."
   },
   "deferred_runtime_configurations": [
     {
       "id": "threads-1",
       "requested_workers": 1,
-      "status": "deferred",
+      "status": "supported",
       "owner_issue": 337
     },
     {
       "id": "threads-2",
       "requested_workers": 2,
-      "status": "deferred",
+      "status": "supported",
       "owner_issue": 337,
-      "notes": "Distinct from the hardcoded supported fixed-two-worker path: #337 must prove an explicit policy request of 2 workers, not merely the current hardcoded default."
+      "notes": "Explicit policy request of 2 workers (distinct from merely inheriting the default)."
     },
     {
       "id": "threads-4",
       "requested_workers": 4,
-      "status": "deferred",
+      "status": "supported",
       "owner_issue": 337
     },
     {
       "id": "threads-8",
       "requested_workers": 8,
-      "status": "deferred",
+      "status": "supported",
       "owner_issue": 337
     },
     {
       "id": "threads-automatic",
       "requested_workers": "automatic",
-      "status": "deferred",
+      "status": "supported",
       "owner_issue": 337
     }
   ],
@@ -170,7 +170,7 @@
   "matrices": {
     "short_ci": {
       "fixture": "synthetic-small",
-      "runtime": "fixed-two-worker",
+      "runtime": "policy-default-two-worker",
       "pass_fail": ["structural_gates", "parity_assertions_on_supported_runtime"],
       "report_only": ["wall_time_ms", "peak_rss_bytes"],
       "forbidden": [
@@ -187,7 +187,7 @@
         "synthetic-10m-edges",
         "livejournal-cached"
       ],
-      "runtime": "fixed-two-worker",
+      "runtime": "policy-default-two-worker",
       "requires_documented_commands": true,
       "records": [
         "hardware_identity",
@@ -230,6 +230,7 @@
     "CSR-to-hash-map expansion remains on analyst/traversal paths (#340).",
     "Algorithm kernels remain serial (#342-#344).",
     "Public snapshot envelope still bounds GraphForge::new scale claims (#338).",
-    "Wall-clock numbers are hardware-specific and never CI pass/fail gates."
+    "Wall-clock numbers are hardware-specific and never CI pass/fail gates.",
+    "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results."
   ]
 }

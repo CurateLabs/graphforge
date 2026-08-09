@@ -82,6 +82,7 @@ mod provider_find;
 mod provider_rerank;
 mod provider_session;
 mod repository;
+mod resource_policy;
 #[cfg(test)]
 mod same_process_concurrency_tests;
 #[cfg(test)]
@@ -246,6 +247,10 @@ pub use valid_time::{
 };
 pub use workspace_ontology::{AdoptOntologyRequest, ClearOntologyRequest};
 pub use write_modes::{GraphForgeOptions, ProjectWriteMode};
+pub use resource_policy::{
+    ExecutionResourcePolicy, NormalizedResourcePolicy, ResourcePolicyDiagnostics,
+    ResourcePolicyMode, SpillPolicy,
+};
 
 fn insert_usize(
     parameters: &mut std::collections::BTreeMap<String, InvocationParameter>,
@@ -373,6 +378,10 @@ pub struct GraphForge {
     graph_visibility: Arc<write_modes::WriteCoordinator>,
     /// Validated embedded write behavior for this facade.
     write_options: GraphForgeOptions,
+    /// Normalized execution resource policy applied to runtime and sessions (#337).
+    resource_policy: resource_policy::NormalizedResourcePolicy,
+    /// Instance-owned heavy-query admission gate (#337).
+    heavy_query_admission: Arc<resource_policy::HeavyQueryAdmission>,
     /// Ensures mutation bursts share one bounded process-local driver thread.
     provider_refresh_driver_active: Arc<AtomicBool>,
     /// Runtime-only provider recipes capable of refreshing exact lineages.
@@ -443,9 +452,9 @@ impl GraphForge {
         path: Option<&str>,
         options: GraphForgeOptions,
     ) -> Result<Self, GfError> {
-        let options = options.validate()?;
+        let (options, resource_policy) = options.validate()?;
         if let Some(p) = path {
-            return Self::open_dir_with_options(PathBuf::from(p), options);
+            return Self::open_dir_with_options(PathBuf::from(p), options, resource_policy);
         }
         // In-memory: exploratory, backed by a temp directory kept alive for the
         // engine's lifetime.
@@ -474,8 +483,12 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(options)),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(options.clone())),
             write_options: options,
+            resource_policy: resource_policy.clone(),
+            heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
+                resource_policy.max_concurrent_heavy_queries,
+            )),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -487,7 +500,7 @@ impl GraphForge {
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
-            runtime: build_runtime()?,
+            runtime: build_runtime(&resource_policy)?,
         })
     }
 
@@ -496,7 +509,11 @@ impl GraphForge {
         *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);
     }
 
-    fn open_dir_with_options(dir: PathBuf, options: GraphForgeOptions) -> Result<Self, GfError> {
+    fn open_dir_with_options(
+        dir: PathBuf,
+        options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
+    ) -> Result<Self, GfError> {
         if !dir.exists() {
             return Err(GfError::Storage(format!(
                 "path does not exist: {}",
@@ -505,7 +522,7 @@ impl GraphForge {
         }
 
         let resolved_generation = graphforge_storage::open_or_initialize_project(&dir)?;
-        Self::open_resolved_with_options(dir, resolved_generation, false, options)
+        Self::open_resolved_with_options(dir, resolved_generation, false, options, resource_policy)
     }
 
     fn open_resolved_with_mode(
@@ -513,11 +530,14 @@ impl GraphForge {
         resolved_generation: ResolvedProjectGeneration,
         read_only: bool,
     ) -> Result<Self, GfError> {
+        let options = GraphForgeOptions::default();
+        let (_, resource_policy) = options.clone().validate()?;
         Self::open_resolved_with_options(
             container_dir,
             resolved_generation,
             read_only,
-            GraphForgeOptions::default(),
+            options,
+            resource_policy,
         )
     }
 
@@ -526,6 +546,7 @@ impl GraphForge {
         resolved_generation: ResolvedProjectGeneration,
         read_only: bool,
         write_options: GraphForgeOptions,
+        resource_policy: resource_policy::NormalizedResourcePolicy,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
@@ -552,8 +573,12 @@ impl GraphForge {
             )),
             embedding_refresh_epoch: Instant::now(),
             embedding_refresh_visibility: Arc::new(Mutex::new(())),
-            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(write_options)),
+            graph_visibility: Arc::new(write_modes::WriteCoordinator::new(write_options.clone())),
             write_options,
+            resource_policy: resource_policy.clone(),
+            heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
+                resource_policy.max_concurrent_heavy_queries,
+            )),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -565,12 +590,55 @@ impl GraphForge {
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             procedures: Arc::new(Mutex::new(ProcedureRegistry::new())),
             ontology_mode,
-            runtime: build_runtime()?,
+            runtime: build_runtime(&resource_policy)?,
         };
         if !read_only {
             graph.reconcile_algorithm_runs()?;
         }
         Ok(graph)
+    }
+
+    /// Normalized execution resource policy for this instance (#337).
+    #[must_use]
+    pub fn resource_policy(&self) -> &NormalizedResourcePolicy {
+        &self.resource_policy
+    }
+
+    /// Safe aggregate diagnostics for the instance resource policy (#337).
+    #[must_use]
+    pub fn resource_diagnostics(&self) -> resource_policy::ResourcePolicyDiagnostics {
+        resource_policy::ResourcePolicyDiagnostics {
+            mode: self.resource_policy.mode,
+            tokio_worker_threads: self.resource_policy.tokio_worker_threads,
+            target_partitions: self.resource_policy.target_partitions,
+            batch_size: self.resource_policy.batch_size,
+            memory_budget_bytes: self.resource_policy.memory_budget_bytes,
+            spill_enabled: self.resource_policy.spill_enabled,
+            io_concurrency: self.resource_policy.io_concurrency,
+            compute_threads: self.resource_policy.compute_threads,
+            max_concurrent_heavy_queries: self.resource_policy.max_concurrent_heavy_queries,
+            heavy_query_available: self.heavy_query_admission.available_permits(),
+            observed_logical_cpus: self.resource_policy.observed_logical_cpus,
+        }
+    }
+
+    fn session_resource_config(&self) -> graphforge_exec::SessionResourceConfig {
+        graphforge_exec::SessionResourceConfig {
+            target_partitions: self.resource_policy.target_partitions,
+            batch_size: self.resource_policy.batch_size,
+            memory_budget_bytes: self.resource_policy.memory_budget_bytes,
+            spill_enabled: self.resource_policy.spill_enabled,
+            spill_directory: self.resource_policy.spill_directory.clone(),
+            spill_max_bytes: self.resource_policy.spill_max_bytes,
+        }
+    }
+
+    fn admit_heavy_query(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GfError> {
+        self.heavy_query_admission.try_acquire()
+    }
+
+    fn admit_heavy_query_owned(&self) -> Result<tokio::sync::OwnedSemaphorePermit, GfError> {
+        self.heavy_query_admission.try_acquire_owned()
     }
 
     fn generation_for_read(&self) -> Result<ResolvedProjectGeneration, GfError> {
@@ -690,6 +758,7 @@ impl GraphForge {
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
     ) -> Result<ExecutionResult, GfError> {
+        let _admission = self.admit_heavy_query()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -787,12 +856,13 @@ impl GraphForge {
             GraphCatalog::open(&self.dir, self.ontology.as_ref(), &rc)
                 .map_err(|e| GfError::Storage(e.to_string()))?
         };
-        let session = ExecutionSession::new_with_target_and_provider(
+        let session = ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
+            self.session_resource_config(),
         )?;
 
         let result = self.block_on(async {
@@ -1059,6 +1129,7 @@ impl GraphForge {
     ) -> Result<graphforge_exec::SendableRecordBatchStream, GfError> {
         use graphforge_exec::ExecutionSession;
 
+        let _admission = self.admit_heavy_query_owned()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
         }
@@ -1115,12 +1186,13 @@ impl GraphForge {
             GraphCatalog::open(&self.dir, self.ontology.as_ref(), &rc)
                 .map_err(|e| GfError::Storage(e.to_string()))?
         };
-        let session = ExecutionSession::new_with_target_and_provider(
+        let session = ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
+            self.session_resource_config(),
         )?;
 
         // Build the stream on the instance's long-lived runtime so the tasks it
@@ -1128,6 +1200,10 @@ impl GraphForge {
         // only when the `GraphForge` is. `block_on` drives the construction
         // inside that runtime's context.
         let stream = self.block_on(async { session.execute_plan_stream(&plan, params).await })?;
+        // Admission is intentionally released after stream construction: the
+        // stream is demand-driven and may outlive this call; holding the slot
+        // for the full consumer lifetime would serialize all streaming clients.
+        drop(_admission);
         Ok(shape_stream(
             stream,
             self.ontology_mode,
@@ -2181,6 +2257,7 @@ impl GraphForge {
         label: &str,
         options: RankOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
+        let _admission = self.admit_heavy_query()?;
         let RankOptions {
             by,
             via,
@@ -2363,6 +2440,7 @@ impl GraphForge {
         label: Option<&str>,
         options: &EmbeddingAnalyzeOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
+        let _admission = self.admit_heavy_query()?;
         let label_id = label
             .map(|value| self.algorithm_label(value, "analyze").map(|(id, _)| id))
             .transpose()?;
@@ -2393,6 +2471,7 @@ impl GraphForge {
         label: &str,
         options: SimilarOptions,
     ) -> Result<arrow::record_batch::RecordBatch, GfError> {
+        let _admission = self.admit_heavy_query()?;
         let (label_id, stem) = self.algorithm_label(label, "similar")?;
         let _adjacency_visibility = self
             .adjacency_visibility
@@ -2551,12 +2630,13 @@ impl GraphForge {
             explained.unwrap_or_else(|e| format!("(logical plan unavailable: {e})"))
         };
 
-        let session = graphforge_exec::ExecutionSession::new_with_target_and_provider(
+        let session = graphforge_exec::ExecutionSession::new_with_target_provider_and_resources(
             catalog,
             self.ontology.clone(),
             self.dir.clone(),
             self.ontology_mode,
             Arc::clone(&self.adjacency_provider),
+            self.session_resource_config(),
         )?;
         let physical = self.block_on(async move { session.explain_physical(&plan).await })?;
 
@@ -2981,13 +3061,12 @@ impl RuntimeGuard {
 }
 
 /// Build the instance's long-lived multi-thread runtime.
-fn build_runtime() -> Result<Arc<OwnedRuntime>, GfError> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
+fn build_runtime(
+    policy: &resource_policy::NormalizedResourcePolicy,
+) -> Result<Arc<OwnedRuntime>, GfError> {
+    policy
+        .build_tokio_runtime()
         .map(|rt| Arc::new(OwnedRuntime(Some(rt))))
-        .map_err(|e| GfError::Execution(format!("failed to build runtime: {e}")))
 }
 
 fn hydrate_graph_workspace(

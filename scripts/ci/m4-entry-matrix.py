@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and summarize the M4 embedded performance entry contract (#334)."""
+"""Validate and summarize the M4 embedded performance entry contract (#334/#337)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ REQUIRED_WORKLOAD_IDS = {
     "exact-cosine-knn",
     "node2vec",
 }
-REQUIRED_DEFERRED_IDS = {
+REQUIRED_PARITY_IDS = {
     "threads-1",
     "threads-2",
     "threads-4",
@@ -68,25 +68,25 @@ def contract_errors(path: Path = CONTRACT) -> list[str]:
             errors.append("current_runtime.status must be supported")
         if current.get("tokio_worker_threads") != 2:
             errors.append("current_runtime.tokio_worker_threads must be 2")
-        if current.get("public_resource_policy") is not False:
-            errors.append("current_runtime.public_resource_policy must be false")
+        if current.get("public_resource_policy") is not True:
+            errors.append("current_runtime.public_resource_policy must be true")
 
     deferred = data.get("deferred_runtime_configurations")
     if not isinstance(deferred, list):
         errors.append("deferred_runtime_configurations must be a list")
     else:
         ids = {item.get("id") for item in deferred if isinstance(item, dict)}
-        if ids != REQUIRED_DEFERRED_IDS:
+        if ids != REQUIRED_PARITY_IDS:
             errors.append(
                 "deferred_runtime_configurations ids must equal "
-                + ",".join(sorted(REQUIRED_DEFERRED_IDS))
+                + ",".join(sorted(REQUIRED_PARITY_IDS))
             )
         for item in deferred:
             if not isinstance(item, dict):
                 errors.append("deferred configuration entries must be objects")
                 continue
-            if item.get("status") != "deferred":
-                errors.append(f"{item.get('id')}: status must be deferred")
+            if item.get("status") != "supported":
+                errors.append(f"{item.get('id')}: status must be supported after #337")
             if item.get("owner_issue") != 337:
                 errors.append(f"{item.get('id')}: owner_issue must be 337")
 
@@ -122,8 +122,8 @@ def contract_errors(path: Path = CONTRACT) -> list[str]:
             ):
                 if required not in forbidden:
                     errors.append(f"short_ci.forbidden must include {required}")
-            if short.get("runtime") != "fixed-two-worker":
-                errors.append("short_ci.runtime must be fixed-two-worker")
+            if short.get("runtime") != "policy-default-two-worker":
+                errors.append("short_ci.runtime must be policy-default-two-worker")
         large = matrices.get("large_manual")
         if not isinstance(large, dict) or not large.get("requires_documented_commands"):
             errors.append("large_manual must require documented commands")
@@ -168,17 +168,12 @@ def evidence_errors(payload: dict[str, Any], contract: dict[str, Any] | None = N
     runtime = payload.get("runtime_configuration")
     if isinstance(runtime, dict):
         status = runtime.get("status")
-        if status not in {"supported", "deferred", "unavailable"}:
-            errors.append("runtime_configuration.status must be supported|deferred|unavailable")
+        if status not in {"supported", "unavailable"}:
+            errors.append("runtime_configuration.status must be supported|unavailable")
         if status == "supported" and runtime.get("tokio_worker_threads") != 2:
-            errors.append("supported runtime must report tokio_worker_threads=2")
-        if status == "deferred" and runtime.get("owner_issue") != 337:
-            errors.append("deferred runtime must cite owner_issue 337")
-        if status != "deferred" and runtime.get("requested_workers") in {1, 4, 8, "automatic"}:
-            # Fabricating unsupported requested configs as supported /
-            # unavailable-without-owner is forbidden.
-            if status == "supported":
-                errors.append("must not claim unsupported thread requests as supported")
+            errors.append("default supported runtime must report tokio_worker_threads=2")
+        if runtime.get("public_resource_policy") is False:
+            errors.append("evidence must not claim public_resource_policy=false after #337")
     else:
         errors.append("runtime_configuration must be an object")
 
@@ -189,10 +184,15 @@ def evidence_errors(payload: dict[str, Any], contract: dict[str, Any] | None = N
         for item in deferred:
             if not isinstance(item, dict):
                 continue
-            if item.get("status") != "deferred":
-                errors.append(f"{item.get('id')}: evidence must keep deferred status")
-            if item.get("executed") is True:
-                errors.append(f"{item.get('id')}: must not claim deferred configs executed")
+            status = item.get("status")
+            if status not in {"supported", "unavailable"}:
+                errors.append(f"{item.get('id')}: status must be supported|unavailable")
+            if status == "supported" and item.get("executed") is not True:
+                errors.append(f"{item.get('id')}: supported configs must set executed=true")
+            if status == "unavailable" and item.get("executed") is True:
+                errors.append(f"{item.get('id')}: unavailable configs must not claim executed")
+            if item.get("owner_issue") != 337:
+                errors.append(f"{item.get('id')}: owner_issue must be 337")
 
     discovery = payload.get("discovery_evidence")
     if isinstance(discovery, list):
@@ -228,27 +228,19 @@ def validate() -> int:
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print(f"OK {CONTRACT.relative_to(ROOT)} ({SCHEMA})")
-    return 0
-
-
-def summarize() -> int:
-    errors = contract_errors()
-    if errors:
-        for error in errors:
-            print(error, file=sys.stderr)
-        return 1
     data = load()
     print(
         json.dumps(
             {
                 "schema": data["schema"],
                 "issue": data["issue"],
-                "current_runtime": data["current_runtime"]["id"],
-                "deferred": [item["id"] for item in data["deferred_runtime_configurations"]],
-                "workloads": [item["id"] for item in data["workloads"]],
-                "short_ci_fixture": data["matrices"]["short_ci"]["fixture"],
                 "parity_owner_issue": data["parity_owner_issue"],
+                "current_runtime": data["current_runtime"]["id"],
+                "public_resource_policy": data["current_runtime"]["public_resource_policy"],
+                "parity_configurations": [
+                    item["id"] for item in data["deferred_runtime_configurations"]
+                ],
+                "workloads": [item["id"] for item in data["workloads"]],
             },
             indent=2,
             sort_keys=True,
@@ -257,18 +249,20 @@ def summarize() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("validate", "summarize"),
-        help="validate the checked-in contract, or print a short summary",
+        choices=("validate", "summary"),
+        help="validate the checked-in contract or print a summary",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
     if args.command == "validate":
         return validate()
-    return summarize()
+    data = load()
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

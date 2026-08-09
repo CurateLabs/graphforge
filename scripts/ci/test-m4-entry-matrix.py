@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation-sensitive tests for the M4 entry matrix contract (#334)."""
+"""Mutation-sensitive tests for the M4 entry matrix contract (#334/#337)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class M4EntryMatrixTests(unittest.TestCase):
         self.assertEqual(GATE.contract_errors(), [])
         self.assertEqual(GATE.validate(), 0)
 
-    def test_deferred_thread_matrix_is_owned_by_337(self) -> None:
+    def test_thread_parity_matrix_is_owned_by_337(self) -> None:
         data = GATE.load()
         deferred = {item["id"]: item for item in data["deferred_runtime_configurations"]}
         self.assertEqual(
@@ -29,9 +29,9 @@ class M4EntryMatrixTests(unittest.TestCase):
             {"threads-1", "threads-2", "threads-4", "threads-8", "threads-automatic"},
         )
         for item in deferred.values():
-            self.assertEqual(item["status"], "deferred")
+            self.assertEqual(item["status"], "supported")
             self.assertEqual(item["owner_issue"], 337)
-        self.assertFalse(data["current_runtime"]["public_resource_policy"])
+        self.assertTrue(data["current_runtime"]["public_resource_policy"])
         self.assertEqual(data["current_runtime"]["tokio_worker_threads"], 2)
 
     def test_required_workloads_and_parity_assertions(self) -> None:
@@ -50,8 +50,8 @@ class M4EntryMatrixTests(unittest.TestCase):
         )
 
         data = copy.deepcopy(GATE.load())
-        data["deferred_runtime_configurations"][0]["status"] = "supported"
-        self.assertTrue(any("deferred" in error for error in self._errors_from_dict(data)))
+        data["deferred_runtime_configurations"][0]["status"] = "deferred"
+        self.assertTrue(any("supported" in error for error in self._errors_from_dict(data)))
 
         data = copy.deepcopy(GATE.load())
         data["workloads"] = [item for item in data["workloads"] if item["id"] != "pagerank"]
@@ -66,7 +66,7 @@ class M4EntryMatrixTests(unittest.TestCase):
             )
         )
 
-    def test_evidence_schema_rejects_fabricated_deferred_execution(self) -> None:
+    def test_evidence_schema_rejects_fabricated_unavailable_execution(self) -> None:
         contract = GATE.load()
         payload = {
             "schema": GATE.EVIDENCE_SCHEMA,
@@ -76,6 +76,7 @@ class M4EntryMatrixTests(unittest.TestCase):
             "runtime_configuration": {
                 "status": "supported",
                 "tokio_worker_threads": 2,
+                "public_resource_policy": True,
             },
             "hardware": {"os": "linux", "logical_cpus": 2},
             "workloads": [
@@ -87,7 +88,12 @@ class M4EntryMatrixTests(unittest.TestCase):
                 }
             ],
             "deferred_configurations": [
-                {"id": "threads-8", "status": "deferred", "executed": True, "owner_issue": 337}
+                {
+                    "id": "threads-8",
+                    "status": "unavailable",
+                    "executed": True,
+                    "owner_issue": 337,
+                }
             ],
             "discovery_evidence": [
                 {
@@ -97,16 +103,18 @@ class M4EntryMatrixTests(unittest.TestCase):
             ],
         }
         errors = GATE.evidence_errors(payload, contract)
-        self.assertTrue(any("must not claim deferred configs executed" in e for e in errors))
+        self.assertTrue(
+            any("unavailable configs must not claim executed" in e for e in errors)
+        )
 
         payload["deferred_configurations"][0]["executed"] = False
         payload["runtime_configuration"] = {
             "status": "supported",
             "tokio_worker_threads": 2,
-            "requested_workers": 8,
+            "public_resource_policy": False,
         }
         errors = GATE.evidence_errors(payload, contract)
-        self.assertTrue(any("must not claim unsupported thread requests" in e for e in errors))
+        self.assertTrue(any("public_resource_policy=false" in e for e in errors))
 
     def test_evidence_accepts_honest_supported_runtime(self) -> None:
         contract = GATE.load()
@@ -117,8 +125,9 @@ class M4EntryMatrixTests(unittest.TestCase):
             "build_profile": "debug",
             "runtime_configuration": {
                 "status": "supported",
-                "id": "fixed-two-worker",
+                "id": "policy-default-two-worker",
                 "tokio_worker_threads": 2,
+                "public_resource_policy": True,
             },
             "hardware": {"os": "linux", "logical_cpus": 8, "memory_bytes": 16 << 30},
             "workloads": [
@@ -130,7 +139,12 @@ class M4EntryMatrixTests(unittest.TestCase):
                 }
             ],
             "deferred_configurations": [
-                {"id": item["id"], "status": "deferred", "executed": False, "owner_issue": 337}
+                {
+                    "id": item["id"],
+                    "status": "supported",
+                    "executed": True,
+                    "owner_issue": 337,
+                }
                 for item in contract["deferred_runtime_configurations"]
             ],
             "discovery_evidence": contract["discovery_evidence"],
@@ -139,7 +153,6 @@ class M4EntryMatrixTests(unittest.TestCase):
 
     def _errors_from_dict(self, data: dict) -> list[str]:
         path = Path(self.id().replace(".", "_") + ".json")
-        # Write beside the module into a temp-like unique name under /tmp via unittest isolation.
         target = Path("/tmp") / path.name
         target.write_text(json.dumps(data), encoding="utf-8")
         try:

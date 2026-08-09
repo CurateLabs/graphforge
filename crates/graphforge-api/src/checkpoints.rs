@@ -2691,6 +2691,7 @@ mod tests {
             write_mode: crate::ProjectWriteMode::QueuedWriter,
             write_queue_capacity: 7,
             max_rebase_attempts: 2,
+            ..crate::GraphForgeOptions::default()
         };
         let mut graph =
             GraphForge::new_with_options(Some(directory.path().to_str().unwrap()), write_options)
