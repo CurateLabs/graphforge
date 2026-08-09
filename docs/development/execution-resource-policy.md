@@ -16,7 +16,7 @@ Tokio runtime or any DataFusion execution session.
 | `memory_budget_bytes` | `512 MiB` | DataFusion `RuntimeEnv` memory pool |
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
-| `max_concurrent_heavy_queries` | `1` | Instance-owned admission semaphore |
+| `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
 | `compute_threads` | `2` | Reserved future private CPU-pool budget |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.

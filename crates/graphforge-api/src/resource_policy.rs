@@ -51,7 +51,7 @@ pub struct ExecutionResourcePolicy {
     pub spill: SpillPolicy,
     /// Bound on concurrent filtered/storage I/O helpers. `None` → mode default.
     pub io_concurrency: Option<usize>,
-    /// Maximum concurrent heavy Cypher / analyst invocations. `None` → 1.
+    /// Maximum concurrent heavy Cypher / analyst invocations. `None` → 64.
     pub max_concurrent_heavy_queries: Option<usize>,
     /// Reserved compute-thread budget for future private CPU pools. Not used to
     /// parallelize algorithms in #337.
@@ -69,7 +69,7 @@ impl Default for ExecutionResourcePolicy {
             memory_budget_bytes: Some(DEFAULT_MEMORY_BUDGET_BYTES),
             spill: SpillPolicy::default(),
             io_concurrency: Some(2),
-            max_concurrent_heavy_queries: Some(1),
+            max_concurrent_heavy_queries: Some(DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES),
             compute_threads: Some(2),
         }
     }
@@ -131,7 +131,10 @@ pub struct ResourcePolicyDiagnostics {
     pub observed_logical_cpus: usize,
 }
 
-pub(crate) const DEFAULT_BATCH_SIZE: usize = 8_192;
+/// Fail-closed ceiling that still preserves concurrent same-instance reads
+/// (pre-#337 had no admission semaphore).
+pub(crate) const DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES: usize = 64;
+const DEFAULT_BATCH_SIZE: usize = 8_192;
 pub(crate) const DEFAULT_MEMORY_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const MIN_THREADS: usize = 1;
 pub(crate) const MAX_THREADS: usize = 256;
@@ -288,7 +291,9 @@ impl ExecutionResourcePolicy {
             )));
         }
 
-        let heavy = self.max_concurrent_heavy_queries.unwrap_or(1);
+        let heavy = self
+            .max_concurrent_heavy_queries
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES);
         if !(1..=64).contains(&heavy) {
             return Err(validation(
                 "max_concurrent_heavy_queries must be between 1 and 64",
@@ -389,7 +394,10 @@ mod tests {
         assert!(!normalized.spill_enabled);
         assert_eq!(normalized.batch_size, DEFAULT_BATCH_SIZE);
         assert_eq!(normalized.memory_budget_bytes, DEFAULT_MEMORY_BUDGET_BYTES);
-        assert_eq!(normalized.max_concurrent_heavy_queries, 1);
+        assert_eq!(
+            normalized.max_concurrent_heavy_queries,
+            DEFAULT_MAX_CONCURRENT_HEAVY_QUERIES
+        );
     }
 
     #[test]
