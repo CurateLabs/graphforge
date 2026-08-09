@@ -28,9 +28,11 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ir::Direction;
 use graphforge_storage::adjacency::{
-    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, CsrIndex, build_adjacency_index,
+    self as csr, ALL_RELATIONS_STEM, AdjacencyManifestRow, CsrIndex, CsrRow, build_adjacency_index,
 };
-use graphforge_storage::adjacency_delta::{DeltaSegment, apply_delta_segments, read_delta_chain};
+use graphforge_storage::adjacency_delta::{
+    CsrDeltaOverlay, DeltaSegment, overlay_delta_segments, read_delta_chain,
+};
 use graphforge_storage::generation::read_topology_generation;
 
 use crate::ValueAt;
@@ -63,16 +65,161 @@ impl AdjacencyStatus {
     }
 }
 
-/// Surrogate-keyed adjacency view consumed by traversal.
+/// How a view is physically backed — used for structural assertions (#340).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdjacencyBacking {
+    /// Scan-built `HashMap` of per-node vectors (fallback / oracle path).
+    ScanHashMap,
+    /// Directed CSR served with O(1) row lookup; no O(E) expansion.
+    CsrNative,
+    /// Directed CSR plus a bounded delta-key overlay; base CSR not copied.
+    CsrOverlay,
+    /// Out+in CSR pair merged per row on access (no full merged hash map).
+    CsrUndirected,
+}
+
+/// Surrogate-keyed adjacency view consumed by traversal (#340).
 ///
-/// The representation is private. Today it is the scan-built map the retired
-/// `build_adjacency` produced; #761 may back the same contract with a
-/// disk-loaded CSR (offsets + interleaved entries) — both serve
-/// [`neighbors`](Self::neighbors) as a contiguous slice, so consumers never
-/// change.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Persisted-index hits keep the validated CSR (and optional bounded overlay)
+/// without expanding into `HashMap<u64, Vec<_>>`. Scan-build fallback retains
+/// the historical map representation for oracle parity.
+#[derive(Clone, Debug, Default)]
 pub struct Adjacency {
-    map: HashMap<u64, Vec<(u64, u64)>>,
+    inner: AdjacencyInner,
+}
+
+#[derive(Clone, Debug, Default)]
+enum AdjacencyInner {
+    #[default]
+    Empty,
+    Map(HashMap<u64, Vec<(u64, u64)>>),
+    Csr(Arc<CsrIndex>),
+    Overlay(CsrDeltaOverlay),
+    Undirected {
+        out: Arc<AdjacencyInner>,
+        inbound: Arc<AdjacencyInner>,
+    },
+}
+
+/// Borrowed or owned neighbor row for one node.
+#[derive(Clone, Debug)]
+pub struct NeighborRow<'a> {
+    kind: NeighborRowKind<'a>,
+}
+
+#[derive(Clone, Debug)]
+enum NeighborRowKind<'a> {
+    Pairs(&'a [(u64, u64)]),
+    Csr(CsrRow<'a>),
+    Owned(Vec<(u64, u64)>),
+}
+
+impl<'a> NeighborRow<'a> {
+    fn pairs(entries: &'a [(u64, u64)]) -> Self {
+        Self {
+            kind: NeighborRowKind::Pairs(entries),
+        }
+    }
+
+    fn csr(row: CsrRow<'a>) -> Self {
+        Self {
+            kind: NeighborRowKind::Csr(row),
+        }
+    }
+
+    fn owned(entries: Vec<(u64, u64)>) -> Self {
+        Self {
+            kind: NeighborRowKind::Owned(entries),
+        }
+    }
+
+    /// Number of `(edge_id, neighbor_id)` entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match &self.kind {
+            NeighborRowKind::Pairs(entries) => entries.len(),
+            NeighborRowKind::Csr(row) => row.len(),
+            NeighborRowKind::Owned(entries) => entries.len(),
+        }
+    }
+
+    /// Whether the row is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Entry at `index`, if present.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<(u64, u64)> {
+        match &self.kind {
+            NeighborRowKind::Pairs(entries) => entries.get(index).copied(),
+            NeighborRowKind::Csr(row) => row.get(index),
+            NeighborRowKind::Owned(entries) => entries.get(index).copied(),
+        }
+    }
+
+    /// Materialize entries (tests and rare owned-row consumers).
+    #[must_use]
+    pub fn to_vec(&self) -> Vec<(u64, u64)> {
+        match &self.kind {
+            NeighborRowKind::Pairs(entries) => entries.to_vec(),
+            NeighborRowKind::Csr(row) => row.iter().collect(),
+            NeighborRowKind::Owned(entries) => entries.clone(),
+        }
+    }
+
+    /// Iterate `(edge_id, neighbor_id)` pairs.
+    pub fn iter(&self) -> NeighborRowIter<'_> {
+        NeighborRowIter {
+            row: self,
+            index: 0,
+        }
+    }
+}
+
+impl PartialEq<[(u64, u64)]> for NeighborRow<'_> {
+    fn eq(&self, other: &[(u64, u64)]) -> bool {
+        self.len() == other.len() && (0..self.len()).all(|i| self.get(i) == Some(other[i]))
+    }
+}
+
+impl PartialEq<&[(u64, u64)]> for NeighborRow<'_> {
+    fn eq(&self, other: &&[(u64, u64)]) -> bool {
+        self == *other
+    }
+}
+
+/// Iterator over [`NeighborRow`] entries.
+pub struct NeighborRowIter<'a> {
+    row: &'a NeighborRow<'a>,
+    index: usize,
+}
+
+impl Iterator for NeighborRowIter<'_> {
+    type Item = (u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.row.get(self.index)?;
+        self.index += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.row.len().saturating_sub(self.index);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for NeighborRowIter<'_> {}
+
+impl<'a> IntoIterator for &'a NeighborRow<'a> {
+    type Item = (u64, u64);
+    type IntoIter = NeighborRowIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 impl Adjacency {
@@ -81,28 +228,194 @@ impl Adjacency {
     /// and dst-keyed entries in that order). BFS emission order observably
     /// depends on this ordering.
     ///
-    /// Unknown, isolated, or deleted ids yield `&[]` — never a panic. (#761's
-    /// dense CSR backing must preserve this for out-of-range ids.)
+    /// Unknown, isolated, or deleted ids yield an empty row — never a panic.
     #[must_use]
-    pub fn neighbors(&self, node_id: u64) -> &[(u64, u64)] {
-        self.map.get(&node_id).map_or(&[], Vec::as_slice)
+    pub fn neighbors(&self, node_id: u64) -> NeighborRow<'_> {
+        self.inner.neighbors(node_id)
     }
 
-    /// Whether the view contains no entries at all.
+    /// Physical backing representation (#340 structural counter surface).
+    #[must_use]
+    pub fn backing(&self) -> AdjacencyBacking {
+        self.inner.backing()
+    }
+
+    /// Number of base-CSR adjacency entries that were expanded into a hash map
+    /// or per-node heap vectors while constructing this view.
+    ///
+    /// Persisted CSR hits (directed, undirected, and bounded overlays) report
+    /// `0`. Scan-build fallback reports the number of map entries inserted.
+    #[must_use]
+    pub fn base_csr_entries_expanded(&self) -> u64 {
+        self.inner.base_csr_entries_expanded()
+    }
+
+    /// Overlay replacement-row count (0 unless [`AdjacencyBacking::CsrOverlay`]
+    /// or an undirected pair that includes an overlay).
+    #[must_use]
+    pub fn overlay_row_count(&self) -> u64 {
+        self.inner.overlay_row_count()
+    }
+
+    /// Whether the view contains no adjacency entries at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.inner.is_empty()
     }
 
-    /// Iterate the surrogate-keyed rows in unspecified map order.
+    /// Visit every node that may have adjacency entries.
     ///
-    /// Consumers that expose deterministic behavior must sort the yielded
-    /// node ids. The entries within each row retain provider order.
-    pub(crate) fn rows(&self) -> impl Iterator<Item = (u64, &[(u64, u64)])> {
-        self.map
-            .iter()
-            .map(|(&node_id, entries)| (node_id, entries.as_slice()))
+    /// CSR-native backings yield dense `0..node_extent` ids (empty rows
+    /// included only when the callback needs them — callers that skip empty
+    /// rows should check [`NeighborRow::is_empty`]). Map backings yield only
+    /// keys present in the map.
+    pub(crate) fn for_each_row(&self, mut visit: impl FnMut(u64, NeighborRow<'_>)) {
+        self.inner.for_each_row(&mut visit);
     }
+}
+
+impl AdjacencyInner {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Map(map) => map.is_empty(),
+            Self::Csr(csr) => csr.edge_count() == 0,
+            Self::Overlay(overlay) => {
+                overlay.base.edge_count() == 0
+                    && overlay.replaced.values().all(|row| row.is_empty())
+            }
+            Self::Undirected { out, inbound } => out.is_empty() && inbound.is_empty(),
+        }
+    }
+
+    fn neighbors(&self, node_id: u64) -> NeighborRow<'_> {
+        match self {
+            Self::Empty => NeighborRow::pairs(&[]),
+            Self::Map(map) => NeighborRow::pairs(map.get(&node_id).map_or(&[], Vec::as_slice)),
+            Self::Csr(csr) => NeighborRow::csr(csr.row(node_id)),
+            Self::Overlay(overlay) => match overlay.row(node_id) {
+                graphforge_storage::adjacency_delta::OverlayRow::Base(row) => NeighborRow::csr(row),
+                graphforge_storage::adjacency_delta::OverlayRow::Replaced(entries) => {
+                    NeighborRow::pairs(entries)
+                }
+            },
+            Self::Undirected { out, inbound } => {
+                merge_undirected_row(out.neighbors(node_id), inbound.neighbors(node_id))
+            }
+        }
+    }
+
+    fn backing(&self) -> AdjacencyBacking {
+        match self {
+            Self::Empty | Self::Map(_) => AdjacencyBacking::ScanHashMap,
+            Self::Csr(_) => AdjacencyBacking::CsrNative,
+            Self::Overlay(_) => AdjacencyBacking::CsrOverlay,
+            Self::Undirected { .. } => AdjacencyBacking::CsrUndirected,
+        }
+    }
+
+    fn base_csr_entries_expanded(&self) -> u64 {
+        match self {
+            Self::Empty | Self::Csr(_) | Self::Overlay(_) => 0,
+            Self::Map(map) => u64::try_from(map.values().map(Vec::len).sum::<usize>()).unwrap_or(0),
+            Self::Undirected { out, inbound } => out
+                .base_csr_entries_expanded()
+                .saturating_add(inbound.base_csr_entries_expanded()),
+        }
+    }
+
+    fn overlay_row_count(&self) -> u64 {
+        match self {
+            Self::Overlay(overlay) => overlay.overlay_row_count(),
+            Self::Undirected { out, inbound } => out
+                .overlay_row_count()
+                .saturating_add(inbound.overlay_row_count()),
+            _ => 0,
+        }
+    }
+
+    fn node_extent(&self) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::Map(map) => map.keys().next().map_or(0, |_| {
+                map.keys().copied().max().map_or(0, |m| m.saturating_add(1))
+            }),
+            Self::Csr(csr) => csr.node_count(),
+            Self::Overlay(overlay) => overlay.node_extent,
+            Self::Undirected { out, inbound } => out.node_extent().max(inbound.node_extent()),
+        }
+    }
+
+    fn for_each_row(&self, visit: &mut dyn FnMut(u64, NeighborRow<'_>)) {
+        match self {
+            Self::Empty => {}
+            Self::Map(map) => {
+                for (&node_id, entries) in map {
+                    visit(node_id, NeighborRow::pairs(entries.as_slice()));
+                }
+            }
+            Self::Csr(csr) => {
+                for node_id in 0..csr.node_count() {
+                    visit(node_id, NeighborRow::csr(csr.row(node_id)));
+                }
+            }
+            Self::Overlay(overlay) => {
+                for node_id in 0..overlay.node_extent {
+                    visit(node_id, self.neighbors(node_id));
+                }
+            }
+            Self::Undirected { out, inbound } => {
+                let extent = out.node_extent().max(inbound.node_extent());
+                for node_id in 0..extent {
+                    visit(node_id, self.neighbors(node_id));
+                }
+            }
+        }
+    }
+}
+
+impl PartialEq for Adjacency {
+    fn eq(&self, other: &Self) -> bool {
+        fn collect(view: &Adjacency) -> Vec<(u64, Vec<(u64, u64)>)> {
+            let mut rows = Vec::new();
+            view.for_each_row(|node_id, row| {
+                if !row.is_empty() {
+                    rows.push((node_id, row.to_vec()));
+                }
+            });
+            rows.sort_unstable_by_key(|(node_id, _)| *node_id);
+            rows
+        }
+        collect(self) == collect(other)
+    }
+}
+
+impl Eq for Adjacency {}
+
+/// Merge out and in rows with ascending `edge_id` and **out before in on ties**.
+fn merge_undirected_row<'a>(out: NeighborRow<'a>, inbound: NeighborRow<'a>) -> NeighborRow<'a> {
+    if out.is_empty() {
+        return NeighborRow::owned(inbound.to_vec());
+    }
+    if inbound.is_empty() {
+        return NeighborRow::owned(out.to_vec());
+    }
+    let mut entries = Vec::with_capacity(out.len() + inbound.len());
+    let mut o = 0usize;
+    let mut i = 0usize;
+    while o < out.len() || i < inbound.len() {
+        let take_out = i >= inbound.len()
+            || (o < out.len()
+                && out.get(o).map(|(e, _)| e) <= inbound.get(i).map(|(e, _)| e));
+        if take_out {
+            entries.push(out.get(o).expect("out index in range"));
+            o += 1;
+        } else {
+            entries.push(inbound.get(i).expect("in index in range"));
+            i += 1;
+        }
+    }
+    NeighborRow::owned(entries)
 }
 
 /// Single adjacency abstraction (ADR 0005): implementations decide *how* a
@@ -218,7 +531,13 @@ fn build_from_edge_batches(
             }
         }
     }
-    Ok(Adjacency { map: adj })
+    Ok(Adjacency {
+        inner: if adj.is_empty() {
+            AdjacencyInner::Empty
+        } else {
+            AdjacencyInner::Map(adj)
+        },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +679,10 @@ impl PersistentAdjacencyProvider {
 
     /// Load the view for (`stem`, `direction`) from the CSR file(s), overlaying
     /// the delta chain (#765) when one is present (`deltas` non-empty).
+    ///
+    /// A fresh base CSR is retained as a CSR-native view (#340): no O(E)
+    /// HashMap expansion. Non-empty delta chains attach a bounded overlay that
+    /// replaces only touched keys.
     fn load(
         &self,
         stem: &str,
@@ -367,10 +690,10 @@ impl PersistentAdjacencyProvider {
         rows: &[AdjacencyManifestRow],
         deltas: &[DeltaSegment],
     ) -> Result<Adjacency, GfError> {
-        let overlaid = |d: csr::Direction| -> Result<CsrIndex, GfError> {
-            let base = csr::read_csr(&csr::csr_path(&self.dir, stem, d))?;
+        let directed = |d: csr::Direction| -> Result<AdjacencyInner, GfError> {
+            let base = Arc::new(csr::read_csr(&csr::csr_path(&self.dir, stem, d))?);
             if deltas.is_empty() {
-                return Ok(base);
+                return Ok(AdjacencyInner::Csr(base));
             }
             // Torn-read count guard (#765): the base CSR must match the manifest
             // row it was loaded against. If a concurrent compaction rewrote the
@@ -385,15 +708,26 @@ impl PersistentAdjacencyProvider {
                     "adjacency base CSR disagrees with manifest counts (torn read)".into(),
                 ));
             }
-            Ok(apply_delta_segments(&base, stem, d, deltas))
+            let overlay = overlay_delta_segments(base, stem, d, deltas);
+            if overlay.replaced.is_empty() {
+                Ok(AdjacencyInner::Csr(overlay.base))
+            } else {
+                Ok(AdjacencyInner::Overlay(overlay))
+            }
         };
         match direction {
-            Direction::Out => Ok(adjacency_from_csr(&overlaid(csr::Direction::Out)?)),
-            Direction::In => Ok(adjacency_from_csr(&overlaid(csr::Direction::In)?)),
-            Direction::Undirected => Ok(merge_undirected(
-                &overlaid(csr::Direction::Out)?,
-                &overlaid(csr::Direction::In)?,
-            )),
+            Direction::Out => Ok(Adjacency {
+                inner: directed(csr::Direction::Out)?,
+            }),
+            Direction::In => Ok(Adjacency {
+                inner: directed(csr::Direction::In)?,
+            }),
+            Direction::Undirected => Ok(Adjacency {
+                inner: AdjacencyInner::Undirected {
+                    out: Arc::new(directed(csr::Direction::Out)?),
+                    inbound: Arc::new(directed(csr::Direction::In)?),
+                },
+            }),
         }
     }
 
@@ -589,79 +923,34 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
     }
 }
 
-/// Convert a directed CSR into the traversal view. Empty rows are skipped so
-/// the result is `PartialEq`-identical to a scan-built view (scan-build never
-/// inserts empty entry vectors).
+/// Convert a directed CSR into the traversal view without O(E) HashMap
+/// expansion (#340). Empty CSR becomes [`AdjacencyInner::Empty`].
 ///
 /// Bounds safety: callers only pass [`CsrIndex`]es produced by
 /// `graphforge_storage::adjacency::read_csr`, which validates the invariants
 /// (offsets `[0]`-rooted, monotone, final offset == target lengths) before
-/// returning — so every slice below is in bounds and the `usize` conversions
-/// cannot fail (offsets never exceed `Vec::len`, which is a `usize`). A
-/// malformed file errors inside `read_csr`, taking the rebuild/fallback path
-/// in the provider, never a panic here.
-fn adjacency_from_csr(index: &CsrIndex) -> Adjacency {
-    let mut map: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
-    for (node, window) in index.offsets.windows(2).enumerate() {
-        let (start, end) = (
-            usize::try_from(window[0]).expect("CSR offset exceeds usize"),
-            usize::try_from(window[1]).expect("CSR offset exceeds usize"),
-        );
-        if start == end {
-            continue;
+/// returning. A malformed file errors inside `read_csr`, taking the
+/// rebuild/fallback path in the provider, never a panic here.
+#[cfg(test)]
+fn adjacency_from_csr(index: CsrIndex) -> Adjacency {
+    if index.edge_count() == 0 {
+        Adjacency::default()
+    } else {
+        Adjacency {
+            inner: AdjacencyInner::Csr(Arc::new(index)),
         }
-        map.insert(
-            node as u64,
-            index.edge_ids[start..end]
-                .iter()
-                .copied()
-                .zip(index.neighbor_ids[start..end].iter().copied())
-                .collect(),
-        );
     }
-    Adjacency { map }
 }
 
-/// Merge a node's out and in CSR rows into the undirected view, interleaving
-/// ascending by `edge_id` with **out before in on ties** — the exact order
-/// scan-build produces (edge files are edge_id-ascending; each row pushes its
-/// src-keyed entry, then for a self-loop its dst-keyed entry).
-///
-/// Bounds safety: same `read_csr`-validated invariants as
-/// [`adjacency_from_csr`]; `row()` additionally guards `node` against the
-/// CSR's own `node_count`.
-fn merge_undirected(out: &CsrIndex, inbound: &CsrIndex) -> Adjacency {
-    let row = |index: &CsrIndex, node: u64| -> (usize, usize) {
-        if node >= index.node_count() {
-            return (0, 0);
-        }
-        let i = usize::try_from(node).expect("node id exceeds usize");
-        (
-            usize::try_from(index.offsets[i]).expect("CSR offset exceeds usize"),
-            usize::try_from(index.offsets[i + 1]).expect("CSR offset exceeds usize"),
-        )
-    };
-    let mut map: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
-    for node in 0..out.node_count().max(inbound.node_count()) {
-        let (mut o, o_end) = row(out, node);
-        let (mut i, i_end) = row(inbound, node);
-        if o == o_end && i == i_end {
-            continue;
-        }
-        let mut entries = Vec::with_capacity((o_end - o) + (i_end - i));
-        while o < o_end || i < i_end {
-            let take_out = i >= i_end || (o < o_end && out.edge_ids[o] <= inbound.edge_ids[i]);
-            if take_out {
-                entries.push((out.edge_ids[o], out.neighbor_ids[o]));
-                o += 1;
-            } else {
-                entries.push((inbound.edge_ids[i], inbound.neighbor_ids[i]));
-                i += 1;
-            }
-        }
-        map.insert(node, entries);
+/// Undirected CSR pair without materializing a merged hash map (#340).
+#[cfg(test)]
+fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
+    Adjacency {
+        inner: AdjacencyInner::Undirected {
+            out: Arc::new(AdjacencyInner::Csr(Arc::new(out))),
+            inbound: Arc::new(AdjacencyInner::Csr(Arc::new(inbound))),
+        },
     }
-    Adjacency { map }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,14 +999,14 @@ mod tests {
         // a has three outgoing entries: a→b, a→c, then the parallel a→b.
         assert_eq!(out.neighbors(a).len(), 3);
         // The self-loop is one Out entry under d...
-        assert_eq!(out.neighbors(d), &[(6, d)]);
+        assert_eq!(out.neighbors(d).to_vec(), vec![(6, d)]);
         // ...and two Undirected entries under d (src-keyed + dst-keyed), after
         // the two incoming diamond edges b→d, c→d.
         let undirected = provider.adjacency("KNOWS", Direction::Undirected).unwrap();
         assert_eq!(undirected.neighbors(d).len(), 4);
         let in_view = provider.adjacency("KNOWS", Direction::In).unwrap();
         // b's incoming: a→b and the parallel a→b.
-        assert_eq!(in_view.neighbors(b), &[(1, a), (5, a)]);
+        assert_eq!(in_view.neighbors(b).to_vec(), vec![(1, a), (5, a)]);
     }
 
     /// `KNOWS` and `OWNS` rows share `_exploratory.parquet`; the rel filter
@@ -738,7 +1027,11 @@ mod tests {
         let provider =
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
-        assert_eq!(view.neighbors(ids[0]), &[(1, ids[1])], "OWNS row excluded");
+        assert_eq!(
+            view.neighbors(ids[0]).to_vec(),
+            vec![(1, ids[1])],
+            "OWNS row excluded"
+        );
     }
 
     #[test]
@@ -758,8 +1051,8 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Exploratory);
         let view = provider.adjacency("*", Direction::Out).unwrap();
         assert_eq!(
-            view.neighbors(ids[0]),
-            &[(1, ids[1]), (2, ids[2])],
+            view.neighbors(ids[0]).to_vec(),
+            vec![(1, ids[1]), (2, ids[2])],
             "wildcard skips the rel filter"
         );
     }
@@ -824,8 +1117,15 @@ mod tests {
         let provider =
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
-        assert_eq!(view.neighbors(ids[1]), &[], "deleted id yields empty");
-        assert_eq!(view.neighbors(ids[2]), &[(3, ids[3])], "survivor intact");
+        assert!(
+            view.neighbors(ids[1]).is_empty(),
+            "deleted id yields empty"
+        );
+        assert_eq!(
+            view.neighbors(ids[2]).to_vec(),
+            vec![(3, ids[3])],
+            "survivor intact"
+        );
     }
 
     #[test]
@@ -835,7 +1135,7 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert!(view.is_empty());
-        assert_eq!(view.neighbors(1), &[]);
+        assert!(view.neighbors(1).is_empty());
     }
 
     /// Neighbor order is edge-file row order — BFS emission order depends on
@@ -860,10 +1160,58 @@ mod tests {
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
         assert_eq!(
-            view.neighbors(hub_id),
-            &[(1, spoke_ids[0]), (2, spoke_ids[1]), (3, spoke_ids[2])],
+            view.neighbors(hub_id).to_vec(),
+            vec![(1, spoke_ids[0]), (2, spoke_ids[1]), (3, spoke_ids[2])],
             "entries in edge-file row order"
         );
+    }
+
+    #[test]
+    fn persisted_csr_hit_does_not_expand_base_into_hash_map() {
+        let dir = TempDir::new().unwrap();
+        let _ids = write_diamond(dir.path());
+        graphforge_storage::adjacency::build_adjacency_index(dir.path(), TS).unwrap();
+        let provider =
+            PersistentAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
+        assert_eq!(
+            provider.status("KNOWS", Direction::Out),
+            AdjacencyStatus::Hit
+        );
+        let out = provider.adjacency("KNOWS", Direction::Out).unwrap();
+        assert_eq!(out.backing(), AdjacencyBacking::CsrNative);
+        assert_eq!(out.base_csr_entries_expanded(), 0);
+        assert_eq!(out.overlay_row_count(), 0);
+
+        let undirected = provider.adjacency("KNOWS", Direction::Undirected).unwrap();
+        assert_eq!(undirected.backing(), AdjacencyBacking::CsrUndirected);
+        assert_eq!(undirected.base_csr_entries_expanded(), 0);
+
+        let scanned = ScanBuildAdjacencyProvider::new(
+            dir.path().to_path_buf(),
+            OntologyMode::Strict,
+        )
+        .adjacency("KNOWS", Direction::Out)
+        .unwrap();
+        assert_eq!(out.as_ref(), scanned.as_ref(), "CSR-native matches scan oracle");
+        assert!(scanned.base_csr_entries_expanded() > 0);
+        assert_eq!(scanned.backing(), AdjacencyBacking::ScanHashMap);
+    }
+
+    #[test]
+    fn undirected_csr_merge_preserves_out_before_in_ties() {
+        let out = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![7],
+            neighbor_ids: vec![1],
+        };
+        let inbound = CsrIndex {
+            offsets: vec![0, 1],
+            edge_ids: vec![7],
+            neighbor_ids: vec![2],
+        };
+        let view = merge_undirected(out, inbound);
+        assert_eq!(view.neighbors(0).to_vec(), vec![(7, 1), (7, 2)]);
+        assert_eq!(view.base_csr_entries_expanded(), 0);
     }
 
     #[test]

@@ -91,14 +91,66 @@ struct LogicalProjectionEdge {
 }
 
 /// Algorithm graph with deterministic surrogate ordering and UUID round trips.
+///
+/// Neighbor storage is CSR-style (#340): one flat `AlgorithmEdge` vector plus
+/// per-node offset ranges. UUID identity keeps a compact by-id map and the
+/// reverse UUID map only where lookup requires them — not a second full-graph
+/// edge hash map.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AdjacencyGraph {
     directed: bool,
     node_ids: Vec<u64>,
     node_uuid_by_id: HashMap<u64, [u8; 16]>,
     node_id_by_uuid: HashMap<[u8; 16], u64>,
-    neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
+    /// Maps node surrogate → row index into [`Self::neighbor_offsets`].
+    neighbor_row: HashMap<u64, u32>,
+    /// CSR offsets over [`Self::neighbor_edges`], length `row_count + 1`.
+    neighbor_offsets: Vec<u32>,
+    /// Flat adjacency entries in CSR order.
+    neighbor_edges: Vec<AlgorithmEdge>,
     node_vectors: HashMap<u64, Vec<f64>>,
+}
+
+/// Build CSR neighbor arrays from `(node_id, edge)` pairs already sorted by
+/// `(node_id, edge_id, neighbor_id)`.
+fn neighbor_csr_from_sorted(
+    sorted: &[(u64, AlgorithmEdge)],
+) -> (HashMap<u64, u32>, Vec<u32>, Vec<AlgorithmEdge>) {
+    let mut neighbor_row = HashMap::new();
+    let mut neighbor_offsets = Vec::new();
+    let mut neighbor_edges = Vec::with_capacity(sorted.len());
+    neighbor_offsets.push(0);
+    let mut row = 0_u32;
+    let mut index = 0usize;
+    while index < sorted.len() {
+        let node_id = sorted[index].0;
+        neighbor_row.insert(node_id, row);
+        while index < sorted.len() && sorted[index].0 == node_id {
+            neighbor_edges.push(sorted[index].1);
+            index += 1;
+        }
+        neighbor_offsets.push(
+            u32::try_from(neighbor_edges.len()).expect("algorithm neighbor count fits u32"),
+        );
+        row = row.saturating_add(1);
+    }
+    (neighbor_row, neighbor_offsets, neighbor_edges)
+}
+
+fn neighbor_csr_from_map(
+    mut neighbors: HashMap<u64, Vec<AlgorithmEdge>>,
+) -> (HashMap<u64, u32>, Vec<u32>, Vec<AlgorithmEdge>) {
+    let mut sorted = Vec::new();
+    let mut keys = neighbors.keys().copied().collect::<Vec<_>>();
+    keys.sort_unstable();
+    for node_id in keys {
+        let mut entries = neighbors.remove(&node_id).unwrap_or_default();
+        entries.sort_by_key(|edge| (edge.edge_id, edge.neighbor_id));
+        for edge in entries {
+            sorted.push((node_id, edge));
+        }
+    }
+    neighbor_csr_from_sorted(&sorted)
 }
 
 impl AdjacencyGraph {
@@ -113,12 +165,15 @@ impl AdjacencyGraph {
             .iter()
             .map(|(node_id, uuid)| (*uuid, *node_id))
             .collect();
+        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
         Self {
             directed,
             node_ids,
             node_uuid_by_id,
             node_id_by_uuid,
-            neighbors,
+            neighbor_row,
+            neighbor_offsets,
+            neighbor_edges,
             node_vectors: HashMap::new(),
         }
     }
@@ -343,12 +398,15 @@ impl AdjacencyGraph {
         for entries in neighbors.values_mut() {
             entries.sort_by_key(|edge| (edge.edge_id, edge.neighbor_id));
         }
+        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
         Ok(Self {
             directed: projection.directed,
             node_ids,
             node_uuid_by_id,
             node_id_by_uuid,
-            neighbors,
+            neighbor_row,
+            neighbor_offsets,
+            neighbor_edges,
             node_vectors: HashMap::new(),
         })
     }
@@ -375,7 +433,18 @@ impl AdjacencyGraph {
     /// Adjacency entries for `node_id`, ordered by `(edge_id, neighbor_id)`.
     #[must_use]
     pub(crate) fn neighbors(&self, node_id: u64) -> &[AlgorithmEdge] {
-        self.neighbors.get(&node_id).map_or(&[], Vec::as_slice)
+        let Some(&row) = self.neighbor_row.get(&node_id) else {
+            return &[];
+        };
+        let row = usize::try_from(row).unwrap_or(usize::MAX);
+        if row + 1 >= self.neighbor_offsets.len() {
+            return &[];
+        }
+        let start = usize::try_from(self.neighbor_offsets[row]).unwrap_or(0);
+        let end = usize::try_from(self.neighbor_offsets[row + 1]).unwrap_or(start);
+        let end = end.min(self.neighbor_edges.len());
+        let start = start.min(end);
+        &self.neighbor_edges[start..end]
     }
 
     /// Resolve an internal node surrogate to its public UUID.
@@ -423,10 +492,7 @@ impl AdjacencyGraph {
 
     /// Number of direction-expanded adjacency entries.
     pub(crate) fn edge_entry_count(&self) -> u64 {
-        self.neighbors
-            .values()
-            .map(|entries| u64::try_from(entries.len()).unwrap_or(u64::MAX))
-            .fold(0_u64, u64::saturating_add)
+        u64::try_from(self.neighbor_edges.len()).unwrap_or(u64::MAX)
     }
 
     #[cfg(test)]
@@ -455,12 +521,15 @@ impl AdjacencyGraph {
                     .collect(),
             )])
         };
+        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
         Self {
             directed: false,
             node_ids,
             node_uuid_by_id,
             node_id_by_uuid,
-            neighbors,
+            neighbor_row,
+            neighbor_offsets,
+            neighbor_edges,
             node_vectors: HashMap::new(),
         }
     }
@@ -486,12 +555,15 @@ impl AdjacencyGraph {
                 weight: 1.0,
             });
         }
+        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
         Self {
             directed: false,
             node_ids,
             node_uuid_by_id,
             node_id_by_uuid,
-            neighbors,
+            neighbor_row,
+            neighbor_offsets,
+            neighbor_edges,
             node_vectors: HashMap::new(),
         }
     }
@@ -548,19 +620,22 @@ impl AdjacencyGraph {
                 neighbors.entry(target).or_default().push(edge(source));
             }
         }
+        let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(neighbors);
         Self {
             directed: false,
             node_ids,
             node_uuid_by_id,
             node_id_by_uuid,
-            neighbors,
+            neighbor_row,
+            neighbor_offsets,
+            neighbor_edges,
             node_vectors: HashMap::new(),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_edge_weights(mut self, weights: &[f64]) -> Self {
-        let mut edges = self.neighbors.values_mut().flatten().collect::<Vec<_>>();
+        let mut edges = self.neighbor_edges.iter_mut().collect::<Vec<_>>();
         edges.sort_unstable_by_key(|edge| edge.edge_id);
         assert_eq!(edges.len(), weights.len());
         for (edge, &weight) in edges.into_iter().zip(weights) {
@@ -585,7 +660,9 @@ pub(crate) fn export_node_selection(
         node_ids,
         node_uuid_by_id,
         node_id_by_uuid,
-        neighbors: HashMap::new(),
+        neighbor_row: HashMap::new(),
+        neighbor_offsets: vec![0],
+        neighbor_edges: Vec::new(),
         node_vectors: HashMap::new(),
     })
 }
@@ -610,13 +687,12 @@ pub(crate) fn export_adjacency(
     let (node_ids, node_uuid_by_id) = selected_nodes(dir, selection.label)?;
     let selected: HashSet<u64> = node_ids.iter().copied().collect();
 
+    // Bound projection work by the selected node set (#340): look up each
+    // selected node's CSR/map row instead of scanning the complete graph.
     let mut raw = Vec::new();
     let mut edge_ids = HashSet::new();
-    for (node_id, entries) in adjacency.rows() {
-        if !selected.contains(&node_id) {
-            continue;
-        }
-        for &(edge_id, neighbor_id) in entries {
+    for &node_id in &node_ids {
+        for (edge_id, neighbor_id) in adjacency.neighbors(node_id) {
             if selected.contains(&neighbor_id) {
                 raw.push((node_id, edge_id, neighbor_id));
                 edge_ids.insert(edge_id);
@@ -631,7 +707,7 @@ pub(crate) fn export_adjacency(
         None => HashMap::new(),
     };
 
-    let mut neighbors: HashMap<u64, Vec<AlgorithmEdge>> = HashMap::new();
+    let mut sorted = Vec::with_capacity(raw.len());
     for (node_id, edge_id, neighbor_id) in raw {
         let edge_uuid = edge_uuids.get(&edge_id).copied().ok_or_else(|| {
             GfError::Execution(format!("adjacency edge {edge_id} has no topology UUID"))
@@ -645,16 +721,18 @@ pub(crate) fn export_adjacency(
                 uuid_text(&edge_uuid)
             )));
         }
-        neighbors.entry(node_id).or_default().push(AlgorithmEdge {
-            edge_id,
-            edge_uuid,
-            neighbor_id,
-            weight,
-        });
+        sorted.push((
+            node_id,
+            AlgorithmEdge {
+                edge_id,
+                edge_uuid,
+                neighbor_id,
+                weight,
+            },
+        ));
     }
-    for entries in neighbors.values_mut() {
-        entries.sort_by_key(|edge| (edge.edge_id, edge.neighbor_id));
-    }
+    sorted.sort_by_key(|(node_id, edge)| (*node_id, edge.edge_id, edge.neighbor_id));
+    let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_sorted(&sorted);
     let node_id_by_uuid = node_uuid_by_id
         .iter()
         .map(|(&id, &uuid)| (uuid, id))
@@ -664,7 +742,9 @@ pub(crate) fn export_adjacency(
         node_ids,
         node_uuid_by_id,
         node_id_by_uuid,
-        neighbors,
+        neighbor_row,
+        neighbor_offsets,
+        neighbor_edges,
         node_vectors: HashMap::new(),
     })
 }
@@ -2151,28 +2231,35 @@ mod tests {
         let uuid0 = u128::from(10_u8).to_be_bytes();
         let uuid1 = u128::from(11_u8).to_be_bytes();
         let edge_uuid = u128::from(12_u8).to_be_bytes();
-        let base = || AdjacencyGraph {
-            directed: true,
-            node_ids: vec![0, 1],
-            node_uuid_by_id: HashMap::from([(0, uuid0), (1, uuid1)]),
-            node_id_by_uuid: HashMap::from([(uuid0, 0), (uuid1, 1)]),
-            neighbors: HashMap::from([(
-                0,
-                vec![AlgorithmEdge {
-                    edge_id: 0,
-                    neighbor_id: 1,
-                    edge_uuid,
-                    weight: 2.5,
-                }],
-            )]),
-            node_vectors: HashMap::new(),
+        let base = || {
+            let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(
+                HashMap::from([(
+                    0,
+                    vec![AlgorithmEdge {
+                        edge_id: 0,
+                        neighbor_id: 1,
+                        edge_uuid,
+                        weight: 2.5,
+                    }],
+                )]),
+            );
+            AdjacencyGraph {
+                directed: true,
+                node_ids: vec![0, 1],
+                node_uuid_by_id: HashMap::from([(0, uuid0), (1, uuid1)]),
+                node_id_by_uuid: HashMap::from([(uuid0, 0), (uuid1, 1)]),
+                neighbor_row,
+                neighbor_offsets,
+                neighbor_edges,
+                node_vectors: HashMap::new(),
+            }
         };
 
         let valid = base().projection_fingerprint().expect("valid projection");
         assert_ne!(valid.as_bytes(), &[0; 32]);
 
         let mut missing_target = base();
-        missing_target.neighbors.get_mut(&0).unwrap()[0].neighbor_id = 9;
+        missing_target.neighbor_edges[0].neighbor_id = 9;
         assert_eq!(
             missing_target
                 .projection_fingerprint()
@@ -2182,7 +2269,7 @@ mod tests {
         );
 
         let mut non_finite = base();
-        non_finite.neighbors.get_mut(&0).unwrap()[0].weight = f64::NAN;
+        non_finite.neighbor_edges[0].weight = f64::NAN;
         assert_eq!(
             non_finite.projection_fingerprint().unwrap_err().to_string(),
             "execution error: algorithm projection edge weight is not finite"
