@@ -90,7 +90,8 @@ The lower-level **~8M-node / ~128M-edge** local scale report remains
 baselines (#345). Public persistence itself is no longer blocked by the legacy
 1/2 GiB Arrow snapshot envelope: #338 publishes `graph`/`files` generations and
 proves reopen through `GraphForge::new` past 2 GiB validated bytes (see
-`build/file-backed-oversize-evidence.json` from the ignored oversize test).
+[`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json);
+regenerate into `build/` with the ignored oversize test).
 
 CI proves the path with a small multi-file fixture
 (`--test file_backed_graph_generation`) and does not download 8M/128M data.

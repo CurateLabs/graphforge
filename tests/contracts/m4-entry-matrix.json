@@ -215,8 +215,8 @@
       "classification": "public_facade_persistence_proof",
       "owner_issue": 338,
       "path": "crates/graphforge-api/tests/file_backed_graph_generation.rs::oversize_file_backed_generation_exceeds_legacy_snapshot_envelope",
-      "evidence_artifact": "build/file-backed-oversize-evidence.json",
-      "notes": "Deterministic sparse multi-file generation whose validated bytes exceed 2 GiB; published and reopened through the public GraphForge path without Arrow snapshot hydrate. CI keeps the small fixture only."
+      "evidence_artifact": "docs/development/file-backed-oversize-evidence.json",
+      "notes": "Deterministic sparse multi-file generation whose validated bytes exceed 2 GiB; published and reopened through the public GraphForge path without Arrow snapshot hydrate. CI keeps the small fixture only; regenerate via the ignored oversize test into build/."
     }
   ],
   "evidence_artifact": {

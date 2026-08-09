@@ -1,0 +1,40 @@
+{
+  "inventory": {
+    "file_count": 6,
+    "padding_byte_length": 2214592512,
+    "padding_relative_path": "padding/oversize.bin",
+    "total_byte_length": 2214600197
+  },
+  "issue": 338,
+  "legacy_snapshot_envelope_bytes": 2147483648,
+  "open": {
+    "api": "GraphForge::new",
+    "bytes_copied": 2214600197,
+    "bytes_validated": 2214600197,
+    "files_copied": 6,
+    "files_opened_in_place": 0,
+    "files_validated": 6,
+    "strategy": "PrivateMaterialize"
+  },
+  "publication": {
+    "generation_uuid": "019fe8b7-97a4-73a3-b3a8-f12f681e2cb4",
+    "path": "stage_project_generation_with_graph_tree + publish (same path as GraphForge)"
+  },
+  "query": {
+    "cypher": "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS from, b.name AS to",
+    "rows_produced": 1
+  },
+  "recorded_at_unix_secs": 1786316053,
+  "resources": {
+    "honest_limits": [
+      "Padding is sparse on supporting filesystems; validated/copied byte lengths are logical sizes.",
+      "Writable GraphForge::new materializes file-by-file (PrivateMaterialize); checkpoint/RO uses PinnedInPlace.",
+      "This proves public persistence beyond the 2 GiB snapshot envelope; full 8M/128M (~15 GiB) remains optional measured evidence under local resource stops."
+    ],
+    "peak_rss_bytes_after_query": 99725312,
+    "peak_rss_bytes_before_open": 98304000
+  },
+  "schema": "graphforge-file-backed-oversize-evidence/1",
+  "source_sha": "7a36f549abeb5a630a151aaf2383a8b2dbc693ae",
+  "strategy": "sparse_padding_beside_queryable_graph"
+}

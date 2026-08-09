@@ -124,9 +124,7 @@ fn portable_export_of_file_backed_generation_is_structured_unsupported() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().to_str().unwrap();
     let graph = GraphForge::new(Some(path)).unwrap();
-    graph
-        .execute("CREATE (:Person {name: 'Ada'})")
-        .unwrap();
+    graph.execute("CREATE (:Person {name: 'Ada'})").unwrap();
 
     let generation = resolve_project_generation(root.path()).unwrap();
     assert!(
@@ -355,10 +353,7 @@ fn oversize_file_backed_generation_exceeds_legacy_snapshot_envelope() {
 }
 
 fn create_sparse_file(path: &Path, logical_bytes: u64) -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     if logical_bytes == 0 {
         return Ok(());
     }

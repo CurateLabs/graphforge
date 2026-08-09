@@ -803,8 +803,7 @@ mod tests {
     #[test]
     fn mid_graph_tree_staging_failure_leaves_current_and_recovery_cleans() {
         const ENABLE_COOKIE: &str = "graphforge-internal-subprocess-v1";
-        const HELPER: &str =
-            "graph_files::tests::subprocess_mid_graph_tree_staging_writer";
+        const HELPER: &str = "graph_files::tests::subprocess_mid_graph_tree_staging_writer";
 
         let root = tempfile::tempdir().unwrap();
         crate::open_or_initialize_project(root.path()).unwrap();
@@ -948,8 +947,12 @@ mod tests {
         };
         let expected = request.generation_uuid;
         let crate::ProjectStageOutcome::Staged(staged) =
-            crate::stage_project_generation_with_graph_tree(container, &request, Some(source.path()))
-                .unwrap()
+            crate::stage_project_generation_with_graph_tree(
+                container,
+                &request,
+                Some(source.path()),
+            )
+            .unwrap()
         else {
             panic!("fresh graph/files fixture unexpectedly replayed");
         };

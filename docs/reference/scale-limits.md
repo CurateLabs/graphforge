@@ -91,7 +91,8 @@ instead); legacy snapshot generations remain portable.
 
 Public persistence past the legacy 2 GiB snapshot envelope is proven by the
 ignored oversize fixture in `file_backed_graph_generation` (sparse padding beside
-a queryable graph; evidence under `build/file-backed-oversize-evidence.json`).
+a queryable graph; checked-in evidence:
+[`file-backed-oversize-evidence.json`](../development/file-backed-oversize-evidence.json)).
 That is not a universal size ceiling and does not download 8M/128M data in CI.
 
 ```bash
