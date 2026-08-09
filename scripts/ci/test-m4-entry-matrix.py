@@ -6,8 +6,8 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
-import unittest
 from pathlib import Path
+import unittest
 
 SCRIPT = Path(__file__).with_name("m4-entry-matrix.py")
 SPEC = importlib.util.spec_from_file_location("m4_entry_matrix", SCRIPT)

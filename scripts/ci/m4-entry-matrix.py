@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
+import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -100,10 +100,7 @@ def contract_errors(path: Path = CONTRACT) -> list[str]:
     else:
         ids = {item.get("id") for item in workloads if isinstance(item, dict)}
         if ids != REQUIRED_WORKLOAD_IDS:
-            errors.append(
-                "workloads must exactly cover "
-                + ",".join(sorted(REQUIRED_WORKLOAD_IDS))
-            )
+            errors.append("workloads must exactly cover " + ",".join(sorted(REQUIRED_WORKLOAD_IDS)))
         for item in workloads:
             if not isinstance(item, dict):
                 continue
@@ -142,9 +139,7 @@ def contract_errors(path: Path = CONTRACT) -> list[str]:
             if item.get("id") == "lower-level-8m-128m":
                 found = True
                 if item.get("classification") != "discovery_not_public_facade_baseline":
-                    errors.append(
-                        "8M/128M evidence must be discovery_not_public_facade_baseline"
-                    )
+                    errors.append("8M/128M evidence must be discovery_not_public_facade_baseline")
                 if item.get("public_facade_owner_issue") != 338:
                     errors.append("8M/128M public_facade_owner_issue must be 338")
         if not found:
@@ -180,7 +175,8 @@ def evidence_errors(payload: dict[str, Any], contract: dict[str, Any] | None = N
         if status == "deferred" and runtime.get("owner_issue") != 337:
             errors.append("deferred runtime must cite owner_issue 337")
         if status != "deferred" and runtime.get("requested_workers") in {1, 4, 8, "automatic"}:
-            # Fabricating unsupported requested configs as supported/unavailable-without-owner is forbidden.
+            # Fabricating unsupported requested configs as supported /
+            # unavailable-without-owner is forbidden.
             if status == "supported":
                 errors.append("must not claim unsupported thread requests as supported")
     else:
@@ -243,19 +239,21 @@ def summarize() -> int:
             print(error, file=sys.stderr)
         return 1
     data = load()
-    print(json.dumps(
-        {
-            "schema": data["schema"],
-            "issue": data["issue"],
-            "current_runtime": data["current_runtime"]["id"],
-            "deferred": [item["id"] for item in data["deferred_runtime_configurations"]],
-            "workloads": [item["id"] for item in data["workloads"]],
-            "short_ci_fixture": data["matrices"]["short_ci"]["fixture"],
-            "parity_owner_issue": data["parity_owner_issue"],
-        },
-        indent=2,
-        sort_keys=True,
-    ))
+    print(
+        json.dumps(
+            {
+                "schema": data["schema"],
+                "issue": data["issue"],
+                "current_runtime": data["current_runtime"]["id"],
+                "deferred": [item["id"] for item in data["deferred_runtime_configurations"]],
+                "workloads": [item["id"] for item in data["workloads"]],
+                "short_ci_fixture": data["matrices"]["short_ci"]["fixture"],
+                "parity_owner_issue": data["parity_owner_issue"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
