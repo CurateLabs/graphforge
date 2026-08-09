@@ -506,12 +506,95 @@ pub fn read_manifest(project_dir: &Path) -> Result<Vec<AdjacencyManifestRow>, Gf
 }
 
 // ---------------------------------------------------------------------------
-// Index builder (#761)
+// Index builder (#761 / #336)
 // ---------------------------------------------------------------------------
 
 /// One edge occurrence during the index build: `(src_id, edge_id, dst_id)`.
 /// [`csr_from_entries`] re-keys per direction (`src` for `out`, `dst` for `in`).
 pub(crate) type BuildEntry = (u64, u64, u64);
+
+/// Default Parquet batch size for adjacency streaming reads.
+pub const DEFAULT_ADJACENCY_BATCH_SIZE: usize = 8_192;
+
+/// Default in-memory entry budget before spilling a sorted run.
+///
+/// ~1M triples ≈ 24 MiB of raw entry storage before direction-keyed flush
+/// copies. Peak working set remains a function of this budget (and the
+/// configured memory/spill caps), not total edge count.
+pub const DEFAULT_ADJACENCY_CHUNK_ROWS: usize = 1_048_576;
+
+/// Spill subdirectory name under the artifact adjacency directory when no
+/// explicit spill root is configured.
+pub const ADJACENCY_SPILL_DIR_NAME: &str = ".spill";
+
+const SPILL_RUN_MAGIC: &[u8; 8] = b"GFADJRUN";
+const SPILL_RUN_VERSION: u32 = 1;
+const BYTES_PER_KEYED_ENTRY: u64 = 24;
+
+/// Bounded build policy for streamed adjacency construction (#336).
+///
+/// Peak memory is governed by [`chunk_rows`](Self::chunk_rows),
+/// [`batch_size`](Self::batch_size), and optional
+/// [`memory_budget_bytes`](Self::memory_budget_bytes) — not by total edge
+/// count. Sorted runs spill under [`spill_dir`](Self::spill_dir) (or a
+/// project-local `.spill` root) and are removed on success, failure, or
+/// cancellation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdjacencyBuildOptions {
+    /// Maximum projected edge rows retained in memory per relation/union
+    /// accumulator before flushing a sorted spill run.
+    pub chunk_rows: usize,
+    /// Parquet `RecordBatch` size for the projected streaming reader.
+    pub batch_size: usize,
+    /// Optional absolute spill directory. When `None`, spill files live under
+    /// `indexes/adjacency/.spill/` inside the artifact project root.
+    pub spill_dir: Option<PathBuf>,
+    /// Optional upper bound on temporary spill bytes. Exceeding the cap fails
+    /// closed with [`ApiErrorCode::ResourceLimit`].
+    pub spill_max_bytes: Option<u64>,
+    /// Soft memory budget used to shrink [`chunk_rows`](Self::chunk_rows) when
+    /// set. Does not replace the hard spill-byte cap.
+    pub memory_budget_bytes: Option<u64>,
+}
+
+impl Default for AdjacencyBuildOptions {
+    fn default() -> Self {
+        Self {
+            chunk_rows: DEFAULT_ADJACENCY_CHUNK_ROWS,
+            batch_size: DEFAULT_ADJACENCY_BATCH_SIZE,
+            spill_dir: None,
+            spill_max_bytes: None,
+            memory_budget_bytes: None,
+        }
+    }
+}
+
+impl AdjacencyBuildOptions {
+    /// Resolve effective chunk/batch sizes after applying the optional memory
+    /// budget. Batch size and chunk rows are always at least 1.
+    #[must_use]
+    pub fn effective(&self) -> Self {
+        let mut out = self.clone();
+        out.batch_size = out.batch_size.max(1);
+        let mut chunk = out.chunk_rows.max(1);
+        if let Some(budget) = out.memory_budget_bytes.filter(|b| *b > 0) {
+            // Leave headroom for out+in keyed copies (~2×) plus CSR/merge state.
+            let entry_budget = budget / (BYTES_PER_KEYED_ENTRY * 4);
+            if entry_budget > 0 {
+                chunk = chunk.min(usize::try_from(entry_budget).unwrap_or(usize::MAX).max(1));
+            }
+        }
+        out.chunk_rows = chunk;
+        out
+    }
+}
+
+fn resource_limit(message: impl Into<String>) -> GfError {
+    GfError::Api {
+        code: graphforge_core::ApiErrorCode::ResourceLimit,
+        message: message.into(),
+    }
+}
 
 /// Build the full adjacency index for the project under `indexes/adjacency/`:
 /// one `{out, in}` CSR pair per relation type found in `topology/edges/`, plus
@@ -542,7 +625,8 @@ pub(crate) type BuildEntry = (u64, u64, u64);
 ///
 /// # Errors
 /// Returns [`GfError::Storage`] on any read, build, or write failure; the
-/// manifest is only written after every CSR file succeeded.
+/// manifest is only written after every CSR file succeeded. Resource exhaustion
+/// (spill cap) returns [`ApiErrorCode::ResourceLimit`].
 pub fn build_adjacency_index(
     project_dir: &Path,
     built_at_micros: i64,
@@ -556,7 +640,12 @@ pub fn build_adjacency_index_with_checkpoint(
     built_at_micros: i64,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<Vec<AdjacencyManifestRow>, GfError> {
-    build_adjacency_index_into(project_dir, project_dir, built_at_micros, &mut checkpoint)
+    build_adjacency_index_into(
+        project_dir,
+        project_dir,
+        built_at_micros,
+        &mut checkpoint,
+    )
 }
 
 /// Build from canonical topology in `source_project_dir` into a separate
@@ -567,20 +656,46 @@ pub fn build_adjacency_index_into(
     built_at_micros: i64,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<Vec<AdjacencyManifestRow>, GfError> {
+    build_adjacency_index_into_with_options(
+        source_project_dir,
+        artifact_project_dir,
+        built_at_micros,
+        &AdjacencyBuildOptions::default(),
+        &mut checkpoint,
+    )
+}
+
+/// Bounded / streaming variant of [`build_adjacency_index_into`].
+pub fn build_adjacency_index_into_with_options(
+    source_project_dir: &Path,
+    artifact_project_dir: &Path,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<Vec<AdjacencyManifestRow>, GfError> {
     checkpoint()?;
     // Generation BEFORE the scan — see the race note in the doc comment.
     let generation = crate::generation::read_topology_generation(source_project_dir)?;
-    let (groups, union_out) = collect_adjacency_groups(source_project_dir)?;
+    let options = options.effective();
 
     let adjacency = adjacency_dir(artifact_project_dir);
     std::fs::create_dir_all(&adjacency).map_err(storage_err)?;
 
-    let mut manifest = Vec::new();
-    {
-        let mut write_pair = |stem: &str, entries: &[BuildEntry]| -> Result<(), GfError> {
+    let spill_root = options
+        .spill_dir
+        .clone()
+        .unwrap_or_else(|| adjacency.join(ADJACENCY_SPILL_DIR_NAME));
+    let mut spill = SpillSession::create(&spill_root)?.with_max_bytes(options.spill_max_bytes);
+
+    let build_result = (|| {
+        let mut groups = stream_build_groups(source_project_dir, &options, &mut spill, &mut checkpoint)?;
+        checkpoint()?;
+
+        let mut manifest = Vec::new();
+        let mut write_pair = |stem: &str, group: &mut EntryGroup| -> Result<(), GfError> {
             for direction in [Direction::Out, Direction::In] {
                 checkpoint()?;
-                let csr = csr_from_entries(entries, direction);
+                let csr = group.finish_csr(direction, &mut spill, &mut checkpoint)?;
                 write_csr(&csr_path(artifact_project_dir, stem, direction), &csr)?;
                 manifest.push(AdjacencyManifestRow {
                     relation_type: stem.to_owned(),
@@ -593,35 +708,517 @@ pub fn build_adjacency_index_into(
             }
             Ok(())
         };
-        for (stem, entries) in &groups {
-            write_pair(stem, entries)?;
+
+        let mut union = groups
+            .remove(ALL_RELATIONS_STEM)
+            .unwrap_or_else(EntryGroup::default);
+        // Stable stem order for deterministic manifest row ordering.
+        let stems: Vec<String> = groups.keys().cloned().collect();
+        for stem in stems {
+            let mut group = groups.remove(&stem).expect("stem present");
+            write_pair(&stem, &mut group)?;
         }
-        write_pair(ALL_RELATIONS_STEM, &union_out)?;
+        write_pair(ALL_RELATIONS_STEM, &mut union)?;
+        checkpoint()?;
+
+        // Manifest LAST: a crash before this point leaves the manifest absent or
+        // old, so a torn build always reads as stale.
+        write_manifest(artifact_project_dir, &manifest)?;
+        checkpoint()?;
+
+        // Phase-1 compaction (#765): the rebuilt base subsumes every delta segment
+        // at or below the generation it was stamped with, so prune them. Segments
+        // written by a concurrent append DURING the build (generation > stamp)
+        // survive, so the new base + those is immediately fresh. Manifest first,
+        // prune after: a crash between leaves dead segments a later prune removes.
+        crate::adjacency_delta::prune_delta_segments(artifact_project_dir, generation);
+        Ok(manifest)
+    })();
+
+    match build_result {
+        Ok(manifest) => {
+            spill.cleanup();
+            Ok(manifest)
+        }
+        Err(error) => {
+            spill.cleanup();
+            Err(error)
+        }
     }
-    checkpoint()?;
+}
 
-    // Manifest LAST: a crash before this point leaves the manifest absent or
-    // old, so a torn build always reads as stale.
-    write_manifest(artifact_project_dir, &manifest)?;
-    checkpoint()?;
+/// RAII spill directory: always removed on drop / explicit cleanup so cancel
+/// and failure cannot leave temporary runs behind as a published artifact.
+struct SpillSession {
+    root: PathBuf,
+    bytes_written: u64,
+    max_bytes: Option<u64>,
+    run_counter: u64,
+    cleaned: bool,
+}
 
-    // Phase-1 compaction (#765): the rebuilt base subsumes every delta segment
-    // at or below the generation it was stamped with, so prune them. Segments
-    // written by a concurrent append DURING the build (generation > stamp)
-    // survive, so the new base + those is immediately fresh. Manifest first,
-    // prune after: a crash between leaves dead segments a later prune removes.
-    crate::adjacency_delta::prune_delta_segments(artifact_project_dir, generation);
-    Ok(manifest)
+impl SpillSession {
+    fn create(root: &Path) -> Result<Self, GfError> {
+        if root.exists() {
+            std::fs::remove_dir_all(root).map_err(storage_err)?;
+        }
+        std::fs::create_dir_all(root).map_err(storage_err)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            bytes_written: 0,
+            max_bytes: None,
+            run_counter: 0,
+            cleaned: false,
+        })
+    }
+
+    fn with_max_bytes(mut self, max_bytes: Option<u64>) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
+    fn next_run_path(&mut self, label: &str, direction: Direction) -> PathBuf {
+        let id = self.run_counter;
+        self.run_counter += 1;
+        self.root
+            .join(format!("{label}.{}.{id}.run", direction.as_str()))
+    }
+
+    fn account_write(&mut self, bytes: u64) -> Result<(), GfError> {
+        self.bytes_written = self.bytes_written.saturating_add(bytes);
+        if let Some(max) = self.max_bytes
+            && self.bytes_written > max
+        {
+            return Err(resource_limit(format!(
+                "adjacency build spill exceeded max_bytes ({max})"
+            )));
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        self.cleaned = true;
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Drop for SpillSession {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// Per-relation (or union) accumulator that flushes sorted direction-keyed
+/// runs when the chunk budget is reached.
+#[derive(Default)]
+struct EntryGroup {
+    buffer: Vec<BuildEntry>,
+    out_runs: Vec<PathBuf>,
+    in_runs: Vec<PathBuf>,
+    label: String,
+}
+
+impl EntryGroup {
+    fn with_label(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            ..Self::default()
+        }
+    }
+
+    fn push(
+        &mut self,
+        entry: BuildEntry,
+        chunk_rows: usize,
+        spill: &mut SpillSession,
+        checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        self.buffer.push(entry);
+        if self.buffer.len() >= chunk_rows {
+            self.flush(spill, checkpoint)?;
+        }
+        Ok(())
+    }
+
+    fn flush(
+        &mut self,
+        spill: &mut SpillSession,
+        checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<(), GfError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        checkpoint()?;
+        let label = if self.label.is_empty() {
+            "group"
+        } else {
+            self.label.as_str()
+        };
+        // Out: (src, edge, dst); In: (dst, edge, src).
+        let mut out_keyed: Vec<(u64, u64, u64)> = self
+            .buffer
+            .iter()
+            .map(|&(src, edge, dst)| (src, edge, dst))
+            .collect();
+        out_keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+        let out_path = spill.next_run_path(label, Direction::Out);
+        write_keyed_run(&out_path, &out_keyed, spill)?;
+        self.out_runs.push(out_path);
+
+        let mut in_keyed: Vec<(u64, u64, u64)> = self
+            .buffer
+            .iter()
+            .map(|&(src, edge, dst)| (dst, edge, src))
+            .collect();
+        in_keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+        let in_path = spill.next_run_path(label, Direction::In);
+        write_keyed_run(&in_path, &in_keyed, spill)?;
+        self.in_runs.push(in_path);
+
+        self.buffer.clear();
+        // Drop capacity so peak memory tracks the chunk budget across flushes.
+        self.buffer.shrink_to_fit();
+        Ok(())
+    }
+
+    fn finish_csr(
+        &mut self,
+        direction: Direction,
+        spill: &mut SpillSession,
+        checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    ) -> Result<CsrIndex, GfError> {
+        let runs = match direction {
+            Direction::Out => &self.out_runs,
+            Direction::In => &self.in_runs,
+        };
+        if runs.is_empty() {
+            // Fast path: never spilled — identical to the pre-#336 builder.
+            return Ok(csr_from_entries(&self.buffer, direction));
+        }
+        // Spill residual as a final run so merge sees only sorted runs.
+        if !self.buffer.is_empty() {
+            self.flush(spill, checkpoint)?;
+        }
+        let runs = match direction {
+            Direction::Out => &self.out_runs,
+            Direction::In => &self.in_runs,
+        };
+        checkpoint()?;
+        merge_keyed_runs_to_csr(runs, checkpoint)
+    }
+}
+
+fn write_keyed_run(
+    path: &Path,
+    entries: &[(u64, u64, u64)],
+    spill: &mut SpillSession,
+) -> Result<(), GfError> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path).map_err(storage_err)?;
+    let header = 8 + 4 + 8;
+    let body = entries.len() as u64 * BYTES_PER_KEYED_ENTRY;
+    spill.account_write(header + body)?;
+    file.write_all(SPILL_RUN_MAGIC).map_err(storage_err)?;
+    file.write_all(&SPILL_RUN_VERSION.to_le_bytes())
+        .map_err(storage_err)?;
+    file.write_all(&(entries.len() as u64).to_le_bytes())
+        .map_err(storage_err)?;
+    for &(key, edge, neighbor) in entries {
+        file.write_all(&key.to_le_bytes()).map_err(storage_err)?;
+        file.write_all(&edge.to_le_bytes()).map_err(storage_err)?;
+        file.write_all(&neighbor.to_le_bytes()).map_err(storage_err)?;
+    }
+    file.sync_all().map_err(storage_err)?;
+    Ok(())
+}
+
+struct RunCursor {
+    file: std::fs::File,
+    remaining: u64,
+    current: Option<(u64, u64, u64)>,
+}
+
+impl RunCursor {
+    fn open(path: &Path) -> Result<Self, GfError> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).map_err(storage_err)?;
+        let mut magic = [0u8; 8];
+        file.read_exact(&mut magic).map_err(storage_err)?;
+        if &magic != SPILL_RUN_MAGIC {
+            return Err(GfError::Storage(format!(
+                "adjacency spill run {} has invalid magic",
+                path.display()
+            )));
+        }
+        let mut version = [0u8; 4];
+        file.read_exact(&mut version).map_err(storage_err)?;
+        if u32::from_le_bytes(version) != SPILL_RUN_VERSION {
+            return Err(GfError::Storage(format!(
+                "adjacency spill run {} has unsupported version",
+                path.display()
+            )));
+        }
+        let mut count = [0u8; 8];
+        file.read_exact(&mut count).map_err(storage_err)?;
+        let mut cursor = Self {
+            file,
+            remaining: u64::from_le_bytes(count),
+            current: None,
+        };
+        cursor.pull()?;
+        Ok(cursor)
+    }
+
+    fn pull(&mut self) -> Result<(), GfError> {
+        use std::io::Read;
+        if self.remaining == 0 {
+            self.current = None;
+            return Ok(());
+        }
+        let mut buf = [0u8; 24];
+        self.file.read_exact(&mut buf).map_err(storage_err)?;
+        let key = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let edge = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let neighbor = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        self.remaining -= 1;
+        self.current = Some((key, edge, neighbor));
+        Ok(())
+    }
+}
+
+fn merge_keyed_runs_to_csr(
+    runs: &[PathBuf],
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<CsrIndex, GfError> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    if runs.is_empty() {
+        return Ok(CsrIndex {
+            offsets: vec![0],
+            edge_ids: Vec::new(),
+            neighbor_ids: Vec::new(),
+        });
+    }
+
+    let mut cursors: Vec<RunCursor> = runs
+        .iter()
+        .map(|p| RunCursor::open(p))
+        .collect::<Result<_, _>>()?;
+    // Min-heap by (key, edge, neighbor, cursor_index).
+    let mut heap: BinaryHeap<Reverse<(u64, u64, u64, usize)>> = BinaryHeap::new();
+    for (idx, cursor) in cursors.iter().enumerate() {
+        if let Some((key, edge, neighbor)) = cursor.current {
+            heap.push(Reverse((key, edge, neighbor, idx)));
+        }
+    }
+
+    let mut csr = CsrIndex {
+        offsets: vec![0],
+        edge_ids: Vec::new(),
+        neighbor_ids: Vec::new(),
+    };
+    let mut current_node: Option<u64> = None;
+    let mut seen = 0u64;
+    while let Some(Reverse((key, edge, neighbor, idx))) = heap.pop() {
+        if seen % 65_536 == 0 {
+            checkpoint()?;
+        }
+        seen += 1;
+
+        match current_node {
+            None => {
+                for _ in 0..key {
+                    csr.offsets.push(csr.edge_count());
+                }
+                current_node = Some(key);
+            }
+            Some(node) if key > node => {
+                // Close `node`, then emit empty rows for (node+1)..key.
+                csr.offsets.push(csr.edge_count());
+                let mut fill = node + 1;
+                while fill < key {
+                    csr.offsets.push(csr.edge_count());
+                    fill += 1;
+                }
+                current_node = Some(key);
+            }
+            Some(node) if key == node => {}
+            Some(node) => {
+                return Err(GfError::Storage(format!(
+                    "adjacency spill merge produced non-sorted keys ({node} then {key})"
+                )));
+            }
+        }
+
+        csr.edge_ids.push(edge);
+        csr.neighbor_ids.push(neighbor);
+
+        cursors[idx].pull()?;
+        if let Some((k, e, n)) = cursors[idx].current {
+            heap.push(Reverse((k, e, n, idx)));
+        }
+    }
+    if current_node.is_some() {
+        csr.offsets.push(csr.edge_count());
+    }
+    Ok(csr)
+}
+
+fn stream_build_groups(
+    project_dir: &Path,
+    options: &AdjacencyBuildOptions,
+    spill: &mut SpillSession,
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<std::collections::BTreeMap<String, EntryGroup>, GfError> {
+    spill.max_bytes = options.spill_max_bytes;
+    let mut groups: std::collections::BTreeMap<String, EntryGroup> =
+        std::collections::BTreeMap::new();
+    groups.insert(
+        ALL_RELATIONS_STEM.to_owned(),
+        EntryGroup::with_label(ALL_RELATIONS_STEM),
+    );
+
+    for_each_adjacency_edge_file(project_dir, options.batch_size, &mut |stem, exploratory, batch| {
+        checkpoint()?;
+        let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
+        let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
+        let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
+        let rel_names = if exploratory {
+            Some(string_column(
+                named_column(batch, "rel_type_name")?,
+                "rel_type_name",
+            )?)
+        } else {
+            None
+        };
+        for i in 0..batch.num_rows() {
+            let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
+            groups
+                .get_mut(ALL_RELATIONS_STEM)
+                .expect("union group")
+                .push(entry, options.chunk_rows, spill, checkpoint)?;
+            let rel = rel_names.map_or(stem, |names| names.value(i));
+            if usable_stem(rel) {
+                if !groups.contains_key(rel) {
+                    groups.insert(rel.to_owned(), EntryGroup::with_label(rel));
+                }
+                groups
+                    .get_mut(rel)
+                    .expect("rel group")
+                    .push(entry, options.chunk_rows, spill, checkpoint)?;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(groups)
+}
+
+/// Stream projected adjacency edge batches for every file under
+/// `topology/edges/`. UUID / FixedSizeBinary columns are never decoded.
+///
+/// Shared by the builder, validator, and inspector so none of them concatenate
+/// a full edge file into one Arrow record batch (#336).
+fn for_each_adjacency_edge_file(
+    project_dir: &Path,
+    batch_size: usize,
+    on_batch: &mut dyn FnMut(&str, bool, &RecordBatch) -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    for path in crate::mutator::parquet_files_in(project_dir, "topology/edges")? {
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        // An unreadable edge file must FAIL the build, not be skipped: a
+        // manifest written without it would stamp the current generation and
+        // make an index missing a relation's edges look fresh.
+        let _schema = crate::catalog::discover_parquet_schema(&path).ok_or_else(|| {
+            GfError::Storage(format!(
+                "adjacency build: cannot read parquet schema for {}",
+                path.display()
+            ))
+        })?;
+        let exploratory = stem == "_exploratory";
+        let columns: &[&str] = if exploratory {
+            &["edge_id", "src_id", "dst_id", "rel_type_name"]
+        } else {
+            &["edge_id", "src_id", "dst_id"]
+        };
+        stream_projected_parquet_batches(&path, columns, batch_size, &mut |batch| {
+            on_batch(&stem, exploratory, &batch)
+        })?;
+    }
+    Ok(())
+}
+
+/// Read `path` as projected Parquet batches without concatenating row groups.
+///
+/// Uses `with_batch_size` and a [`ProjectionMask`] so UUID FixedSizeBinary
+/// columns are dropped at the reader when `column_names` names only id fields.
+pub(crate) fn stream_projected_parquet_batches(
+    path: &Path,
+    column_names: &[&str],
+    batch_size: usize,
+    on_batch: &mut dyn FnMut(RecordBatch) -> Result<(), GfError>,
+) -> Result<usize, GfError> {
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    if !path.exists() {
+        return Ok(0);
+    }
+    let file = File::open(path).map_err(storage_err)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(storage_err)?;
+    let mask = ProjectionMask::columns(builder.parquet_schema(), column_names.iter().copied());
+    let batch_size = batch_size.max(1);
+    let reader = builder
+        .with_projection(mask)
+        .with_batch_size(batch_size)
+        .build()
+        .map_err(storage_err)?;
+    let mut batches = 0usize;
+    for batch in reader {
+        let batch = batch.map_err(storage_err)?;
+        // Defense in depth: projected batches must not carry FixedSizeBinary
+        // UUID columns that would recreate the Arrow concat ceiling.
+        for field in batch.schema().fields() {
+            if matches!(field.data_type(), DataType::FixedSizeBinary(_)) {
+                return Err(GfError::Storage(format!(
+                    "adjacency stream: projected batch unexpectedly contains FixedSizeBinary column {}",
+                    field.name()
+                )));
+            }
+        }
+        on_batch(batch)?;
+        batches += 1;
+    }
+    Ok(batches)
 }
 
 /// Scan `topology/edges/` and group every edge occurrence by relation type:
 /// per-relation entries (stems unusable as file names are skipped, see
-/// [`build_adjacency_index`]) plus the full union. Shared by the builder and
-/// the validator so "what the index SHOULD contain" has exactly one
-/// definition.
+/// [`build_adjacency_index`]) plus the full union. Shared by the validator and
+/// inspector. Uses the projected streaming reader so validation/inspection
+/// cannot hit the full-file UUID concat ceiling (#336).
 #[allow(clippy::type_complexity)]
 fn collect_adjacency_groups(
     project_dir: &Path,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, Vec<BuildEntry>>,
+        Vec<BuildEntry>,
+    ),
+    GfError,
+> {
+    collect_adjacency_groups_with_batch_size(project_dir, DEFAULT_ADJACENCY_BATCH_SIZE)
+}
+
+#[allow(clippy::type_complexity)]
+fn collect_adjacency_groups_with_batch_size(
+    project_dir: &Path,
+    batch_size: usize,
 ) -> Result<
     (
         std::collections::BTreeMap<String, Vec<BuildEntry>>,
@@ -633,46 +1230,30 @@ fn collect_adjacency_groups(
 
     let mut groups: BTreeMap<String, Vec<BuildEntry>> = BTreeMap::new();
     let mut union_out: Vec<BuildEntry> = Vec::new();
-    for path in crate::mutator::parquet_files_in(project_dir, "topology/edges")? {
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
-            continue;
+    for_each_adjacency_edge_file(project_dir, batch_size, &mut |stem, exploratory, batch| {
+        let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
+        let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
+        let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
+        let rel_names = if exploratory {
+            Some(string_column(
+                named_column(batch, "rel_type_name")?,
+                "rel_type_name",
+            )?)
+        } else {
+            None
         };
-        // An unreadable edge file must FAIL the build, not be skipped: a
-        // manifest written without it would stamp the current generation and
-        // make an index missing a relation's edges look fresh.
-        let schema = crate::catalog::discover_parquet_schema(&path).ok_or_else(|| {
-            GfError::Storage(format!(
-                "adjacency build: cannot read parquet schema for {}",
-                path.display()
-            ))
-        })?;
-        let batches = crate::catalog::read_parquet_or_empty(&path, schema).map_err(storage_err)?;
-        let exploratory = stem == "_exploratory";
-        for batch in &batches {
-            let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
-            let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
-            let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
-            let rel_names = if exploratory {
-                Some(string_column(
-                    named_column(batch, "rel_type_name")?,
-                    "rel_type_name",
-                )?)
-            } else {
-                None
-            };
-            for i in 0..batch.num_rows() {
-                let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
-                union_out.push(entry);
-                let rel = rel_names.map_or(stem.as_str(), |names| names.value(i));
-                if usable_stem(rel) {
-                    groups.entry(rel.to_owned()).or_default().push(entry);
-                }
+        for i in 0..batch.num_rows() {
+            let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
+            union_out.push(entry);
+            let rel = rel_names.map_or(stem, |names| names.value(i));
+            if usable_stem(rel) {
+                groups.entry(rel.to_owned()).or_default().push(entry);
             }
         }
-    }
+        Ok(())
+    })?;
     Ok((groups, union_out))
 }
-
 // ---------------------------------------------------------------------------
 // Index validation (#766)
 // ---------------------------------------------------------------------------
@@ -2046,5 +2627,343 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
         assert!(read_csr(&path).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Streaming / spill build (#336)
+    // -----------------------------------------------------------------------
+
+    fn write_multi_row_group_knows(dir: &Path, edges: &[(u64, u64, u64)]) {
+        use parquet::arrow::ArrowWriter;
+        use parquet::file::properties::WriterProperties;
+
+        // Bootstrap project layout + generation via the writer, then replace the
+        // typed edge file with a multi-row-group Parquet that still carries UUID
+        // FixedSizeBinary columns (the concat hazard #336 removes).
+        let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, BUILD_TS).unwrap();
+        let max_node = edges
+            .iter()
+            .map(|&(s, _, d)| s.max(d))
+            .max()
+            .unwrap_or(0);
+        let mut node_uuids = Vec::new();
+        for _ in 0..=max_node {
+            node_uuids.push(new_v7());
+            w.create_node(*node_uuids.last().unwrap(), TypeId(0))
+                .unwrap();
+        }
+        // At least one edge so flush creates topology/edges/.
+        w.create_edge(
+            new_v7(),
+            "KNOWS",
+            &node_uuids[0],
+            &node_uuids[usize::try_from(max_node.min(1)).unwrap()],
+        )
+        .unwrap();
+        w.flush().unwrap();
+
+        let edges_path = dir.join("topology/edges/KNOWS.parquet");
+        let schema = crate::schemas::TYPED_EDGE_SCHEMA.clone();
+        let n = edges.len();
+        let edge_uuid = arrow::array::FixedSizeBinaryArray::try_from_iter((0..n).map(|i| {
+            let mut bytes = [0u8; 16];
+            bytes[12..].copy_from_slice(&(i as u32).to_be_bytes());
+            bytes
+        }))
+        .unwrap();
+        let src_uuid =
+            arrow::array::FixedSizeBinaryArray::try_from_iter((0..n).map(|_| [0u8; 16])).unwrap();
+        let dst_uuid =
+            arrow::array::FixedSizeBinaryArray::try_from_iter((0..n).map(|_| [1u8; 16])).unwrap();
+        let edge_id = UInt64Array::from(edges.iter().map(|e| e.1).collect::<Vec<_>>());
+        let src_id = UInt64Array::from(edges.iter().map(|e| e.0).collect::<Vec<_>>());
+        let dst_id = UInt64Array::from(edges.iter().map(|e| e.2).collect::<Vec<_>>());
+        let created = TimestampMicrosecondArray::from(vec![BUILD_TS; n]);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(edge_uuid),
+                Arc::new(src_uuid),
+                Arc::new(dst_uuid),
+                Arc::new(edge_id),
+                Arc::new(src_id),
+                Arc::new(dst_id),
+                Arc::new(created),
+            ],
+        )
+        .unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .build();
+        let file = std::fs::File::create(&edges_path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn streaming_reader_emits_multiple_batches_without_uuid_columns() {
+        let dir = TempDir::new().unwrap();
+        // 5 edges → 5 row groups with max_row_group_row_count=1.
+        let edges = [(0, 1, 1), (0, 2, 2), (1, 3, 2), (2, 4, 3), (3, 5, 0)];
+        write_multi_row_group_knows(dir.path(), &edges);
+        let path = dir.path().join("topology/edges/KNOWS.parquet");
+
+        let mut batches = 0usize;
+        let mut rows = 0usize;
+        let count = stream_projected_parquet_batches(
+            &path,
+            &["edge_id", "src_id", "dst_id"],
+            /* batch_size */ 1,
+            &mut |batch| {
+                batches += 1;
+                rows += batch.num_rows();
+                for field in batch.schema().fields() {
+                    assert!(
+                        !matches!(field.data_type(), DataType::FixedSizeBinary(_)),
+                        "UUID column {} must not be projected",
+                        field.name()
+                    );
+                }
+                assert!(batch.column_by_name("edge_uuid").is_none());
+                assert!(batch.column_by_name("src_uuid").is_none());
+                assert!(batch.column_by_name("dst_uuid").is_none());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(count, batches);
+        assert!(batches >= 5, "expected one batch per tiny row-group, got {batches}");
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn tiny_chunk_rows_spill_build_matches_csr_from_entries() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        let (groups, union) = collect_adjacency_groups(dir.path()).unwrap();
+        let expected_knows_out = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::Out);
+        let expected_knows_in = csr_from_entries(groups.get("KNOWS").unwrap(), Direction::In);
+        let expected_all_out = csr_from_entries(&union, Direction::Out);
+        let expected_all_in = csr_from_entries(&union, Direction::In);
+
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 1, // force a spill run per edge
+            batch_size: 1,
+            spill_dir: None,
+            spill_max_bytes: None,
+            memory_budget_bytes: None,
+        };
+        build_adjacency_index_into_with_options(
+            dir.path(),
+            dir.path(),
+            BUILD_TS,
+            &options,
+            &mut || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_csr(&csr_path(dir.path(), "KNOWS", Direction::Out)).unwrap(),
+            expected_knows_out
+        );
+        assert_eq!(
+            read_csr(&csr_path(dir.path(), "KNOWS", Direction::In)).unwrap(),
+            expected_knows_in
+        );
+        assert_eq!(
+            read_csr(&csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out)).unwrap(),
+            expected_all_out
+        );
+        assert_eq!(
+            read_csr(&csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::In)).unwrap(),
+            expected_all_in
+        );
+        // Spill root cleaned after success.
+        assert!(
+            !adjacency_dir(dir.path())
+                .join(ADJACENCY_SPILL_DIR_NAME)
+                .exists()
+        );
+        assert!(validate_adjacency_index(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_spill_build_cleans_spill_and_leaves_prior_index() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        build_adjacency_index(dir.path(), BUILD_TS).unwrap();
+        let prior_manifest = std::fs::read(manifest_path(dir.path())).unwrap();
+        let stage = TempDir::new_in(dir.path().parent().unwrap()).unwrap();
+        let spill = adjacency_dir(stage.path()).join(ADJACENCY_SPILL_DIR_NAME);
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 1,
+            batch_size: 1,
+            spill_dir: Some(spill.clone()),
+            spill_max_bytes: None,
+            memory_budget_bytes: None,
+        };
+        let mut checkpoints = 0usize;
+        let err = build_adjacency_index_into_with_options(
+            dir.path(),
+            stage.path(),
+            BUILD_TS + 1,
+            &options,
+            &mut || {
+                checkpoints += 1;
+                if checkpoints > 3 {
+                    return Err(GfError::Api {
+                        code: graphforge_core::ApiErrorCode::Cancelled,
+                        message: "test cancel".into(),
+                    });
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "GF_CANCELLED");
+        assert!(!spill.exists(), "spill must be cleaned on cancel");
+        assert!(!manifest_path(stage.path()).exists());
+        assert_eq!(
+            std::fs::read(manifest_path(dir.path())).unwrap(),
+            prior_manifest,
+            "reader-visible index unchanged"
+        );
+        assert_eq!(
+            inspect_adjacency_index(dir.path()).unwrap().state,
+            AdjacencyFreshnessState::Current
+        );
+    }
+
+    #[test]
+    fn spill_max_bytes_fails_closed_without_publishing_manifest() {
+        let dir = TempDir::new().unwrap();
+        write_diamond(dir.path());
+        let stage = TempDir::new_in(dir.path().parent().unwrap()).unwrap();
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 1,
+            batch_size: 1,
+            spill_dir: None,
+            spill_max_bytes: Some(1), // impossible for any real run file
+            memory_budget_bytes: None,
+        };
+        let err = build_adjacency_index_into_with_options(
+            dir.path(),
+            stage.path(),
+            BUILD_TS,
+            &options,
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "GF_RESOURCE_LIMIT");
+        assert!(!manifest_path(stage.path()).exists());
+        assert!(
+            !adjacency_dir(stage.path())
+                .join(ADJACENCY_SPILL_DIR_NAME)
+                .exists()
+        );
+    }
+
+    /// Deterministic seam: projected streaming never materializes a single
+    /// FixedSizeBinary(16) buffer covering every edge. CI uses a tiny fixture;
+    /// the ignored companion below documents the >134M boundary simulation.
+    #[test]
+    fn arrow_uuid_concat_boundary_is_avoided_by_projection() {
+        let dir = TempDir::new().unwrap();
+        let edges: Vec<(u64, u64, u64)> = (0..64).map(|i| (i % 8, i + 1, (i + 1) % 8)).collect();
+        write_multi_row_group_knows(dir.path(), &edges);
+        let path = dir.path().join("topology/edges/KNOWS.parquet");
+
+        // Full-schema eager path (what the old builder did) would concat UUID
+        // columns to `edges.len()` values. The streaming path must not.
+        let full = crate::catalog::read_parquet_or_empty(
+            &path,
+            crate::schemas::TYPED_EDGE_SCHEMA.clone(),
+        )
+        .unwrap();
+        assert_eq!(full.len(), 1, "legacy helper still concats to one batch");
+        let uuid = full[0]
+            .column_by_name("edge_uuid")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .unwrap();
+        assert_eq!(uuid.len(), edges.len());
+
+        let mut projected_rows = 0usize;
+        stream_projected_parquet_batches(
+            &path,
+            &["edge_id", "src_id", "dst_id"],
+            8,
+            &mut |batch| {
+                projected_rows += batch.num_rows();
+                assert!(batch.column_by_name("edge_uuid").is_none());
+                // Each projected batch stays well below the Arrow 2GiB UUID
+                // buffer ceiling (134,217,728 FixedSizeBinary(16) values).
+                assert!(batch.num_rows() <= 8);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(projected_rows, edges.len());
+
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 4,
+            batch_size: 8,
+            ..AdjacencyBuildOptions::default()
+        };
+        build_adjacency_index_into_with_options(
+            dir.path(),
+            dir.path(),
+            BUILD_TS,
+            &options,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let expected = csr_from_entries(
+            &edges
+                .iter()
+                .map(|&(s, e, d)| (s, e, d))
+                .collect::<Vec<_>>(),
+            Direction::Out,
+        );
+        assert_eq!(
+            read_csr(&csr_path(dir.path(), "KNOWS", Direction::Out)).unwrap(),
+            expected
+        );
+    }
+
+    /// Optional large-boundary simulation: tiny flush threshold stands in for
+    /// the 134,217,728 FixedSizeBinary concat ceiling without allocating it.
+    #[test]
+    #[ignore = "manual/scale: exercises many spill runs; run explicitly for #336 evidence"]
+    fn ignored_arrow_boundary_simulation_via_tiny_flush_threshold() {
+        let dir = TempDir::new().unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Strict, BUILD_TS).unwrap();
+        let nodes: Vec<_> = (0..256).map(|_| new_v7()).collect();
+        for u in &nodes {
+            w.create_node(*u, TypeId(0)).unwrap();
+        }
+        for i in 0..4_096 {
+            let src = &nodes[i % nodes.len()];
+            let dst = &nodes[(i * 7) % nodes.len()];
+            w.create_edge(new_v7(), "KNOWS", src, dst).unwrap();
+        }
+        w.flush().unwrap();
+        let options = AdjacencyBuildOptions {
+            chunk_rows: 17, // awkward prime to stress merge
+            batch_size: 13,
+            spill_max_bytes: Some(64 * 1024 * 1024),
+            ..AdjacencyBuildOptions::default()
+        };
+        build_adjacency_index_into_with_options(
+            dir.path(),
+            dir.path(),
+            BUILD_TS,
+            &options,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert!(validate_adjacency_index(dir.path()).unwrap().is_empty());
     }
 }

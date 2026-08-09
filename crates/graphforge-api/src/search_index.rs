@@ -249,11 +249,17 @@ impl GraphForge {
             .prefix(".graphforge-adjacency-stage.")
             .tempdir_in(workspace_parent)
             .map_err(|error| GfError::Storage(format!("cannot stage adjacency: {error}")))?;
-        graphforge_storage::adjacency::build_adjacency_index_into(
+        // Prefer the instance resource policy (#337) for batch/memory/spill
+        // knobs; always keep spill under the private stage when the policy does
+        // not enable an absolute spill directory so cancel/failure cleanup is
+        // scoped to the unpublished artifact (#336).
+        let build_options = self.adjacency_build_options(staged.path());
+        graphforge_storage::adjacency::build_adjacency_index_into_with_options(
             &self.dir,
             staged.path(),
             transaction_time_micros(),
-            || token.checkpoint(),
+            &build_options,
+            &mut || token.checkpoint(),
         )?;
         let issues = graphforge_storage::adjacency::validate_adjacency_index_against(
             &self.dir,
@@ -335,6 +341,33 @@ impl GraphForge {
         drop(adjacency_visibility);
         drop(visibility);
         self.inspect_adjacency()
+    }
+
+    /// Map the instance [`NormalizedResourcePolicy`](#337) onto adjacency build
+    /// options. Spill prefers the policy directory when enabled; otherwise the
+    /// unpublished stage keeps a project-local `.spill` root that is removed
+    /// with the stage on success, failure, or cancellation.
+    fn adjacency_build_options(
+        &self,
+        staged_project_dir: &std::path::Path,
+    ) -> graphforge_storage::adjacency::AdjacencyBuildOptions {
+        let policy = &self.resource_policy;
+        let spill_dir = if policy.spill_enabled {
+            policy.spill_directory.clone()
+        } else {
+            Some(
+                graphforge_storage::adjacency::adjacency_dir(staged_project_dir)
+                    .join(graphforge_storage::adjacency::ADJACENCY_SPILL_DIR_NAME),
+            )
+        };
+        graphforge_storage::adjacency::AdjacencyBuildOptions {
+            chunk_rows: graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS,
+            batch_size: policy.batch_size.max(1),
+            spill_dir,
+            spill_max_bytes: policy.spill_max_bytes,
+            memory_budget_bytes: Some(policy.memory_budget_bytes),
+        }
+        .effective()
     }
 
     /// Inspect the derived adjacency artifact without mutating it.
