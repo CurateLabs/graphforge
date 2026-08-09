@@ -103,9 +103,7 @@ class M4EntryMatrixTests(unittest.TestCase):
             ],
         }
         errors = GATE.evidence_errors(payload, contract)
-        self.assertTrue(
-            any("unavailable configs must not claim executed" in e for e in errors)
-        )
+        self.assertTrue(any("unavailable configs must not claim executed" in e for e in errors))
 
         payload["deferred_configurations"][0]["executed"] = False
         payload["runtime_configuration"] = {
