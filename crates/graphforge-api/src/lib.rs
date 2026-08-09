@@ -642,6 +642,7 @@ impl GraphForge {
             spill_enabled: self.resource_policy.spill_enabled,
             spill_directory: self.resource_policy.spill_directory.clone(),
             spill_max_bytes: self.resource_policy.spill_max_bytes,
+            io_concurrency: self.resource_policy.io_concurrency,
         }
     }
 

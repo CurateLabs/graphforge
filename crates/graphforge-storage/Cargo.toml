@@ -23,6 +23,7 @@ atomicwrites = "0.4.4"
 datafusion = { workspace = true }
 datafusion-catalog = "54"
 fs4 = "1.1"
+futures = { workspace = true }
 parquet = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

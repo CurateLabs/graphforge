@@ -234,7 +234,6 @@
     ]
   },
   "known_limitations": [
-    "Eager Parquet materialization into single-partition MemTable remains observable.",
     "CSR-to-hash-map expansion remains on analyst/traversal paths (#340).",
     "Algorithm kernels remain serial (#342-#344).",
     "Portable interchange does not yet encode file-backed graph/files trees (structured GF_UNSUPPORTED_PROJECT_FORMAT); copy the project directory instead (#338).",

@@ -13,10 +13,14 @@
 //!
 //! # Scan implementation
 //!
-//! Scans are implemented via DataFusion's [`MemTable`]: the Parquet file is read
-//! into memory at query time and wrapped in a `MemTable` which handles projection
-//! and filter application.  This is correct and simple for M12; lower-level
-//! pushdown can be added in a later milestone.
+//! Query-facing scans build a streaming [`GraphForgeParquetExec`](crate::parquet_scan::GraphForgeParquetExec)
+//! during `TableProvider::scan` without reading or concatenating Parquet payloads
+//! (#339). Decode happens in `ExecutionPlan::execute`, emitting bounded batches
+//! sized from the session batch size. Unsupported predicates stay DataFusion-owned
+//! (default filter pushdown is unsupported / non-exact).
+//!
+//! Direct readers (`read_edges`, `read_nodes`, …) used by ExpandExec and writers
+//! still eagerly materialize; they are outside the query-provider scan path.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -29,7 +33,7 @@ use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
-use datafusion::datasource::{MemTable, TableProvider, TableType};
+use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::Expr;
@@ -40,6 +44,7 @@ use graphforge_core::OntologyMode;
 use graphforge_ir::RuntimeCatalog;
 use graphforge_ontology::OntologyHandle;
 
+use crate::parquet_scan::{ParquetFragment, scan_fragments};
 use crate::schemas::{
     EXPLORATORY_EDGE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, property_schema,
 };
@@ -315,7 +320,10 @@ fn read_edges_union(
 /// Normalize a typed-edge batch to [`EXPLORATORY_EDGE_SCHEMA`] by appending a
 /// constant `rel_type_name = stem` column. A batch already carrying the column
 /// (an `_exploratory` file) is returned unchanged.
-fn tag_rel_type_name(batch: &RecordBatch, stem: &str) -> Result<RecordBatch, DataFusionError> {
+pub(crate) fn tag_rel_type_name(
+    batch: &RecordBatch,
+    stem: &str,
+) -> Result<RecordBatch, DataFusionError> {
     if batch.schema().field_with_name("rel_type_name").is_ok() {
         return Ok(batch.clone());
     }
@@ -1108,15 +1116,18 @@ impl TableProvider for TopologyNodeTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let batches = normalize_topology_nodes(read_parquet_or_empty(
-            &self.path,
+        // Existence only — no Parquet decode during planning (#339).
+        let fragment = ParquetFragment::for_path(self.path.clone(), true);
+        scan_fragments(
             TOPOLOGY_NODES_SCHEMA.clone(),
-        )?)?;
-        let mem = MemTable::try_new(TOPOLOGY_NODES_SCHEMA.clone(), vec![batches])?;
-        mem.scan(state, projection, filters, limit).await
+            vec![fragment],
+            projection,
+            limit,
+            state.config().batch_size(),
+        )
     }
 }
 
@@ -1165,12 +1176,17 @@ impl TableProvider for TypedEdgeTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let batches = read_parquet_or_empty(&self.path, self.schema.clone())?;
-        let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
-        mem.scan(state, projection, filters, limit).await
+        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        scan_fragments(
+            self.schema.clone(),
+            vec![fragment],
+            projection,
+            limit,
+            state.config().batch_size(),
+        )
     }
 }
 
@@ -1180,10 +1196,10 @@ impl TableProvider for TypedEdgeTable {
 
 /// [`TableProvider`] over the union of every relation's edge file (#823) — the
 /// scan source for an **untyped** single-hop pattern (`(a)-[]->(b)`) in a typed
-/// project, where the `_exploratory` table does not exist. Materializes
-/// [`read_edges_union`] into a [`MemTable`]; the schema is always
-/// [`EXPLORATORY_EDGE_SCHEMA`] (each row tagged with its source relation), so it
-/// is a drop-in for the exploratory edge scan the untyped lowering already uses.
+/// project, where the `_exploratory` table does not exist. Streams each
+/// relation file as a natural fragment via [`scan_fragments`] (stem order);
+/// the schema is always [`EXPLORATORY_EDGE_SCHEMA`] (each row tagged with its
+/// source relation).
 #[derive(Debug, Clone)]
 pub struct UnionEdgeTable {
     dir: PathBuf,
@@ -1213,12 +1229,31 @@ impl TableProvider for UnionEdgeTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let batches = read_edges_union(&self.dir, None, None)?;
-        let mem = MemTable::try_new(EXPLORATORY_EDGE_SCHEMA.clone(), vec![batches])?;
-        mem.scan(state, projection, filters, limit).await
+        // Directory listing only — stem order matches `read_edges_union`.
+        let mut files = crate::mutator::parquet_files_in(&self.dir, "topology/edges")
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+        files.sort();
+        let fragments: Vec<ParquetFragment> = files
+            .into_iter()
+            .map(|path| {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                ParquetFragment::for_union_edge(path, stem)
+            })
+            .collect();
+        scan_fragments(
+            EXPLORATORY_EDGE_SCHEMA.clone(),
+            fragments,
+            projection,
+            limit,
+            state.config().batch_size(),
+        )
     }
 }
 
@@ -1325,12 +1360,17 @@ impl TableProvider for EdgePropertyTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let batches = read_parquet_or_empty(&self.path, self.schema.clone())?;
-        let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
-        mem.scan(state, projection, filters, limit).await
+        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        scan_fragments(
+            self.schema.clone(),
+            vec![fragment],
+            projection,
+            limit,
+            state.config().batch_size(),
+        )
     }
 }
 
@@ -1356,12 +1396,17 @@ impl TableProvider for PropertyTable {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        filters: &[Expr],
+        _filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let batches = read_parquet_or_empty(&self.path, self.schema.clone())?;
-        let mem = MemTable::try_new(self.schema.clone(), vec![batches])?;
-        mem.scan(state, projection, filters, limit).await
+        let fragment = ParquetFragment::for_path(self.path.clone(), false);
+        scan_fragments(
+            self.schema.clone(),
+            vec![fragment],
+            projection,
+            limit,
+            state.config().batch_size(),
+        )
     }
 }
 
@@ -1932,6 +1977,142 @@ mod tests {
             let batches = frame.collect().await.unwrap();
             assert_eq!(row_count(&batches), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn query_providers_build_streaming_parquet_plan_not_memtable() {
+        let dir = TempDir::new().unwrap();
+        let nodes = dir.path().join("topology/nodes.parquet");
+        write_nodes_parquet(&nodes);
+        let edges = dir.path().join("topology/edges/KNOWS.parquet");
+        write_edge_parquet(&edges);
+
+        let ctx = SessionContext::new();
+        let state = ctx.state();
+        let cases: Vec<(&str, Arc<dyn TableProvider>)> = vec![
+            (
+                "nodes",
+                Arc::new(TopologyNodeTable::new(nodes.clone())),
+            ),
+            ("edges", Arc::new(TypedEdgeTable::open(dir.path(), "KNOWS"))),
+            ("union", Arc::new(UnionEdgeTable::open(dir.path()))),
+            (
+                "props",
+                Arc::new(PropertyTable::open_discovered(dir.path(), "Person")),
+            ),
+            (
+                "edge_props",
+                Arc::new(EdgePropertyTable::open_discovered(dir.path(), "KNOWS")),
+            ),
+        ];
+        for (label, provider) in cases {
+            let plan = provider
+                .scan(&state as &dyn Session, None, &[], None)
+                .await
+                .unwrap();
+            let text = datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(false)
+                .to_string();
+            assert!(
+                text.contains("GraphForgeParquetExec"),
+                "{label}: expected GraphForgeParquetExec, got:\n{text}"
+            );
+            assert!(
+                !text.contains("MemoryExec") && !text.contains("MemTable"),
+                "{label}: MemTable/MemoryExec must not appear:\n{text}"
+            );
+        }
+        // Corrupt after scan planning — execute must fail closed with a structured error.
+        let table = TypedEdgeTable::open(dir.path(), "KNOWS");
+        let plan = table
+            .scan(&state as &dyn Session, None, &[], None)
+            .await
+            .unwrap();
+        std::fs::write(&edges, b"not-parquet").unwrap();
+        let err = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("parquet")
+                || err.to_string().to_lowercase().contains("corrupt"),
+            "structured failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_scan_honors_session_batch_size_policy() {
+        let dir = TempDir::new().unwrap();
+        let path = dir
+            .path()
+            .join("topology")
+            .join("edges")
+            .join("KNOWS.parquet");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let n = 20usize;
+        let uuids = FixedSizeBinaryArray::try_from_iter(
+            (0..n).map(|i| {
+                let mut bytes = vec![0u8; 16];
+                bytes[15] = i as u8;
+                bytes
+            }),
+        )
+        .unwrap();
+        let src = FixedSizeBinaryArray::try_from_iter((0..n).map(|_| vec![1u8; 16])).unwrap();
+        let dst = FixedSizeBinaryArray::try_from_iter((0..n).map(|_| vec![2u8; 16])).unwrap();
+        let ts = TimestampMicrosecondArray::from(vec![0i64; n])
+            .with_timezone_opt(Some(Arc::from("UTC")));
+        let batch = RecordBatch::try_new(
+            TYPED_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(uuids),
+                Arc::new(src),
+                Arc::new(dst),
+                Arc::new(UInt64Array::from((1..=n as u64).collect::<Vec<_>>())),
+                Arc::new(UInt64Array::from(vec![1u64; n])),
+                Arc::new(UInt64Array::from(vec![2u64; n])),
+                Arc::new(ts),
+            ],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            file,
+            TYPED_EDGE_SCHEMA.clone(),
+            Some(WriterProperties::builder().build()),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let config = datafusion::prelude::SessionConfig::new().with_batch_size(5);
+        let state = datafusion::execution::SessionStateBuilder::new()
+            .with_default_features()
+            .with_config(config)
+            .build();
+        let ctx = SessionContext::new_with_state(state);
+        let table = TypedEdgeTable::open(dir.path(), "KNOWS");
+        let session = ctx.state();
+        let plan = table
+            .scan(&session as &dyn Session, None, &[], None)
+            .await
+            .unwrap();
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .one_line()
+            .to_string();
+        assert!(
+            display.contains("batch_size=5"),
+            "policy batch size must appear on plan: {display}"
+        );
+        let batches = datafusion::physical_plan::collect(plan, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert!(
+            batches.len() >= 2,
+            "expected multiple batches, got {}",
+            batches.len()
+        );
+        assert!(batches.iter().all(|b| b.num_rows() <= 5));
+        assert_eq!(row_count(&batches), 20);
     }
 
     #[test]

@@ -178,6 +178,9 @@ pub use catalog::{
     read_nodes_filtered_observed, read_properties,
 };
 
+pub mod parquet_scan;
+pub use parquet_scan::{GraphForgeParquetExec, IoConcurrencyExt, ParquetFragment};
+
 pub mod schemas;
 pub use schemas::{
     ADJACENCY_CSR_SCHEMA, ADJACENCY_MANIFEST_SCHEMA, EDGE_PROPERTY_BASE_SCHEMA,
