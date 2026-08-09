@@ -290,14 +290,7 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
-    stage_project_generation_with_lock_and_tree(
-        root,
-        writer_lock,
-        parent,
-        request,
-        None,
-        graph_tree,
-    )
+    stage_project_generation_with_lock(root, writer_lock, parent, request, None, graph_tree)
 }
 
 fn stage_project_generation_optimistic_inner(
@@ -322,17 +315,10 @@ fn stage_project_generation_optimistic_inner(
 
 /// Stage a generation using a writer lock and parent resolved by a composed
 /// storage operation such as complete-workspace checkpoint revert.
+///
+/// Pass `graph_tree` when the request's `graph`/`files` inventory must be
+/// staged from a non-parent source (for example a pinned checkpoint generation).
 pub(crate) fn stage_project_generation_with_lock(
-    root: PathBuf,
-    writer_lock: File,
-    parent: ResolvedProjectGeneration,
-    request: &ProjectGenerationRequest,
-    revert: Option<RevertJournalExtension>,
-) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_with_lock_and_tree(root, writer_lock, parent, request, revert, None)
-}
-
-pub(crate) fn stage_project_generation_with_lock_and_tree(
     root: PathBuf,
     writer_lock: File,
     parent: ResolvedProjectGeneration,
