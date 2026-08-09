@@ -163,6 +163,25 @@ for new enable operations and treats absent record families in an already
 enabled capability as empty. A present but corrupt or unsupported participant
 is never treated as empty.
 
+### Graph record families under `graph@1`
+
+`graph@1` remains the mandatory capability version. Two mutually exclusive
+record families may appear:
+
+- `snapshot` (Arrow IPC) — legacy whole-workspace envelope (1 GiB/file, 2 GiB
+  total). Existing projects remain readable through hydrate.
+- `files` (canonical JSON inventory) — file-backed contract. Exact workspace
+  files live under the generation-owned `graph/` directory beside
+  `participants/`. Open validates the inventory and either pins that tree
+  (read-only) or materializes file-by-file into a private workspace. New
+  publications use this path. Unsupported inventory versions return
+  `GF_UNSUPPORTED_PROJECT_FORMAT`.
+
+Portable interchange does not yet encode the generation-owned `graph/` tree and
+returns a structured unsupported error for `files` generations; copy the project
+directory instead. Checkpoint open/diff follows the same GraphForge hydration
+path for either family.
+
 There is no capability migration from unsupported layouts. A boolean manifest,
 missing v0.5 `FORMAT`, or any other pre-v1 root returns
 `GF_UNSUPPORTED_PROJECT_FORMAT` before mutation.

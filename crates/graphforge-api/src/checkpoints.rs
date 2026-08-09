@@ -1015,7 +1015,9 @@ fn logical_records(
             continue;
         }
         cancellation(page)?;
-        if descriptor.capability_id == "graph" && descriptor.record_family_id == "snapshot" {
+        if descriptor.capability_id == "graph"
+            && matches!(descriptor.record_family_id.as_str(), "snapshot" | "files")
+        {
             let records = crate::checkpoint_graph_diff::extract_logical_graph_records(
                 generation,
                 page.cancellation.as_ref(),
@@ -1290,7 +1292,7 @@ fn validate_revert_source(
     generation: &graphforge_storage::ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
     generation.validate_complete_participant_inventory()?;
-    let _workspace = crate::hydrate_graph_workspace(generation)?;
+    let _workspace = crate::hydrate_graph_workspace(generation, true)?;
     let _ontology = generation
         .participant_snapshot(
             graphforge_storage::WORKSPACE_CAPABILITY_ID,

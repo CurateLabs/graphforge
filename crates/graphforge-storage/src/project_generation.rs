@@ -149,10 +149,8 @@ impl ResolvedProjectGeneration {
     /// Returns structured validation/corruption errors for unsupported
     /// contracts or inventory/tree mismatch.
     pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
-        let Some(snapshot) = self.participant_snapshot(
-            crate::GRAPH_CAPABILITY_ID,
-            crate::GRAPH_FILES_FAMILY,
-        )?
+        let Some(snapshot) =
+            self.participant_snapshot(crate::GRAPH_CAPABILITY_ID, crate::GRAPH_FILES_FAMILY)?
         else {
             return Ok(None);
         };

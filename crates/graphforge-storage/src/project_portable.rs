@@ -121,6 +121,15 @@ pub fn encode_portable_project(
     generation: &ResolvedProjectGeneration,
     limits: PortableProjectLimits,
 ) -> Result<(Vec<u8>, PortableExportReceipt), GfError> {
+    if generation.participant_descriptors()?.iter().any(|entry| {
+        entry.capability_id == crate::GRAPH_CAPABILITY_ID
+            && entry.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) {
+        return Err(GfError::Project {
+            code: graphforge_core::ProjectErrorCode::UnsupportedProjectFormat,
+            message: "portable interchange does not yet encode file-backed graph trees; copy the project directory or use a legacy snapshot generation".into(),
+        });
+    }
     let snapshots = generation.participant_snapshots()?;
     enforce_count(snapshots.len(), limits.max_participants)?;
     let capabilities = generation

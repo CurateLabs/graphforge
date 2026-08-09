@@ -161,13 +161,13 @@ pub fn decode_inventory(bytes: &[u8]) -> Result<GraphFilesInventory, GfError> {
         .map_err(|error| validation(format!("invalid graph files inventory JSON: {error}")))?;
     validate_inventory_contract(&inventory)?;
     let mut canonical = serde_json::to_vec(&inventory).map_err(|error| {
-        validation(format!("graph files inventory cannot be re-encoded: {error}"))
+        validation(format!(
+            "graph files inventory cannot be re-encoded: {error}"
+        ))
     })?;
     canonical.push(b'\n');
     if canonical != bytes {
-        return Err(validation(
-            "graph files inventory is not in canonical form",
-        ));
+        return Err(validation("graph files inventory is not in canonical form"));
     }
     Ok(inventory)
 }
@@ -204,9 +204,8 @@ pub fn stage_graph_tree(
             "generation graph tree already exists before staging",
         ));
     }
-    fs::create_dir_all(&destination_root).map_err(|error| {
-        storage("create generation graph tree", &destination_root, error)
-    })?;
+    fs::create_dir_all(&destination_root)
+        .map_err(|error| storage("create generation graph tree", &destination_root, error))?;
 
     let mut evidence = GraphFilesOpenEvidence {
         strategy: GraphFilesOpenStrategy::PrivateMaterialize,
@@ -254,7 +253,10 @@ pub fn stage_graph_tree(
 /// # Errors
 /// Returns corruption/validation errors for missing, extra, linked, or
 /// digest-mismatched files.
-pub fn verify_graph_tree(graph_root: &Path, inventory: &GraphFilesInventory) -> Result<(), GfError> {
+pub fn verify_graph_tree(
+    graph_root: &Path,
+    inventory: &GraphFilesInventory,
+) -> Result<(), GfError> {
     validate_inventory_contract(inventory)?;
     if !graph_root.exists() {
         if inventory.files.is_empty() {
@@ -618,11 +620,12 @@ fn sync_directory_tree(root: &Path) -> Result<(), GfError> {
     let mut directories = vec![root.to_path_buf()];
     let mut index = 0;
     while index < directories.len() {
-        let directory = &directories[index];
-        for entry in fs::read_dir(directory)
-            .map_err(|error| storage("read graph tree for fsync", directory, error))?
+        let directory = directories[index].clone();
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| storage("read graph tree for fsync", &directory, error))?
         {
-            let entry = entry.map_err(|error| storage("read graph tree entry", directory, error))?;
+            let entry =
+                entry.map_err(|error| storage("read graph tree entry", &directory, error))?;
             let path = entry.path();
             let file_type = entry
                 .file_type()

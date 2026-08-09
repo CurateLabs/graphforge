@@ -85,10 +85,13 @@ to later M4 issues.
 
 ## Discovery evidence (not a public baseline)
 
-The lower-level **~8M-node / ~128M-edge** local scale report is classified as
-`discovery_not_public_facade_baseline`. It does not traverse the current public
-snapshot path. Public-product claims at that scale require #338 and public-facade
-reruns (#345).
+The lower-level **~8M-node / ~128M-edge** local scale report was classified as
+`discovery_not_public_facade_baseline` under the legacy snapshot envelope.
+With #338, public persistence uses the file-backed `graph`/`files` contract;
+re-run the measured fixture through `GraphForge::new` and the M4 entry harness
+for public-product claims (#345). CI proves the path with a small multi-file
+fixture (`--test file_backed_graph_generation`) and does not download 8M/128M
+data.
 
 ## Citation for M4 implementation issues
 

@@ -177,6 +177,18 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "file_backed_graph_generation",
+    srcs = [
+        "tests/file_backed_graph_generation.rs",
+        "tests/support/project_fixture.rs",
+    ],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "medium",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "graph_internal_metadata",
     srcs = ["tests/graph_internal_metadata.rs"],
     crate = ":graphforge_api",

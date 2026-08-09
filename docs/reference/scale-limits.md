@@ -76,12 +76,23 @@ and the public-facade harness documented in
 gates on structural correctness under the default Explicit two-worker resource
 policy; thread configurations `1`/`2`/`4`/`8`/automatic are executed under
 [Embedded Execution Resource Policy](../development/execution-resource-policy.md)
-(#337) when the machine budget allows. Lower-level 8M-node/128M-edge reports
-remain discovery evidence until #338 proves the public path.
+(#337) when the machine budget allows.
+
+### Graph persistence envelopes
+
+| Path | What it stores | Open behavior | Size guidance |
+|---|---|---|---|
+| Legacy `graph`/`snapshot` (Arrow IPC) | Whole workspace bytes in one participant | Hydrates every file into a private workspace | Historical envelope: 1 GiB/file and 2 GiB total. Still readable. Do not raise these constants. |
+| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Measured 8M/128M (~15 GiB) is accepted evidence for the public path once published through this contract; CI uses a small multi-file fixture. |
+
+New publications use the file-backed path. Portable interchange currently returns a
+structured unsupported error for file-backed trees (copy the project directory
+instead); legacy snapshot generations remain portable.
 
 ```bash
 make m4-entry-matrix-check
 cargo test -p graphforge-api --test m4_entry_baseline
+cargo test -p graphforge-api --test file_backed_graph_generation
 make bench-m4-entry
 ```
 
@@ -116,6 +127,9 @@ boundary as a GraphForge maximum graph size.
 | Cancel/failure leaves prior index or absent/stale | Covered by cancel + spill-cap tests |
 | >200M edges indexes on a supported machine | Pending reproducible M4 scale evidence |
 
+Manual/scheduled 8M/128M reproduction (not CI): build or point at the measured
+fixture, publish through `GraphForge`, reopen, and record RSS/storage/fingerprint
+via the #334 evidence emitter.
 ---
 
 ## Why Edge Count, Not Node Count

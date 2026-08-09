@@ -258,6 +258,7 @@ impl GraphForge {
             )),
             dir: self.dir.clone(),
             workspace_guard: Arc::clone(&self.workspace_guard),
+            graph_open_evidence: self.graph_open_evidence.clone(),
             tempdir: self.tempdir.clone(),
             ontology: self.ontology.clone(),
             ontology_document: self.ontology_document.clone(),

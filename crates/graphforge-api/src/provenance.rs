@@ -547,7 +547,7 @@ mod tests {
         let generation = graphforge_storage::resolve_project_generation(root.path()).unwrap();
         assert!(
             generation
-                .participant_snapshot("graph", "snapshot")
+                .participant_snapshot("graph", graphforge_storage::GRAPH_FILES_FAMILY)
                 .unwrap()
                 .is_some()
         );

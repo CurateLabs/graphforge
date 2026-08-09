@@ -290,7 +290,14 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
-    stage_project_generation_with_lock_and_tree(root, writer_lock, parent, request, None, graph_tree)
+    stage_project_generation_with_lock_and_tree(
+        root,
+        writer_lock,
+        parent,
+        request,
+        None,
+        graph_tree,
+    )
 }
 
 fn stage_project_generation_optimistic_inner(
