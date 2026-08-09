@@ -3656,7 +3656,12 @@ mod tests {
                     let (_, generation) =
                         graphforge_storage::open_checkpoint_generation(directory.path(), "Stable")
                             .unwrap();
-                    let path = generation.participant_path("graph", "snapshot").unwrap();
+                    let path = generation
+                        .participant_path(
+                            graphforge_storage::GRAPH_CAPABILITY_ID,
+                            graphforge_storage::GRAPH_FILES_FAMILY,
+                        )
+                        .unwrap();
                     std::fs::write(path, b"corrupt checkpoint participant").unwrap();
                 }
                 _ => unreachable!(),

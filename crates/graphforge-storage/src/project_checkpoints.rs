@@ -28,7 +28,7 @@ use crate::project_publication::{
     LOCKS_DIR, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
     ProjectParticipantEncoding, ProjectStageOutcome, RevertJournalExtension, WRITER_LOCK_FILE,
     ensure_machine_directory, load_published_revert, load_revert_journal_extension,
-    open_regular_lock, stage_project_generation_with_lock, sync_directory,
+    open_regular_lock, stage_project_generation_with_lock_and_tree, sync_directory,
 };
 use crate::resolve_project_generation;
 
@@ -647,12 +647,25 @@ where
         })
         .collect::<BTreeSet<_>>();
     let writer = locks.transfer_writer_for_revert_publication();
-    let receipt = match stage_project_generation_with_lock(
+    // Revert must stage graph bytes from the pinned source generation. Using
+    // the parent's tree (CURRENT) would verify the restored inventory against
+    // post-checkpoint mutations and fail closed with length/digest mismatch.
+    let source_graph_tree = source.graph_tree_root();
+    let graph_tree = publication
+        .participants
+        .iter()
+        .any(|participant| {
+            participant.capability_id == crate::GRAPH_CAPABILITY_ID
+                && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+        })
+        .then_some(source_graph_tree.as_path());
+    let receipt = match stage_project_generation_with_lock_and_tree(
         root.clone(),
         writer,
         prior_current,
         &publication,
         Some(expected_extension),
+        graph_tree,
     )? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
