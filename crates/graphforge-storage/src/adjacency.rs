@@ -640,12 +640,7 @@ pub fn build_adjacency_index_with_checkpoint(
     built_at_micros: i64,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<Vec<AdjacencyManifestRow>, GfError> {
-    build_adjacency_index_into(
-        project_dir,
-        project_dir,
-        built_at_micros,
-        &mut checkpoint,
-    )
+    build_adjacency_index_into(project_dir, project_dir, built_at_micros, &mut checkpoint)
 }
 
 /// Build from canonical topology in `source_project_dir` into a separate
@@ -681,14 +676,20 @@ pub fn build_adjacency_index_into_with_options(
     let adjacency = adjacency_dir(artifact_project_dir);
     std::fs::create_dir_all(&adjacency).map_err(storage_err)?;
 
-    let spill_root = options
-        .spill_dir
-        .clone()
-        .unwrap_or_else(|| adjacency.join(ADJACENCY_SPILL_DIR_NAME));
+    let spill_root = {
+        let base = options
+            .spill_dir
+            .clone()
+            .unwrap_or_else(|| adjacency.join(ADJACENCY_SPILL_DIR_NAME));
+        // Unique per-build subdirectory so a shared #337 spill root is never
+        // wiped, and concurrent builders cannot collide.
+        base.join(format!("build-{}", uuid::Uuid::new_v4().as_simple()))
+    };
     let mut spill = SpillSession::create(&spill_root)?.with_max_bytes(options.spill_max_bytes);
 
     let build_result = (|| {
-        let mut groups = stream_build_groups(source_project_dir, &options, &mut spill, &mut checkpoint)?;
+        let mut groups =
+            stream_build_groups(source_project_dir, &options, &mut spill, &mut checkpoint)?;
         checkpoint()?;
 
         let mut manifest = Vec::new();
@@ -759,9 +760,8 @@ struct SpillSession {
 
 impl SpillSession {
     fn create(root: &Path) -> Result<Self, GfError> {
-        if root.exists() {
-            std::fs::remove_dir_all(root).map_err(storage_err)?;
-        }
+        // Only create the per-build directory; never delete a caller-supplied
+        // parent spill root (it may be shared with DataFusion / other ops).
         std::fs::create_dir_all(root).map_err(storage_err)?;
         Ok(Self {
             root: root.to_path_buf(),
@@ -802,6 +802,15 @@ impl SpillSession {
         }
         self.cleaned = true;
         let _ = std::fs::remove_dir_all(&self.root);
+        // Best-effort: remove an empty project-local `.spill` parent we created.
+        // Never delete a shared policy spill root that may hold other files.
+        if let Some(parent) = self.root.parent()
+            && parent
+                .file_name()
+                .is_some_and(|name| name == ADJACENCY_SPILL_DIR_NAME)
+        {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 }
 
@@ -929,7 +938,8 @@ fn write_keyed_run(
     for &(key, edge, neighbor) in entries {
         file.write_all(&key.to_le_bytes()).map_err(storage_err)?;
         file.write_all(&edge.to_le_bytes()).map_err(storage_err)?;
-        file.write_all(&neighbor.to_le_bytes()).map_err(storage_err)?;
+        file.write_all(&neighbor.to_le_bytes())
+            .map_err(storage_err)?;
     }
     file.sync_all().map_err(storage_err)?;
     Ok(())
@@ -1024,7 +1034,7 @@ fn merge_keyed_runs_to_csr(
     let mut current_node: Option<u64> = None;
     let mut seen = 0u64;
     while let Some(Reverse((key, edge, neighbor, idx))) = heap.pop() {
-        if seen % 65_536 == 0 {
+        if seen.is_multiple_of(65_536) {
             checkpoint()?;
         }
         seen += 1;
@@ -1082,38 +1092,44 @@ fn stream_build_groups(
         EntryGroup::with_label(ALL_RELATIONS_STEM),
     );
 
-    for_each_adjacency_edge_file(project_dir, options.batch_size, &mut |stem, exploratory, batch| {
-        checkpoint()?;
-        let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
-        let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
-        let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
-        let rel_names = if exploratory {
-            Some(string_column(
-                named_column(batch, "rel_type_name")?,
-                "rel_type_name",
-            )?)
-        } else {
-            None
-        };
-        for i in 0..batch.num_rows() {
-            let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
-            groups
-                .get_mut(ALL_RELATIONS_STEM)
-                .expect("union group")
-                .push(entry, options.chunk_rows, spill, checkpoint)?;
-            let rel = rel_names.map_or(stem, |names| names.value(i));
-            if usable_stem(rel) {
-                if !groups.contains_key(rel) {
-                    groups.insert(rel.to_owned(), EntryGroup::with_label(rel));
-                }
+    for_each_adjacency_edge_file(
+        project_dir,
+        options.batch_size,
+        &mut |stem, exploratory, batch| {
+            checkpoint()?;
+            let edge_ids = uint64_column(named_column(batch, "edge_id")?, "edge_id")?;
+            let src_ids = uint64_column(named_column(batch, "src_id")?, "src_id")?;
+            let dst_ids = uint64_column(named_column(batch, "dst_id")?, "dst_id")?;
+            let rel_names = if exploratory {
+                Some(string_column(
+                    named_column(batch, "rel_type_name")?,
+                    "rel_type_name",
+                )?)
+            } else {
+                None
+            };
+            for i in 0..batch.num_rows() {
+                let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
                 groups
-                    .get_mut(rel)
-                    .expect("rel group")
+                    .get_mut(ALL_RELATIONS_STEM)
+                    .expect("union group")
                     .push(entry, options.chunk_rows, spill, checkpoint)?;
+                let rel = rel_names.map_or(stem, |names| names.value(i));
+                if usable_stem(rel) {
+                    if !groups.contains_key(rel) {
+                        groups.insert(rel.to_owned(), EntryGroup::with_label(rel));
+                    }
+                    groups.get_mut(rel).expect("rel group").push(
+                        entry,
+                        options.chunk_rows,
+                        spill,
+                        checkpoint,
+                    )?;
+                }
             }
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     Ok(groups)
 }
 
@@ -2641,11 +2657,7 @@ mod tests {
         // typed edge file with a multi-row-group Parquet that still carries UUID
         // FixedSizeBinary columns (the concat hazard #336 removes).
         let mut w = GraphWriter::open_at(dir, OntologyMode::Strict, BUILD_TS).unwrap();
-        let max_node = edges
-            .iter()
-            .map(|&(s, _, d)| s.max(d))
-            .max()
-            .unwrap_or(0);
+        let max_node = edges.iter().map(|&(s, _, d)| s.max(d)).max().unwrap_or(0);
         let mut node_uuids = Vec::new();
         for _ in 0..=max_node {
             node_uuids.push(new_v7());
@@ -2678,7 +2690,7 @@ mod tests {
         let edge_id = UInt64Array::from(edges.iter().map(|e| e.1).collect::<Vec<_>>());
         let src_id = UInt64Array::from(edges.iter().map(|e| e.0).collect::<Vec<_>>());
         let dst_id = UInt64Array::from(edges.iter().map(|e| e.2).collect::<Vec<_>>());
-        let created = TimestampMicrosecondArray::from(vec![BUILD_TS; n]);
+        let created = TimestampMicrosecondArray::from(vec![BUILD_TS; n]).with_timezone("UTC");
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
@@ -2733,7 +2745,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(count, batches);
-        assert!(batches >= 5, "expected one batch per tiny row-group, got {batches}");
+        assert!(
+            batches >= 5,
+            "expected one batch per tiny row-group, got {batches}"
+        );
         assert_eq!(rows, 5);
     }
 
@@ -2822,7 +2837,21 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "GF_CANCELLED");
-        assert!(!spill.exists(), "spill must be cleaned on cancel");
+        let leftover_runs = spill.exists().then(|| {
+            std::fs::read_dir(&spill)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| {
+                    e.path().extension().is_some_and(|ext| ext == "run")
+                        || e.file_name().to_string_lossy().starts_with("build-")
+                })
+                .count()
+        });
+        assert_eq!(
+            leftover_runs.unwrap_or(0),
+            0,
+            "spill runs / build dirs must be cleaned on cancel"
+        );
         assert!(!manifest_path(stage.path()).exists());
         assert_eq!(
             std::fs::read(manifest_path(dir.path())).unwrap(),
@@ -2876,11 +2905,9 @@ mod tests {
 
         // Full-schema eager path (what the old builder did) would concat UUID
         // columns to `edges.len()` values. The streaming path must not.
-        let full = crate::catalog::read_parquet_or_empty(
-            &path,
-            crate::schemas::TYPED_EDGE_SCHEMA.clone(),
-        )
-        .unwrap();
+        let full =
+            crate::catalog::read_parquet_or_empty(&path, crate::schemas::TYPED_EDGE_SCHEMA.clone())
+                .unwrap();
         assert_eq!(full.len(), 1, "legacy helper still concats to one batch");
         let uuid = full[0]
             .column_by_name("edge_uuid")
@@ -2921,10 +2948,7 @@ mod tests {
         )
         .unwrap();
         let expected = csr_from_entries(
-            &edges
-                .iter()
-                .map(|&(s, e, d)| (s, e, d))
-                .collect::<Vec<_>>(),
+            &edges.iter().map(|&(s, e, d)| (s, e, d)).collect::<Vec<_>>(),
             Direction::Out,
         );
         assert_eq!(

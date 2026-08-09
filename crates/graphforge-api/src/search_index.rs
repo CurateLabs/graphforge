@@ -343,8 +343,8 @@ impl GraphForge {
         self.inspect_adjacency()
     }
 
-    /// Map the instance [`NormalizedResourcePolicy`](#337) onto adjacency build
-    /// options. Spill prefers the policy directory when enabled; otherwise the
+    /// Map the instance resource policy (#337) onto adjacency build options.
+    /// Spill prefers the policy directory when enabled; otherwise the
     /// unpublished stage keeps a project-local `.spill` root that is removed
     /// with the stage on success, failure, or cancellation.
     fn adjacency_build_options(
