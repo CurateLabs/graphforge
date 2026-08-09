@@ -451,6 +451,7 @@ test_suite(
         ":existential_subquery",
         ":facade_methods",
         ":fixed_hop_limit",
+        ":file_backed_graph_generation",
         ":m4_entry_baseline",
         ":graph_internal_metadata",
         ":inference_provenance",

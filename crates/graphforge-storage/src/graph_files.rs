@@ -671,7 +671,11 @@ fn reject_link(path: &Path) -> Result<(), GfError> {
 }
 
 fn hex_digest(digest: [u8; 32]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    digest.iter().fold(String::with_capacity(64), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 fn validation(message: impl Into<String>) -> GfError {
