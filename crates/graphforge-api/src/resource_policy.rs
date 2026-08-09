@@ -181,9 +181,8 @@ fn validate_spill_directory(path: &Path) -> Result<PathBuf, GfError> {
         }
     }
     if path.exists() {
-        let meta = std::fs::symlink_metadata(path).map_err(|e| {
-            validation(format!("spill directory metadata unavailable: {e}"))
-        })?;
+        let meta = std::fs::symlink_metadata(path)
+            .map_err(|e| validation(format!("spill directory metadata unavailable: {e}")))?;
         if meta.file_type().is_symlink() {
             return Err(validation("spill directory must not be a symlink"));
         }
@@ -487,7 +486,9 @@ mod tests {
                 ..ExecutionResourcePolicy::default()
             }
             .normalize();
-            let max_primary = observed.saturating_mul(2).clamp(4, MAX_THREADS.saturating_mul(2));
+            let max_primary = observed
+                .saturating_mul(2)
+                .clamp(4, MAX_THREADS.saturating_mul(2));
             if n.saturating_add(n) > max_primary {
                 assert!(
                     result.is_err(),
@@ -513,7 +514,10 @@ mod tests {
     #[test]
     fn combined_budget_rejects_oversubscription() {
         let observed = logical_cpus();
-        let n = observed.saturating_mul(2).saturating_add(1).min(MAX_THREADS);
+        let n = observed
+            .saturating_mul(2)
+            .saturating_add(1)
+            .min(MAX_THREADS);
         let err = ExecutionResourcePolicy {
             mode: ResourcePolicyMode::Explicit,
             tokio_worker_threads: Some(n),

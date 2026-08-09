@@ -240,6 +240,10 @@ pub use ontology_lifecycle::{
 };
 pub use paging::{CancellationToken, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageRequest, PageToken};
 pub use provenance::ProvenanceHistoryRequest;
+pub use resource_policy::{
+    ExecutionResourcePolicy, NormalizedResourcePolicy, ResourcePolicyDiagnostics,
+    ResourcePolicyMode, SpillPolicy,
+};
 pub use search_index::{AdjacencyInspection, TextIndexInspection};
 pub use valid_time::{
     ApplyValidTimeRequest, ListAssertionValidityRequest, RecordAssertionValidityRequest,
@@ -247,10 +251,6 @@ pub use valid_time::{
 };
 pub use workspace_ontology::{AdoptOntologyRequest, ClearOntologyRequest};
 pub use write_modes::{GraphForgeOptions, ProjectWriteMode};
-pub use resource_policy::{
-    ExecutionResourcePolicy, NormalizedResourcePolicy, ResourcePolicyDiagnostics,
-    ResourcePolicyMode, SpillPolicy,
-};
 
 fn insert_usize(
     parameters: &mut std::collections::BTreeMap<String, InvocationParameter>,

@@ -3,8 +3,8 @@ use std::sync::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use graphforge_core::{ApiErrorCode, GfError};
 
-use crate::resource_policy::{ExecutionResourcePolicy, NormalizedResourcePolicy};
 use crate::CancellationToken;
+use crate::resource_policy::{ExecutionResourcePolicy, NormalizedResourcePolicy};
 
 /// Embedded project-write coordination policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

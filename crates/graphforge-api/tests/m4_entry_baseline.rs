@@ -260,7 +260,10 @@ fn supported_runtime_configuration() -> serde_json::Value {
     })
 }
 
-fn parity_configurations(contract: &serde_json::Value, fixture: &std::path::Path) -> serde_json::Value {
+fn parity_configurations(
+    contract: &serde_json::Value,
+    fixture: &std::path::Path,
+) -> serde_json::Value {
     let configs = contract
         .get("deferred_runtime_configurations")
         .and_then(|v| v.as_array())
@@ -414,7 +417,6 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
         },
     ]
 }
-
 
 struct WorkloadEvidence {
     id: &'static str,
@@ -733,8 +735,14 @@ fn thread_parity_matrix_executes_under_resource_policy() {
     assert!(!executed.is_empty());
     let baseline = &executed[0]["fingerprints"];
     for cell in &executed {
-        assert_eq!(cell["fingerprints"], *baseline, "fingerprint parity across modes");
-        assert_eq!(cell["structured_error_code"], executed[0]["structured_error_code"]);
+        assert_eq!(
+            cell["fingerprints"], *baseline,
+            "fingerprint parity across modes"
+        );
+        assert_eq!(
+            cell["structured_error_code"],
+            executed[0]["structured_error_code"]
+        );
         assert_eq!(cell["resource_limit_rows"], 3);
     }
 }
