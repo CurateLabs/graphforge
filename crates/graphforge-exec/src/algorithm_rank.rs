@@ -6238,7 +6238,7 @@ mod tests {
         let nodes = 512_u64;
         let mut edges = Vec::new();
         for source in 0..nodes {
-            let degree = 8 + (source % 13) as usize;
+            let degree = 256 + (source % 13) as usize;
             for hop in 0..degree {
                 edges.push((source, (source + hop as u64) % nodes));
             }
