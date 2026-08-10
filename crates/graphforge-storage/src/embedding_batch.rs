@@ -133,7 +133,7 @@ where
             hasher.update(value.to_le_bytes());
         }
     }
-    let content_digest = EmbeddingContentDigest::from_hex(&format!("{:x}", hasher.finalize()))?;
+    let content_digest = EmbeddingContentDigest::from_hex(&hex_lower(&hasher.finalize()))?;
     Ok(ValidatedEmbeddingBatch {
         rows,
         dimension,
@@ -174,6 +174,15 @@ fn exhausted(resource: &'static str, limit: usize) -> SearchArtifactError {
         resource,
         limit: u64::try_from(limit).unwrap_or(u64::MAX),
     }
+}
+
+
+fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

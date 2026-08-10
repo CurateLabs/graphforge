@@ -156,6 +156,14 @@ fn ontology_depth(name: &str, parents: &HashMap<&str, Option<&str>>) -> usize {
         .map_or(1, |parent| 1 + ontology_depth(parent, parents))
 }
 
+
+fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+    Sha256::digest(bytes.as_ref())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn main() {
     let manifest = read_manifest();
     assert_eq!(manifest["id"], "probate-genealogy");
@@ -815,7 +823,7 @@ fn main() {
         "stable_assertion_uuids": [id(0x1100), id(0x1110), id(0x1200), id(0x1210)],
     });
     let canonical = serde_json::to_vec(&final_summary).unwrap();
-    let final_fingerprint = format!("{:x}", Sha256::digest(&canonical));
+    let final_fingerprint = hex_sha256(&canonical);
     let arrow_expectations: Value =
         serde_json::from_slice(&fs::read(fixture("expected/arrow-fingerprints.json")).unwrap())
             .unwrap();
@@ -909,7 +917,7 @@ fn main() {
             "rust_authoritative": true,
             "step_ids": manifest["steps"],
             "ontology_fingerprint": final_summary["ontology_fingerprint"],
-            "fixture_fingerprint": format!("{:x}", Sha256::digest(fs::read(fixture("generator.yaml")).unwrap())),
+            "fixture_fingerprint": hex_sha256(&fs::read(fixture("generator.yaml")).unwrap()),
             "normalized_final_fingerprint": final_fingerprint,
             "source_uuids": [id(0x1103), id(0x1113), id(0x1203), id(0x1213)],
             "assertion_uuids": final_summary["stable_assertion_uuids"],

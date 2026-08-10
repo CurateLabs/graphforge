@@ -203,7 +203,7 @@ fn empty_batch(schema: &std::sync::LazyLock<arrow::datatypes::SchemaRef>) -> Rec
 fn build_ontology_meta(doc: &OntologyDoc) -> Result<RecordBatch, OntologyError> {
     // Checksum: SHA-256 of the stable JSON serialisation.
     let json = serde_json::to_string(doc).map_err(|e| OntologyError::Arrow(e.to_string()))?;
-    let checksum = format!("{:x}", Sha256::digest(json.as_bytes()));
+    let checksum = hex_digest(&Sha256::digest(json.as_bytes()));
 
     let mut ids = StringBuilder::new();
     let mut versions = StringBuilder::new();
@@ -498,6 +498,15 @@ fn build_inheritance_closure(doc: &OntologyDoc, name_to_id: &HashMap<String, u32
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

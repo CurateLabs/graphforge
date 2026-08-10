@@ -607,7 +607,7 @@ fn active_checksum(
     hasher.update(b"graphforge.embedding.active.v1\0");
     hasher.update(compatibility_id.to_hex().as_bytes());
     hasher.update(generation_id.to_hex().as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex_lower(&hasher.finalize())
 }
 
 fn content_digest<C>(
@@ -625,7 +625,7 @@ where
             hasher.update(value.to_le_bytes());
         }
     }
-    EmbeddingContentDigest::from_hex(&format!("{:x}", hasher.finalize()))
+    EmbeddingContentDigest::from_hex(&hex_lower(&hasher.finalize()))
 }
 
 fn hash_file<C>(
@@ -658,7 +658,7 @@ where
         }
         hasher.update(&buffer[..read]);
     }
-    EmbeddingPublicationFingerprint::from_hex(&format!("{:x}", hasher.finalize()))
+    EmbeddingPublicationFingerprint::from_hex(&hex_lower(&hasher.finalize()))
 }
 
 struct EmbeddingWriterLock {
@@ -915,6 +915,15 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> SearchArt
         path: path.to_path_buf(),
         source,
     }
+}
+
+
+fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

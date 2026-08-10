@@ -1702,7 +1702,14 @@ fn entries_fingerprint(entries: &mut [BuildEntry]) -> String {
         digest.update(edge.to_le_bytes());
         digest.update(dst.to_le_bytes());
     }
-    format!("sha256:{:x}", digest.finalize())
+    format!(
+        "sha256:{}",
+        digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
 
 /// Build a dense [`CsrIndex`] from `(src_id, edge_id, dst_id)` entries for the
