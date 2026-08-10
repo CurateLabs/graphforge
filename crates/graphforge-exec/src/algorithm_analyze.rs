@@ -3971,7 +3971,8 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::CountAutomorphisms).result_schema()
         );
-        let [row] = output.rows().as_slice() else {
+        let rows = output.rows();
+        let [row] = rows.as_slice() else {
             panic!("automorphism dispatch must return exactly one row");
         };
         let [AlgorithmValue::UInt64(count)] = row.as_slice() else {
@@ -4509,7 +4510,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(empty.rows.is_empty());
+        assert!(empty.rows().is_empty());
 
         let graph = AdjacencyGraph::with_test_undirected_multigraph(4, &[(1, 0, 1), (2, 2, 3)]);
         assert!(matches!(
@@ -4584,7 +4585,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(empty.rows.is_empty());
+        assert!(empty.rows().is_empty());
 
         let graph = AdjacencyGraph::with_test_undirected_multigraph(4, &[(1, 0, 1), (2, 2, 3)]);
         assert!(matches!(
@@ -4974,12 +4975,12 @@ mod tests {
         for algorithm in [AnalyzeAlgorithm::EulerCircuit, AnalyzeAlgorithm::EulerPath] {
             let empty = euler_output(&AdjacencyGraph::default(), algorithm, false).unwrap();
             assert_eq!(empty.schema, Algorithm::Analyze(algorithm).result_schema());
-            assert!(empty.rows.is_empty());
+            assert!(empty.rows().is_empty());
 
             let singleton =
                 euler_output(&AdjacencyGraph::with_test_edges(1, &[]), algorithm, false).unwrap();
             assert_eq!(
-                singleton.rows,
+                singleton.rows(),
                 [vec![
                     AlgorithmValue::UuidList(vec![uuid(0)]),
                     AlgorithmValue::UuidList(Vec::new()),
@@ -4995,7 +4996,7 @@ mod tests {
         assert_eq!(
             euler_output(&undirected_open, AnalyzeAlgorithm::EulerPath, false)
                 .unwrap()
-                .rows,
+                .rows(),
             [vec![
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(2)]),
                 AlgorithmValue::UuidList(vec![uuid(10), uuid(11)]),
@@ -5010,7 +5011,7 @@ mod tests {
         assert_eq!(
             euler_output(&directed_open, AnalyzeAlgorithm::EulerPath, true)
                 .unwrap()
-                .rows,
+                .rows(),
             [vec![
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(2)]),
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1)]),
@@ -5032,13 +5033,13 @@ mod tests {
             ),
         ] {
             let circuit = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, directed).unwrap();
-            assert_eq!(circuit.rows.len(), 1);
+            assert_eq!(circuit.rows().len(), 1);
             assert_eq!(
-                circuit.rows[0][0],
+                circuit.rows()[0][0],
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(0)])
             );
             assert_eq!(
-                circuit.rows[0][1],
+                circuit.rows()[0][1],
                 AlgorithmValue::UuidList(if directed {
                     vec![uuid(0), uuid(1)]
                 } else {
@@ -5057,7 +5058,8 @@ mod tests {
         let first = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, false).unwrap();
         let second = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, false).unwrap();
         assert_eq!(first, second);
-        let [row] = first.rows.as_slice() else {
+        let rows = first.rows();
+        let [row] = rows.as_slice() else {
             panic!("Euler circuit must be one row");
         };
         let [
@@ -5212,7 +5214,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         assert!(matches!(
@@ -5397,7 +5399,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![
                 AlgorithmValue::Float64(0.0),
                 AlgorithmValue::UuidList(Vec::new()),
@@ -5481,7 +5483,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![
                 AlgorithmValue::Float64(0.0),
                 AlgorithmValue::UuidList(Vec::new()),
@@ -5604,7 +5606,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows,
+                .rows(),
                 [vec![AlgorithmValue::Boolean(false)]]
             );
         }
@@ -5617,7 +5619,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![AlgorithmValue::Boolean(false)]]
         );
     }
@@ -5889,7 +5891,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
             );
         }
@@ -6040,7 +6042,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [
                 vec![AlgorithmValue::UuidList(
                     [0_u128, 1, 2].map(u128::to_be_bytes).to_vec()
@@ -6067,7 +6069,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1), (1, 2), (2, 0)]);
@@ -6561,7 +6563,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert_ne!(output.rows(), legacy.rows);
+        assert_ne!(output.rows(), legacy.rows());
         assert_ne!(
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber).result_schema()
@@ -6599,7 +6601,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(matches!(

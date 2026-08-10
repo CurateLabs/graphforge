@@ -580,7 +580,7 @@ mod tests {
                 }
                 Behavior::NonConverge(count) => {
                     for _ in 0..count {
-                        control.checkpoint();
+                        control.checkpoint()?;
                     }
                     Err(control.non_convergence())
                 }

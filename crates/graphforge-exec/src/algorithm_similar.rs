@@ -602,7 +602,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![
                 vec![uuid(0), uuid(1), AlgorithmValue::Float64(1.0)],
                 vec![uuid(1), uuid(0), AlgorithmValue::Float64(1.0)],
@@ -617,7 +617,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(
@@ -628,7 +628,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(matches!(

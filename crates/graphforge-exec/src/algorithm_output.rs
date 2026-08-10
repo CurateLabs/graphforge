@@ -8,13 +8,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, UInt32Array,
-};
+use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, UInt32Array};
 use arrow::compute::take;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::algorithms::{Algorithm, AlgorithmFieldType};
+use graphforge_core::algorithms::Algorithm;
 
 use crate::algorithm_arrow_sink::{AlgorithmArrowSink, schema_version, shape_error};
 use crate::algorithm_dispatch::{AlgorithmError, AlgorithmOutput, AlgorithmValue};
@@ -50,6 +48,10 @@ pub(crate) fn materialize_node_properties_with_batch_size(
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "batchwise enrichment keeps one linear gather path"
+)]
 fn materialize_node_properties_with<F>(
     batch: &RecordBatch,
     stems: &[String],
@@ -282,8 +284,9 @@ fn materialization_error(message: impl Into<String>) -> AlgorithmError {
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::DataType;
     use graphforge_core::algorithms::{
-        AnalyzeAlgorithm, ClusterAlgorithm, PathAlgorithm, RankAlgorithm,
+        AlgorithmFieldType, AnalyzeAlgorithm, ClusterAlgorithm, PathAlgorithm, RankAlgorithm,
     };
 
     use super::*;

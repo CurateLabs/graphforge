@@ -1914,7 +1914,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
             );
         }
@@ -1966,7 +1966,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&directed, 0, 2, 3, 42, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![
                 vec![value(0), path(&[0, 2])],
                 vec![value(0), path(&[0, 1, 3])],
@@ -1975,7 +1975,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&directed, 2, 1, 3, 42, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(2), path(&[2])]]
         );
 
@@ -1983,7 +1983,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&undirected, 1, 1, 1, 0, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(1), path(&[1, 0])]]
         );
 
@@ -1992,7 +1992,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&weighted, 0, 1, 1, 0, true)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(0), path(&[0, 2])]]
         );
     }
@@ -2166,6 +2166,7 @@ mod tests {
                 8192,
                 u64::MAX
             )
+            .unwrap()
         );
         assert_eq!(
             edges.rows().iter().map(|row| &row[3]).collect::<Vec<_>>(),
@@ -2227,6 +2228,7 @@ mod tests {
                 8192,
                 u64::MAX
             )
+            .unwrap()
         );
         assert_eq!(
             edges,
@@ -2239,12 +2241,13 @@ mod tests {
                 8192,
                 u64::MAX
             )
+            .unwrap()
         );
         assert_eq!(
             scalar.rows()[0][2],
             AlgorithmValue::Float64(
                 edges
-                    .rows
+                    .rows()
                     .iter()
                     .map(|row| match &row[3] {
                         AlgorithmValue::Float64(capacity) => *capacity,
@@ -2307,7 +2310,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![
                 value(10),
                 value(0),
@@ -2327,7 +2330,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![value(0), value(2), AlgorithmValue::Float64(0.0)]]
         );
         assert!(
@@ -2340,7 +2343,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -2421,7 +2424,7 @@ mod tests {
             AlgorithmLimits::default(),
         )
         .unwrap()
-        .rows;
+        .rows();
         assert_eq!(
             rows,
             vec![
@@ -2594,7 +2597,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![
                 value(0),
                 value(4),
@@ -3051,7 +3054,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             output.rows()
         );
     }
@@ -3123,7 +3126,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             output.rows()
         );
     }
@@ -3140,7 +3143,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         assert!(matches!(

@@ -24,7 +24,10 @@ const SCHEMA_VERSION: &str = "1";
 
 /// Typed, bounded Arrow builder set for one algorithm result schema.
 pub(crate) struct AlgorithmArrowSink {
-    #[allow(dead_code, reason = "retained for diagnostics and future observability")]
+    #[allow(
+        dead_code,
+        reason = "retained for diagnostics and future observability"
+    )]
     algorithm: Algorithm,
     schema: AlgorithmResultSchema,
     arrow_schema: Arc<Schema>,
@@ -82,7 +85,7 @@ impl AlgorithmArrowSink {
                 arrow_type(logical.data_type),
                 logical.nullable,
             ));
-            builders.push(ColumnBuilder::new(logical.data_type)?);
+            builders.push(ColumnBuilder::new(logical.data_type));
         }
         let metadata = HashMap::from([
             (
@@ -112,6 +115,7 @@ impl AlgorithmArrowSink {
         })
     }
 
+    #[allow(dead_code, reason = "diagnostics accessor")]
     pub(crate) fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
@@ -121,11 +125,13 @@ impl AlgorithmArrowSink {
     }
 
     #[cfg(test)]
+    #[allow(dead_code, reason = "sink diagnostics reserved for direct sink tests")]
     pub(crate) fn peak_builder_rows(&self) -> usize {
         self.peak_builder_rows
     }
 
     #[cfg(test)]
+    #[allow(dead_code, reason = "sink diagnostics reserved for direct sink tests")]
     pub(crate) fn internal_batch_count(&self) -> usize {
         self.finished.len() + usize::from(self.current_rows > 0)
     }
@@ -180,8 +186,8 @@ impl AlgorithmArrowSink {
 }
 
 impl ColumnBuilder {
-    fn new(data_type: AlgorithmFieldType) -> Result<Self, AlgorithmError> {
-        Ok(match data_type {
+    fn new(data_type: AlgorithmFieldType) -> Self {
+        match data_type {
             AlgorithmFieldType::Uuid => Self::Uuid(FixedSizeBinaryBuilder::new(16)),
             AlgorithmFieldType::UuidList => {
                 Self::UuidList(
@@ -202,7 +208,7 @@ impl ColumnBuilder {
             AlgorithmFieldType::UInt64 => Self::UInt64(UInt64Builder::new()),
             AlgorithmFieldType::Int64 => Self::Int64(Int64Builder::new()),
             AlgorithmFieldType::Float64 => Self::Float64(Float64Builder::new()),
-        })
+        }
     }
 
     fn append(
@@ -306,7 +312,7 @@ impl AlgorithmArrowSink {
             .fields
             .iter()
             .map(|field| ColumnBuilder::new(field.data_type))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect();
         let rows = self.current_rows;
         self.current_rows = 0;
         let batch = RecordBatch::try_new(self.arrow_schema.clone(), columns)
@@ -332,7 +338,7 @@ fn coalesce_batches(
     let total_rows = batches
         .iter()
         .map(RecordBatch::num_rows)
-        .try_fold(0_usize, |acc, rows| acc.checked_add(rows))
+        .try_fold(0_usize, usize::checked_add)
         .ok_or_else(|| shape_error("coalesced output row count overflows usize"))?;
     if total_rows > i32::MAX as usize {
         return Err(shape_error(
@@ -354,12 +360,12 @@ fn check_batch_capacity(batch: &RecordBatch) -> Result<(), AlgorithmError> {
         return Err(shape_error("Arrow batch exceeds checked i32 row capacity"));
     }
     for column in batch.columns() {
-        if let Some(list) = column.as_any().downcast_ref::<ListArray>() {
-            if list.values().len() > i32::MAX as usize {
-                return Err(shape_error(
-                    "Arrow list values exceed checked i32 offset capacity",
-                ));
-            }
+        if let Some(list) = column.as_any().downcast_ref::<ListArray>()
+            && list.values().len() > i32::MAX as usize
+        {
+            return Err(shape_error(
+                "Arrow list values exceed checked i32 offset capacity",
+            ));
         }
     }
     Ok(())
