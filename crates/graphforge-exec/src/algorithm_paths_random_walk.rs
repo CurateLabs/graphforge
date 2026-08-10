@@ -141,7 +141,7 @@ fn random_walks_parallel<A: RandomWalkAdjacencySource>(
         .ok_or_else(|| execution("parallel random_walk requires an instance-owned compute pool"))?;
     let ranges = walk_task_chunks(output_rows, control.compute_threads());
     let chunk_results = run_on_pool(pool, || {
-        ranges
+        Ok(ranges
             .par_iter()
             .map(|&(start, end)| {
                 let mut walks = Vec::with_capacity(end.saturating_sub(start));
@@ -161,7 +161,7 @@ fn random_walks_parallel<A: RandomWalkAdjacencySource>(
                 }
                 Ok(walks)
             })
-            .collect::<Vec<Result<Vec<Vec<[u8; 16]>>, AlgorithmError>>>()
+            .collect::<Vec<Result<Vec<Vec<[u8; 16]>>, AlgorithmError>>>())
     })?;
     merge_walk_chunks(chunk_results, output_rows)
 }
