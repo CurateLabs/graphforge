@@ -649,8 +649,8 @@ The estimate is `sources^2 + 2 * sources * selected_degree_sum`. Manual
 serial-vs-parallel timing on the M4 agent host (4x Xeon vCPU, directed
 ring-lattice fixtures, 4 private workers, debug test profile after a clean
 target-dir build; see ignored `measure_total_neighbors_parallel_crossover`)
-showed ~230k units still slower (~1.77x serial), ~540k still slower (~1.16x),
-~1.2M first clear win (~0.69x), and >=2.1M at least 1.7x faster.
+showed ~230k units still slower (~1.06x serial), ~540k still slower (~1.31x),
+~1.2M first clear win (~0.84x), and >=2.1M at least 1.4x faster.
 
 Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Parallel workers own only source

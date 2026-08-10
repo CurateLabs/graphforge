@@ -166,10 +166,10 @@ const COMMON_NEIGHBORS_CHECKPOINT_INTERVAL: usize = 1_024;
 /// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers, debug
 /// test profile after a clean target-dir build; see
 /// ignored `measure_total_neighbors_parallel_crossover`):
-/// - ~230k estimated units: parallel still slower (~1.77x serial)
-/// - ~540k estimated units: parallel still slower (~1.16x serial)
-/// - ~1.2M estimated units: first clear win (~0.69x serial)
-/// - >=2.1M estimated units: >=1.7x speedup
+/// - ~230k estimated units: parallel still slower (~1.06x serial)
+/// - ~540k estimated units: parallel still slower (~1.31x serial)
+/// - ~1.2M estimated units: first clear win (~0.84x serial)
+/// - >=2.1M estimated units: >=1.4x speedup
 ///
 /// `1_048_576` is the smallest power-of-two work estimate below that measured
 /// win boundary. Each source keeps serial candidate/intersection order, so
