@@ -79,11 +79,13 @@ DataFusion target partitions, thread-parity cells over the host budget.
 ## Honest bottlenecks retained
 
 The entry baseline intentionally records the current implementation, including
-serial algorithm kernels and CSR-to-map conversion where still observable.
-Query-facing Parquet providers stream bounded batches via
-`GraphForgeParquetExec` (#339) rather than eager single-partition `MemTable`
-materialization; ExpandExec filtered reads and fixed-hop demand remain the
-selective-path contract. Further optimizations belong to later M4 issues.
+CSR-to-map conversion where still observable. Exact cosine KNN / similarity
+(#342) may use the instance-owned private compute pool above a documented
+crossover while preserving one-thread fingerprints. Query-facing Parquet
+providers stream bounded batches via `GraphForgeParquetExec` (#339) rather than
+eager single-partition `MemTable` materialization; ExpandExec filtered reads and
+fixed-hop demand remain the selective-path contract. Further optimizations
+belong to later M4 issues.
 
 ## Discovery evidence (not a universal size ceiling)
 

@@ -2,8 +2,9 @@
 //!
 //! One normalized policy configures Tokio workers, DataFusion partitions /
 //! batch size, memory, spill, I/O concurrency, and heavy-query admission
-//! before a [`crate::GraphForge`] instance begins work. Algorithm kernels are
-//! not parallelized here; `compute_threads` reserves a future private pool.
+//! before a [`crate::GraphForge`] instance begins work. `compute_threads`
+//! sizes the instance-owned private CPU pool consumed by parallel cosine KNN
+//! (#342) and future deterministic CPU kernels.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -53,8 +54,10 @@ pub struct ExecutionResourcePolicy {
     pub io_concurrency: Option<usize>,
     /// Maximum concurrent heavy Cypher / analyst invocations. `None` → 64.
     pub max_concurrent_heavy_queries: Option<usize>,
-    /// Reserved compute-thread budget for future private CPU pools. Not used to
-    /// parallelize algorithms in #337.
+    /// Compute-thread budget for the instance-owned private CPU pool (#337 / #342).
+    ///
+    /// Parallel cosine KNN partitions work by canonical source through that pool
+    /// when work exceeds the documented crossover; `1` keeps the serial path.
     pub compute_threads: Option<usize>,
 }
 
@@ -98,7 +101,7 @@ pub struct NormalizedResourcePolicy {
     pub io_concurrency: usize,
     /// Heavy-query admission slots.
     pub max_concurrent_heavy_queries: usize,
-    /// Reserved compute-thread budget (future private pool).
+    /// Compute-thread budget for the instance-owned private CPU pool (#342).
     pub compute_threads: usize,
     /// Machine logical parallelism observed at normalize time.
     pub observed_logical_cpus: usize,
@@ -121,7 +124,7 @@ pub struct ResourcePolicyDiagnostics {
     pub spill_enabled: bool,
     /// I/O concurrency budget.
     pub io_concurrency: usize,
-    /// Reserved compute threads.
+    /// Compute-thread budget for the private CPU pool.
     pub compute_threads: usize,
     /// Heavy-query admission limit.
     pub max_concurrent_heavy_queries: usize,

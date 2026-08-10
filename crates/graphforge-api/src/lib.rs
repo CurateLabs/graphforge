@@ -382,6 +382,8 @@ pub struct GraphForge {
     write_options: GraphForgeOptions,
     /// Normalized execution resource policy applied to runtime and sessions (#337).
     resource_policy: resource_policy::NormalizedResourcePolicy,
+    /// Instance-owned private CPU pool for parallel algorithm kernels (#337 / #342).
+    compute_pool: graphforge_exec::SharedComputePool,
     /// Instance-owned heavy-query admission gate (#337).
     heavy_query_admission: Arc<resource_policy::HeavyQueryAdmission>,
     /// Ensures mutation bursts share one bounded process-local driver thread.
@@ -490,6 +492,9 @@ impl GraphForge {
             heavy_query_admission: Arc::new(resource_policy::HeavyQueryAdmission::new(
                 resource_policy.max_concurrent_heavy_queries,
             )),
+            compute_pool: Arc::new(graphforge_exec::ComputePool::new(
+                resource_policy.compute_threads,
+            )?),
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -567,6 +572,9 @@ impl GraphForge {
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
             resource_policy.max_concurrent_heavy_queries,
         ));
+        let compute_pool = Arc::new(graphforge_exec::ComputePool::new(
+            resource_policy.compute_threads,
+        )?);
         let runtime = build_runtime(&resource_policy)?;
 
         let graph = Self {
@@ -589,6 +597,7 @@ impl GraphForge {
             graph_visibility: Arc::new(write_modes::WriteCoordinator::new(&write_options)),
             write_options,
             resource_policy,
+            compute_pool,
             heavy_query_admission,
             provider_refresh_driver_active: Arc::new(AtomicBool::new(false)),
             provider_refresh_runtimes: Arc::new(Mutex::new(Vec::new())),
@@ -2522,7 +2531,7 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        graphforge_exec::similar_algorithm_with_limits(
+        graphforge_exec::similar_algorithm_with_compute(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
@@ -2530,7 +2539,9 @@ impl GraphForge {
             std::slice::from_ref(&stem),
             options,
             graphforge_exec::AlgorithmLimits::default()
-                .with_batch_size(self.resource_policy.batch_size),
+                .with_batch_size(self.resource_policy.batch_size)
+                .with_compute_threads(self.resource_policy.compute_threads),
+            Some(self.compute_pool.clone()),
         )
     }
 

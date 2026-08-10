@@ -201,6 +201,7 @@ pub use algorithm_cluster::{
     cluster_algorithm, cluster_algorithm_with_limits, cluster_projection_fingerprint,
 };
 pub use algorithm_dispatch::AlgorithmLimits;
+mod compute_pool;
 pub use algorithm_embedding_invocation::{
     EmbeddingExecution, EmbeddingInvocationDescriptor, EmbeddingInvocationLimits,
     EmbeddingProjectionSelector, EmbeddingRngContract,
@@ -208,8 +209,10 @@ pub use algorithm_embedding_invocation::{
 pub use algorithm_paths::{paths_algorithm, paths_projection_fingerprint};
 pub use algorithm_rank::{rank_algorithm, rank_algorithm_with_limits, rank_projection_fingerprint};
 pub use algorithm_similar::{
-    similar_algorithm, similar_algorithm_with_limits, similar_projection_fingerprint,
+    similar_algorithm, similar_algorithm_with_compute, similar_algorithm_with_limits,
+    similar_projection_fingerprint,
 };
+pub use compute_pool::{ComputePool, SharedComputePool};
 
 mod write_driver;
 

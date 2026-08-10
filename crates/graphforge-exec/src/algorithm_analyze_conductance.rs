@@ -255,6 +255,7 @@ mod tests {
                         iterations: limits.3,
                         states: AlgorithmLimits::default().states,
                         batch_size: AlgorithmLimits::default().batch_size,
+                        compute_threads: AlgorithmLimits::default().compute_threads,
                     },
                     AlgorithmCancellation::default(),
                 );
