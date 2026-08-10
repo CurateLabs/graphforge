@@ -83,6 +83,14 @@ Components merges worker-local forests in canonical source-range order, and
 Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
 path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and transitivity
+triangle counting (#586) may partition independent work across that pool above
+documented crossovers; work never uses Rayon's process-global pool. Cosine dot
+products retain serial coordinate order, PageRank keeps canonical contribution
+order with serial dangling/delta reductions, Node2Vec skip-gram training stays
+serial, and transitivity merges integer triangle counts in canonical source-range
+order, so fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -261,6 +269,25 @@ IDs are still assigned by canonical node order, so schemas, row order, labels,
 and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
+
+## Parallel transitivity triangle counting (#586)
+
+`analyze(by="transitivity")` keeps UUID indexing, undirected simple-neighbor
+normalization, and the wedge denominator serial. Those steps validate duplicate
+edge UUIDs, self-loops, endpoint membership, and the zero-wedge early return
+before any pool scheduling. The triangle-closure scan then partitions independent
+source-ordinal ranges across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- closed-wedge candidates are at least
+  `TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES` (`32_768`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread,
+transitivity stays serial. Parallel workers return local `u64` triangle counts;
+chunks merge in ascending source-range order before the single final `3T / wedge`
+floating-point division. Schemas, scalar row shape, ratio bits, structured
+errors, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
+configurations.
 
 ## Observability
 
