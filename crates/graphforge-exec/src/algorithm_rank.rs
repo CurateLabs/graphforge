@@ -1,8 +1,8 @@
 //! Rust-owned rank handlers registered under the shared M18 dispatch contract.
 //!
-//! PageRank (#343) may partition destination-owned score updates across the
-//! instance-owned private compute pool while preserving the serial contribution
-//! order, dangling/delta reductions, and bit-identical fingerprints.
+//! PageRank (#343) and triangles (#515) may partition destination-owned score
+//! updates across the instance-owned private compute pool while preserving the
+//! serial contribution order, reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -83,6 +83,13 @@ const PAGERANK_TOLERANCE: f64 = 1.0e-10;
 /// embedded hosts. Numeric results remain identical either way.
 pub const PAGERANK_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
 const PAGERANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
+/// Selected node count below which triangle ranking stays on the serial path (#515).
+///
+/// Keeps small fixtures and sparse micro-invocations off the worker pool; above
+/// this, dense-ordinal node partitions amortize scheduling on typical embedded
+/// hosts. Exact triangle counts remain identical either way.
+pub const TRIANGLES_PARALLEL_CROSSOVER_NODES: usize = 256;
+const TRIANGLES_CHECKPOINT_PAIRS: usize = 1_024;
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 const ARTICLE_RANK_DAMPING: f64 = 0.85;
@@ -1147,18 +1154,54 @@ fn triangle_scores(
     control: &AlgorithmControl,
 ) -> Result<Vec<f64>, AlgorithmError> {
     let neighbors = simple_undirected_neighbors(graph, control)?;
-    let mut scores = Vec::with_capacity(graph.node_ids().len());
+    match select_triangles_path(control, neighbors.len()) {
+        TrianglesExecutionPath::Serial => triangle_scores_serial(&neighbors, control),
+        TrianglesExecutionPath::Parallel { .. } => triangle_scores_parallel(&neighbors, control),
+    }
+}
+
+/// Selected triangles execution path for private-pool crossover tests (#515).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrianglesExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+/// Choose serial vs private-pool parallel execution for a triangles workload.
+pub(crate) fn select_triangles_path(
+    control: &AlgorithmControl,
+    nodes: usize,
+) -> TrianglesExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes <= 1
+        || nodes < TRIANGLES_PARALLEL_CROSSOVER_NODES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return TrianglesExecutionPath::Serial;
+    }
+    let chunks = destination_chunks(nodes, threads).len();
+    TrianglesExecutionPath::Parallel { threads, chunks }
+}
+
+fn triangle_scores_serial(
+    neighbors: &[Vec<usize>],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let mut scores = Vec::with_capacity(neighbors.len());
     let mut visited_pairs = 0_usize;
-    for node in 0..graph.node_ids().len() {
+    for node in 0..neighbors.len() {
         control.checkpoint()?;
         let mut count = 0_u64;
         for (offset, &first) in neighbors[node].iter().enumerate() {
             for &second in &neighbors[node][offset + 1..] {
-                if visited_pairs.is_multiple_of(1024) {
+                if visited_pairs.is_multiple_of(TRIANGLES_CHECKPOINT_PAIRS) {
                     control.checkpoint()?;
                 }
                 visited_pairs += 1;
-                if has_arc(&neighbors, first, second) {
+                if has_arc(neighbors, first, second) {
                     count = count
                         .checked_add(1)
                         .ok_or_else(|| execution("triangle count exceeds supported range"))?;
@@ -1168,6 +1211,76 @@ fn triangle_scores(
         scores.push(exact_u64_as_f64(count, "triangle count")?);
     }
     Ok(scores)
+}
+
+fn triangle_scores_parallel(
+    neighbors: &[Vec<usize>],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel triangles requires an instance-owned compute pool"))?;
+    let ranges = destination_chunks(neighbors.len(), control.compute_threads());
+    let work = AtomicUsize::new(0);
+    let chunk_results = run_triangles_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut local = Vec::with_capacity(end - start);
+                for node in start..end {
+                    control.check_cancelled()?;
+                    local.push(triangle_score_node_parallel(
+                        neighbors, node, control, &work,
+                    )?);
+                }
+                Ok((start, local))
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+
+    // Merge worker-local scores in ascending node-ordinal range order (canonical).
+    let mut scores = vec![0.0; neighbors.len()];
+    for (start, local) in chunk_results {
+        scores[start..start + local.len()].copy_from_slice(&local);
+    }
+    Ok(scores)
+}
+
+fn triangle_score_node_parallel(
+    neighbors: &[Vec<usize>],
+    node: usize,
+    control: &AlgorithmControl,
+    work: &AtomicUsize,
+) -> Result<f64, AlgorithmError> {
+    let mut count = 0_u64;
+    for (offset, &first) in neighbors[node].iter().enumerate() {
+        for &second in &neighbors[node][offset + 1..] {
+            let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
+            if observed.is_multiple_of(TRIANGLES_CHECKPOINT_PAIRS) {
+                control.check_cancelled()?;
+            }
+            if has_arc(neighbors, first, second) {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| execution("triangle count exceeds supported range"))?;
+            }
+        }
+    }
+    exact_u64_as_f64(count, "triangle count")
+}
+
+fn run_triangles_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("triangles worker panicked")),
+    }
 }
 
 fn preferential_attachment_scores(
@@ -2074,6 +2187,26 @@ mod tests {
         AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
 
+    fn triangle_thread_matrix_graph() -> AdjacencyGraph {
+        let nodes = TRIANGLES_PARALLEL_CROSSOVER_NODES + 32;
+        let mut edges = Vec::with_capacity(nodes * 4);
+        for node in 0..nodes {
+            let a = node as u64;
+            let b = ((node + 1) % nodes) as u64;
+            let c = ((node + 2) % nodes) as u64;
+            edges.push((a, b));
+            edges.push((b, c));
+            edges.push((c, a));
+            if node.is_multiple_of(17) {
+                edges.push((a, b));
+            }
+            if node.is_multiple_of(23) {
+                edges.push((a, a));
+            }
+        }
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+
     fn execute_betweenness(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
@@ -2310,8 +2443,31 @@ mod tests {
         )
     }
 
+    fn execute_triangles_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::Triangles), graph, &control)
+    }
+
     fn triangle_output_scores(output: &AlgorithmOutput) -> Vec<f64> {
         hits_hub_scores(output)
+    }
+
+    fn triangle_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        triangle_output_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
     }
 
     fn execute_k_core(
@@ -4068,6 +4224,95 @@ mod tests {
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "triangles");
+    }
+
+    #[test]
+    fn triangles_path_selection_respects_crossover_pool_and_one_thread() {
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_triangles_path(&no_pool, TRIANGLES_PARALLEL_CROSSOVER_NODES),
+            TrianglesExecutionPath::Serial
+        );
+
+        let below = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_triangles_path(&below, TRIANGLES_PARALLEL_CROSSOVER_NODES - 1),
+            TrianglesExecutionPath::Serial
+        );
+
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_triangles_path(&one, TRIANGLES_PARALLEL_CROSSOVER_NODES),
+            TrianglesExecutionPath::Serial
+        );
+
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_triangles_path(&parallel, TRIANGLES_PARALLEL_CROSSOVER_NODES),
+            TrianglesExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn triangles_thread_matrix_matches_one_thread_fingerprints_and_ordering() {
+        let graph = triangle_thread_matrix_graph();
+        assert!(graph.node_ids().len() >= TRIANGLES_PARALLEL_CROSSOVER_NODES);
+
+        let one_thread =
+            execute_triangles_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let expected_rows = one_thread.rows();
+        let expected_bits = triangle_bits(&one_thread);
+
+        for threads in [1_usize, 2, 4, 8] {
+            let output =
+                execute_triangles_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(output.schema, one_thread.schema);
+            assert_eq!(output.rows(), expected_rows);
+            assert_eq!(triangle_bits(&output), expected_bits);
+        }
+    }
+
+    #[test]
+    fn triangles_parallel_cancellation_returns_structured_cancelled() {
+        let graph = AdjacencyGraph::with_test_edges(TRIANGLES_PARALLEL_CROSSOVER_NODES as u64, &[]);
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert!(matches!(
+            select_triangles_path(&control, graph.node_ids().len()),
+            TrianglesExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        ));
+
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_triangles_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
     }
 
     #[test]

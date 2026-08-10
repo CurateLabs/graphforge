@@ -1,8 +1,8 @@
-//! Instance-owned bounded CPU pool for deterministic algorithm kernels (#337 / #342 / #343 / #344).
+//! Instance-owned bounded CPU pool for deterministic algorithm kernels (#337 / #342 / #343 / #344 / #515).
 //!
 //! GraphForge never installs work onto Rayon's process-global pool. Parallel
 //! cosine KNN (#342), PageRank (#343), Node2Vec walk generation (#344), and
-//! sibling CPU kernels consume this private pool sized from [`crate`]-facing
+//! triangles (#515) consume this private pool sized from [`crate`]-facing
 //! `compute_threads` on the embedded resource policy.
 
 use std::sync::Arc;
