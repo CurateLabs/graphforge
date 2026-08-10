@@ -330,6 +330,13 @@ candidate, and coordinate orders. Xavier initialization uses
 `graphsage-xavier`
 (`U64(layer), U64(output coordinate), U64(input coordinate)`).
 
+GraphSAGE-v1 training has an explicit serial performance disposition (#560) and
+no private-pool crossover. Positive-pair replay, sampled role-path computation
+graphs, gradient accumulation, Adam moment updates, and final inference are one
+canonical state stream; reordering examples or reducing gradients across workers
+would define a different numeric contract. Multi-thread resource policies must
+therefore preserve the one-thread output rather than parallelize this path.
+
 After training, output is one deterministic full-neighborhood forward pass,
 an explicit GraphForge v1 choice rather than a paper requirement:
 each mean uses all canonical incident candidates, not a sample, and rows are

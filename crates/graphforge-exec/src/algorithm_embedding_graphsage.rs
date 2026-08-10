@@ -1,4 +1,10 @@
 //! Deterministic GraphSAGE-v1 projection and neighborhood-sampling kernel.
+//!
+//! GraphSAGE training remains serial for #560: positive-pair replay, sampled
+//! computation graphs, gradient accumulation, Adam moment updates, and final
+//! full-neighborhood inference all feed the next accepted state in canonical
+//! order. The implementation therefore avoids a private-pool crossover and
+//! keeps the order-sensitive path explicit for evidence.
 
 use std::collections::{BTreeMap, HashMap};
 use std::mem::size_of;
@@ -126,6 +132,13 @@ pub(crate) enum GraphSageKernelError {
     IndexOverflow,
     #[error(transparent)]
     Resource(#[from] EmbeddingResourceError),
+}
+
+/// Selected GraphSAGE execution path for #560 disposition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GraphSageExecutionPath {
+    /// Training and inference keep one canonical state stream.
+    SerialOrderedTraining,
 }
 
 /// Validate public identity and features, then canonicalize an undirected graph.
@@ -364,6 +377,9 @@ pub(crate) fn train_graphsage(
     options: &GraphSageOptions,
     control: &EmbeddingControl<'_>,
 ) -> Result<Vec<GraphSageEmbeddingRow>, GraphSageKernelError> {
+    match select_graphsage_path(control, projection.nodes.len()) {
+        GraphSageExecutionPath::SerialOrderedTraining => {}
+    }
     validate_graphsage_options(options)?;
     if projection.nodes.is_empty() {
         return Err(GraphSageKernelError::UndefinedTraining);
@@ -409,6 +425,13 @@ pub(crate) fn train_graphsage(
     }
 
     infer_full_neighborhood(projection, options, &parameters.weights, control)
+}
+
+pub(crate) fn select_graphsage_path(
+    _control: &EmbeddingControl<'_>,
+    _node_count: usize,
+) -> GraphSageExecutionPath {
+    GraphSageExecutionPath::SerialOrderedTraining
 }
 
 fn validate_graphsage_options(options: &GraphSageOptions) -> Result<(), GraphSageKernelError> {
@@ -1375,6 +1398,8 @@ mod tests {
         AlgorithmCancellation, AlgorithmControl, AlgorithmError, AlgorithmLimits,
     };
     use crate::algorithm_embedding_control::EmbeddingResourceLimits;
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(value: u128) -> [u8; 16] {
         value.to_be_bytes()
@@ -1423,6 +1448,20 @@ mod tests {
         }
     }
 
+    fn control_with_threads(threads: usize) -> (AlgorithmControl, EmbeddingResourceLimits) {
+        (
+            AlgorithmControl::new(
+                AlgorithmLimits::default().with_compute_threads(threads),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap())),
+            EmbeddingResourceLimits {
+                memory_bytes: u64::MAX,
+                work: u64::MAX,
+            },
+        )
+    }
+
     #[test]
     fn projection_is_uuid_ordered_and_validates_feature_shape_and_finiteness() {
         let projection = validate_graphsage_projection(
@@ -1450,6 +1489,72 @@ mod tests {
         assert_eq!(
             validate_graphsage_projection(vec![node(1, &[])], vec![]),
             Err(GraphSageKernelError::EmptyFeatures)
+        );
+    }
+
+    #[test]
+    fn serial_disposition_holds_across_thread_budgets() {
+        let graph = validate_graphsage_projection(
+            vec![
+                node(4, &[4.0, 40.0]),
+                node(1, &[1.0, 10.0]),
+                node(3, &[3.0, 30.0]),
+                node(2, &[2.0, 20.0]),
+            ],
+            vec![
+                edge(11, 1, 2),
+                edge(12, 2, 3),
+                edge(13, 3, 4),
+                edge(14, 4, 1),
+                edge(15, 1, 3),
+            ],
+        )
+        .unwrap();
+        let options = GraphSageOptions {
+            dimensions: 2,
+            hidden_dimensions: 2,
+            layers: 1,
+            sample_sizes: vec![1],
+            epochs: 1,
+            negative_samples: 1,
+            learning_rate: 0.000_002,
+            feature_properties: vec!["feature".into()],
+            seed: 23,
+            ..GraphSageOptions::default()
+        };
+        let (algorithm, limits) = control_with_threads(1);
+        let oracle_control = EmbeddingControl::new(&algorithm, limits);
+        assert_eq!(
+            select_graphsage_path(&oracle_control, graph.nodes.len()),
+            GraphSageExecutionPath::SerialOrderedTraining
+        );
+        let oracle = train_graphsage(&graph, &options, &oracle_control).unwrap();
+
+        for threads in [2_usize, 4, 8] {
+            let (algorithm, limits) = control_with_threads(threads);
+            let control = EmbeddingControl::new(&algorithm, limits);
+            assert_eq!(
+                select_graphsage_path(&control, graph.nodes.len()),
+                GraphSageExecutionPath::SerialOrderedTraining
+            );
+            assert_eq!(train_graphsage(&graph, &options, &control).unwrap(), oracle);
+        }
+    }
+
+    #[test]
+    fn negative_distribution_follows_projection_uuid_order() {
+        let graph = validate_graphsage_projection(
+            vec![node(3, &[3.0]), node(1, &[1.0]), node(2, &[2.0])],
+            vec![edge(11, 3, 1), edge(12, 2, 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            negative_distribution(&graph)
+                .unwrap()
+                .into_iter()
+                .map(|(node, _)| graph.nodes[node].uuid)
+                .collect::<Vec<_>>(),
+            vec![uuid(1), uuid(2), uuid(3)]
         );
     }
 

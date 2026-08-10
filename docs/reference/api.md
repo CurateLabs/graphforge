@@ -3203,6 +3203,12 @@ Embedding items are non-null. Metadata includes
 `graphforge.rng_derivation`. Embedding analysis is read-only: it has no
 `write_property` behavior and does not publish or refresh an embedding space.
 
+`by="graphsage"` has an explicit serial performance disposition (#560). The
+training examples, sampled computation graphs, gradient accumulation, Adam
+updates, and final inference preserve one canonical order under every
+`compute_threads` policy; no parallel training crossover, GPU, or foreign-engine
+fallback is claimed.
+
 ---
 
 ### `similar(label, *, by, k=10, vector_property=None, via=None)` → `pyarrow.Table`
