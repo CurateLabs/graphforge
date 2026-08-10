@@ -1,7 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 use crate::algorithm_partition::ResolvedPartitionMap;
+
+/// Partition counts below this stay serial to avoid private-pool scheduling tax.
+pub(crate) const CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ConductanceEdge {
@@ -15,6 +21,12 @@ pub(crate) struct ConductanceEdge {
 pub(crate) struct ConductanceRow {
     pub partition_id: String,
     pub conductance: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConductanceExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
 }
 
 pub(crate) fn conductance(
@@ -83,26 +95,143 @@ pub(crate) fn conductance(
         }
     }
 
-    let mut rows = Vec::with_capacity(volumes.len());
-    for (partition, &volume) in &volumes {
-        checkpoint(control, &mut work)?;
-        let complement = volumes
-            .iter()
-            .filter(|(other, _)| *other != partition)
-            .try_fold(0.0, |sum, (_, value)| finite(sum + value))?;
-        let denominator = volume.min(complement);
-        if denominator == 0.0 {
-            return Err(AlgorithmError::UndefinedConductance {
-                partition: partition.clone(),
-            });
+    let rows = match select_conductance_path(control, volumes.len()) {
+        ConductanceExecutionPath::Serial => {
+            conductance_rows_serial(&volumes, &cuts, control, &mut work)?
         }
-        rows.push(ConductanceRow {
-            partition_id: partition.clone(),
-            conductance: cuts[partition] / denominator,
-        });
-    }
+        ConductanceExecutionPath::Parallel { .. } => {
+            conductance_rows_parallel(&volumes, &cuts, control)?
+        }
+    };
     control.check_cancelled()?;
     Ok(rows)
+}
+
+pub(crate) fn select_conductance_path(
+    control: &AlgorithmControl,
+    partitions: usize,
+) -> ConductanceExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || partitions < CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return ConductanceExecutionPath::Serial;
+    }
+    ConductanceExecutionPath::Parallel {
+        threads,
+        chunks: partition_chunks(partitions, threads).len(),
+    }
+}
+
+fn conductance_rows_serial(
+    volumes: &BTreeMap<String, f64>,
+    cuts: &BTreeMap<String, f64>,
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<Vec<ConductanceRow>, AlgorithmError> {
+    let mut rows = Vec::with_capacity(volumes.len());
+    for (partition, &volume) in volumes {
+        checkpoint(control, work)?;
+        rows.push(conductance_row(partition, volume, volumes, cuts)?);
+    }
+    Ok(rows)
+}
+
+fn conductance_rows_parallel(
+    volumes: &BTreeMap<String, f64>,
+    cuts: &BTreeMap<String, f64>,
+    control: &AlgorithmControl,
+) -> Result<Vec<ConductanceRow>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel conductance requires an instance-owned compute pool"))?;
+    let entries = volumes
+        .iter()
+        .map(|(partition, &volume)| (partition.as_str(), volume))
+        .collect::<Vec<_>>();
+    let ranges = partition_chunks(entries.len(), control.compute_threads());
+    let mut chunk_results = run_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let result = (|| {
+                    control.check_cancelled()?;
+                    let mut work = 0_usize;
+                    let mut local = Vec::with_capacity(end - start);
+                    for &(partition, volume) in &entries[start..end] {
+                        checkpoint(control, &mut work)?;
+                        local.push(conductance_row(partition, volume, volumes, cuts)?);
+                    }
+                    Ok(local)
+                })();
+                (start, result)
+            })
+            .collect::<Vec<(usize, Result<Vec<ConductanceRow>, AlgorithmError>)>>())
+    })?;
+    chunk_results.sort_unstable_by_key(|(start, _)| *start);
+    let mut rows = Vec::with_capacity(entries.len());
+    for (_, chunk) in chunk_results {
+        rows.extend(chunk?);
+    }
+    Ok(rows)
+}
+
+fn conductance_row(
+    partition: &str,
+    volume: f64,
+    volumes: &BTreeMap<String, f64>,
+    cuts: &BTreeMap<String, f64>,
+) -> Result<ConductanceRow, AlgorithmError> {
+    let complement = volumes
+        .iter()
+        .filter(|(other, _)| other.as_str() != partition)
+        .try_fold(0.0, |sum, (_, value)| finite(sum + value))?;
+    let denominator = volume.min(complement);
+    if denominator == 0.0 {
+        return Err(AlgorithmError::UndefinedConductance {
+            partition: partition.to_owned(),
+        });
+    }
+    Ok(ConductanceRow {
+        partition_id: partition.to_owned(),
+        conductance: cuts[partition] / denominator,
+    })
+}
+
+fn partition_chunks(len: usize, threads: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, len);
+    let base = len / workers;
+    let rem = len % workers;
+    let mut chunks = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let chunk_len = base + usize::from(index < rem);
+        let end = start + chunk_len;
+        if start < end {
+            chunks.push((start, end));
+        }
+        start = end;
+    }
+    chunks
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("conductance worker panicked")),
+    }
 }
 
 fn canonical(mut edge: ConductanceEdge) -> ConductanceEdge {
@@ -146,15 +275,28 @@ mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
     use crate::algorithm_partition::PartitionValue;
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(n: u8) -> [u8; 16] {
         [n; 16]
+    }
+    fn wide_uuid(n: u128) -> [u8; 16] {
+        n.to_be_bytes()
     }
     fn edge(id: u8, source: u8, target: u8, weight: f64) -> ConductanceEdge {
         ConductanceEdge {
             edge_uuid: uuid(id),
             source_uuid: uuid(source),
             target_uuid: uuid(target),
+            weight,
+        }
+    }
+    fn wide_edge(id: u128, source: usize, target: usize, weight: f64) -> ConductanceEdge {
+        ConductanceEdge {
+            edge_uuid: wide_uuid(id),
+            source_uuid: wide_uuid(source as u128),
+            target_uuid: wide_uuid(target as u128),
             weight,
         }
     }
@@ -169,6 +311,41 @@ mod tests {
     }
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
+    }
+    fn singleton_fixture(
+        nodes: usize,
+    ) -> (Vec<[u8; 16]>, Vec<ConductanceEdge>, ResolvedPartitionMap) {
+        let node_ids = (0..nodes)
+            .map(|node| wide_uuid(node as u128))
+            .collect::<Vec<_>>();
+        let edges = (0..nodes - 1)
+            .map(|source| {
+                wide_edge(
+                    10_000 + source as u128,
+                    source,
+                    source + 1,
+                    1.0 + (source % 7) as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let partitions = ResolvedPartitionMap::try_new(
+            node_ids.iter().copied(),
+            (0..nodes).map(|node| {
+                (
+                    wide_uuid(node as u128),
+                    PartitionValue::String(format!("p{node:04}")),
+                )
+            }),
+        )
+        .unwrap();
+        (node_ids, edges, partitions)
     }
     fn run(
         nodes: &[[u8; 16]],
@@ -212,6 +389,57 @@ mod tests {
                 partition: "left".into(),
             })
         );
+    }
+
+    #[test]
+    fn path_selection_respects_crossover_and_private_pool() {
+        let serial = control_with_threads(1);
+        assert_eq!(
+            select_conductance_path(&serial, CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS),
+            ConductanceExecutionPath::Serial
+        );
+        let below = control_with_threads(4);
+        assert_eq!(
+            select_conductance_path(&below, CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS - 1),
+            ConductanceExecutionPath::Serial
+        );
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_conductance_path(&no_pool, CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS),
+            ConductanceExecutionPath::Serial
+        );
+        assert_eq!(
+            select_conductance_path(
+                &control_with_threads(4),
+                CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS
+            ),
+            ConductanceExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_conductance_rows() {
+        let (nodes, edges, partitions) = singleton_fixture(192);
+        let serial =
+            conductance(&nodes, &edges, false, &partitions, &control_with_threads(1)).unwrap();
+        assert_eq!(serial.len(), 192);
+        for threads in [2_usize, 4, 8] {
+            let control = control_with_threads(threads);
+            assert!(matches!(
+                select_conductance_path(&control, 192),
+                ConductanceExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(
+                conductance(&nodes, &edges, false, &partitions, &control).unwrap(),
+                serial
+            );
+        }
     }
 
     #[test]

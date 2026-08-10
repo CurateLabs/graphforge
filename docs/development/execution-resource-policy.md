@@ -83,6 +83,14 @@ Components merges worker-local forests in canonical source-range order, and
 Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
 path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and conductance
+row evaluation (#566) may partition independent work across that pool above
+documented crossovers; work never uses Rayon's process-global pool. Cosine dot
+products retain serial coordinate order, PageRank keeps canonical contribution
+order with serial dangling/delta reductions, Node2Vec skip-gram training stays
+serial, and conductance keeps weighted cut/volume accumulation serial, so
+fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -261,6 +269,26 @@ IDs are still assigned by canonical node order, so schemas, row order, labels,
 and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
+
+## Parallel conductance row evaluation (#566)
+
+`analyze(by="conductance")` keeps weighted edge normalization, cut accumulation,
+and volume accumulation serial. Those stages contain floating-point additions
+whose order is part of the accepted bit-level contract. After the serial
+accumulators are complete, each partition row can be evaluated independently on
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- normalized partitions are at least
+  `CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS` (`128`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread,
+conductance stays fully serial. Parallel workers evaluate canonical partition
+ranges; each row preserves the serial `BTreeMap` complement summation order, and
+chunks merge in ascending range order so row ordering and the first undefined
+partition error remain deterministic. Schemas, row order, conductance bits,
+structured errors, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 
