@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #518 Components) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -68,13 +68,13 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and connected
-components (#518) may partition independent work across that pool above
-documented crossovers; work never uses Rayon's process-global pool. Cosine dot
-products retain serial coordinate order, PageRank keeps canonical contribution
-order with serial dangling/delta reductions, Node2Vec skip-gram training stays
-serial, and components assigns final community IDs in canonical node order, so
-fingerprints match the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+`cluster(by="components")` (#518) may partition independent work across that pool
+above documented crossovers; work never uses Rayon's process-global pool. Cosine
+dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Node2Vec skip-gram
+training stays serial, and Components merges worker-local forests in canonical
+source-range order, so fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -130,22 +130,28 @@ by canonical node ordinal with checked addition. Training order and arithmetic
 are unchanged, so schemas, row order, metadata, and fingerprints match the
 one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
 
-## Parallel components (#518)
+## Parallel Components (#518)
 
-`cluster(by="components")` partitions independent source-node adjacency scans
+`cluster(by="components")` partitions **independent source-node adjacency scans**
 across the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
-- selected adjacency entries are at least
+- selected direction-expanded adjacency entries are at least
   `COMPONENTS_PARALLEL_CROSSOVER_EDGES` (`16_384`) in `graphforge-exec`.
 
 Below that crossover, or when the policy provides one compute thread, the serial
-union-find path runs with no pool scheduling tax. Parallel workers build
-worker-local union-find parents over deterministic source chunks; the kernel then
-merges those local parents into one global union-find and assigns public
-community IDs serially in canonical node order. Schemas, row order, community ID
-assignment, and fingerprints match the one-thread result at
-`1`/`2`/`4`/`8`/automatic configurations.
+union-find path runs with no pool scheduling or worker-local map setup cost. The
+crossover is the measured M4 boundary where chunk-local union-find begins to
+amortize Rayon scheduling and deterministic merge overhead on multi-component
+fixtures.
+
+Parallel work is source-range-owned: each worker builds a local min-root
+union-find forest for the edges whose source ordinal falls in its chunk, then the
+main thread merges those local links by ascending source range. Final component
+IDs are still assigned by canonical node order, so schemas, row order, labels,
+and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
+configurations. Cancellation remains cooperative both before worker launch and
+inside chunk scans.
 
 ## Observability
 
