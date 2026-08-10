@@ -1253,38 +1253,37 @@ fn eigenvector_pull_parallel(
     scores: &[f64],
     control: &AlgorithmControl,
 ) -> Result<Vec<f64>, AlgorithmError> {
+    if scores.is_empty() {
+        return Ok(Vec::new());
+    }
     let pool = control
         .compute_pool()
         .ok_or_else(|| execution("parallel eigenvector requires an instance-owned compute pool"))?;
-    let ranges = destination_chunks(scores.len(), control.compute_threads());
-    let work = AtomicUsize::new(0);
-    let chunk_results = run_eigenvector_on_pool(pool, || {
-        ranges
-            .par_iter()
-            .map(|&(start, end)| {
+    let chunks = destination_chunks(scores.len(), control.compute_threads())
+        .len()
+        .max(1);
+    let chunk_len = scores.len().div_ceil(chunks);
+    let mut next = vec![0.0; scores.len()];
+    run_eigenvector_on_pool(pool, || {
+        next.par_chunks_mut(chunk_len)
+            .enumerate()
+            .try_for_each(|(chunk_index, local)| {
                 control.check_cancelled()?;
-                let mut local = Vec::with_capacity(end - start);
-                for dest in start..end {
-                    let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
-                    if observed.is_multiple_of(EIGENVECTOR_CHECKPOINT_DESTINATIONS) {
+                let start = chunk_index * chunk_len;
+                for (offset, slot) in local.iter_mut().enumerate() {
+                    let dest = start + offset;
+                    if dest.is_multiple_of(EIGENVECTOR_CHECKPOINT_DESTINATIONS) {
                         control.check_cancelled()?;
                     }
                     let score = eigenvector_pull_destination(inbound, scores, dest);
                     if !score.is_finite() {
                         return Err(execution("eigenvector score exceeds supported range"));
                     }
-                    local.push(score);
+                    *slot = score;
                 }
-                Ok((start, local))
+                Ok(())
             })
-            .collect::<Result<Vec<_>, AlgorithmError>>()
     })?;
-
-    // Merge chunk outputs in ascending destination-range order (canonical).
-    let mut next = vec![0.0; scores.len()];
-    for (start, local) in chunk_results {
-        next[start..start + local.len()].copy_from_slice(&local);
-    }
     Ok(next)
 }
 
