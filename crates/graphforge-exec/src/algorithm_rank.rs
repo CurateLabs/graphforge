@@ -119,17 +119,19 @@ pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
 =======
 /// Estimated pair/intersection work below which common-neighbors stays serial (#505).
 ///
-/// Chosen from release-mode serial-vs-parallel timings on this M4 agent host
-/// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers; see
+/// Chosen from manual serial-vs-parallel timings on this M4 agent host
+/// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers, debug
+/// test profile after a clean target-dir build; see
 /// ignored `measure_common_neighbors_parallel_crossover`):
 /// - ~230k estimated units: parallel still neutral/slower (pool scheduling tax)
-/// - ~540k estimated units: first clear win (~0.53x serial)
-/// - >=2.1M estimated units: >=3.0x speedup
+/// - ~540k estimated units: parallel still slower (~1.09x serial)
+/// - ~1.2M estimated units: first clear win (~0.81x serial)
+/// - >=2.1M estimated units: >=1.5x speedup
 ///
-/// `524_288` is the smallest power-of-two work estimate below that measured win
-/// boundary. Each source keeps serial candidate/intersection order, so exact
-/// counts remain identical on either path.
-pub const COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK: u64 = 524_288;
+/// `1_048_576` is the smallest power-of-two work estimate below that measured
+/// win boundary. Each source keeps serial candidate/intersection order, so
+/// exact counts remain identical on either path.
+pub const COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK: u64 = 1_048_576;
 const COMMON_NEIGHBORS_CHECKPOINT_INTERVAL: usize = 1_024;
 >>>>>>> ecfa5e4 (perf(exec): parallelize common neighbors rank)
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;

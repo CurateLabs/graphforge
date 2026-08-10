@@ -555,15 +555,17 @@ the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
 - the estimated pair/intersection work is at least
-  `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`524_288`) in `graphforge-exec`.
+  `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) in
+  `graphforge-exec`.
 
 The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
 conservative O(V + E) proxy for the serial pair loop and two-pointer
 intersection scans. The threshold is the smallest power-of-two work estimate
 below the measured win boundary on the M4 agent host (4 vCPU, directed
-ring-lattice fixture, 4 private workers, release build): ~230k units was still
-neutral/slower, ~540k units first won (~0.53x serial), and >=2.1M units was
->=3.0x faster.
+ring-lattice fixture, 4 private workers, debug test profile after a clean
+target-dir build): ~230k units was neutral/slower, ~540k units was still slower
+(~1.09x serial), ~1.2M units first won (~0.81x serial), and >=2.1M units was
+>=1.5x faster.
 
 Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Parallel workers only own source

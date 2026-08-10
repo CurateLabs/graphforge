@@ -601,8 +601,8 @@ and node aggregates use checked integer arithmetic and convert to `Float64`
 only when exactly representable at or below `2^53`; larger results return a
 structured execution error. Shared selected-node, adjacency-entry, output-row,
 iteration, and cancellation limits apply with batched checkpoints. Above the
-documented `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`524_288`) estimate, and
-only when the resource policy provides more than one compute thread,
+documented `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) estimate,
+and only when the resource policy provides more than one compute thread,
 independent source ordinals may run on the instance-owned private compute pool
 (#337 / #505). Candidate order, missing-link checks, two-pointer intersections,
 and checked accumulation remain serial per source; worker score chunks merge in
