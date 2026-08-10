@@ -823,6 +823,7 @@ pub fn cluster_algorithm_with_limits(
 }
 
 /// Execute clustering with shaping limits and an optional private compute pool (#518).
+/// Execute clustering with shaping limits and an optional private compute pool (#524).
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors cluster_algorithm_with_limits plus the instance compute pool handle"

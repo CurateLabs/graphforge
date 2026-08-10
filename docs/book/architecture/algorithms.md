@@ -1239,6 +1239,17 @@ consecutive `Int64` values ordered by the first topology point assigned to each
 observed community. Duplicate vectors are valid and may collapse multiple
 centroids into fewer returned communities.
 
+The assignment pass may use the instance-owned private compute pool when
+`compute_threads > 1` and `points * 10 * dimensions` is at least
+`KMEANS_ASSIGN_PARALLEL_CROSSOVER_OPS` (`32,768`). Smaller workloads and
+one-thread policies stay serial. Parallel execution only partitions independent
+point assignment; each point still evaluates centroid distances in the serial
+coordinate and centroid order above. Initialization, centroid mean reductions,
+empty-cluster retention, convergence comparison, label canonicalization, and
+Arrow publication remain serial, so schemas, row order, community IDs, and
+fingerprints match the one-thread oracle. There is no GPU, approximate, or
+user-visible K-means concurrency option.
+
 Empty selections preserve the typed zero-row result; non-empty selections with
 fewer than ten nodes are rejected. The schema is non-null
 `node_uuid: FixedSizeBinary(16)`, non-null `community_id: Int64`, then

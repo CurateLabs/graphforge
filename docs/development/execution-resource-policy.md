@@ -851,6 +851,25 @@ neighbor UUID then edge UUID before sampling. Worker outputs merge by contiguous
 source/walk task range, so schemas, row order, metadata, cancellation/limit
 outcomes, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+## Parallel K-means assignment (#524)
+
+K-means assignment partitions **independent point-to-centroid searches** across
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated distance-coordinate evaluations
+  (`points * CLUSTER_COUNT * dimensions`) are at least
+  `KMEANS_ASSIGN_PARALLEL_CROSSOVER_OPS` (`32_768`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Each point still computes squared
+Euclidean distances to centroids in centroid-index order and applies the same
+lower-index tie-break. Farthest-first initialization, centroid mean reductions,
+empty-centroid retention, convergence checks, canonical label assignment, and
+Arrow output remain serial, so schemas, row order, community IDs, and
+fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
+configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
