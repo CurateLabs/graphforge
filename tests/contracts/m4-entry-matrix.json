@@ -177,6 +177,23 @@
       ]
     },
     {
+      "id": "paths-bellman-ford",
+      "class": "serial-shortest-path-graph-algorithm",
+      "surface": "GraphForge::paths",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_ordered_bellman_ford_relaxation",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
+    },
+    {
       "id": "exact-cosine-knn",
       "class": "exact-vector-search",
       "surface": "GraphForge::similar",

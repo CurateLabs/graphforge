@@ -1,3 +1,7 @@
+//! Bellman-Ford remains serial (#537). Relaxation rounds walk nodes and edges
+//! in canonical order, mutating a best-path map whose state determines later
+//! relaxations and negative-cycle detection.
+
 use std::cmp::Ordering;
 use std::collections::HashMap;
 

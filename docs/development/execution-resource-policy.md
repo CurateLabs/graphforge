@@ -789,6 +789,23 @@ Acceptance for #551 is documented here and covered by the short CI matrix
 `paths-min-steiner-tree` evidence with one-thread parity across supported worker
 counts.
 
+## Serial paths(by="bellman_ford") (#537)
+
+`paths(by="bellman_ford")` has no parallel crossover. Its disposition is
+**serial ordered Bellman-Ford relaxation** for every `compute_threads` setting,
+including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted adjacency (#340) and applies
+relaxation rounds in canonical node and edge order. Each successful relaxation
+mutates the best-path map used by later relaxations, tie comparisons, and the
+reachable negative-cycle scan. Parallel relaxations would require shared map
+coordination and could alter accepted paths, row order, or fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`paths-bellman-ford` evidence and verifies one-thread parity; timing is
+report-only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
