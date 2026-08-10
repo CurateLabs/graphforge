@@ -658,5 +658,24 @@ mod tests {
                 eprintln!("threads={threads} elapsed={elapsed:?}");
             }
         }
+        if let Some(peak_rss_kib) = peak_rss_kib() {
+            eprintln!("peak_rss_kib={peak_rss_kib}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn peak_rss_kib() -> Option<u64> {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let value = line.strip_prefix("VmHWM:")?.trim();
+                value.split_whitespace().next()?.parse().ok()
+            })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn peak_rss_kib() -> Option<u64> {
+        None
     }
 }
