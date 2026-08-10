@@ -112,8 +112,8 @@ fn exact_dijkstra_all_pairs_serial(
 ) -> Result<Vec<DijkstraPath>, AlgorithmError> {
     let mut paths = Vec::new();
     for &source in graph.node_ids() {
-        checkpoint(control, &mut work)?;
-        let source_paths = dijkstra_from(graph, source, None, control, &mut work)?
+        checkpoint(control, work)?;
+        let source_paths = dijkstra_from(graph, source, None, control, work)?
             .into_iter()
             .filter(|path| path.target != source)
             .collect::<Vec<_>>();
