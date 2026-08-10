@@ -262,6 +262,21 @@ and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
 
+## Serial bridges (#564)
+
+`analyze(by="bridges")` is intentionally SERIAL. Bridge classification depends
+on the shared low-link DFS traversal: discovery order, parent-edge identity,
+multigraph parallel-edge handling, and low-link propagation determine whether an
+edge is a bridge. Parallelizing that state would change the canonical edge
+evidence or require synchronization around each DFS transition, so there is no
+safe independent kernel for the private compute pool.
+
+The handler keeps Rust-owned adjacency projection and bounded Arrow output,
+does not use Rayon's global pool, and preserves cancellation and shared resource
+limits. A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
+configured compute threads and requires identical schemas, bridge ordering, and
+rows.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

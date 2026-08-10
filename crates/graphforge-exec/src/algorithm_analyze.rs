@@ -3981,6 +3981,26 @@ mod tests {
         )
     }
 
+    fn execute_with_compute_threads(
+        graph: &AdjacencyGraph,
+        algorithm: AnalyzeAlgorithm,
+        directed: bool,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_analyze_algorithms(&mut registry, directed)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(Algorithm::Analyze(algorithm), graph, &control)
+    }
+
+    fn output_fingerprint(output: &AlgorithmOutput) -> String {
+        format!("{:?}|{:?}", output.schema, output.rows())
+    }
+
     fn execute_minimum_k_spanning_tree(
         graph: &AdjacencyGraph,
         k: usize,
@@ -6943,6 +6963,59 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn bridges_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_undirected_multigraph(
+            10,
+            &[
+                (10, 0, 1),
+                (11, 1, 2),
+                (12, 2, 0),
+                (13, 1, 3),
+                (14, 3, 4),
+                (15, 4, 5),
+                (16, 5, 3),
+                (17, 5, 6),
+                (18, 6, 7),
+                (19, 7, 5),
+                (20, 7, 8),
+                (21, 8, 9),
+                (22, 7, 8),
+            ],
+        );
+        let serial =
+            execute_with_compute_threads(&graph, AnalyzeAlgorithm::Bridges, false, 1).unwrap();
+        assert_eq!(
+            serial.rows(),
+            [
+                vec![
+                    AlgorithmValue::Uuid(13_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(1_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(3_u128.to_be_bytes()),
+                ],
+                vec![
+                    AlgorithmValue::Uuid(17_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(5_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(6_u128.to_be_bytes()),
+                ],
+                vec![
+                    AlgorithmValue::Uuid(21_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(8_u128.to_be_bytes()),
+                    AlgorithmValue::Uuid(9_u128.to_be_bytes()),
+                ],
+            ]
+        );
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output =
+                execute_with_compute_threads(&graph, AnalyzeAlgorithm::Bridges, false, threads)
+                    .unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
+        }
     }
 
     #[test]
