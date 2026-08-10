@@ -17,10 +17,12 @@ use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
     CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions, ExecutionResourcePolicy,
-    GraphForge, GraphForgeOptions, Node2VecOptions, RankOptions, ResourcePolicyMode,
-    SimilarOptions, SpillPolicy,
+    GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector, PathsOptions, PropValue,
+    RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
-use graphforge_core::algorithms::{AnalyzeAlgorithm, RankAlgorithm, SimilarAlgorithm};
+use graphforge_core::algorithms::{
+    AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
+};
 use graphforge_exec::demand;
 use graphforge_storage::io_stats;
 use sha2::{Digest, Sha256};
@@ -48,16 +50,16 @@ const SCAN_COUNT: &str = "MATCH (n:Person) RETURN count(n) AS total";
 const AGGREGATE_TOP_N: &str =
     "MATCH (n:Person) RETURN n.name AS name, n.age AS age ORDER BY n.age DESC LIMIT 3";
 const CREATE_FIXTURE: &str = "CREATE \
-         (alice:Person {name:'Alice', age:30, embedding:[1.0, 0.0]}), \
-         (bob:Person {name:'Bob', age:25, embedding:[1.0, 0.0]}), \
-         (carol:Person {name:'Carol', age:35, embedding:[1.0, 1.0]}), \
-         (dave:Person {name:'Dave', age:28, embedding:[0.0, 1.0]}), \
-         (eve:Person {name:'Eve', age:22, embedding:[-1.0, 0.0]}), \
-         (alice)-[:KNOWS]->(bob), \
-         (bob)-[:KNOWS]->(carol), \
-         (carol)-[:KNOWS]->(dave), \
-         (alice)-[:KNOWS]->(carol), \
-         (dave)-[:LIKES]->(eve)";
+         (alice:Person {name:'Alice', age:30, embedding:[1.0, 0.0], heuristic:3.0, prize:5.0}), \
+         (bob:Person {name:'Bob', age:25, embedding:[1.0, 0.0], heuristic:2.0, prize:4.0}), \
+         (carol:Person {name:'Carol', age:35, embedding:[1.0, 1.0], heuristic:2.0, prize:3.0}), \
+         (dave:Person {name:'Dave', age:28, embedding:[0.0, 1.0], heuristic:0.0, prize:6.0}), \
+         (eve:Person {name:'Eve', age:22, embedding:[-1.0, 0.0], heuristic:1.0, prize:2.0}), \
+         (alice)-[:KNOWS {capacity:3.0, cost:1.0}]->(bob), \
+         (bob)-[:KNOWS {capacity:2.0, cost:1.0}]->(carol), \
+         (carol)-[:KNOWS {capacity:3.0, cost:2.0}]->(dave), \
+         (alice)-[:KNOWS {capacity:2.0, cost:2.0}]->(carol), \
+         (dave)-[:LIKES {capacity:1.0, cost:1.0}]->(eve)";
 
 fn load_contract_json() -> serde_json::Value {
     serde_json::from_str(CONTRACT_JSON).expect("parse m4-entry-matrix.json")
@@ -406,6 +408,11 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_paths_gomory_hu_tree(gf);
+            assert!(ev.output_rows > 0, "paths-gomory-hu-tree must produce rows");
+            ev
+        },
+        {
             let ev = run_knn(gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -495,6 +502,65 @@ fn run_pagerank(gf: &GraphForge) -> WorkloadEvidence {
         wall_time_ms,
         peak_rss_bytes: peak_rss_bytes().or(before_rss),
         structural: BTreeMap::from([("surface", serde_json::json!("GraphForge::rank"))]),
+    }
+}
+
+fn person_selector(name: &str) -> NodeSelector {
+    NodeSelector::Match {
+        label: "Person".into(),
+        property: "name".into(),
+        value: PropValue::Str(name.to_owned()),
+    }
+}
+
+fn run_paths_gomory_hu_tree(gf: &GraphForge) -> WorkloadEvidence {
+    let options = PathsOptions {
+        by: PathAlgorithm::GomoryHuTree,
+        via: None,
+        directed: false,
+        k: 1,
+        weight: Some("capacity".into()),
+        capacity_property: None,
+        cost_property: None,
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: Vec::new(),
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(Option::<&NodeSelector>::None, None, options.clone())
+        .expect("gomory_hu_tree");
+    let second = gf
+        .paths(Option::<&NodeSelector>::None, None, options)
+        .expect("gomory_hu_tree repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "gomory_hu_tree must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-gomory-hu-tree",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("gomory_hu_tree")),
+            (
+                "disposition",
+                serde_json::json!("serial_gomory_hu_parent_updates"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("component_bfs_and_ordered_min_cut_parent_updates"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
     }
 }
 
@@ -624,6 +690,11 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_paths_gomory_hu_tree(&gf);
+            assert!(ev.output_rows > 0, "paths-gomory-hu-tree must produce rows");
+            ev
+        },
+        {
             let ev = run_knn(&gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -672,7 +743,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 6);
+    assert_eq!(workloads.len(), 7);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -681,6 +752,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "scan-count",
             "aggregate-top-n",
             "pagerank",
+            "paths-gomory-hu-tree",
             "exact-cosine-knn",
             "node2vec"
         ]

@@ -1,5 +1,9 @@
 //! Deterministic Gomory-Hu forests over undirected capacity multigraphs.
 
+//! The Gomory-Hu tree path remains serial (#544). Each component-local
+//! min-cut updates parent links that determine later source/sink pairs, so cut
+//! calls are ordered state transitions rather than independent tasks.
+
 use std::collections::VecDeque;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};

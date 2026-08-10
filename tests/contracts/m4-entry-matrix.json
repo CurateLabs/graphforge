@@ -64,7 +64,7 @@
       "matrix": "short_ci",
       "nodes": 5,
       "edges": 5,
-      "density_note": "Person/KNOWS(+LIKES) e2e-shaped fixture with vector property for KNN",
+      "density_note": "Person/KNOWS(+LIKES) e2e-shaped fixture with vector, capacity, cost, heuristic, and prize properties",
       "opt_in": false
     },
     {
@@ -111,7 +111,11 @@
       "surface": "GraphForge::execute",
       "short_ci": true,
       "large_manual": true,
-      "structural_gates": ["schema", "row_count", "determinism"]
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "determinism"
+      ]
     },
     {
       "id": "aggregate-top-n",
@@ -119,7 +123,12 @@
       "surface": "GraphForge::execute",
       "short_ci": true,
       "large_manual": true,
-      "structural_gates": ["schema", "row_count", "ordering", "determinism"]
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "determinism"
+      ]
     },
     {
       "id": "pagerank",
@@ -127,7 +136,28 @@
       "surface": "GraphForge::rank",
       "short_ci": true,
       "large_manual": true,
-      "structural_gates": ["schema", "row_count", "determinism"]
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "determinism"
+      ]
+    },
+    {
+      "id": "paths-gomory-hu-tree",
+      "class": "serial-cut-tree-graph-algorithm",
+      "surface": "GraphForge::paths",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_gomory_hu_parent_updates",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
     },
     {
       "id": "exact-cosine-knn",
@@ -135,7 +165,11 @@
       "surface": "GraphForge::similar",
       "short_ci": true,
       "large_manual": true,
-      "structural_gates": ["schema", "row_count", "determinism"]
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "determinism"
+      ]
     },
     {
       "id": "node2vec",
@@ -143,7 +177,11 @@
       "surface": "GraphForge::analyze_embedding",
       "short_ci": true,
       "large_manual": true,
-      "structural_gates": ["schema", "row_count", "determinism"]
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "determinism"
+      ]
     }
   ],
   "metrics": {
@@ -173,8 +211,14 @@
     "short_ci": {
       "fixture": "synthetic-small",
       "runtime": "policy-default-two-worker",
-      "pass_fail": ["structural_gates", "parity_assertions_on_supported_runtime"],
-      "report_only": ["wall_time_ms", "peak_rss_bytes"],
+      "pass_fail": [
+        "structural_gates",
+        "parity_assertions_on_supported_runtime"
+      ],
+      "report_only": [
+        "wall_time_ms",
+        "peak_rss_bytes"
+      ],
       "forbidden": [
         "timing_absolute_thresholds",
         "sleeps",

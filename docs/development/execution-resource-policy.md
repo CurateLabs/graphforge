@@ -261,6 +261,22 @@ IDs are still assigned by canonical node order, so schemas, row order, labels,
 and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
+## Serial paths(by="gomory_hu_tree") (#544)
+
+`paths(by="gomory_hu_tree")` has no parallel crossover. Its disposition is
+**serial Gomory-Hu parent updates** for every `compute_threads` setting,
+including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native undirected capacity adjacency (#340), finds
+canonical connected components, and runs the classic parent-update sequence.
+Each min-cut result rewrites parent links that choose subsequent cut pairs and
+final forest rows. Launching those cuts independently would compute against the
+wrong parent state and could change cut values, row order, and fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`paths-gomory-hu-tree` evidence and verifies one-thread parity across supported
+resource-policy cells; timing remains evidence only.
 
 ## Observability
 
