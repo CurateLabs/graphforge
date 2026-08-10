@@ -199,7 +199,7 @@ fn collect_relaxation_proposals_parallel(
     let source_ids = sources.iter().copied().collect::<Vec<_>>();
     let ranges = source_chunks(source_ids.len(), control.compute_threads());
     let chunk_results = run_delta_on_pool(pool, || {
-        ranges
+        Ok(ranges
             .par_iter()
             .map(|&(start, end)| {
                 let mut work = 0_usize;
@@ -219,7 +219,7 @@ fn collect_relaxation_proposals_parallel(
                 }
                 Ok(proposals)
             })
-            .collect::<Vec<Result<_, AlgorithmError>>>()
+            .collect::<Vec<Result<_, AlgorithmError>>>())
     })?;
     merge_chunk_proposals(chunk_results)
 }
