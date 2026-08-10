@@ -85,6 +85,37 @@ cargo test -p graphforge-api --test m4_entry_baseline
 make bench-m4-entry
 ```
 
+## Adjacency index build (#336)
+
+Derived CSR adjacency construction streams projected Parquet batches
+(`edge_id` / `src_id` / `dst_id`, plus `rel_type_name` for exploratory files)
+instead of concatenating each typed edge file into one Arrow `RecordBatch`.
+That removes the observed **134,217,727-edge** ceiling caused by concatenating
+`FixedSizeBinary(16)` UUID columns into a single contiguous buffer
+(2 GiB / 16 bytes).
+
+Peak build memory is governed by an explicit chunk/spill policy
+(`AdjacencyBuildOptions`: `chunk_rows`, `batch_size`, optional
+`memory_budget_bytes`, `spill_dir`, `spill_max_bytes`), not by total edge
+count. Sorted runs spill under the unpublished stage (or a configured absolute
+spill directory from the #337 resource policy) and are removed on success,
+failure, or cancellation. Manifest-last publication is unchanged: a cancelled
+or failed build cannot publish a fresh-looking partial index.
+
+Deterministic CI covers multi-row-group streaming without UUID projection,
+tiny-`chunk_rows` golden CSR equality against `csr_from_entries`, and
+cancel/spill cleanup. A full **>200M-edge** public-path index build remains an
+M4 scale / scheduled evidence run (map to the #334 harness after hardware and
+spill configuration are recorded). Do **not** read the former 134M Arrow
+boundary as a GraphForge maximum graph size.
+
+| Claim | Status |
+|---|---|
+| No full-file UUID concat during adjacency build/validate/inspect | Covered by CI streaming seam |
+| CSR bytes match scan-build semantics under spill | Covered by tiny-chunk golden tests |
+| Cancel/failure leaves prior index or absent/stale | Covered by cancel + spill-cap tests |
+| >200M edges indexes on a supported machine | Pending reproducible M4 scale evidence |
+
 ---
 
 ## Why Edge Count, Not Node Count
