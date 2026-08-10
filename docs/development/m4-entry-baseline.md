@@ -78,14 +78,17 @@ DataFusion target partitions, thread-parity cells over the host budget.
 
 ## Honest bottlenecks retained
 
-The entry baseline intentionally records the current implementation, including
-CSR-to-map conversion where still observable. Exact cosine KNN / similarity
-(#342) and PageRank (#343) may use the instance-owned private compute pool above
-documented crossovers while preserving one-thread fingerprints. Query-facing
-Parquet providers stream bounded batches via `GraphForgeParquetExec` (#339)
-rather than eager single-partition `MemTable` materialization; ExpandExec
-filtered reads and fixed-hop demand remain the selective-path contract. Further
-optimizations belong to later M4 issues.
+The entry baseline records structural gates on the public facade. Fresh CSR
+index hits no longer expand into an O(E) HashMap (#340). Exact cosine KNN /
+similarity (#342), PageRank (#343), and Node2Vec walk generation (#344) may use
+the instance-owned private compute pool above documented crossovers while
+preserving one-thread fingerprints. Query-facing Parquet providers stream
+bounded batches via `GraphForgeParquetExec` (#339) rather than eager
+single-partition `MemTable` materialization; ExpandExec filtered reads and
+fixed-hop demand remain the selective-path contract.
+
+Exit reconciliation for the final M4 tree lives in
+[`m4-exit-evidence.md`](m4-exit-evidence.md).
 
 ## Discovery evidence (not a universal size ceiling)
 
@@ -110,5 +113,7 @@ Before/after evidence source:
   and [`benchmarks/m4_entry_baseline.md`](../benchmarks/m4_entry_baseline.md)
 - Harness: `crates/graphforge-api/tests/m4_entry_baseline.rs`
 
-Every M4 child (#336–#344) should compare against this gate’s structural
-contract. #345 reruns it as exit evidence on the final tree.
+Every M4 child (#336–#344) compared against this gate’s structural contract.
+#345 reruns it as exit evidence on the final tree
+([`m4-exit-evidence.md`](m4-exit-evidence.md) /
+[`m4-exit-evidence.json`](m4-exit-evidence.json)).
