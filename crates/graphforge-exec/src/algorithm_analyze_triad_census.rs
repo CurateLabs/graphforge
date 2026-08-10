@@ -111,7 +111,7 @@ fn count_connected_triads_parallel(
     })?;
     let ranges = source_chunks(neighbors.len(), control.compute_threads());
     let mut chunk_results = run_on_pool(pool, || {
-        ranges
+        Ok(ranges
             .par_iter()
             .map(|&(start, end)| {
                 let mut work = 0_usize;
@@ -120,7 +120,7 @@ fn count_connected_triads_parallel(
                     count_source_range(start, end, neighbors, successors, control, &mut work),
                 )
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>())
     })?;
     chunk_results.sort_unstable_by_key(|(start, _)| *start);
     let mut counts = [0_u64; 16];
