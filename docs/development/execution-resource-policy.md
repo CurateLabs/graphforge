@@ -276,6 +276,29 @@ after the implicit identity term in the same canonical source/edge order as
 serial scatter. L2 normalization and component-wise convergence checks stay
 serial, so scores, iteration counts, and fingerprints match the one-thread
 result at `1`/`2`/`4`/`8`/automatic configurations.
+## Parallel HITS hub (#510)
+
+The shared `hits_scores` kernel used by `rank(by="hits_hub")` prepares selected
+adjacency once as dense-ordinal outgoing and incoming CSR, then partitions
+independent node-score updates across the instance-owned private compute pool
+when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `HITS_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel work is node-owned: the
+authority phase owns contiguous target ranges over incoming CSR, and the hub
+phase owns contiguous source ranges over outgoing CSR. Each node's
+floating-point sum still walks its CSR slice in canonical source/edge order,
+and global L2 norms remain serial dense-ordinal reductions, so schemas, row
+order, scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations. The crossover follows the same
+4 vCPU release-build structural benchmark regime used for adjacent M4 kernels:
+the parallel path avoids small-fixture tax and clears the worker-pool cost once
+20 fixed HITS iterations amortize two sparse matrix-vector phases per
+iteration. It is CPU-only; no GPU or universal scaling claim is made.
 
 ## Parallel Node2Vec walk generation (#344)
 

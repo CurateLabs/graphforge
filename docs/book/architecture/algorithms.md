@@ -335,6 +335,14 @@ components share global norms; isolated nodes score `0.0`, an edgeless selection
 scores every node `0.0`, a self-loop singleton scores `1.0`, and an empty
 selection returns the typed zero-row table.
 
+For selected adjacency at or above `HITS_PARALLEL_CROSSOVER_EDGES` (`4_096`)
+and a multi-thread private compute policy, the hub handler uses the shared HITS
+CSR kernel to partition independent node updates over the instance-owned
+compute pool. Each node still sums its canonical CSR slice serially, and the
+global L2 norm remains a serial dense-ordinal reduction; smaller workloads and
+one-thread policies retain the serial path. This is the documented CPU-only
+crossover for #510, with no GPU or universal scaling claim.
+
 The public schema is non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties with Arrow NULLs for missing
 values. Numeric execution surrogates never escape. `write_property` atomically

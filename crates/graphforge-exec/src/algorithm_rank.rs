@@ -7,6 +7,9 @@
 //! PageRank (#343) and eigenvector (#507) may partition destination-owned score
 //! updates across the instance-owned private compute pool while preserving the
 //! serial contribution order, serial convergence reductions, and bit-identical
+//! PageRank (#343) and HITS hub (#510) may partition destination-owned score
+//! updates across the instance-owned private compute pool while preserving the
+//! serial contribution order, deterministic reductions, and bit-identical
 //! fingerprints.
 
 use std::collections::{HashMap, VecDeque};
@@ -133,6 +136,13 @@ const ARTICLE_RANK_ALPHA: f64 = 1.0 - ARTICLE_RANK_DAMPING;
 const ARTICLE_RANK_MAX_ITERATIONS: usize = 20;
 const ARTICLE_RANK_TOLERANCE: f64 = 1.0e-7;
 const HITS_ITERATIONS: usize = 20;
+/// Selected adjacency entries below which HITS stays on the serial path (#510).
+///
+/// HITS performs two full sparse matrix-vector phases per fixed iteration, so
+/// this keeps small invocations off the worker pool while large embedded
+/// workloads can partition independent dense-ordinal node updates.
+pub const HITS_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
+const HITS_CHECKPOINT_EDGES: usize = 4_096;
 const CELF_SIMULATIONS: u32 = 100;
 const CELF_LIVE_EDGE_THRESHOLD: u64 = u64::MAX / 10;
 
@@ -2477,6 +2487,26 @@ fn splitmix64(value: u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
+#[derive(Clone, Debug, Default)]
+struct HitsCsr {
+    offsets: Vec<u32>,
+    neighbors: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PreparedHits {
+    outgoing: HitsCsr,
+    incoming: HitsCsr,
+    edge_count: u64,
+}
+
+/// Selected HITS execution path for observability and crossover tests (#510).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HitsExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
 fn hits_scores(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
@@ -2486,40 +2516,144 @@ fn hits_scores(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    let prepared = prepare_hits(graph, control)?;
+    let path = select_hits_path(control, prepared.edge_count, node_ids.len());
+    let mut authorities = vec![1.0; node_ids.len()];
+    let mut hubs = vec![1.0; node_ids.len()];
+    for _ in 0..HITS_ITERATIONS {
+        control.checkpoint()?;
+        match path {
+            HitsExecutionPath::Serial => {
+                hits_pull_serial(&prepared.incoming, &hubs, &mut authorities, control)?;
+            }
+            HitsExecutionPath::Parallel { .. } => {
+                hits_pull_parallel(&prepared.incoming, &hubs, &mut authorities, control)?;
+            }
+        }
+        normalize_hits(&mut authorities, "authority")?;
+
+        control.checkpoint()?;
+        let mut next_hubs = vec![0.0; node_ids.len()];
+        match path {
+            HitsExecutionPath::Serial => {
+                hits_pull_serial(&prepared.outgoing, &authorities, &mut next_hubs, control)?;
+            }
+            HitsExecutionPath::Parallel { .. } => {
+                hits_pull_parallel(&prepared.outgoing, &authorities, &mut next_hubs, control)?;
+            }
+        }
+        normalize_hits(&mut next_hubs, "hub")?;
+        hubs = next_hubs;
+    }
+    Ok((authorities, hubs))
+}
+
+fn prepare_hits(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+) -> Result<PreparedHits, AlgorithmError> {
+    let node_ids = graph.node_ids();
     let indices: HashMap<u64, usize> = node_ids
         .iter()
         .enumerate()
         .map(|(index, &node)| (node, index))
         .collect();
-    let mut authorities = vec![1.0; node_ids.len()];
-    let mut hubs = vec![1.0; node_ids.len()];
-    for _ in 0..HITS_ITERATIONS {
-        control.checkpoint()?;
-        authorities.fill(0.0);
-        accumulate_hits_phase(
-            graph,
-            node_ids,
-            control,
-            |source, _| hubs[source],
-            |_, target, value| authorities[target] += value,
-            &indices,
-        )?;
-        normalize_hits(&mut authorities, "authority")?;
-
-        control.checkpoint()?;
-        let mut next_hubs = vec![0.0; node_ids.len()];
-        accumulate_hits_phase(
-            graph,
-            node_ids,
-            control,
-            |_, target| authorities[target],
-            |source, _, value| next_hubs[source] += value,
-            &indices,
-        )?;
-        normalize_hits(&mut next_hubs, "hub")?;
-        hubs = next_hubs;
+    let mut outgoing_offsets = Vec::with_capacity(node_ids.len() + 1);
+    let mut outgoing_neighbors = Vec::with_capacity(
+        usize::try_from(graph.edge_entry_count())
+            .map_err(|_| execution("HITS edge count exceeds supported range"))?,
+    );
+    let mut incoming_counts = vec![0_u32; node_ids.len()];
+    let mut edge_count = 0_u64;
+    outgoing_offsets.push(0_u32);
+    for &node in node_ids {
+        for edge in graph.neighbors(node) {
+            if edge_count > 0 && edge_count.is_multiple_of(1024) {
+                control.checkpoint()?;
+            }
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            incoming_counts[target] = incoming_counts[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("HITS inbound degree exceeds supported range"))?;
+            outgoing_neighbors.push(exact_u32(target, "HITS target ordinal")?);
+            edge_count = edge_count
+                .checked_add(1)
+                .ok_or_else(|| execution("HITS edge count exceeds supported range"))?;
+        }
+        outgoing_offsets.push(exact_u32(
+            outgoing_neighbors.len(),
+            "HITS outgoing CSR length",
+        )?);
     }
-    Ok((authorities, hubs))
+
+    let mut incoming_offsets = Vec::with_capacity(node_ids.len() + 1);
+    incoming_offsets.push(0_u32);
+    for &count in &incoming_counts {
+        let next = incoming_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(count)
+            .ok_or_else(|| execution("HITS incoming CSR offsets exceed supported range"))?;
+        incoming_offsets.push(next);
+    }
+    let mut incoming_neighbors = vec![0_u32; outgoing_neighbors.len()];
+    let mut write_at = incoming_offsets[..node_ids.len()].to_vec();
+    for source in 0..node_ids.len() {
+        let source_u32 = exact_u32(source, "HITS source ordinal")?;
+        let start = usize::try_from(outgoing_offsets[source])
+            .map_err(|_| execution("HITS outgoing offset exceeds supported range"))?;
+        let end = usize::try_from(outgoing_offsets[source + 1])
+            .map_err(|_| execution("HITS outgoing offset exceeds supported range"))?;
+        for &target in &outgoing_neighbors[start..end] {
+            let target = usize::try_from(target)
+                .map_err(|_| execution("HITS target ordinal exceeds supported range"))?;
+            let slot = usize::try_from(write_at[target])
+                .map_err(|_| execution("HITS incoming write cursor exceeds supported range"))?;
+            incoming_neighbors[slot] = source_u32;
+            write_at[target] = write_at[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("HITS incoming write cursor overflow"))?;
+        }
+    }
+
+    Ok(PreparedHits {
+        outgoing: HitsCsr {
+            offsets: outgoing_offsets,
+            neighbors: outgoing_neighbors,
+        },
+        incoming: HitsCsr {
+            offsets: incoming_offsets,
+            neighbors: incoming_neighbors,
+        },
+        edge_count,
+    })
+}
+
+/// Choose serial vs private-pool parallel execution for a HITS workload.
+pub(crate) fn select_hits_path(
+    control: &AlgorithmControl,
+    edge_count: u64,
+    nodes: usize,
+) -> HitsExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes <= 1
+        || edge_count < HITS_PARALLEL_CROSSOVER_EDGES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return HitsExecutionPath::Serial;
+    }
+    let chunks = destination_chunks(nodes, threads).len();
+    if chunks <= 1 {
+        return HitsExecutionPath::Serial;
+    }
+    HitsExecutionPath::Parallel { threads, chunks }
 }
 
 fn rank_scores_output(
@@ -2538,29 +2672,89 @@ fn rank_scores_output(
     sink.finish()
 }
 
-fn accumulate_hits_phase(
-    graph: &AdjacencyGraph,
-    node_ids: &[u64],
+fn hits_pull_serial(
+    csr: &HitsCsr,
+    input: &[f64],
+    output: &mut [f64],
     control: &AlgorithmControl,
-    value: impl Fn(usize, usize) -> f64,
-    mut add: impl FnMut(usize, usize, f64),
-    indices: &HashMap<u64, usize>,
 ) -> Result<(), AlgorithmError> {
     let mut traversed_edges = 0_usize;
-    for (source, &node) in node_ids.iter().enumerate() {
-        for edge in graph.neighbors(node) {
+    for (node, score) in output.iter_mut().enumerate() {
+        *score = 0.0;
+        let start = usize::try_from(csr.offsets[node])
+            .map_err(|_| execution("HITS CSR offset exceeds supported range"))?;
+        let end = usize::try_from(csr.offsets[node + 1])
+            .map_err(|_| execution("HITS CSR offset exceeds supported range"))?;
+        for &neighbor in &csr.neighbors[start..end] {
             if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
                 control.checkpoint()?;
             }
             traversed_edges += 1;
-            let target = indices
-                .get(&edge.neighbor_id)
-                .copied()
-                .ok_or_else(|| execution("adjacency references an unselected node"))?;
-            add(source, target, value(source, target));
+            let neighbor = usize::try_from(neighbor)
+                .map_err(|_| execution("HITS neighbor ordinal exceeds supported range"))?;
+            *score += input[neighbor];
         }
     }
     Ok(())
+}
+
+fn hits_pull_parallel(
+    csr: &HitsCsr,
+    input: &[f64],
+    output: &mut [f64],
+    control: &AlgorithmControl,
+) -> Result<(), AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel HITS requires an instance-owned compute pool"))?;
+    let ranges = destination_chunks(output.len(), control.compute_threads());
+    let chunk_results = run_hits_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut local = Vec::with_capacity(end - start);
+                let mut traversed_edges = 0_usize;
+                for node in start..end {
+                    let edge_start = usize::try_from(csr.offsets[node])
+                        .map_err(|_| execution("HITS CSR offset exceeds supported range"))?;
+                    let edge_end = usize::try_from(csr.offsets[node + 1])
+                        .map_err(|_| execution("HITS CSR offset exceeds supported range"))?;
+                    let mut score = 0.0;
+                    for &neighbor in &csr.neighbors[edge_start..edge_end] {
+                        traversed_edges = traversed_edges.saturating_add(1);
+                        if traversed_edges.is_multiple_of(HITS_CHECKPOINT_EDGES) {
+                            control.check_cancelled()?;
+                        }
+                        let neighbor = usize::try_from(neighbor).map_err(|_| {
+                            execution("HITS neighbor ordinal exceeds supported range")
+                        })?;
+                        score += input[neighbor];
+                    }
+                    local.push(score);
+                }
+                Ok((start, local))
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+    // Merge chunk outputs in ascending dense-ordinal range order (canonical).
+    for (start, local) in chunk_results {
+        output[start..start + local.len()].copy_from_slice(&local);
+    }
+    Ok(())
+}
+
+fn run_hits_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("HITS worker panicked")),
+    }
 }
 
 fn normalize_hits(scores: &mut [f64], kind: &str) -> Result<(), AlgorithmError> {
@@ -3108,6 +3302,22 @@ mod tests {
         )
     }
 
+    fn execute_hits_hub_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::HitsHub), graph, &control)
+    }
+
     fn hits_hub_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
             .rows()
@@ -3117,6 +3327,26 @@ mod tests {
                 _ => panic!("HITS hub score must be Float64"),
             })
             .collect()
+    }
+
+    fn hits_hub_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        hits_hub_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    fn dense_hits_graph(nodes: usize) -> AdjacencyGraph {
+        let fanout = ((HITS_PARALLEL_CROSSOVER_EDGES as usize) / nodes.max(1)).saturating_add(3);
+        let edges = (0..nodes)
+            .flat_map(|source| {
+                (0..fanout).map(move |hop| {
+                    let target = (source + hop + usize::from(hop % 3 == 0)) % nodes;
+                    (source as u64, target as u64)
+                })
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
 
     fn execute_hits_authority(
@@ -5006,6 +5236,103 @@ mod tests {
             .find(|capability| capability.algorithm == Algorithm::Rank(RankAlgorithm::HitsHub))
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn hits_hub_path_selection_respects_crossover_and_one_thread() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_hits_path(&serial_control, HITS_PARALLEL_CROSSOVER_EDGES - 1, 64),
+            HitsExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_hits_path(&one, HITS_PARALLEL_CROSSOVER_EDGES, 64),
+            HitsExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_hits_path(&parallel, HITS_PARALLEL_CROSSOVER_EDGES, 64),
+            HitsExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn hits_hub_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_hits_graph(128);
+        assert!(graph.edge_entry_count() >= HITS_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_hits_hub_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let serial_bits = hits_hub_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_hits_hub_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(hits_hub_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn hits_hub_parallel_preserves_multigraph_self_loop_and_disconnected_bits() {
+        let mut edges = Vec::new();
+        let nodes = 256_u64;
+        for source in 0..nodes {
+            edges.push((source, source));
+            edges.push((source, (source + 1) % nodes));
+            edges.push((source, (source + 1) % nodes));
+            for hop in 2..18 {
+                edges.push((source, (source + hop) % nodes));
+            }
+        }
+        let graph = AdjacencyGraph::with_test_edges(nodes, &edges);
+        assert!(graph.edge_entry_count() >= HITS_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_hits_hub_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_hits_hub_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(hits_hub_bits(&parallel), hits_hub_bits(&serial));
+            assert_eq!(parallel.rows(), serial.rows());
+        }
+    }
+
+    #[test]
+    fn hits_hub_parallel_cancellation_and_worker_panic_are_structured() {
+        let graph = dense_hits_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_hits_hub_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+
+        let pool = crate::ComputePool::new(2).unwrap();
+        assert_eq!(
+            run_hits_on_pool(&pool, || -> Result<(), AlgorithmError> {
+                panic!("synthetic HITS worker panic");
+            }),
+            Err(AlgorithmError::Execution {
+                message: "HITS worker panicked".to_string()
+            })
+        );
     }
 
     #[test]
