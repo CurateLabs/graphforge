@@ -1815,7 +1815,7 @@ cooperative iteration checkpoints at 10,000. Selector, option, projection, weigh
 limit, cancellation, execution, or shaping failures return structured errors without partial
 output.
 
-For bucket waves with at least 8,192 direction-expanded edge scans and more than one current
+For bucket waves with at least 262,144 direction-expanded edge scans and more than one current
 source, proposal collection may use the instance-owned private `ComputePool`; one-thread,
 single-source, missing-pool, and smaller waves remain serial. Distance updates and public
 ordering are still merged canonically against the same one-thread oracle, and no process-global

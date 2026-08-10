@@ -15,10 +15,10 @@ const CHECKPOINT_INTERVAL: usize = 4_096;
 ///
 /// The parallel path partitions the current bucket's source set, not adjacency
 /// rows globally, so single-source buckets remain serial. On this agent host the
-/// private-pool path first won consistently once a relaxation wave scanned at
-/// least about 8k edges; 8,192 keeps small public calls off the pool while large
-/// bucket waves can use available compute threads.
-pub(crate) const DELTA_STEPPING_PARALLEL_CROSSOVER_EDGE_SCANS: u64 = 8_192;
+/// private-pool path did not win consistently at 132k edge entries, but 2/4/8
+/// workers all beat one thread at 395k edge entries. 262,144 keeps smaller
+/// public calls off the pool while large bucket waves can use compute threads.
+pub(crate) const DELTA_STEPPING_PARALLEL_CROSSOVER_EDGE_SCANS: u64 = 262_144;
 
 type BestPath = (f64, Vec<u64>, Vec<u64>);
 type Buckets = BTreeMap<BucketIndex, BTreeSet<u64>>;
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn parallel_proposals_match_one_thread_oracle_across_thread_counts() {
-        let graph = parallel_wave_fixture(96, 96);
+        let graph = parallel_wave_fixture(1024, 384);
         let oracle = exact_delta_stepping(&graph, 0, None, &control_with_threads(1)).unwrap();
 
         for threads in [2, 4, 8] {
@@ -569,9 +569,9 @@ mod tests {
 
     #[test]
     fn parallel_limit_failure_is_structured_without_partial_results() {
-        let graph = parallel_wave_fixture(160, 128);
+        let graph = parallel_wave_fixture(1024, 384);
         let limited = AlgorithmLimits {
-            iterations: 8,
+            iterations: 100,
             ..AlgorithmLimits::default()
         };
         assert!(matches!(

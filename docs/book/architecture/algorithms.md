@@ -1689,7 +1689,7 @@ Projection errors, invalid selectors or options, strict-weight failures, accumul
 overflow, limit violations, cancellation, execution errors, and Arrow shaping failures abort
 the invocation without partial output.
 
-Proposal collection for bucket waves with at least 8,192 direction-expanded edge scans and
+Proposal collection for bucket waves with at least 262,144 direction-expanded edge scans and
 more than one current source may run on the instance-owned private `ComputePool`; one-thread,
 single-source, missing-pool, and smaller waves stay serial. Workers only produce candidate
 proposals from CSR neighbor slices. Bucket mutation, distance updates, final sorting, and
