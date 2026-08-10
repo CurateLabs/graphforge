@@ -348,7 +348,9 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
@@ -636,10 +638,16 @@ mod tests {
     #[test]
     fn worker_panic_is_structured_execution_error() {
         let pool = crate::ComputePool::new(2).unwrap();
+        let _guard = PANIC_HOOK_LOCK.lock().expect("panic hook lock poisoned");
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = run_on_pool(&pool, || -> Result<(), AlgorithmError> {
+            panic!("synthetic triangle_count worker failure")
+        });
+        std::panic::set_hook(previous_hook);
+
         assert!(matches!(
-            run_on_pool(&pool, || -> Result<(), AlgorithmError> {
-                panic!("synthetic triangle_count worker failure")
-            }),
+            result,
             Err(AlgorithmError::Execution { message }) if message == "triangle_count worker panicked"
         ));
     }
