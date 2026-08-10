@@ -30,6 +30,13 @@ pub(crate) struct WeightedUndirectedGraph {
     pub matching_state: AlternatingDualState,
 }
 
+/// Selected weighted matching execution path for #558 disposition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WeightedMatchingExecutionPath {
+    /// Exact weighted blossom state remains serial.
+    SerialWeightedBlossom,
+}
+
 pub(crate) fn normalize_weighted_undirected(
     nodes: &[[u8; 16]],
     edges: &[WeightedEdge],
@@ -98,6 +105,9 @@ pub(crate) fn solve_exact_matching(
     graph: &WeightedUndirectedGraph,
     control: &AlgorithmControl,
 ) -> Result<Vec<WeightedEdge>, AlgorithmError> {
+    match select_weighted_matching_path(control, graph.node_index.len(), graph.edges.len()) {
+        WeightedMatchingExecutionPath::SerialWeightedBlossom => {}
+    }
     let indexed = graph
         .edges
         .iter()
@@ -114,6 +124,14 @@ pub(crate) fn solve_exact_matching(
     let selected = state.solve_exact(&indexed, control)?;
     control.check_output_rows(selected.len())?;
     Ok(selected.into_iter().map(|edge| graph.edges[edge]).collect())
+}
+
+pub(crate) fn select_weighted_matching_path(
+    _control: &AlgorithmControl,
+    _node_count: usize,
+    _edge_count: usize,
+) -> WeightedMatchingExecutionPath {
+    WeightedMatchingExecutionPath::SerialWeightedBlossom
 }
 
 /// Solves with raw edge UUIDs as the canonical identity order.
@@ -177,6 +195,8 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
@@ -193,6 +213,14 @@ mod tests {
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
     }
 
     fn normalize(
@@ -364,6 +392,33 @@ mod tests {
         permuted_edges.reverse();
         permuted_edges[0] = permuted_edges[0].canonical();
         assert_eq!(selected(&permuted_nodes, &permuted_edges), expected);
+    }
+
+    #[test]
+    fn serial_disposition_holds_across_thread_budgets() {
+        let nodes = (0..6).map(uuid).collect::<Vec<_>>();
+        let edges = [
+            edge(9, 0, 1, 2.0),
+            edge(8, 0, 1, 2.0),
+            edge(7, 1, 2, 4.0),
+            edge(6, 2, 3, 1.0),
+            edge(5, 3, 4, 3.0),
+            edge(4, 4, 5, 3.0),
+            edge(3, 5, 0, -1.0),
+        ];
+        let graph = normalize(&nodes, &edges).unwrap();
+        let control = control_with_threads(8);
+        assert_eq!(
+            select_weighted_matching_path(&control, graph.node_index.len(), graph.edges.len()),
+            WeightedMatchingExecutionPath::SerialWeightedBlossom
+        );
+        let oracle = solve_exact_matching(&graph, &control_with_threads(1)).unwrap();
+        for threads in [2_usize, 4, 8] {
+            assert_eq!(
+                solve_exact_matching(&graph, &control_with_threads(threads)).unwrap(),
+                oracle
+            );
+        }
     }
 
     #[test]
