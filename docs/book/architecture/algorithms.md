@@ -253,7 +253,9 @@ in addition to the implicit identity term.
 
 Destination updates may run through the instance-owned private compute pool
 (#337 / #507) above `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) selected
-adjacency entries. Each destination applies inbound contributions after the
+adjacency entries after the first two required iterations. Workloads that
+converge during that serial warm-up avoid inbound CSR setup entirely. When the
+parallel path runs, each destination applies inbound contributions after the
 implicit identity term in the same canonical source/edge order as serial
 scatter, and L2 normalization plus convergence checks remain serial, so scores,
 iteration counts, and fingerprints match the one-thread path.

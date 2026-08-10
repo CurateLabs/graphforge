@@ -207,21 +207,23 @@ schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
 ## Parallel eigenvector (#507)
 
-`rank(by="eigenvector")` shifted power-iteration destination updates run on the
-instance-owned private compute pool when:
+`rank(by="eigenvector")` shifted power-iteration destination updates may run on
+the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
 - selected adjacency entries are at least
   `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
 
 Below that crossover, or when the policy provides one compute thread, the
-serial source-scatter path runs with no pool scheduling tax. Parallel work is
-destination-owned: each worker owns a contiguous dense-ordinal destination
-range and applies inbound contributions after the implicit identity term in the
-same canonical source/edge order as serial scatter. L2 normalization and
-component-wise convergence checks stay serial, so scores, iteration counts, and
-fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
-configurations.
+serial source-scatter path runs with no pool scheduling tax. Above the
+crossover, the first two required power iterations also stay serial; if the
+workload converges there, no inbound CSR or worker scheduling tax is paid.
+Remaining non-converged work is destination-owned: each worker owns a
+contiguous dense-ordinal destination range and applies inbound contributions
+after the implicit identity term in the same canonical source/edge order as
+serial scatter. L2 normalization and component-wise convergence checks stay
+serial, so scores, iteration counts, and fingerprints match the one-thread
+result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Parallel Node2Vec walk generation (#344)
 
