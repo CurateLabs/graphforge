@@ -470,6 +470,11 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_paths_floyd_warshall(gf);
+            assert!(ev.output_rows > 0, "paths-floyd-warshall must produce rows");
+            ev
+        },
+        {
             let ev = run_knn(gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -1037,6 +1042,58 @@ fn run_analyze_minimum_k_spanning_tree(gf: &GraphForge) -> WorkloadEvidence {
     }
 }
 
+fn run_paths_floyd_warshall(gf: &GraphForge) -> WorkloadEvidence {
+    let source = person_selector("Alice");
+    let options = PathsOptions {
+        by: PathAlgorithm::FloydWarshall,
+        via: None,
+        directed: true,
+        k: 1,
+        weight: Some("cost".into()),
+        capacity_property: None,
+        cost_property: None,
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: Vec::new(),
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(&source, None, options.clone())
+        .expect("floyd_warshall");
+    let second = gf
+        .paths(&source, None, options)
+        .expect("floyd_warshall repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "floyd_warshall must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-floyd-warshall",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("floyd_warshall")),
+            (
+                "disposition",
+                serde_json::json!("serial_floyd_warshall_dynamic_programming"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("ordered_middle_source_target_updates"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
 fn run_knn(gf: &GraphForge) -> WorkloadEvidence {
     let options = SimilarOptions {
         by: SimilarAlgorithm::Knn,
@@ -1217,6 +1274,11 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_paths_floyd_warshall(&gf);
+            assert!(ev.output_rows > 0, "paths-floyd-warshall must produce rows");
+            ev
+        },
+        {
             let ev = run_knn(&gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -1265,7 +1327,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 15);
+    assert_eq!(workloads.len(), 16);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -1283,6 +1345,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "paths-bellman-ford",
             "paths-min-cost-max-flow",
             "analyze-minimum-k-spanning-tree",
+            "paths-floyd-warshall",
             "exact-cosine-knn",
             "node2vec",
         ]

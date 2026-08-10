@@ -27,6 +27,7 @@ REQUIRED_WORKLOAD_IDS = {
     "paths-bellman-ford",
     "paths-min-cost-max-flow",
     "analyze-minimum-k-spanning-tree",
+    "paths-floyd-warshall",
     "exact-cosine-knn",
     "node2vec",
 }

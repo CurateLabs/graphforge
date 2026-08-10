@@ -986,6 +986,21 @@ resource checks, and no process-global Rayon pool. Schemas, row order, costs,
 paths, structured errors, and fingerprints match the one-thread oracle at
 supported `1`/`2`/`4`/`8`/automatic configurations.
 
+## Serial paths(by="floyd_warshall") (#543)
+
+`paths(by="floyd_warshall")` has no parallel crossover. Its disposition is
+**serial Floyd-Warshall dynamic programming** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted adjacency (#340), seeds a best-path
+table, and updates it in canonical `middle, source, target` order. Each update
+can feed later comparisons and negative-cycle checks, so changing update order
+would risk path ties, row ordering, or fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`paths-floyd-warshall` evidence and verifies one-thread parity; timing is
+report-only.
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
