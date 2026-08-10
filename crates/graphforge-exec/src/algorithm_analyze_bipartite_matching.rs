@@ -3,6 +3,13 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::algorithm_analyze_bipartite::{BipartiteEdge, BipartiteProjection};
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
+/// Selected bipartite matching execution path for #556 disposition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BipartiteMatchingExecutionPath {
+    /// BFS layers and augmenting-path commits stay serial.
+    SerialLayeredAugmentation,
+}
+
 /// Compute a deterministic maximum-cardinality matching.
 ///
 /// The projection has already established left/right orientation and retained
@@ -11,6 +18,14 @@ pub(crate) fn maximum_bipartite_matching(
     projection: &BipartiteProjection,
     control: &AlgorithmControl,
 ) -> Result<Vec<BipartiteEdge>, AlgorithmError> {
+    match select_bipartite_matching_path(
+        control,
+        projection.left_nodes.len(),
+        projection.right_nodes.len(),
+        projection.edges.len(),
+    ) {
+        BipartiteMatchingExecutionPath::SerialLayeredAugmentation => {}
+    }
     control.checkpoint()?;
     let left_index = projection
         .left_nodes
@@ -86,6 +101,16 @@ pub(crate) fn maximum_bipartite_matching(
     control.check_output_rows(result.len())?;
     Ok(result)
 }
+
+pub(crate) fn select_bipartite_matching_path(
+    _control: &AlgorithmControl,
+    _left_nodes: usize,
+    _right_nodes: usize,
+    _edge_count: usize,
+) -> BipartiteMatchingExecutionPath {
+    BipartiteMatchingExecutionPath::SerialLayeredAugmentation
+}
+
 fn find_layers(
     adjacency: &[Vec<usize>],
     left_match: &[Option<usize>],
@@ -169,6 +194,8 @@ fn invalid_projection(message: &str) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
     fn uuid(value: u128) -> [u8; 16] {
         value.to_be_bytes()
     }
@@ -181,6 +208,14 @@ mod tests {
     }
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
     }
     #[test]
     fn finds_maximum_cardinality_with_deterministic_ties() {
@@ -204,6 +239,40 @@ mod tests {
             maximum_bipartite_matching(&projection, &control()).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn serial_disposition_holds_across_thread_budgets() {
+        let projection = BipartiteProjection {
+            left_nodes: vec![uuid(1), uuid(2), uuid(3), uuid(4)],
+            right_nodes: vec![uuid(5), uuid(6), uuid(7), uuid(8)],
+            edges: vec![
+                edge(9, 1, 5),
+                edge(8, 1, 6),
+                edge(7, 2, 5),
+                edge(6, 2, 7),
+                edge(5, 3, 6),
+                edge(4, 3, 8),
+                edge(3, 4, 7),
+            ],
+        };
+        let control = control_with_threads(8);
+        assert_eq!(
+            select_bipartite_matching_path(
+                &control,
+                projection.left_nodes.len(),
+                projection.right_nodes.len(),
+                projection.edges.len(),
+            ),
+            BipartiteMatchingExecutionPath::SerialLayeredAugmentation
+        );
+        let oracle = maximum_bipartite_matching(&projection, &control_with_threads(1)).unwrap();
+        for threads in [2_usize, 4, 8] {
+            assert_eq!(
+                maximum_bipartite_matching(&projection, &control_with_threads(threads)).unwrap(),
+                oracle
+            );
+        }
     }
     #[test]
     fn selects_lowest_parallel_edge_and_ignores_isolates() {

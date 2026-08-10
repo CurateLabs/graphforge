@@ -3124,6 +3124,13 @@ entries, 10,000,000 output rows, and 10,000 cooperative work checkpoints.
 Projection, partition validation or inference, matching, output shaping, limit
 failures, and cancellation abort atomically without partial output.
 
+M4 #556 disposition: maximum bipartite matching remains serial. BFS layer
+construction and each augmenting-path commit mutate the left/right mate arrays
+consumed by later unmatched roots, so GraphForge does not claim a parallel
+crossover for `analyze(by="max_bipartite_matching")`. Thread policies at
+`1`/`2`/`4`/`8`/automatic preserve the one-thread selected edge set, row order,
+structured errors, and bounded Arrow shaping.
+
 Typed Rust owns graph-property resolution, the validated UUID mapping boundary,
 partition inference, matching, deterministic choices, controls, and Arrow
 shaping. The matching kernel consumes only graph-native topology and the
