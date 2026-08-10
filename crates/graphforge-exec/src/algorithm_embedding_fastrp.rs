@@ -1339,12 +1339,13 @@ mod tests {
         ));
 
         let pool = ComputePool::new(2).unwrap();
-        assert_eq!(
-            run_on_pool(&pool, || -> Result<(), FastRpError> {
-                panic!("test FastRP worker panic");
-            }),
-            Err(FastRpError::WorkerPanic)
-        );
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let worker_result = run_on_pool(&pool, || -> Result<(), FastRpError> {
+            panic!("test FastRP worker panic");
+        });
+        std::panic::set_hook(previous_hook);
+        assert_eq!(worker_result, Err(FastRpError::WorkerPanic));
     }
 
     #[test]
