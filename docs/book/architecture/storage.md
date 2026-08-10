@@ -252,10 +252,11 @@ Conventions:
 - **Node with no neighbors**: an empty list (`offsets[i] == offsets[i+1]`).
 - CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count` simply
   have no entries.
-- In-memory consumers (`graphforge_exec::AdjacencyProvider` — scan-build via
-  `ScanBuildAdjacencyProvider` until the persistent loader) see the logical
-  `offsets`/`targets` model; the list encoding is a file-format detail
-  (`graphforge_storage::adjacency::CsrIndex` on the storage side).
+- In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep the logical
+  `offsets` / parallel `edge_ids`+`neighbor_ids` model on a persisted hit
+  (#340 CSR-native views); the list encoding remains a file-format detail
+  (`graphforge_storage::adjacency::CsrIndex`). Scan-build fallback still
+  materializes a hash map for oracle parity.
 
 ### Rebuild and versioning semantics
 

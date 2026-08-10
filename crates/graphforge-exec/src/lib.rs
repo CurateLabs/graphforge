@@ -189,7 +189,7 @@ pub(crate) mod algorithm_weighted_undirected;
 #[doc(hidden)]
 pub mod demand;
 pub use adjacency::{
-    Adjacency, AdjacencyProvider, AdjacencyStatus, PersistentAdjacencyProvider,
+    Adjacency, AdjacencyBacking, AdjacencyProvider, AdjacencyStatus, PersistentAdjacencyProvider,
     ScanBuildAdjacencyProvider,
 };
 pub use algorithm_analyze::{
@@ -2722,7 +2722,7 @@ fn bfs_emit(
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {
             continue;
         }
-        for &(edge_id, next) in adjacency.neighbors(p.node) {
+        for (edge_id, next) in adjacency.neighbors(p.node).iter() {
             if p.visited_edges.contains(&edge_id) {
                 continue; // relationship isomorphism: no edge twice per path
             }
@@ -3484,7 +3484,9 @@ fn expand_single_hop_chunk(
         };
         let neighbors = adjacency.neighbors(src);
         while position.neighbor_offset < neighbors.len() && triples.len() < max_output {
-            let (edge_id, neighbor) = neighbors[position.neighbor_offset];
+            let (edge_id, neighbor) = neighbors
+                .get(position.neighbor_offset)
+                .expect("neighbor_offset < len");
             position.neighbor_offset += 1;
             if matches!(cfg.direction, Direction::Undirected)
                 && !position.seen_edges.insert(edge_id)

@@ -139,6 +139,36 @@ impl CsrIndex {
         self.edge_ids.len() as u64
     }
 
+    /// Checked O(1) row lookup: parallel `(edge_id, neighbor_id)` slices for
+    /// `node_id`, or empty slices when the id is out of range / isolated.
+    ///
+    /// Callers that loaded this CSR via [`read_csr`] already validated offsets,
+    /// so the returned ranges are always in bounds.
+    #[must_use]
+    pub fn row(&self, node_id: u64) -> CsrRow<'_> {
+        if node_id >= self.node_count() {
+            return CsrRow {
+                edge_ids: &[],
+                neighbor_ids: &[],
+            };
+        }
+        let i = usize::try_from(node_id).unwrap_or(usize::MAX);
+        if i >= self.offsets.len().saturating_sub(1) {
+            return CsrRow {
+                edge_ids: &[],
+                neighbor_ids: &[],
+            };
+        }
+        let start = usize::try_from(self.offsets[i]).unwrap_or(0);
+        let end = usize::try_from(self.offsets[i + 1]).unwrap_or(start);
+        let end = end.min(self.edge_ids.len()).min(self.neighbor_ids.len());
+        let start = start.min(end);
+        CsrRow {
+            edge_ids: &self.edge_ids[start..end],
+            neighbor_ids: &self.neighbor_ids[start..end],
+        }
+    }
+
     /// Check the structural invariants listed on the type.
     fn validate(&self) -> Result<(), GfError> {
         if self.offsets.first() != Some(&0) {
@@ -162,6 +192,47 @@ impl CsrIndex {
             )));
         }
         Ok(())
+    }
+}
+
+/// Borrowed CSR row: parallel edge-id and neighbor-id slices (same length).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CsrRow<'a> {
+    /// Edge surrogates for this row, in CSR order.
+    pub edge_ids: &'a [u64],
+    /// Neighbor node surrogates aligned with [`Self::edge_ids`].
+    pub neighbor_ids: &'a [u64],
+}
+
+impl<'a> CsrRow<'a> {
+    /// Number of `(edge, neighbor)` entries in this row.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.edge_ids.len().min(self.neighbor_ids.len())
+    }
+
+    /// Whether the row has no adjacency entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Entry at `index`, if in range.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<(u64, u64)> {
+        if index < self.len() {
+            Some((self.edge_ids[index], self.neighbor_ids[index]))
+        } else {
+            None
+        }
+    }
+
+    /// Iterate `(edge_id, neighbor_id)` pairs without allocating.
+    pub fn iter(self) -> impl Iterator<Item = (u64, u64)> + 'a {
+        self.edge_ids
+            .iter()
+            .copied()
+            .zip(self.neighbor_ids.iter().copied())
     }
 }
 
@@ -1826,6 +1897,24 @@ mod tests {
         let csr = sample_csr();
         write_csr(&path, &csr).unwrap();
         assert_eq!(read_csr(&path).unwrap(), csr);
+    }
+
+    #[test]
+    fn csr_row_lookup_is_o1_and_handles_empty_boundary_and_oor() {
+        let csr = sample_csr();
+        let row0 = csr.row(0);
+        assert_eq!(row0.len(), 2);
+        assert_eq!(row0.get(0), Some((csr.edge_ids[0], csr.neighbor_ids[0])));
+        assert_eq!(row0.get(1), Some((csr.edge_ids[1], csr.neighbor_ids[1])));
+        assert!(csr.row(1).is_empty(), "empty interior row");
+        assert_eq!(csr.row(2).len(), 2);
+        assert!(csr.row(3).is_empty(), "out of range");
+        assert!(csr.row(u64::MAX).is_empty());
+        let empty = CsrIndex {
+            offsets: vec![0],
+            ..CsrIndex::default()
+        };
+        assert!(empty.row(0).is_empty());
     }
 
     #[test]

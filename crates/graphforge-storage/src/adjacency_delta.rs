@@ -15,7 +15,12 @@
 //! `edge_id` is a unique surrogate, the result is byte-identical to a full
 //! rebuild from `topology/` for the same edges — that equivalence is the
 //! correctness contract (acceptance criterion 1), pinned by the tests below.
+//!
+//! Execution (#340) prefers [`overlay_delta_segments`]: a borrowable base CSR
+//! plus a **bounded** replacement map over only the keys touched by the delta
+//! chain. That path never copies the complete valid base CSR.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -25,7 +30,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use graphforge_core::GfError;
 
 use crate::adjacency::{
-    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, Direction, adjacency_dir, csr_from_entries,
+    ALL_RELATIONS_STEM, BuildEntry, CsrIndex, CsrRow, Direction, adjacency_dir, csr_from_entries,
     usable_stem,
 };
 use crate::schemas::ADJACENCY_DELTA_SCHEMA;
@@ -259,6 +264,135 @@ pub fn apply_delta_segments(
     csr_from_entries(&entries, direction)
 }
 
+/// Bounded delta overlay over a borrowed base CSR (#340).
+///
+/// Untouched rows are served directly from `base` (no copy). Only keys that
+/// appear in the filtered delta chain allocate replacement rows — size is
+/// proportional to overlay cardinality, never to the complete base edge count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CsrDeltaOverlay {
+    /// Validated base CSR; retained by reference-counted ownership.
+    pub base: Arc<CsrIndex>,
+    /// Complete replacement rows for keys touched by the delta chain.
+    pub replaced: HashMap<u64, Vec<(u64, u64)>>,
+    /// Exclusive upper bound on node ids that may have entries
+    /// (`max(base.node_count, max_replaced_key + 1)`).
+    pub node_extent: u64,
+}
+
+impl CsrDeltaOverlay {
+    /// Checked row lookup: overlay replacement when present, else base CSR row.
+    #[must_use]
+    pub fn row(&self, node_id: u64) -> OverlayRow<'_> {
+        if let Some(entries) = self.replaced.get(&node_id) {
+            return OverlayRow::Replaced(entries.as_slice());
+        }
+        OverlayRow::Base(self.base.row(node_id))
+    }
+
+    /// Number of keys with an allocated replacement row.
+    #[must_use]
+    pub fn overlay_row_count(&self) -> u64 {
+        u64::try_from(self.replaced.len()).unwrap_or(u64::MAX)
+    }
+}
+
+/// A row resolved through [`CsrDeltaOverlay::row`].
+#[derive(Clone, Copy, Debug)]
+pub enum OverlayRow<'a> {
+    /// Untouched base CSR row.
+    Base(CsrRow<'a>),
+    /// Delta-touched replacement (base row ∪ filtered delta entries).
+    Replaced(&'a [(u64, u64)]),
+}
+
+impl OverlayRow<'_> {
+    /// Number of `(edge, neighbor)` entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Base(row) => row.len(),
+            Self::Replaced(entries) => entries.len(),
+        }
+    }
+
+    /// Whether the row is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Entry at `index`, if in range.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<(u64, u64)> {
+        match self {
+            Self::Base(row) => row.get(index),
+            Self::Replaced(entries) => entries.get(index).copied(),
+        }
+    }
+}
+
+/// Build a bounded overlay that preserves the base CSR without copying it.
+///
+/// Semantic parity with [`apply_delta_segments`]: every key's row matches the
+/// fully rebuilt CSR for that key. Empty chains return an overlay with no
+/// replacements (base served as-is).
+#[must_use]
+pub fn overlay_delta_segments(
+    base: Arc<CsrIndex>,
+    stem: &str,
+    direction: Direction,
+    chain: &[DeltaSegment],
+) -> CsrDeltaOverlay {
+    let take_all = stem == ALL_RELATIONS_STEM;
+    let mut delta_by_key: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+    let mut max_key = 0_u64;
+    let mut saw_key = false;
+    for seg in chain {
+        for e in &seg.edges {
+            if take_all || (e.rel_type_name == stem && usable_stem(&e.rel_type_name)) {
+                let (key, neighbor) = match direction {
+                    Direction::Out => (e.src_id, e.dst_id),
+                    Direction::In => (e.dst_id, e.src_id),
+                };
+                delta_by_key
+                    .entry(key)
+                    .or_default()
+                    .push((e.edge_id, neighbor));
+                max_key = if saw_key { max_key.max(key) } else { key };
+                saw_key = true;
+            }
+        }
+    }
+
+    let mut replaced = HashMap::with_capacity(delta_by_key.len());
+    for (key, mut delta_entries) in delta_by_key {
+        let mut row = Vec::new();
+        if key < base.node_count() {
+            let base_row = base.row(key);
+            row.reserve(base_row.len() + delta_entries.len());
+            row.extend(base_row.iter());
+        } else {
+            row.reserve(delta_entries.len());
+        }
+        row.append(&mut delta_entries);
+        row.sort_unstable_by_key(|&(edge_id, _)| edge_id);
+        replaced.insert(key, row);
+    }
+
+    let node_extent = if saw_key {
+        max_key.saturating_add(1).max(base.node_count())
+    } else {
+        base.node_count()
+    };
+
+    CsrDeltaOverlay {
+        base,
+        replaced,
+        node_extent,
+    }
+}
+
 /// Reconstruct the `(src, edge, dst)` build entries a CSR for `direction` was
 /// built from: an `out` CSR is keyed by `src` with `dst` neighbors, an `in` CSR
 /// by `dst` with `src` neighbors.
@@ -355,6 +489,52 @@ mod tests {
             apply_delta_segments(&base, ALL_RELATIONS_STEM, Direction::Out, &[]),
             base
         );
+        let overlay = overlay_delta_segments(
+            Arc::new(base.clone()),
+            ALL_RELATIONS_STEM,
+            Direction::Out,
+            &[],
+        );
+        assert!(overlay.replaced.is_empty());
+        assert_eq!(overlay.node_extent, base.node_count());
+        assert_eq!(overlay.base.as_ref(), &base);
+    }
+
+    #[test]
+    fn overlay_matches_full_rebuild_without_copying_untouched_base_rows() {
+        let base_edges: Vec<BuildEntry> =
+            vec![(0, 1, 1), (0, 2, 1), (1, 3, 2), (2, 4, 0), (2, 5, 2)];
+        let chain = vec![
+            seg(8, &[("KNOWS", 6, 1, 3), ("KNOWS", 7, 3, 0)]),
+            seg(9, &[("OWNS", 8, 0, 2), ("../evil", 9, 3, 1)]),
+        ];
+        for direction in [Direction::Out, Direction::In] {
+            let base = Arc::new(csr_from_entries(&base_edges, direction));
+            let rebuilt = apply_delta_segments(&base, ALL_RELATIONS_STEM, direction, &chain);
+            let overlay =
+                overlay_delta_segments(Arc::clone(&base), ALL_RELATIONS_STEM, direction, &chain);
+            // Overlay keys are only those touched by filtered deltas — never |E|.
+            assert!(overlay.overlay_row_count() < base.edge_count());
+            assert!(
+                Arc::ptr_eq(&overlay.base, &base),
+                "overlay must retain the original base CSR allocation"
+            );
+            let extent = rebuilt.node_count().max(overlay.node_extent);
+            for node in 0..extent {
+                let expected = rebuilt.row(node);
+                let got = overlay.row(node);
+                assert_eq!(got.len(), expected.len(), "node {node} {direction:?}");
+                for i in 0..expected.len() {
+                    assert_eq!(got.get(i), expected.get(i), "node {node} idx {i}");
+                }
+            }
+            // Untouched base key 2 (self-loop + reverse) keeps a Base borrow when
+            // no delta edge touches key 2 under this direction.
+            let key_two_touched = overlay.replaced.contains_key(&2);
+            if !key_two_touched {
+                assert!(matches!(overlay.row(2), OverlayRow::Base(_)));
+            }
+        }
     }
 
     #[test]
