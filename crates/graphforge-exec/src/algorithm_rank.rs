@@ -4031,6 +4031,15 @@ mod tests {
         cancellation: AlgorithmCancellation,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        execute_article_rank_with_shared_pool(graph, pool, cancellation)
+    }
+
+    fn execute_article_rank_with_shared_pool(
+        graph: &AdjacencyGraph,
+        pool: Arc<crate::ComputePool>,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let threads = pool.num_threads();
         let mut registry = AlgorithmRegistry::default();
         register_rank_algorithms(&mut registry)?;
         let control = AlgorithmControl::new(
@@ -6255,6 +6264,8 @@ mod tests {
     fn measure_article_rank_parallel_crossover() {
         use std::time::Instant;
 
+        let serial_pool = Arc::new(crate::ComputePool::new(1).unwrap());
+        let parallel_pool = Arc::new(crate::ComputePool::new(4).unwrap());
         for &(nodes, fanout) in &[
             (64usize, 16usize),
             (64, 32),
@@ -6262,6 +6273,8 @@ mod tests {
             (128, 64),
             (256, 64),
             (512, 64),
+            (1024, 128),
+            (2048, 128),
         ] {
             let edges = (0..nodes)
                 .flat_map(|node| {
@@ -6270,29 +6283,41 @@ mod tests {
                 .collect::<Vec<_>>();
             let graph = AdjacencyGraph::with_test_edges(nodes as u64, &edges);
             let edge_count = graph.edge_entry_count();
-            let serial =
-                execute_article_rank_with_pool(&graph, 1, AlgorithmCancellation::default())
-                    .unwrap();
+            let serial = execute_article_rank_with_shared_pool(
+                &graph,
+                serial_pool.clone(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
             let expected = article_rank_fingerprint(&serial);
             // Warm once so timings emphasize the kernel path over first-use setup.
-            let parallel =
-                execute_article_rank_with_pool(&graph, 4, AlgorithmCancellation::default())
-                    .unwrap();
+            let parallel = execute_article_rank_with_shared_pool(
+                &graph,
+                parallel_pool.clone(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
             assert_eq!(article_rank_fingerprint(&parallel), expected);
 
             let mut serial_ns = u128::MAX;
             let mut parallel_ns = u128::MAX;
             for _ in 0..5 {
                 let t0 = Instant::now();
-                let serial =
-                    execute_article_rank_with_pool(&graph, 1, AlgorithmCancellation::default())
-                        .unwrap();
+                let serial = execute_article_rank_with_shared_pool(
+                    &graph,
+                    serial_pool.clone(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
                 serial_ns = serial_ns.min(t0.elapsed().as_nanos());
 
                 let t1 = Instant::now();
-                let parallel =
-                    execute_article_rank_with_pool(&graph, 4, AlgorithmCancellation::default())
-                        .unwrap();
+                let parallel = execute_article_rank_with_shared_pool(
+                    &graph,
+                    parallel_pool.clone(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
                 parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
                 assert_eq!(article_rank_fingerprint(&serial), expected);
                 assert_eq!(article_rank_fingerprint(&parallel), expected);
