@@ -93,6 +93,15 @@ keeps per-destination incoming contribution order with serial norm/convergence
 reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
 the one-thread path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+common-neighbors source aggregates (#505) may partition independent work across
+that pool above documented crossovers; work never uses Rayon's process-global
+pool. Cosine dot products retain serial coordinate order, PageRank keeps
+canonical contribution order with serial dangling/delta reductions, Node2Vec
+skip-gram training stays serial, and common-neighbors keeps serial
+candidate/intersection order per source, so fingerprints match the one-thread
+path.
+
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and triad census
 source-range enumeration (#587) may partition independent work across that pool
 above documented crossovers; work never uses Rayon's process-global pool. Cosine
@@ -538,6 +547,31 @@ does not use Rayon's global pool, and preserves shared cancellation and limits.
 A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
 configured compute threads and requires identical schemas, preorder rows,
 depths, and discovery ordinals.
+
+## Parallel common-neighbors aggregate (#505)
+
+`rank(by="common_neighbors")` partitions **independent source ordinals** across
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- the estimated pair/intersection work is at least
+  `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`524_288`) in `graphforge-exec`.
+
+The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
+conservative O(V + E) proxy for the serial pair loop and two-pointer
+intersection scans. The threshold is the smallest power-of-two work estimate
+below the measured win boundary on the M4 agent host (4 vCPU, directed
+ring-lattice fixture, 4 private workers, release build): ~230k units was still
+neutral/slower, ~540k units first won (~0.53x serial), and >=2.1M units was
+>=3.0x faster.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel workers only own source
+ranges. Candidate order, missing-link checks, two-pointer neighborhood
+intersection, and checked integer accumulation remain serial per source.
+Worker score chunks merge in canonical source order, so schemas, row order,
+scores, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/
+automatic configurations.
 
 ## Observability
 

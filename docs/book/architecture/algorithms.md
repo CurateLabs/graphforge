@@ -600,7 +600,13 @@ Stable topology and neighbor order drive exact set intersections. Pair counts
 and node aggregates use checked integer arithmetic and convert to `Float64`
 only when exactly representable at or below `2^53`; larger results return a
 structured execution error. Shared selected-node, adjacency-entry, output-row,
-iteration, and cancellation limits apply with batched checkpoints.
+iteration, and cancellation limits apply with batched checkpoints. Above the
+documented `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`524_288`) estimate, and
+only when the resource policy provides more than one compute thread,
+independent source ordinals may run on the instance-owned private compute pool
+(#337 / #505). Candidate order, missing-link checks, two-pointer intersections,
+and checked accumulation remain serial per source; worker score chunks merge in
+source order, so scores and fingerprints match the one-thread path.
 
 The public schema remains non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties with Arrow NULLs for missing

@@ -65,11 +65,11 @@ GF_FILE_BACKED_OVERSIZE_EVIDENCE_OUT=docs/development/file-backed-oversize-evide
   via structural counters.
 - **Arrow shaping (#341):** analyst outputs are Arrow batches only (no retained
   `rows: Vec<Vec<…>>`).
-- **CPU kernels (#342–#344):** exact cosine KNN, PageRank, and Node2Vec walk
-  generation use the instance-owned private compute pool above documented
-  crossovers; one-thread fingerprints are preserved. Thread cells that exceed
-  the machine-relative concurrency budget are recorded `unavailable` (on this
-  host `threads-8` is unavailable).
+- **CPU kernels (#342–#344/#505):** exact cosine KNN, PageRank, Node2Vec walk
+  generation, and common-neighbors source aggregates use the instance-owned
+  private compute pool above documented crossovers; one-thread fingerprints are
+  preserved. Thread cells that exceed the machine-relative concurrency budget
+  are recorded `unavailable` (on this host `threads-8` is unavailable).
 
 ## Honest scale dispositions
 
