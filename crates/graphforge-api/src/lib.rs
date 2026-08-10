@@ -382,7 +382,7 @@ pub struct GraphForge {
     write_options: GraphForgeOptions,
     /// Normalized execution resource policy applied to runtime and sessions (#337).
     resource_policy: resource_policy::NormalizedResourcePolicy,
-    /// Instance-owned private CPU pool for parallel algorithm kernels (#337 / #342).
+    /// Instance-owned private CPU pool for parallel algorithm kernels (#337 / #342 / #343).
     compute_pool: graphforge_exec::SharedComputePool,
     /// Instance-owned heavy-query admission gate (#337).
     heavy_query_admission: Arc<resource_policy::HeavyQueryAdmission>,
@@ -2329,7 +2329,7 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        let batch = graphforge_exec::rank_algorithm_with_limits(
+        let batch = graphforge_exec::rank_algorithm_with_compute(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
@@ -2337,7 +2337,9 @@ impl GraphForge {
             std::slice::from_ref(&stem),
             &dispatch_options,
             graphforge_exec::AlgorithmLimits::default()
-                .with_batch_size(self.resource_policy.batch_size),
+                .with_batch_size(self.resource_policy.batch_size)
+                .with_compute_threads(self.resource_policy.compute_threads),
+            Some(self.compute_pool.clone()),
         )?;
         self.write_algorithm_property(
             label,

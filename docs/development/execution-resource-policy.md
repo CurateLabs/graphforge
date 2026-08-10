@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; future kernels) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; sibling kernels) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -68,9 +68,10 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342) may partition independent source rows across that pool above a documented
-crossover; work never uses Rayon's process-global pool. Dot products retain
-serial coordinate order so fingerprints match the one-thread path.
+(#342) and PageRank (#343) may partition work across that pool above documented
+crossovers; work never uses Rayon's process-global pool. Dot products retain
+serial coordinate order, and PageRank keeps canonical contribution order with
+serial dangling/delta reductions, so fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -92,6 +93,23 @@ serial path runs with no pool scheduling tax. Inner floating-point reductions
 stay serial per source→target pair (no parallel dot products, no approximate
 similarity). Worker outputs merge in canonical source order so schemas, row
 order, scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel PageRank (#343)
+
+PageRank destination updates run on the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `PAGERANK_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial source-scatter path runs with no pool scheduling tax. Parallel work is
+destination-owned: each worker owns a contiguous dense-ordinal destination
+range and applies inbound contributions in the same canonical source/edge order
+as serial scatter. Dangling-mass and L1 convergence reductions stay serial so
+IEEE accumulation order matches the accepted oracle. Schemas, row order,
+scores, iteration counts, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
