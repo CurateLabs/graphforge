@@ -3078,8 +3078,11 @@ impl Drop for OwnedRuntime {
 pub struct RuntimeGuard {
     runtime: Arc<OwnedRuntime>,
     /// Private mutable graph workspace hydrated for this facade (`dir`).
+    /// Held solely so `TempDir` cleanup waits until stream consumers finish.
+    #[allow(dead_code)]
     workspace: Arc<tempfile::TempDir>,
     /// In-memory project root, when the facade is not path-backed.
+    #[allow(dead_code)]
     tempdir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -3097,10 +3100,6 @@ impl RuntimeGuard {
         F: std::future::Future + Send,
         F::Output: Send,
     {
-        // Keep workspace/tempdir referenced for the duration of the poll so a
-        // future that captures only `self.runtime` cannot outlive the pins.
-        let _workspace = &self.workspace;
-        let _tempdir = &self.tempdir;
         let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::scope(|s| {

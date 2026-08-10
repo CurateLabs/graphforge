@@ -739,8 +739,8 @@ mod tests {
             normalize_topology: false,
             exact_rows: None,
         };
-        let plan = GraphForgeParquetExec::try_new(edge_schema(), vec![fragment], None, None, 8)
-            .unwrap();
+        let plan =
+            GraphForgeParquetExec::try_new(edge_schema(), vec![fragment], None, None, 8).unwrap();
         let ctx = SessionContext::new();
         let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, ctx.task_ctx())
             .await
