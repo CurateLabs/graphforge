@@ -13,7 +13,7 @@
     "@cucumber/cucumber": "^11.0.0",
     "@types/node": "^26.1.2",
     "apache-arrow": "^21.2.0",
-    "typescript": "^5.7.0",
+    "typescript": "^6.0.3",
     "ts-node": "^10.9.0"
   }
 }
