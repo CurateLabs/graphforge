@@ -17,8 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #515 triangles; #518 Components; #535 Jaccard similarity; #513 resource allocation) |
-
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #515 triangles; #518 Components; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -72,20 +71,8 @@ private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
 Jaccard node similarity (#535), local clustering coefficient (#504), triangle
 ranking (#515), Degree (#506), betweenness Brandes source searches (#501), and
-`cluster(by="components")` (#518), and transitive closure (#554) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Cosine dot products retain serial coordinate order,
-PageRank keeps canonical contribution order with serial dangling/delta
-reductions, Jaccard retains serial candidate order per source, clustering
-coefficient merges node-range scores in canonical dense-ordinal order, triangles
-merge node-owned counts by ascending dense ordinal, Degree merges node chunks in
-dense ordinal order, betweenness reduces per-source dependency arrays in
-canonical source order, Components merges worker-local forests in canonical
-source-range order, Node2Vec skip-gram training stays serial, and transitive
-closure merges source ranges canonically, so fingerprints match the one-thread
-
 `cluster(by="components")` (#518) may partition independent work across that
-pool above documented crossovers; work never uses Rayon's process-global pool. Maximum-cardinality matching (#557) is explicitly dispositioned serial because blossom/primal-dual search mutates ordered matching state.
+pool above documented crossovers; work never uses Rayon's process-global pool.
 Cosine dot products retain serial coordinate order, PageRank keeps canonical
 contribution order with serial dangling/delta reductions, Jaccard retains
 serial candidate order per source, clustering coefficient merges node-range
@@ -94,94 +81,15 @@ ascending dense ordinal, Degree merges node chunks in dense ordinal order,
 betweenness reduces per-source dependency arrays in canonical source order,
 Components merges worker-local forests in canonical source-range order, and
 Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
-
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. GraphSAGE training (#560) is explicitly
-dispositioned serial because positive-pair replay, sampled computation graphs,
-gradient accumulation, Adam moment updates, and final full-neighborhood
-inference are one accepted state stream. Cosine dot products retain serial
-coordinate order, PageRank keeps canonical contribution order with serial
-dangling/delta reductions, Node2Vec skip-gram training stays serial, and
-GraphSAGE keeps one-thread training order, so fingerprints match the one-thread
-path.
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
-eigenvector destination updates (#507) may partition independent work across
-that pool above documented crossovers; work never uses Rayon's process-global
-pool. Cosine dot products retain serial coordinate order, PageRank keeps
-canonical contribution order with serial dangling/delta reductions, eigenvector
-keeps per-destination incoming contribution order with serial norm/convergence
-reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
-the one-thread path.
-
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
-common-neighbors source aggregates (#505) may partition independent work across
-that pool above documented crossovers; work never uses Rayon's process-global
-pool. Cosine dot products retain serial coordinate order, PageRank keeps
-canonical contribution order with serial dangling/delta reductions, Node2Vec
-skip-gram training stays serial, and common-neighbors keeps serial
-candidate/intersection order per source, so fingerprints match the one-thread
 path.
 
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and triad census
-source-range enumeration (#587) may partition independent work across that pool
-above documented crossovers; work never uses Rayon's process-global pool. Cosine
-dot products retain serial coordinate order, PageRank keeps canonical
-contribution order with serial dangling/delta reductions, Node2Vec skip-gram
-training stays serial, and triad census merges integer class counts in canonical
-source-range order, so fingerprints match the one-thread path.
-
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+`paths(by="dijkstra_all_pairs")` source searches (#542) may partition
 independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Leiden (#527) is explicitly dispositioned serial
-because local moves, refinement, fixed random sampling, and aggregation consume
-the accepted state from the previous step. Cosine dot products retain serial
-coordinate order, PageRank keeps canonical contribution order with serial
-dangling/delta reductions, Node2Vec skip-gram training stays serial, and Leiden
-keeps one-thread refinement order, so fingerprints match the one-thread path.
-
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Maximum-weight matching (#558) is explicitly
-dispositioned serial because exact weighted blossom labels, dual arithmetic,
-contractions, expansions, and augmenting-path commits mutate one shared
-alternating forest. Cosine dot products retain serial coordinate order,
+Rayon's process-global pool. Cosine dot products retain serial coordinate order,
 PageRank keeps canonical contribution order with serial dangling/delta
-reductions, Node2Vec skip-gram training stays serial, and max-weight matching
-keeps one-thread weighted blossom state order, so fingerprints match the
-one-thread path.
-
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and transitivity
-triangle counting (#586) may partition independent work across that pool above
-documented crossovers; work never uses Rayon's process-global pool. Cosine dot
-products retain serial coordinate order, PageRank keeps canonical contribution
-order with serial dangling/delta reductions, Node2Vec skip-gram training stays
-serial, and transitivity merges integer triangle counts in canonical source-range
-order, so fingerprints match the one-thread path.
-
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and conductance
-row evaluation (#566) may partition independent work across that pool above
-documented crossovers; work never uses Rayon's process-global pool. Cosine dot
-products retain serial coordinate order, PageRank keeps canonical contribution
-order with serial dangling/delta reductions, Node2Vec skip-gram training stays
-serial, and conductance keeps weighted cut/volume accumulation serial, so
-fingerprints match the one-thread path.
-
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
-Adamic-Adar source aggregates (#499) may partition independent work across that
-pool above documented crossovers; work never uses Rayon's process-global pool.
-Cosine dot products retain serial coordinate order, PageRank keeps canonical
-contribution order with serial dangling/delta reductions, Node2Vec skip-gram
-training stays serial, and Adamic-Adar keeps serial candidate/intersection order
-per source, so fingerprints match the one-thread path.
-
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and ArticleRank
-(#500) may partition independent work across that pool above documented
-crossovers; work never uses Rayon's process-global pool. Cosine dot products
-retain serial coordinate order, PageRank keeps canonical contribution order with
-serial dangling/delta reductions, ArticleRank keeps canonical per-destination
-message order with serial score/delta updates, and Node2Vec skip-gram training
-stays serial, so fingerprints match the one-thread path.
+reductions, Node2Vec skip-gram training stays serial, and each Dijkstra source
+search remains serial, so fingerprints match the one-thread path.
 
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
 resource-allocation source aggregates (#513) may partition independent work
@@ -304,80 +212,7 @@ Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
 for contiguous ordinal ranges; the sink merges them in ascending node order so
 schemas, row order, scores, and fingerprints match the one-thread result at
-
-## Parallel ArticleRank (#500)
-
-ArticleRank destination message sums run on the instance-owned private compute
-pool when:
-
-- `compute_threads > 1`, and
-- selected adjacency entries are at least
-  `ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`131_072`) in `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread, the serial
-destination-pull path runs with no pool scheduling tax. Parallel work is
-destination-owned: each worker owns a contiguous dense-ordinal destination range
-and applies inbound messages in the same canonical source/edge order as the
-one-thread recurrence. Score accumulation, delta damping, and convergence
-checks remain serial in dense node order, so schemas, row order, scores,
-iteration counts, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
-## Parallel eigenvector (#507)
-
-`rank(by="eigenvector")` shifted power-iteration destination updates may run on
-the instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- selected adjacency entries are at least
-  `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`8_192`) in `graphforge-exec`.
-
-Release-mode local evidence on the 4-worker M4 agent host showed regular graphs
-that converge during warm-up avoid the pool, while irregular non-converged
-fixtures crossed over by ~8K selected adjacency entries:
-`8_689`, `24_440`, `65_505`, and `130_544` edge irregular fixtures repeatedly
-ran at roughly `0.4×–0.6×` of the one-thread time on four private workers.
-Those timings are hardware-specific evidence, not a CI gate.
-
-Below that crossover, or when the policy provides one compute thread, the
-serial source-scatter path runs with no pool scheduling tax. Above the
-crossover, the first two required power iterations also stay serial; if the
-workload converges there, no inbound CSR or worker scheduling tax is paid.
-Remaining non-converged work is destination-owned: each worker owns a
-contiguous dense-ordinal destination range and applies inbound contributions
-after the implicit identity term in the same canonical source/edge order as
-serial scatter. L2 normalization and component-wise convergence checks stay
-serial, so scores, iteration counts, and fingerprints match the one-thread
-result at `1`/`2`/`4`/`8`/automatic configurations.
-## Parallel HITS hub (#510)
-## Parallel HITS hub / authority (#510 / #509)
-
-The shared `hits_scores` kernel used by `rank(by="hits_hub")` prepares selected
-and `rank(by="hits_authority")` prepares selected adjacency once as
-dense-ordinal outgoing and incoming CSR, then partitions independent node-score
-updates across the instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- selected adjacency entries are at least
-  `HITS_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread, the
-serial path runs with no pool scheduling tax. Parallel work is node-owned: the
-authority phase owns contiguous target ranges over incoming CSR, and the hub
-phase owns contiguous source ranges over outgoing CSR. Each node's
-floating-point sum still walks its CSR slice in canonical source/edge order,
-and global L2 norms remain serial dense-ordinal reductions, so schemas, row
-order, scores, ties, and fingerprints match the one-thread result at
-`1`/`2`/`4`/`8`/automatic configurations. The crossover follows the same
-4 vCPU release-build structural benchmark regime used for adjacent M4 kernels:
-the parallel path avoids small-fixture tax and clears the worker-pool cost once
-20 fixed HITS iterations amortize two sparse matrix-vector phases per
-iteration. It is CPU-only; no GPU or universal scaling claim is made.
-
-The threshold is the first measured win on the M4 agent host using the ignored
-release harness (`measure_article_rank_parallel_crossover`) with a shared
-four-worker private pool: sizes through 32k selected entries stayed near parity
-within timing noise, while 131k and 262k selected entries were clear wins over
-the one-thread path.
 
 ## Parallel Node2Vec walk generation (#344)
 
@@ -443,250 +278,28 @@ IDs are still assigned by canonical node order, so schemas, row order, labels,
 and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
-## Serial paths(by="gomory_hu_tree") (#544)
 
-`paths(by="gomory_hu_tree")` has no parallel crossover. Its disposition is
-**serial Gomory-Hu parent updates** for every `compute_threads` setting,
-including `1`/`2`/`4`/`8`/automatic policies.
+## Parallel Dijkstra all-pairs sources (#542)
 
-The Rust kernel consumes CSR-native undirected capacity adjacency (#340), finds
-canonical connected components, and runs the classic parent-update sequence.
-Each min-cut result rewrites parent links that choose subsequent cut pairs and
-final forest rows. Launching those cuts independently would compute against the
-wrong parent state and could change cut values, row order, and fingerprints.
-
-The path still uses bounded Arrow output (#341), structured cancellation and
-resource checks, and no process-global Rayon pool. The M4 harness records
-`paths-gomory-hu-tree` evidence and verifies one-thread parity across supported
-resource-policy cells; timing remains evidence only.
-
-## Parallel transitive closure (#554)
-
-`paths(by="transitive_closure")` partitions independent source-node traversals
-across the instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- estimated traversal work (`sources × direction-expanded adjacency entries`) is
-  at least `TRANSITIVE_CLOSURE_PARALLEL_CROSSOVER_WORK` (`65_536`) in
-  `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread, the serial
-per-source breadth-first traversal runs with no pool scheduling tax. Parallel
-workers preserve the serial traversal inside each source, sort reachable targets
-by public UUID, and merge worker outputs by ascending canonical source range.
-Schemas, row order, reachable-pair sets, and fingerprints match the one-thread
-result at `1`/`2`/`4`/`8`/automatic configurations.
-
-## Parallel triad census source ranges (#587)
-
-`analyze(by="triad_census")` keeps UUID indexing and directed-neighbor
-normalization serial so duplicate-edge validation, self-loop elision, and
-canonical node ordering remain unchanged. The Batagelj-Mrvar enumeration then
-partitions independent source-ordinal ranges across the instance-owned private
-compute pool when:
-
-- `compute_threads > 1`, and
-- normalized weak dyads are at least
-  `TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS` (`4_096`) in `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread, triad
-census stays serial. Each worker builds the same per-dyad union sets as the
-serial path for its source range and returns worker-local `u64` counts for the 16
-MAN classes. Chunk results merge in ascending source-range order before deriving
-the closed-form `003` count and validating the `V choose 3` invariant. Schemas,
-row order, class counts, structured errors, and fingerprints match the one-thread
-result at `1`/`2`/`4`/`8`/automatic configurations.
-
-## Serial k-core decomposition (#523)
-
-`cluster(by="k_core_decomposition")` is intentionally SERIAL. The exact
-core-number peel mutates node degrees through a canonical min-heap; each removal
-changes later heap priorities and stale-entry rejection. Splitting that frontier
-across workers would either change tie order/core assignment evidence or add a
-global synchronization point around every peel, leaving no safe independent
-kernel for the private compute pool.
-
-The handler keeps the Rust-owned projection path and bounded Arrow sink, avoids
-the Rayon global pool, and observes shared graph/output/iteration limits. A
-fingerprint test attaches private compute pools for `1`/`2`/`4`/`8` configured
-compute threads and requires identical schemas, row ordering, core labels, and
-rows.
-
-## Serial Leiden modularity optimization (#527)
-
-`cluster(by="leiden")` has no parallel crossover. Its performance disposition is
-**serial local-move/refinement/aggregation** for every `compute_threads`
-setting, including `1`/`2`/`4`/`8`/automatic resource policies.
-
-Each Leiden level first runs topology-ordered positive-gain local moves, then
-refines coarse communities through connected subcommunities using the fixed
-Rust random stream and accepted membership state, then aggregates the refined
-partition while seeding the next level from the coarse partition. Reordering
-candidate moves, random draws, or aggregation updates would require a new
-numeric and tie contract and could change connected-community guarantees,
-community IDs, row ordering, or fingerprints.
-
-The #527 disposition therefore preserves the serial contract, CSR-native
-selected adjacency access, shared cancellation/checkpoint controls, structured
-resource errors, and bounded Arrow shaping. Schemas, row order, community IDs,
-projection fingerprints, cancellation, and limit behavior match the one-thread
-oracle at supported thread configurations. No GPU, distributed, approximate, or
-foreign-engine fallback is implied.
-
-## Serial bridges (#564)
-
-`analyze(by="bridges")` is intentionally SERIAL. Bridge classification depends
-on the shared low-link DFS traversal: discovery order, parent-edge identity,
-multigraph parallel-edge handling, and low-link propagation determine whether an
-edge is a bridge. Parallelizing that state would change the canonical edge
-evidence or require synchronization around each DFS transition, so there is no
-safe independent kernel for the private compute pool.
-
-The handler keeps Rust-owned adjacency projection and bounded Arrow output,
-does not use Rayon's global pool, and preserves cancellation and shared resource
-limits. A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
-configured compute threads and requires identical schemas, bridge ordering, and
-rows.
-
-## Serial paths(by="dijkstra") (#541)
-
-`paths(by="dijkstra")` for one source, with or without one target, has no
-parallel crossover. Its disposition is **serial non-negative shortest-path
-relaxation** for every `compute_threads` setting. The all-pairs variant is
-tracked independently by #542.
-
-The Rust kernel validates non-negative finite weights, then repeatedly pops one
-canonical heap entry, compares it with the current best-path map, and relaxes
-stable outgoing edges. The public target early exit and equal-cost path-vector
-and edge-UUID ties depend on that exact pop order. Parallel relaxations would
-need to arbitrate competing predecessors and could alter paths, row order, or
-fingerprints.
-
-The path still uses CSR-native selected adjacency, bounded Arrow shaping,
-structured cancellation and limit checks, and no process-global Rayon pool.
-Costs, selected node sequences, unreachable-target behavior, structured errors,
-and cancellation behavior match the one-thread oracle across supported
-resource-policy cells.
-
-## Serial maximum-weight matching (#558)
-
-`analyze(by="max_weight_matching")` has no parallel crossover. Its performance
-disposition is **serial exact weighted blossom search** for every
-`compute_threads` setting.
-
-The weighted handler normalizes the selected undirected multigraph, validates
-finite weights, and uses the shared exact blossom/primal-dual core with summed
-Float64 weights as the primary objective, cardinality as a secondary objective,
-and canonical edge tuples for ties. Labels, root queues, exact-weight dual
-steps, blossom contractions/expansions, and augmenting-path commits all update
-one alternating forest. Parallel speculation would need conflict resolution
-across shared vertices/blossoms and could change the selected maximum-weight
-edge set or tie objective.
-
-The #558 disposition preserves CSR-native selected adjacency access before
-normalization, shared cancellation/checkpoint controls, structured resource
-errors, and bounded Arrow shaping. Schemas, row order, selected edge UUIDs and
-weights, projection fingerprints, cancellation, and limit behavior match the
-one-thread oracle at supported thread configurations. No GPU, distributed,
-approximate, or foreign-engine fallback is implied.
-
-## Parallel transitivity triangle counting (#586)
-
-`analyze(by="transitivity")` keeps UUID indexing, undirected simple-neighbor
-normalization, and the wedge denominator serial. Those steps validate duplicate
-edge UUIDs, self-loops, endpoint membership, and the zero-wedge early return
-before any pool scheduling. The triangle-closure scan then partitions independent
-source-ordinal ranges across the instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- closed-wedge candidates are at least
-  `TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES` (`32_768`) in `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread,
-transitivity stays serial. Parallel workers return local `u64` triangle counts;
-chunks merge in ascending source-range order before the single final `3T / wedge`
-floating-point division. Schemas, scalar row shape, ratio bits, structured
-errors, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
-configurations.
-
-## Parallel conductance row evaluation (#566)
-
-`analyze(by="conductance")` keeps weighted edge normalization, cut accumulation,
-and volume accumulation serial. Those stages contain floating-point additions
-whose order is part of the accepted bit-level contract. After the serial
-accumulators are complete, each partition row can be evaluated independently on
+`paths(by="dijkstra_all_pairs")` partitions **independent source nodes** across
 the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
-- normalized partitions are at least
-  `CONDUCTANCE_PARALLEL_CROSSOVER_PARTITIONS` (`128`) in `graphforge-exec`.
-
-Below that crossover, or when the policy provides one compute thread,
-conductance stays fully serial. Parallel workers evaluate canonical partition
-ranges; each row preserves the serial `BTreeMap` complement summation order, and
-chunks merge in ascending range order so row ordering and the first undefined
-partition error remain deterministic. Schemas, row order, conductance bits,
-structured errors, and fingerprints match the one-thread result at
-`1`/`2`/`4`/`8`/automatic configurations.
-## Serial depth-first search (#540)
-
-`paths(by="dfs")` is intentionally SERIAL. The public result is preorder with a
-stable discovery index and depth. That order is defined by a single stack over
-sorted neighbor lists; parallelizing frontier expansion would change discovery
-order, depth ties, or require serial reassembly of every stack mutation.
-
-The handler uses the Rust-owned adjacency projection and bounded Arrow sink,
-does not use Rayon's global pool, and preserves shared cancellation and limits.
-A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
-configured compute threads and requires identical schemas, preorder rows,
-depths, and discovery ordinals.
-
-## Parallel common-neighbors aggregate (#505)
-
-`rank(by="common_neighbors")` partitions **independent source ordinals** across
-the instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- the estimated pair/intersection work is at least
-  `COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) in
+- estimated source-edge inspections (`selected_nodes × CSR adjacency entries`)
+  are at least `DIJKSTRA_APSP_PARALLEL_CROSSOVER_WORK` (`8_192`) in
   `graphforge-exec`.
-
-The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
-conservative O(V + E) proxy for the serial pair loop and two-pointer
-intersection scans. The threshold is the smallest power-of-two work estimate
-below the measured win boundary on the M4 agent host (4 vCPU, directed
-ring-lattice fixture, 4 private workers, debug test profile after a clean
-target-dir build): ~230k units was still slower (~1.80x serial), ~540k units
-was still slower (~1.20x serial), ~1.2M units first won (~0.70x serial), and
->=2.1M units was >=1.8x faster.
-## Parallel Adamic-Adar aggregate (#499)
-
-`rank(by="adamic_adar")` partitions **independent source ordinals** across the
-instance-owned private compute pool when:
-
-- `compute_threads > 1`, and
-- the estimated pair/intersection work is at least
-  `ADAMIC_ADAR_PARALLEL_CROSSOVER_WORK` (`524_288`) in `graphforge-exec`.
-
-The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
-conservative O(V + E) proxy for the serial pair loop and two-pointer
-intersection scans. The threshold is the smallest power-of-two work estimate
-below the measured win boundary on the M4 agent host (4 vCPU, directed
-ring-lattice fixture, 4 private workers, release build): ~230k units was still
-neutral/slower, ~540k units first won (~0.61x serial), and >=2.1M units was
->=2.8x faster.
 
 Below that crossover, or when the policy provides one compute thread, the
-serial path runs with no pool scheduling tax. Parallel workers only own source
-ranges. Candidate order, missing-link checks, two-pointer neighborhood
-intersection, and checked integer accumulation remain serial per source.
-Worker score chunks merge in canonical source order, so schemas, row order,
-scores, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/
-automatic configurations.
-intersection, logarithmic discounts, and compensated floating-point summation
-remain serial per source. Worker score chunks merge in canonical source order,
-so schemas, row order, scores, and fingerprints match the one-thread result at
-`1`/`2`/`4`/`8`/automatic configurations.
+existing serial source loop runs with no pool scheduling tax. Above the
+crossover, each worker runs the same single-source Dijkstra serially: heap
+ordering, equal-cost path ties, edge order, cost accumulation, cancellation
+checkpoints, and source-local allocations are unchanged. Worker outputs merge by
+canonical source range, and output limits are checked during that merge, so
+schemas, row order, costs, paths, structured errors, and fingerprints match the
+one-thread result at supported `1`/`2`/`4`/`8`/automatic configurations. The
+implementation consumes CSR-native adjacency and the existing bounded Arrow
+shaping path; it does not introduce a parallel-only graph copy or a global
+edge-index map.
 
 ## Parallel resource-allocation aggregate (#513)
 
@@ -929,7 +542,6 @@ Evidence is carried by:
 
 
 There is no crossover for SCC in M4: the documented disposition is `serial_tarjan`. Timing remains hardware-specific evidence, never a CI pass/fail gate.
-<<<<<<< HEAD
 ## Serial analyze(by="minimum_k_spanning_tree") (#581)
 
 `analyze(by="minimum_k_spanning_tree")` has no parallel crossover. Its
@@ -947,7 +559,7 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and no process-global Rayon pool. The M4 harness records
 `analyze-minimum-k-spanning-tree` evidence and verifies one-thread parity;
 timing is report-only.
-=======
+
 ## Serial CELF influence maximization (#502)
 
 `rank(by="celf")` keeps the Cost-Effective Lazy Forward search serial under every
@@ -980,7 +592,6 @@ sink, avoids any Rayon global pool, and observes cancellation and shared
 iteration/output limits. The serial disposition is covered by a fingerprint test
 that attaches private compute pools for `1`/`2`/`4`/`8` configured compute
 threads and requires identical schemas, row ordering, labels, and rows.
-
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
@@ -1017,15 +628,3 @@ counts.
 - [M4 Entry Baseline](m4-entry-baseline.md)
 - [Scale Limits](../reference/scale-limits.md)
 - Contract: [`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
-
-| Knob | Default (Explicit) | Applied to |
-|---|---|---|
-| `tokio_worker_threads` | `2` | Facade multi-thread Tokio runtime |
-| `target_partitions` | `2` | DataFusion `SessionConfig` |
-| `batch_size` | `8192` | DataFusion `SessionConfig`; analyst Arrow shaping / property enrichment (#341) |
-| `memory_budget_bytes` | `512 MiB` | DataFusion `RuntimeEnv` memory pool |
-| `spill` | disabled | Optional absolute spill directory + byte cap |
-| `io_concurrency` | `2` | Reserved I/O concurrency budget |
-| `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-
-## Parallel closeness BFS (#503)

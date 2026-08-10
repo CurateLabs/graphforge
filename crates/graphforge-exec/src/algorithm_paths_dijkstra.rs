@@ -4,11 +4,28 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 use crate::algorithm_graph::AdjacencyGraph;
 
 const CHECKPOINT_INTERVAL: usize = 4_096;
+/// Estimated source-edge inspections below which APSP Dijkstra stays serial (#542).
+///
+/// The estimate is `selected_nodes * CSR adjacency entries`. The threshold keeps
+/// small fixtures away from worker scheduling overhead while letting independent
+/// source searches use the instance-owned private compute pool.
+pub const DIJKSTRA_APSP_PARALLEL_CROSSOVER_WORK: u64 = 8_192;
+
+/// Selected all-pairs Dijkstra execution path for crossover and parity tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DijkstraAllPairsExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DijkstraPath {
     pub source: u64,
@@ -76,19 +93,64 @@ pub(crate) fn exact_dijkstra_all_pairs(
     control: &AlgorithmControl,
 ) -> Result<Vec<DijkstraPath>, AlgorithmError> {
     control.checkpoint()?;
-    let mut paths = Vec::new();
     let mut work = 0_usize;
     validate_weights(graph, control, &mut work)?;
+    match select_dijkstra_all_pairs_path(control, graph) {
+        DijkstraAllPairsExecutionPath::Serial => {
+            exact_dijkstra_all_pairs_serial(graph, control, &mut work)
+        }
+        DijkstraAllPairsExecutionPath::Parallel { .. } => {
+            exact_dijkstra_all_pairs_parallel(graph, control)
+        }
+    }
+}
+
+fn exact_dijkstra_all_pairs_serial(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<Vec<DijkstraPath>, AlgorithmError> {
+    let mut paths = Vec::new();
     for &source in graph.node_ids() {
         checkpoint(control, &mut work)?;
         let source_paths = dijkstra_from(graph, source, None, control, &mut work)?
             .into_iter()
             .filter(|path| path.target != source)
             .collect::<Vec<_>>();
-        control.check_output_rows(paths.len().saturating_add(source_paths.len()))?;
-        paths.extend(source_paths);
+        append_paths(&mut paths, source_paths, control)?;
     }
     Ok(paths)
+}
+
+fn exact_dijkstra_all_pairs_parallel(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+) -> Result<Vec<DijkstraPath>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel dijkstra_all_pairs requires an instance-owned compute pool")
+    })?;
+    let sources = graph.node_ids();
+    let ranges = source_chunks(sources.len(), control.compute_threads());
+    let chunk_results = run_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut work = 0_usize;
+                let mut chunk_paths = Vec::new();
+                for &source in &sources[start..end] {
+                    checkpoint(control, &mut work)?;
+                    let source_paths = dijkstra_from(graph, source, None, control, &mut work)?
+                        .into_iter()
+                        .filter(|path| path.target != source)
+                        .collect::<Vec<_>>();
+                    chunk_paths.extend(source_paths);
+                }
+                Ok(chunk_paths)
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_result(results)
+    })?;
+    merge_chunks(chunk_results, control)
 }
 
 fn dijkstra_from(
@@ -169,6 +231,95 @@ fn dijkstra_from(
         .collect())
 }
 
+fn append_paths(
+    paths: &mut Vec<DijkstraPath>,
+    source_paths: Vec<DijkstraPath>,
+    control: &AlgorithmControl,
+) -> Result<(), AlgorithmError> {
+    control.check_cancelled()?;
+    control.check_output_rows(paths.len().saturating_add(source_paths.len()))?;
+    paths.extend(source_paths);
+    Ok(())
+}
+
+fn merge_chunks(
+    chunk_results: Vec<Vec<DijkstraPath>>,
+    control: &AlgorithmControl,
+) -> Result<Vec<DijkstraPath>, AlgorithmError> {
+    let mut paths = Vec::new();
+    for chunk in chunk_results {
+        append_paths(&mut paths, chunk, control)?;
+    }
+    Ok(paths)
+}
+
+fn first_chunk_result(
+    results: Vec<Result<Vec<DijkstraPath>, AlgorithmError>>,
+) -> Result<Vec<Vec<DijkstraPath>>, AlgorithmError> {
+    let mut chunks = Vec::with_capacity(results.len());
+    for result in results {
+        chunks.push(result?);
+    }
+    Ok(chunks)
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("dijkstra_all_pairs worker panicked")),
+    }
+}
+
+/// Choose serial vs private-pool parallel source execution for APSP Dijkstra.
+pub(crate) fn select_dijkstra_all_pairs_path(
+    control: &AlgorithmControl,
+    graph: &AdjacencyGraph,
+) -> DijkstraAllPairsExecutionPath {
+    let sources = graph.node_ids().len();
+    let threads = control.compute_threads();
+    let estimated_work = (sources as u64).saturating_mul(graph.edge_entry_count());
+    if threads <= 1 || sources <= 1 || estimated_work < DIJKSTRA_APSP_PARALLEL_CROSSOVER_WORK {
+        return DijkstraAllPairsExecutionPath::Serial;
+    }
+    if control
+        .compute_pool()
+        .is_none_or(|pool| !pool.is_parallel())
+    {
+        return DijkstraAllPairsExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    if chunks <= 1 {
+        return DijkstraAllPairsExecutionPath::Serial;
+    }
+    DijkstraAllPairsExecutionPath::Parallel { threads, chunks }
+}
+
+fn source_chunks(sources: usize, threads: usize) -> Vec<(usize, usize)> {
+    if sources == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, sources);
+    let base = sources / workers;
+    let rem = sources % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
+}
+
 fn validate_weights(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
@@ -205,9 +356,56 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        let pool = Arc::new(ComputePool::new(threads).unwrap());
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool)
+    }
+
+    fn parallel_fixture(node_count: u64, weight: f64) -> AdjacencyGraph {
+        let offsets = [1_u64, 5, 17, 31];
+        let edges = (0..node_count)
+            .flat_map(|source| {
+                offsets
+                    .into_iter()
+                    .map(move |offset| (source, (source + offset) % node_count))
+            })
+            .collect::<Vec<_>>();
+        let weights = edges
+            .iter()
+            .map(|(source, target)| {
+                if weight == 1.0 {
+                    1.0 + ((source + target) % 7) as f64 / 10.0
+                } else {
+                    weight
+                }
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(node_count, &edges).with_test_edge_weights(&weights)
+    }
+
+    fn path_fingerprint(paths: &[DijkstraPath]) -> Vec<(u64, u64, u64, Vec<u64>)> {
+        paths
+            .iter()
+            .map(|path| {
+                (
+                    path.source,
+                    path.target,
+                    path.cost.to_bits(),
+                    path.nodes.clone(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -303,6 +501,31 @@ mod tests {
     }
 
     #[test]
+    fn all_pairs_selects_parallel_only_above_private_pool_crossover() {
+        let small = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 2), (2, 3)]);
+        assert_eq!(
+            select_dijkstra_all_pairs_path(&control_with_threads(4), &small),
+            DijkstraAllPairsExecutionPath::Serial
+        );
+        let large = parallel_fixture(48, 1.0);
+        assert_eq!(
+            select_dijkstra_all_pairs_path(&control(), &large),
+            DijkstraAllPairsExecutionPath::Serial
+        );
+        assert_eq!(
+            select_dijkstra_all_pairs_path(&control_with_threads(1), &large),
+            DijkstraAllPairsExecutionPath::Serial
+        );
+        assert_eq!(
+            select_dijkstra_all_pairs_path(&control_with_threads(4), &large),
+            DijkstraAllPairsExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
     fn all_pairs_returns_exact_reachable_ordered_non_self_paths() {
         let graph =
             AdjacencyGraph::with_test_edges(5, &[(0, 2), (0, 1), (1, 3), (2, 3), (3, 0), (4, 4)])
@@ -331,6 +554,27 @@ mod tests {
         );
         assert_eq!(paths, exact_dijkstra_all_pairs(&graph, &control()).unwrap());
         assert!(paths.iter().all(|path| path.source != path.target));
+    }
+
+    #[test]
+    fn all_pairs_parallel_source_chunks_match_serial_fingerprint() {
+        let graph = parallel_fixture(48, 1.0);
+        let serial = exact_dijkstra_all_pairs(&graph, &control_with_threads(1)).unwrap();
+        assert_eq!(
+            serial.len(),
+            48 * 47,
+            "fixture should be strongly connected and omit self-pairs"
+        );
+        let serial_fingerprint = path_fingerprint(&serial);
+        for threads in [2, 4, 8] {
+            let parallel = exact_dijkstra_all_pairs(&graph, &control_with_threads(threads))
+                .unwrap_or_else(|error| panic!("threads={threads}: {error:?}"));
+            assert_eq!(
+                serial_fingerprint,
+                path_fingerprint(&parallel),
+                "threads={threads}: canonical source/target/cost/path fingerprint"
+            );
+        }
     }
 
     #[test]
@@ -413,6 +657,29 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn all_pairs_parallel_limits_and_worker_errors_are_structured() {
+        let graph = parallel_fixture(48, 1.0);
+        let limited = AlgorithmControl::new(
+            AlgorithmLimits {
+                output_rows: 10,
+                ..AlgorithmLimits::default().with_compute_threads(4)
+            },
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(4).unwrap()));
+        assert!(matches!(
+            exact_dijkstra_all_pairs(&graph, &limited),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+
+        let overflow = parallel_fixture(48, f64::MAX);
+        assert!(matches!(
+            exact_dijkstra_all_pairs(&overflow, &control_with_threads(4)),
+            Err(AlgorithmError::Execution { .. })
+        ));
     }
 
     #[test]

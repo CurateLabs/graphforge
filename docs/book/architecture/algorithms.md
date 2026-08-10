@@ -1555,6 +1555,13 @@ sequence and then edge topology order.
 batch. Shared node, edge, iteration, and output limits plus cooperative cancellation cover the
 complete invocation.
 
+Above the documented `DIJKSTRA_APSP_PARALLEL_CROSSOVER_WORK` source-edge estimate
+(`selected_nodes × CSR adjacency entries >= 8_192`) and with `compute_threads > 1`,
+the executor partitions independent source nodes across the instance-owned private
+`ComputePool`. Each source still runs the serial Dijkstra heap/tie algorithm, and
+worker chunks merge in canonical source order. Smaller workloads and one-thread
+policies retain the serial loop, so there is no universal pool scheduling tax.
+
 Projection, validation, execution, deterministic tie resolution, limits, and shaping are owned
 by Rust in `graphforge-exec`; Python and Node are thin argument/Arrow adapters. Results are independent
 of knowledge-layer presence. Official

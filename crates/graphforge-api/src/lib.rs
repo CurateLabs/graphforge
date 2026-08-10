@@ -3630,6 +3630,7 @@ mod tests {
         Int64Array, ListArray, StringArray, StructArray, UInt64Array,
     };
     use arrow::datatypes::DataType;
+    use sha2::Digest as _;
     use std::collections::HashSet;
 
     #[test]
@@ -5632,6 +5633,24 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn arrow_batch_fingerprint(batch: &arrow::record_batch::RecordBatch) -> String {
+        let mut hasher = sha2::Sha256::new();
+        for field in batch.schema().fields() {
+            hasher.update(field.name().as_bytes());
+            hasher.update([0]);
+            hasher.update(format!("{:?}", field.data_type()).as_bytes());
+            hasher.update([0]);
+            hasher.update([u8::from(field.is_nullable())]);
+        }
+        hasher.update(batch.num_rows().to_le_bytes());
+        for column in batch.columns() {
+            hasher.update(column.len().to_le_bytes());
+            hasher.update(column.null_count().to_le_bytes());
+            hasher.update(format!("{column:?}").as_bytes());
+        }
+        format!("{:x}", hasher.finalize())
     }
 
     fn add_person(graph: &GraphForge, name: &str) -> NodeHandle {
@@ -13780,6 +13799,123 @@ mod tests {
             ),
             Err(GfError::Validation(message)) if message.contains("k must be 1")
         ));
+    }
+
+    #[test]
+    fn dijkstra_all_pairs_public_fingerprint_matches_thread_configs() {
+        const NODE_COUNT: usize = 48;
+        const OFFSETS: [usize; 4] = [1, 5, 17, 31];
+
+        fn policy(workers: usize) -> ExecutionResourcePolicy {
+            ExecutionResourcePolicy {
+                mode: ResourcePolicyMode::Explicit,
+                tokio_worker_threads: Some(workers),
+                target_partitions: Some(workers),
+                batch_size: Some(8_192),
+                memory_budget_bytes: Some(512 * 1024 * 1024),
+                spill: SpillPolicy::default(),
+                io_concurrency: Some(workers),
+                max_concurrent_heavy_queries: Some(1),
+                compute_threads: Some(workers),
+            }
+        }
+
+        fn automatic_policy() -> ExecutionResourcePolicy {
+            ExecutionResourcePolicy {
+                mode: ResourcePolicyMode::Automatic,
+                tokio_worker_threads: None,
+                target_partitions: None,
+                batch_size: None,
+                memory_budget_bytes: None,
+                spill: SpillPolicy::default(),
+                io_concurrency: None,
+                max_concurrent_heavy_queries: None,
+                compute_threads: None,
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_uuid = {
+            let graph = GraphForge::new(Some(dir.path().to_str().unwrap())).unwrap();
+            let nodes = (0..NODE_COUNT)
+                .map(|index| add_person(&graph, &format!("n{index}")))
+                .collect::<Vec<_>>();
+            let match_clause = (0..NODE_COUNT)
+                .map(|index| format!("(n{index}:Person {{name:'n{index}'}})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let create_clause = (0..NODE_COUNT)
+                .flat_map(|source| {
+                    OFFSETS.into_iter().map(move |offset| {
+                        let target = (source + offset) % NODE_COUNT;
+                        let cost = 1.0 + ((source + target) % 7) as f64 / 10.0;
+                        format!("(n{source})-[:ROAD {{cost:{cost:.1}}}]->(n{target})")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            graph
+                .execute(&format!("MATCH {match_clause} CREATE {create_clause}"))
+                .unwrap();
+            nodes[0].uuid
+        };
+
+        let configs = [
+            ("threads-1", policy(1)),
+            ("threads-2", policy(2)),
+            ("threads-4", policy(4)),
+            ("threads-8", policy(8)),
+            ("threads-automatic", automatic_policy()),
+        ];
+        let mut baseline: Option<(Vec<(String, String, bool)>, usize, String)> = None;
+        let mut executed = 0_usize;
+        for (id, resource) in configs {
+            let graph = match GraphForge::new_with_options(
+                Some(dir.path().to_str().unwrap()),
+                GraphForgeOptions {
+                    resource,
+                    ..GraphForgeOptions::default()
+                },
+            ) {
+                Ok(graph) => graph,
+                Err(error) => {
+                    eprintln!("{id}: unavailable resource policy: {error}");
+                    continue;
+                }
+            };
+            let batch = graph
+                .paths(
+                    &NodeSelector::Uuid(source_uuid),
+                    None,
+                    dijkstra_all_pairs_options(true, Some("ROAD"), Some("cost")),
+                )
+                .unwrap_or_else(|error| panic!("{id}: {error}"));
+            let schema = batch
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| {
+                    (
+                        field.name().clone(),
+                        format!("{:?}", field.data_type()),
+                        field.is_nullable(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let fingerprint = arrow_batch_fingerprint(&batch);
+            let observed = (schema, batch.num_rows(), fingerprint);
+            if let Some(expected) = &baseline {
+                assert_eq!(&observed, expected, "{id}: dijkstra_all_pairs parity");
+            } else {
+                assert_eq!(batch.num_rows(), NODE_COUNT * (NODE_COUNT - 1));
+                baseline = Some(observed);
+            }
+            executed += 1;
+        }
+        assert!(
+            executed >= 2,
+            "expected at least threads-1 and one multi-thread/automatic dijkstra_all_pairs cell"
+        );
     }
 
     #[test]
