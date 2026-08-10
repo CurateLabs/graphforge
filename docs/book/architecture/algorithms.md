@@ -251,6 +251,13 @@ mode exports both endpoint directions. `via` filters relationship type.
 Parallel entries contribute independently; a stored self-loop contributes once
 in addition to the implicit identity term.
 
+Destination updates may run through the instance-owned private compute pool
+(#337 / #507) above `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) selected
+adjacency entries. Each destination applies inbound contributions after the
+implicit identity term in the same canonical source/edge order as serial
+scatter, and L2 normalization plus convergence checks remain serial, so scores,
+iteration counts, and fingerprints match the one-thread path.
+
 Disconnected components share one global L2 norm and remain deterministic from
 the uniform start. An edgeless `N`-node selection scores every node
 `1 / sqrt(N)`, a singleton scores `1.0`, and an empty selection returns a typed

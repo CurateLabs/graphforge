@@ -18,6 +18,7 @@ Tokio runtime or any DataFusion execution session.
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #507 eigenvector) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -82,6 +83,14 @@ betweenness reduces per-source dependency arrays in canonical source order,
 Components merges worker-local forests in canonical source-range order, and
 Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
 path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+eigenvector destination updates (#507) may partition independent work across
+that pool above documented crossovers; work never uses Rayon's process-global
+pool. Cosine dot products retain serial coordinate order, PageRank keeps
+canonical contribution order with serial dangling/delta reductions, eigenvector
+keeps per-destination incoming contribution order with serial norm/convergence
+reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
+the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -196,6 +205,23 @@ serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
 for contiguous ordinal ranges; the sink merges them in ascending node order so
 schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+## Parallel eigenvector (#507)
+
+`rank(by="eigenvector")` shifted power-iteration destination updates run on the
+instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial source-scatter path runs with no pool scheduling tax. Parallel work is
+destination-owned: each worker owns a contiguous dense-ordinal destination
+range and applies inbound contributions after the implicit identity term in the
+same canonical source/edge order as serial scatter. L2 normalization and
+component-wise convergence checks stay serial, so scores, iteration counts, and
+fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
+configurations.
 
 ## Parallel Node2Vec walk generation (#344)
 

@@ -4,6 +4,10 @@
 //! (#506), and betweenness (#501) may partition independent score updates across
 //! the instance-owned private compute pool while preserving serial contribution
 //! order, ordered merges, reductions, and bit-identical fingerprints.
+//! PageRank (#343) and eigenvector (#507) may partition destination-owned score
+//! updates across the instance-owned private compute pool while preserving the
+//! serial contribution order, serial convergence reductions, and bit-identical
+//! fingerprints.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -113,6 +117,14 @@ const DEGREE_CHECKPOINT_NODES: usize = 1_024;
 pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
+/// Selected adjacency entries below which eigenvector stays on the serial path (#507).
+///
+/// The shifted `A^T + I` update has independent destination rows, but the inbound
+/// CSR build and private-pool scheduling only amortize on edge-heavy workloads.
+/// Above this measured crossover, destination-owned parallel updates preserve the
+/// exact serial contribution order for each destination.
+pub const EIGENVECTOR_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
+const EIGENVECTOR_CHECKPOINT_DESTINATIONS: usize = 4_096;
 const ARTICLE_RANK_DAMPING: f64 = 0.85;
 const ARTICLE_RANK_ALPHA: f64 = 1.0 - ARTICLE_RANK_DAMPING;
 const ARTICLE_RANK_MAX_ITERATIONS: usize = 20;
@@ -1046,25 +1058,29 @@ impl RustAlgorithm for Eigenvector {
             .collect();
         let node_count = f64::from(exact_u32(node_ids.len(), "node count")?);
         let mut scores = vec![1.0 / node_count; node_ids.len()];
+        let path = select_eigenvector_path(control, graph.edge_entry_count(), node_ids.len());
+        let inbound = match path {
+            EigenvectorExecutionPath::Serial => None,
+            EigenvectorExecutionPath::Parallel { .. } => {
+                Some(prepare_eigenvector_inbound(graph, &indices)?)
+            }
+        };
         for iteration in 0..EIGENVECTOR_MAX_ITERATIONS {
             control.checkpoint()?;
-            let mut next = scores.clone();
-            let mut traversed_edges = 0_usize;
-            for (source_index, &source) in node_ids.iter().enumerate() {
-                for edge in graph.neighbors(source) {
-                    if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                        control.checkpoint()?;
-                    }
-                    traversed_edges += 1;
-                    let target = indices
-                        .get(&edge.neighbor_id)
-                        .copied()
-                        .ok_or_else(|| execution("adjacency references an unselected node"))?;
-                    next[target] += scores[source_index];
-                    if !next[target].is_finite() {
-                        return Err(execution("eigenvector score exceeds supported range"));
-                    }
+            let mut next = match path {
+                EigenvectorExecutionPath::Serial => {
+                    eigenvector_scatter_serial(graph, &indices, node_ids, &scores, control)?
                 }
+                EigenvectorExecutionPath::Parallel { .. } => eigenvector_pull_parallel(
+                    inbound
+                        .as_ref()
+                        .ok_or_else(|| execution("parallel eigenvector requires inbound CSR"))?,
+                    &scores,
+                    control,
+                )?,
+            };
+            if next.iter().any(|score| !score.is_finite()) {
+                return Err(execution("eigenvector score exceeds supported range"));
             }
 
             let norm = next.iter().map(|score| score * score).sum::<f64>().sqrt();
@@ -1098,6 +1114,190 @@ impl RustAlgorithm for Eigenvector {
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
         AlgorithmOutput::from_rows(algorithm, control, rows)
+    }
+}
+
+/// Selected eigenvector execution path for observability and crossover tests (#507).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EigenvectorExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+/// Dense inbound CSR: source ordinals in canonical source/edge order per destination.
+#[derive(Clone, Debug, Default)]
+struct EigenvectorInboundCsr {
+    offsets: Vec<u32>,
+    sources: Vec<u32>,
+}
+
+fn select_eigenvector_path(
+    control: &AlgorithmControl,
+    edge_count: u64,
+    nodes: usize,
+) -> EigenvectorExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes <= 1
+        || edge_count < EIGENVECTOR_PARALLEL_CROSSOVER_EDGES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return EigenvectorExecutionPath::Serial;
+    }
+    let chunks = destination_chunks(nodes, threads).len();
+    EigenvectorExecutionPath::Parallel { threads, chunks }
+}
+
+fn prepare_eigenvector_inbound(
+    graph: &AdjacencyGraph,
+    indices: &HashMap<u64, usize>,
+) -> Result<EigenvectorInboundCsr, AlgorithmError> {
+    let node_ids = graph.node_ids();
+    let node_len = node_ids.len();
+    let mut inbound_counts = vec![0_u32; node_len];
+    for &source in node_ids {
+        for edge in graph.neighbors(source) {
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            inbound_counts[target] = inbound_counts[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("inbound degree exceeds supported range"))?;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(node_len + 1);
+    offsets.push(0_u32);
+    for &count in &inbound_counts {
+        let next = offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(count)
+            .ok_or_else(|| execution("inbound CSR offsets exceed supported range"))?;
+        offsets.push(next);
+    }
+    let total = usize::try_from(*offsets.last().unwrap_or(&0))
+        .map_err(|_| execution("inbound CSR length exceeds supported range"))?;
+    let mut sources = vec![0_u32; total];
+    let mut write_at = offsets[..node_len].to_vec();
+    for (source_index, &source) in node_ids.iter().enumerate() {
+        let source_u32 = exact_u32(source_index, "source ordinal")?;
+        for edge in graph.neighbors(source) {
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            let slot = usize::try_from(write_at[target])
+                .map_err(|_| execution("inbound write cursor exceeds supported range"))?;
+            sources[slot] = source_u32;
+            write_at[target] = write_at[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("inbound write cursor overflow"))?;
+        }
+    }
+
+    Ok(EigenvectorInboundCsr { offsets, sources })
+}
+
+fn eigenvector_scatter_serial(
+    graph: &AdjacencyGraph,
+    indices: &HashMap<u64, usize>,
+    node_ids: &[u64],
+    scores: &[f64],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let mut next = scores.to_vec();
+    let mut traversed_edges = 0_usize;
+    for (source_index, &source) in node_ids.iter().enumerate() {
+        for edge in graph.neighbors(source) {
+            if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
+                control.checkpoint()?;
+            }
+            traversed_edges += 1;
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            next[target] += scores[source_index];
+            if !next[target].is_finite() {
+                return Err(execution("eigenvector score exceeds supported range"));
+            }
+        }
+    }
+    Ok(next)
+}
+
+fn eigenvector_pull_destination(
+    inbound: &EigenvectorInboundCsr,
+    scores: &[f64],
+    dest: usize,
+) -> f64 {
+    let start = usize::try_from(inbound.offsets[dest]).unwrap_or(0);
+    let end = usize::try_from(inbound.offsets[dest + 1]).unwrap_or(start);
+    let mut acc = scores[dest];
+    for &source in &inbound.sources[start.min(end)..end.min(inbound.sources.len())] {
+        let source = usize::try_from(source).unwrap_or(usize::MAX);
+        if source < scores.len() {
+            acc += scores[source];
+        }
+    }
+    acc
+}
+
+fn eigenvector_pull_parallel(
+    inbound: &EigenvectorInboundCsr,
+    scores: &[f64],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel eigenvector requires an instance-owned compute pool"))?;
+    let ranges = destination_chunks(scores.len(), control.compute_threads());
+    let work = AtomicUsize::new(0);
+    let chunk_results = run_eigenvector_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut local = Vec::with_capacity(end - start);
+                for dest in start..end {
+                    let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
+                    if observed.is_multiple_of(EIGENVECTOR_CHECKPOINT_DESTINATIONS) {
+                        control.check_cancelled()?;
+                    }
+                    let score = eigenvector_pull_destination(inbound, scores, dest);
+                    if !score.is_finite() {
+                        return Err(execution("eigenvector score exceeds supported range"));
+                    }
+                    local.push(score);
+                }
+                Ok((start, local))
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+
+    // Merge chunk outputs in ascending destination-range order (canonical).
+    let mut next = vec![0.0; scores.len()];
+    for (start, local) in chunk_results {
+        next[start..start + local.len()].copy_from_slice(&local);
+    }
+    Ok(next)
+}
+
+fn run_eigenvector_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("Eigenvector worker panicked")),
     }
 }
 
@@ -2812,6 +3012,22 @@ mod tests {
         )
     }
 
+    fn execute_eigenvector_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::Eigenvector), graph, &control)
+    }
+
     fn eigenvector_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
             .rows()
@@ -2820,6 +3036,13 @@ mod tests {
                 AlgorithmValue::Float64(score) => score,
                 _ => panic!("eigenvector score must be Float64"),
             })
+            .collect()
+    }
+
+    fn eigenvector_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        eigenvector_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
             .collect()
     }
 
@@ -2832,6 +3055,17 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn dense_eigenvector_graph(nodes: usize) -> AdjacencyGraph {
+        let fanout =
+            ((EIGENVECTOR_PARALLEL_CROSSOVER_EDGES as usize) / nodes.max(1)).saturating_add(2);
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
 
     fn execute_article_rank(
@@ -4237,6 +4471,217 @@ mod tests {
             .find(|capability| capability.algorithm == Algorithm::Rank(RankAlgorithm::Eigenvector))
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn eigenvector_path_selection_respects_crossover_and_one_thread() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_eigenvector_path(
+                &serial_control,
+                EIGENVECTOR_PARALLEL_CROSSOVER_EDGES - 1,
+                64
+            ),
+            EigenvectorExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_eigenvector_path(&one, EIGENVECTOR_PARALLEL_CROSSOVER_EDGES, 64),
+            EigenvectorExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_eigenvector_path(&parallel, EIGENVECTOR_PARALLEL_CROSSOVER_EDGES, 64),
+            EigenvectorExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn eigenvector_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_eigenvector_graph(128);
+        assert!(graph.edge_entry_count() >= EIGENVECTOR_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_eigenvector_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let serial_bits = eigenvector_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_eigenvector_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(eigenvector_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn eigenvector_parallel_preserves_multigraph_self_loop_and_disconnected_bits() {
+        let fixtures = [
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (0, 1), (0, 2), (1, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]),
+            AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
+            AdjacencyGraph::default(),
+            AdjacencyGraph::with_test_edges(1, &[]),
+        ];
+        for graph in &fixtures {
+            let serial =
+                execute_eigenvector_with_pool(graph, 1, AlgorithmCancellation::default()).unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel =
+                    execute_eigenvector_with_pool(graph, threads, AlgorithmCancellation::default())
+                        .unwrap();
+                assert_eq!(eigenvector_bits(&parallel), eigenvector_bits(&serial));
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+
+        let nodes = 512_u64;
+        let mut edges = Vec::new();
+        for source in 0..nodes {
+            let degree = 8 + (source % 11) as usize;
+            for hop in 0..degree {
+                edges.push((source, (source + hop as u64) % nodes));
+            }
+        }
+        let adversarial = AdjacencyGraph::with_test_edges(nodes, &edges);
+        assert!(adversarial.edge_entry_count() >= EIGENVECTOR_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_eigenvector_with_pool(&adversarial, 1, AlgorithmCancellation::default())
+                .unwrap();
+        for threads in [2_usize, 4, 8] {
+            let parallel = execute_eigenvector_with_pool(
+                &adversarial,
+                threads,
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(eigenvector_bits(&parallel), eigenvector_bits(&serial));
+        }
+    }
+
+    #[test]
+    fn eigenvector_parallel_cancellation_returns_structured_cancelled() {
+        let graph = dense_eigenvector_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_eigenvector_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn eigenvector_pull_matches_serial_scatter_contribution_order() {
+        let fixtures = [
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (0, 1), (0, 2), (1, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]),
+            AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
+            AdjacencyGraph::with_test_edges(1, &[]),
+            dense_eigenvector_graph(64),
+        ];
+        for graph in &fixtures {
+            if graph.node_ids().is_empty() {
+                continue;
+            }
+            let indices = graph
+                .node_ids()
+                .iter()
+                .enumerate()
+                .map(|(index, &node)| (node, index))
+                .collect::<HashMap<_, _>>();
+            let inbound = prepare_eigenvector_inbound(graph, &indices).unwrap();
+            let scores = (0..graph.node_ids().len())
+                .map(|index| (index + 1) as f64 / (graph.node_ids().len() + 1) as f64)
+                .collect::<Vec<_>>();
+            let control =
+                AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+            let scatter =
+                eigenvector_scatter_serial(graph, &indices, graph.node_ids(), &scores, &control)
+                    .unwrap();
+            let pull = (0..scores.len())
+                .map(|dest| eigenvector_pull_destination(&inbound, &scores, dest))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                scatter
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                pull.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "pull must apply contributions in serial source/edge order"
+            );
+        }
+    }
+
+    #[test]
+    fn eigenvector_worker_panic_returns_structured_error() {
+        let pool = crate::ComputePool::new(2).unwrap();
+        assert_eq!(
+            run_eigenvector_on_pool(&pool, || -> Result<(), AlgorithmError> {
+                panic!("worker panic is converted")
+            }),
+            Err(AlgorithmError::Execution {
+                message: "Eigenvector worker panicked".into()
+            })
+        );
+    }
+
+    #[test]
+    #[ignore = "manual crossover measurement; run in release with --ignored --nocapture"]
+    fn measure_eigenvector_parallel_crossover() {
+        use std::time::Instant;
+
+        for nodes in [64_usize, 128, 512] {
+            for fanout in [8_usize, 32, 64] {
+                let edges = (0..nodes)
+                    .flat_map(|node| {
+                        (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+                    })
+                    .collect::<Vec<_>>();
+                let graph = AdjacencyGraph::with_test_edges(nodes as u64, &edges);
+                let edges = graph.edge_entry_count();
+                let _ = execute_eigenvector_with_pool(&graph, 1, AlgorithmCancellation::default())
+                    .unwrap();
+                let _ = execute_eigenvector_with_pool(&graph, 4, AlgorithmCancellation::default())
+                    .unwrap();
+
+                let mut serial_ns = u128::MAX;
+                let mut parallel_ns = u128::MAX;
+                for _ in 0..5 {
+                    let t0 = Instant::now();
+                    let serial =
+                        execute_eigenvector_with_pool(&graph, 1, AlgorithmCancellation::default())
+                            .unwrap();
+                    serial_ns = serial_ns.min(t0.elapsed().as_nanos());
+
+                    let t1 = Instant::now();
+                    let parallel =
+                        execute_eigenvector_with_pool(&graph, 4, AlgorithmCancellation::default())
+                            .unwrap();
+                    parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
+                    assert_eq!(eigenvector_bits(&parallel), eigenvector_bits(&serial));
+                }
+                println!(
+                    "nodes={nodes} fanout={fanout} edges={edges} serial_ns={serial_ns} parallel_ns={parallel_ns} ratio={}",
+                    parallel_ns as f64 / serial_ns as f64
+                );
+            }
+        }
     }
 
     #[test]

@@ -314,7 +314,10 @@ identity shift. Disconnected components share the global norm, an edgeless
 selection scores each node `1 / sqrt(N)`, and an empty selection returns the
 typed zero-row schema. Stable order, UUID-only identity, shared Rust
 limits/cancellation/errors, and atomic opt-in write-back apply unchanged.
-Python and Node contain no separate eigenvector implementation or fallback.
+Above the documented `4_096` selected-adjacency-entry crossover, destination
+updates may use the instance-owned private compute pool while preserving
+one-thread scores, ordering, and fingerprints. Python and Node contain no
+separate eigenvector implementation or fallback.
 
 Harmonic closeness is exact, normalized, unweighted, and outward in directed
 mode. For `N` selected nodes, it sums `1 / distance(u, v)` over reachable
