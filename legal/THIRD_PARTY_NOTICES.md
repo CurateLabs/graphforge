@@ -8472,7 +8472,7 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.11.0
+- napi 3.12.0
 - napi-build 2.4.0
 - napi-derive 3.6.2
 - napi-derive-backend 6.1.1
