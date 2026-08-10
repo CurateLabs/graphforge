@@ -1560,9 +1560,10 @@ fn bulk_edge_publication_error(py: Python<'_>, error: BulkEdgePublicationError) 
 /// query one batch per pull. Handed to PyArrow (via the Arrow C Stream
 /// Interface) so `execute_stream` returns a genuine `pyarrow.RecordBatchReader`.
 ///
-/// Owns a [`RuntimeGuard`] so the Tokio runtime outlives the parent
-/// `GraphForge`: the reader is lazy and `'static`, and a bare runtime handle
-/// would not keep the runtime (and the stream's worker threads) alive.
+/// Owns a [`RuntimeGuard`] so the Tokio runtime and on-disk graph workspace
+/// outlive the parent `GraphForge`: the reader is lazy and `'static`, and a bare
+/// runtime handle would not keep the runtime (and the stream's worker threads /
+/// Parquet fragment paths) alive.
 struct StreamReader {
     schema: SchemaRef,
     stream: SendableRecordBatchStream,

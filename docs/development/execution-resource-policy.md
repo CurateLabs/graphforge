@@ -58,9 +58,13 @@ state.
 3. `build_runtime(&policy)` sets Tokio worker threads
 4. Every DataFusion `ExecutionSession` receives a
    [`SessionResourceConfig`](../../crates/graphforge-exec/src/lib.rs) with
-   partitions, batch size, memory, and optional spill
+   partitions, batch size, memory, optional spill, and `io_concurrency`
 5. Heavy ops (`run_query`, streams construction, `rank`, `similar`,
    `analyze_embedding`) take an admission permit
+6. Query-facing Parquet scans (`GraphForgeParquetExec`, #339) defer file I/O to
+   `ExecutionPlan::execute`, emit batches sized from `batch_size`, declare
+   natural file fragments, and acquire the session `io_concurrency` semaphore
+   before opening each fragment
 
 Resources are **instance-owned**, not process-global. `compute_threads` is a
 structural reserve for a future private Rayon pool; this issue does **not**

@@ -79,9 +79,11 @@ DataFusion target partitions, thread-parity cells over the host budget.
 ## Honest bottlenecks retained
 
 The entry baseline intentionally records the current implementation, including
-eager Parquet materialization, single-partition custom plans, serial algorithm
-kernels, and CSR-to-map conversion where still observable. Optimizations belong
-to later M4 issues.
+serial algorithm kernels and CSR-to-map conversion where still observable.
+Query-facing Parquet providers stream bounded batches via
+`GraphForgeParquetExec` (#339) rather than eager single-partition `MemTable`
+materialization; ExpandExec filtered reads and fixed-hop demand remain the
+selective-path contract. Further optimizations belong to later M4 issues.
 
 ## Discovery evidence (not a universal size ceiling)
 

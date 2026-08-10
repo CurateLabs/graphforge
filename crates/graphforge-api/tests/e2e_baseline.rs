@@ -3333,9 +3333,10 @@ fn execute_stream_owned_guard_outlives_dropped_forge() {
         &DataType::FixedSizeBinary(16),
     );
 
-    // Drop the GraphForge before consuming: the guard (an Arc to the runtime)
-    // must keep it alive so the detached stream still drives to completion — the
-    // lazy-reader lifetime contract the Python binding relies on (#587).
+    // Drop the GraphForge before consuming: the guard must keep the Tokio
+    // runtime and on-disk workspace alive so the detached stream still drives
+    // to completion — the lazy-reader lifetime contract the Python binding
+    // relies on (#587), including streaming Parquet fragment opens (#339).
     drop(gf);
 
     let mut rows = 0;

@@ -4323,6 +4323,8 @@ pub struct SessionResourceConfig {
     pub spill_directory: Option<PathBuf>,
     /// Optional spill byte cap.
     pub spill_max_bytes: Option<u64>,
+    /// Concurrent Parquet / I/O open budget (#337 / #339).
+    pub io_concurrency: usize,
 }
 
 impl Default for SessionResourceConfig {
@@ -4334,6 +4336,7 @@ impl Default for SessionResourceConfig {
             spill_enabled: false,
             spill_directory: None,
             spill_max_bytes: None,
+            io_concurrency: 2,
         }
     }
 }
@@ -4477,6 +4480,9 @@ impl ExecutionSession {
         let provider: Arc<dyn AdjacencyProvider> = Arc::clone(&adjacency_provider) as _;
         let config = datafusion::prelude::SessionConfig::new()
             .with_extension(Arc::new(AdjacencyProviderExt(provider)))
+            .with_extension(Arc::new(graphforge_storage::IoConcurrencyExt::new(
+                resources.io_concurrency,
+            )))
             .with_target_partitions(resources.target_partitions)
             .with_batch_size(resources.batch_size);
 

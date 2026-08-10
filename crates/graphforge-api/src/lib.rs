@@ -642,6 +642,7 @@ impl GraphForge {
             spill_enabled: self.resource_policy.spill_enabled,
             spill_directory: self.resource_policy.spill_directory.clone(),
             spill_max_bytes: self.resource_policy.spill_max_bytes,
+            io_concurrency: self.resource_policy.io_concurrency,
         }
     }
 
@@ -1238,12 +1239,16 @@ impl GraphForge {
         ))
     }
 
-    /// Streaming query plus a [`RuntimeGuard`] that keeps the instance's runtime
-    /// alive for as long as the returned stream is held — for bindings that
-    /// detach the stream into a foreign, lazily-consumed reader (e.g. a
-    /// `pyarrow.RecordBatchReader`, #587). A bare runtime `Handle` does not keep
-    /// the runtime alive, so the guard holds an `Arc` to it; the runtime is shut
-    /// down only once both this `GraphForge` and every outstanding guard drop.
+    /// Streaming query plus a [`RuntimeGuard`] that keeps the instance's
+    /// runtime **and** on-disk graph workspace alive for as long as the returned
+    /// stream is held — for bindings that detach the stream into a foreign,
+    /// lazily-consumed reader (e.g. a `pyarrow.RecordBatchReader`, #587).
+    ///
+    /// A bare runtime `Handle` does not keep the runtime alive, and streaming
+    /// Parquet scans (#339) read fragment paths during consumer pull — so the
+    /// guard also pins the private workspace (and in-memory project tempdir)
+    /// that back those paths. Resources are released only once both this
+    /// `GraphForge` and every outstanding guard drop.
     ///
     /// Returns the (shaped) stream, its schema (advertised up front so a reader
     /// can expose `schema` before the first batch), and the guard.
@@ -1264,7 +1269,15 @@ impl GraphForge {
     > {
         let stream = self.execute_stream_with_params(cypher, params)?;
         let schema = stream.schema();
-        Ok((stream, schema, RuntimeGuard(Arc::clone(&self.runtime))))
+        Ok((
+            stream,
+            schema,
+            RuntimeGuard {
+                runtime: Arc::clone(&self.runtime),
+                workspace: Arc::clone(&self.workspace_guard),
+                tempdir: self.tempdir.clone(),
+            },
+        ))
     }
 
     /// Drive a future on the instance's runtime from a synchronous caller.
@@ -3052,13 +3065,26 @@ impl Drop for OwnedRuntime {
     }
 }
 
-/// An opaque guard that keeps a [`GraphForge`]'s Tokio runtime alive after the
-/// instance is dropped, so a detached [`execute_stream_owned`](GraphForge::execute_stream_owned)
-/// stream can still be driven to completion (e.g. a lazy
-/// `pyarrow.RecordBatchReader`, #587). Cheap to clone (an `Arc` bump); the
-/// runtime is shut down only once the `GraphForge` and all guards have dropped.
+/// An opaque guard that keeps a [`GraphForge`]'s Tokio runtime and on-disk graph
+/// workspace alive after the instance is dropped, so a detached
+/// [`execute_stream_owned`](GraphForge::execute_stream_owned) stream can still
+/// be driven to completion (e.g. a lazy `pyarrow.RecordBatchReader`, #587).
+///
+/// Cheap to clone (`Arc` bumps). The runtime shuts down and temp workspaces are
+/// removed only once the `GraphForge` and all guards have dropped. Streaming
+/// Parquet scans (#339) open fragment paths at pull time, so pinning the
+/// workspace is required for the same lifetime contract MemTable planning had.
 #[derive(Clone, Debug)]
-pub struct RuntimeGuard(Arc<OwnedRuntime>);
+pub struct RuntimeGuard {
+    runtime: Arc<OwnedRuntime>,
+    /// Private mutable graph workspace hydrated for this facade (`dir`).
+    /// Held solely so `TempDir` cleanup waits until stream consumers finish.
+    #[allow(dead_code)]
+    workspace: Arc<tempfile::TempDir>,
+    /// In-memory project root, when the facade is not path-backed.
+    #[allow(dead_code)]
+    tempdir: Option<Arc<tempfile::TempDir>>,
+}
 
 impl RuntimeGuard {
     /// Drive a future to completion on the guarded runtime from a synchronous
@@ -3074,7 +3100,7 @@ impl RuntimeGuard {
         F: std::future::Future + Send,
         F::Output: Send,
     {
-        let handle = self.0.handle().clone();
+        let handle = self.runtime.handle().clone();
         if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::scope(|s| {
                 s.spawn(|| handle.block_on(fut))
