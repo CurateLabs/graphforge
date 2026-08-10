@@ -156,7 +156,6 @@ fn ontology_depth(name: &str, parents: &HashMap<&str, Option<&str>>) -> usize {
         .map_or(1, |parent| 1 + ontology_depth(parent, parents))
 }
 
-
 fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
     Sha256::digest(bytes.as_ref())
         .iter()

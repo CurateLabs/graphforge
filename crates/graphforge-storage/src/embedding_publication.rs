@@ -917,13 +917,8 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> SearchArt
     }
 }
 
-
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

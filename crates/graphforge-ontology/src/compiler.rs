@@ -499,13 +499,8 @@ fn build_inheritance_closure(doc: &OntologyDoc, name_to_id: &HashMap<String, u32
 // Tests
 // ---------------------------------------------------------------------------
 
-
 fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    digest
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

@@ -439,13 +439,8 @@ fn corrupt(path: &Path, reason: impl Into<String>) -> SearchArtifactError {
     }
 }
 
-
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    bytes
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]
