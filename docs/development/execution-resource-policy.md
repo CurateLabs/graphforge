@@ -526,6 +526,18 @@ chunks merge in ascending range order so row ordering and the first undefined
 partition error remain deterministic. Schemas, row order, conductance bits,
 structured errors, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+## Serial depth-first search (#540)
+
+`paths(by="dfs")` is intentionally SERIAL. The public result is preorder with a
+stable discovery index and depth. That order is defined by a single stack over
+sorted neighbor lists; parallelizing frontier expansion would change discovery
+order, depth ties, or require serial reassembly of every stack mutation.
+
+The handler uses the Rust-owned adjacency projection and bounded Arrow sink,
+does not use Rayon's global pool, and preserves shared cancellation and limits.
+A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
+configured compute threads and requires identical schemas, preorder rows,
+depths, and discovery ordinals.
 
 ## Observability
 
