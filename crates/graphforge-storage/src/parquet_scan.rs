@@ -365,17 +365,40 @@ fn apply_limit(batches: Vec<RecordBatch>, limit: Option<usize>) -> Vec<RecordBat
     out
 }
 
+fn empty_projected_batch(
+    base_schema: &SchemaRef,
+    projection: Option<&[usize]>,
+) -> Result<RecordBatch, DataFusionError> {
+    match projection {
+        Some(indices) => Ok(RecordBatch::new_empty(Arc::new(
+            base_schema.project(indices).map_err(|e| {
+                DataFusionError::ArrowError(Box::new(e), Some("empty projection".into()))
+            })?,
+        ))),
+        None => Ok(RecordBatch::new_empty(Arc::clone(base_schema))),
+    }
+}
+
 fn read_fragment_batches(
     fragment: &ParquetFragment,
     base_schema: &SchemaRef,
     projection: Option<&[usize]>,
     batch_size: usize,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    let file = File::open(&fragment.path).map_err(|e| {
-        DataFusionError::External(
-            format!("open parquet {}: {e}", path_label(&fragment.path)).into(),
-        )
-    })?;
+    // Match `read_parquet_or_empty`: a missing path is an empty schema-shaped
+    // batch, never a hard error — including TOCTOU where planning saw the file
+    // and execute does not (clear / workspace teardown races).
+    let file = match File::open(&fragment.path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(vec![empty_projected_batch(base_schema, projection)?]);
+        }
+        Err(e) => {
+            return Err(DataFusionError::External(
+                format!("open parquet {}: {e}", path_label(&fragment.path)).into(),
+            ));
+        }
+    };
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
         DataFusionError::External(format!("corrupt or unreadable parquet: {e}").into())
     })?;
@@ -421,15 +444,7 @@ fn read_fragment_batches(
         out.push(batch);
     }
     if out.is_empty() {
-        let empty = match projection {
-            Some(indices) => {
-                RecordBatch::new_empty(Arc::new(base_schema.project(indices).map_err(|e| {
-                    DataFusionError::ArrowError(Box::new(e), Some("empty projection".into()))
-                })?))
-            }
-            None => RecordBatch::new_empty(Arc::clone(base_schema)),
-        };
-        out.push(empty);
+        out.push(empty_projected_batch(base_schema, projection)?);
     }
     Ok(out)
 }
@@ -707,6 +722,29 @@ mod tests {
         let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, ctx.task_ctx())
             .await
             .unwrap();
+        let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!(total, 0);
+        assert_eq!(batches[0].schema(), edge_schema());
+    }
+
+    #[tokio::test]
+    async fn stale_exists_flag_missing_file_yields_empty_not_error() {
+        // Planning-time `exists: true` must still match `read_parquet_or_empty`
+        // when the path is gone by execute (TOCTOU / clear).
+        let path = PathBuf::from("/nonexistent/graphforge-339-stale.parquet");
+        let fragment = ParquetFragment {
+            path,
+            exists: true,
+            rel_type_name: None,
+            normalize_topology: false,
+            exact_rows: None,
+        };
+        let plan = GraphForgeParquetExec::try_new(edge_schema(), vec![fragment], None, None, 8)
+            .unwrap();
+        let ctx = SessionContext::new();
+        let batches = collect(Arc::new(plan) as Arc<dyn ExecutionPlan>, ctx.task_ctx())
+            .await
+            .expect("missing path must not hard-error");
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
         assert_eq!(total, 0);
         assert_eq!(batches[0].schema(), edge_schema());
