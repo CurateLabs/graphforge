@@ -73,52 +73,54 @@ pub(crate) fn random_walks<A: RandomWalkAdjacencySource>(
     control.check_output_rows(output_rows)?;
     control.check_iterations(transitions)?;
 
+    let plan = RandomWalkPlan {
+        sources,
+        walks_per_source,
+        walk_length,
+        seed,
+        weighted,
+        output_rows,
+    };
     let transitions = u64::try_from(transitions).unwrap_or(u64::MAX);
-    match select_random_walk_path(control, output_rows, transitions) {
-        RandomWalkExecutionPath::Serial => random_walks_serial(
-            adjacency,
-            sources,
-            walks_per_source,
-            walk_length,
-            seed,
-            weighted,
-            control,
-            output_rows,
-        ),
-        RandomWalkExecutionPath::Parallel { .. } => random_walks_parallel(
-            adjacency,
-            sources,
-            walks_per_source,
-            walk_length,
-            seed,
-            weighted,
-            control,
-            output_rows,
-        ),
+    match select_random_walk_path(control, plan.output_rows, transitions) {
+        RandomWalkExecutionPath::Serial => random_walks_serial(adjacency, plan, control),
+        RandomWalkExecutionPath::Parallel { .. } => random_walks_parallel(adjacency, plan, control),
     }
 }
 
-fn random_walks_serial<A: RandomWalkAdjacencySource>(
-    adjacency: &A,
-    sources: &[[u8; 16]],
+#[derive(Clone, Copy)]
+struct RandomWalkPlan<'a> {
+    sources: &'a [[u8; 16]],
     walks_per_source: usize,
     walk_length: usize,
     seed: u64,
     weighted: bool,
-    control: &AlgorithmControl,
     output_rows: usize,
+}
+
+#[derive(Clone, Copy)]
+struct RandomWalkTask {
+    source_uuid: [u8; 16],
+    source_ordinal: usize,
+    walk_ordinal: usize,
+}
+
+fn random_walks_serial<A: RandomWalkAdjacencySource>(
+    adjacency: &A,
+    plan: RandomWalkPlan<'_>,
+    control: &AlgorithmControl,
 ) -> Result<Vec<Vec<[u8; 16]>>, AlgorithmError> {
-    let mut output = Vec::with_capacity(output_rows);
-    for (source_ordinal, source_uuid) in sources.iter().enumerate() {
-        for walk_ordinal in 0..walks_per_source {
+    let mut output = Vec::with_capacity(plan.output_rows);
+    for (source_ordinal, source_uuid) in plan.sources.iter().enumerate() {
+        for walk_ordinal in 0..plan.walks_per_source {
             output.push(build_walk(
                 adjacency,
-                *source_uuid,
-                source_ordinal,
-                walk_ordinal,
-                walk_length,
-                seed,
-                weighted,
+                RandomWalkTask {
+                    source_uuid: *source_uuid,
+                    source_ordinal,
+                    walk_ordinal,
+                },
+                plan,
                 control,
             )?);
         }
@@ -128,34 +130,29 @@ fn random_walks_serial<A: RandomWalkAdjacencySource>(
 
 fn random_walks_parallel<A: RandomWalkAdjacencySource>(
     adjacency: &A,
-    sources: &[[u8; 16]],
-    walks_per_source: usize,
-    walk_length: usize,
-    seed: u64,
-    weighted: bool,
+    plan: RandomWalkPlan<'_>,
     control: &AlgorithmControl,
-    output_rows: usize,
 ) -> Result<Vec<Vec<[u8; 16]>>, AlgorithmError> {
     let pool = control
         .compute_pool()
         .ok_or_else(|| execution("parallel random_walk requires an instance-owned compute pool"))?;
-    let ranges = walk_task_chunks(output_rows, control.compute_threads());
+    let ranges = walk_task_chunks(plan.output_rows, control.compute_threads());
     let chunk_results = run_on_pool(pool, || {
         Ok(ranges
             .par_iter()
             .map(|&(start, end)| {
                 let mut walks = Vec::with_capacity(end.saturating_sub(start));
                 for task in start..end {
-                    let source_ordinal = task / walks_per_source;
-                    let walk_ordinal = task % walks_per_source;
+                    let source_ordinal = task / plan.walks_per_source;
+                    let walk_ordinal = task % plan.walks_per_source;
                     walks.push(build_walk(
                         adjacency,
-                        sources[source_ordinal],
-                        source_ordinal,
-                        walk_ordinal,
-                        walk_length,
-                        seed,
-                        weighted,
+                        RandomWalkTask {
+                            source_uuid: plan.sources[source_ordinal],
+                            source_ordinal,
+                            walk_ordinal,
+                        },
+                        plan,
                         control,
                     )?);
                 }
@@ -163,31 +160,31 @@ fn random_walks_parallel<A: RandomWalkAdjacencySource>(
             })
             .collect::<Vec<Result<Vec<Vec<[u8; 16]>>, AlgorithmError>>>())
     })?;
-    merge_walk_chunks(chunk_results, output_rows)
+    merge_walk_chunks(chunk_results, plan.output_rows)
 }
 
 fn build_walk<A: RandomWalkAdjacencySource>(
     adjacency: &A,
-    source_uuid: [u8; 16],
-    source_ordinal: usize,
-    walk_ordinal: usize,
-    walk_length: usize,
-    seed: u64,
-    weighted: bool,
+    task: RandomWalkTask,
+    plan: RandomWalkPlan<'_>,
     control: &AlgorithmControl,
 ) -> Result<Vec<[u8; 16]>, AlgorithmError> {
     control.check_cancelled()?;
-    let mut rng = SplitMix64::new(derive_seed(seed, source_ordinal, walk_ordinal));
-    let mut node = source_uuid;
+    let mut rng = SplitMix64::new(derive_seed(
+        plan.seed,
+        task.source_ordinal,
+        task.walk_ordinal,
+    ));
+    let mut node = task.source_uuid;
     let mut walk = Vec::new();
-    walk.push(source_uuid);
+    walk.push(task.source_uuid);
 
-    for _ in 0..walk_length {
+    for _ in 0..plan.walk_length {
         control.checkpoint()?;
         let mut choices = adjacency.choices(&node)?;
         choices.sort_unstable_by_key(|edge| (edge.neighbor_uuid, edge.edge_uuid));
         let choices = choices.iter().collect::<Vec<_>>();
-        let Some(edge) = choose(&choices, weighted, &mut rng)? else {
+        let Some(edge) = choose(&choices, plan.weighted, &mut rng)? else {
             break;
         };
         node = edge.neighbor_uuid;
