@@ -2136,6 +2136,17 @@ Cancellation is checked before and during traversal. Limit, cancellation,
 projection, validation, execution, and Arrow-shaping failures return
 structured Rust errors without partial output.
 
+Per-source traversal may use the instance-owned private compute pool when
+`compute_threads > 1` and `sources * direction-expanded adjacency entries` is
+at least `TRANSITIVE_CLOSURE_PARALLEL_CROSSOVER_WORK` (`65,536`). Smaller
+workloads and one-thread policies stay serial. Parallel execution partitions
+only independent source traversals over the shared adjacency. Each worker
+preserves serial traversal inside its source range, sorts reachable targets by
+public UUID, and merges rows by ascending canonical source range. Schemas, row
+order, reachable pairs, and fingerprints match the one-thread oracle. There is
+no GPU, distributed, approximate, or user-visible transitive-closure
+concurrency option.
+
 Catalog registration, graph projection, execution, limits, cancellation,
 deduplication, ordering, and Arrow shaping are Rust-owned in `graphforge-exec`.
 Python and Node only adapt selectors/options and the native Arrow result; they
