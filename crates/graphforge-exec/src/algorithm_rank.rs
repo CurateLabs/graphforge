@@ -123,10 +123,10 @@ pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
 /// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers, debug
 /// test profile after a clean target-dir build; see
 /// ignored `measure_common_neighbors_parallel_crossover`):
-/// - ~230k estimated units: parallel still neutral/slower (pool scheduling tax)
-/// - ~540k estimated units: parallel still slower (~1.09x serial)
-/// - ~1.2M estimated units: first clear win (~0.81x serial)
-/// - >=2.1M estimated units: >=1.5x speedup
+/// - ~230k estimated units: parallel still slower (~1.80x serial)
+/// - ~540k estimated units: parallel still slower (~1.20x serial)
+/// - ~1.2M estimated units: first clear win (~0.70x serial)
+/// - >=2.1M estimated units: >=1.8x speedup
 ///
 /// `1_048_576` is the smallest power-of-two work estimate below that measured
 /// win boundary. Each source keeps serial candidate/intersection order, so
