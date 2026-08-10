@@ -184,10 +184,10 @@ const ARTICLE_RANK_MAX_ITERATIONS: usize = 20;
 const ARTICLE_RANK_TOLERANCE: f64 = 1.0e-7;
 /// Selected adjacency entries below which ArticleRank stays on the serial path (#500).
 ///
-/// ArticleRank shares PageRank's destination-owned pull shape and short fixed
-/// iteration cap, so the same measured edge-count crossover avoids worker-pool
-/// scheduling tax for small fixtures while keeping larger update rounds parallel.
-pub const ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
+/// Release-mode shared-pool timings on the M4 agent host first clear a parallel
+/// win at 131k selected entries; smaller fixtures stay serial to avoid worker
+/// scheduling tax.
+pub const ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES: u64 = 131_072;
 const ARTICLE_RANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
 const HITS_ITERATIONS: usize = 20;
 /// Selected adjacency entries below which HITS stays on the serial path (#510).

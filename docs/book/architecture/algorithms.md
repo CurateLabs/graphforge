@@ -300,7 +300,7 @@ adapter's directed/undirected export contract.
 
 Destination message sums may run through the instance-owned private compute
 pool (#337 / #500) above the documented
-`ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`4_096`) threshold. Each worker owns a
+`ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`131_072`) threshold. Each worker owns a
 contiguous dense-ordinal destination range and applies inbound source messages
 in the same canonical source/edge order as the one-thread recurrence; damping,
 score accumulation, and convergence checks remain serial in dense node order, so

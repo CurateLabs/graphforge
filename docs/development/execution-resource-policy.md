@@ -303,7 +303,7 @@ pool when:
 
 - `compute_threads > 1`, and
 - selected adjacency entries are at least
-  `ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+  `ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`131_072`) in `graphforge-exec`.
 
 Below that crossover, or when the policy provides one compute thread, the serial
 destination-pull path runs with no pool scheduling tax. Parallel work is
@@ -363,6 +363,11 @@ order, scores, ties, and fingerprints match the one-thread result at
 the parallel path avoids small-fixture tax and clears the worker-pool cost once
 20 fixed HITS iterations amortize two sparse matrix-vector phases per
 iteration. It is CPU-only; no GPU or universal scaling claim is made.
+
+The threshold is the first measured win on the M4 agent host using the ignored
+release harness (`measure_article_rank_parallel_crossover`) with a shared
+four-worker private pool: 32k selected entries still carried scheduling overhead,
+while 131k and 262k selected entries were faster than the one-thread path.
 
 ## Parallel Node2Vec walk generation (#344)
 
