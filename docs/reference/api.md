@@ -314,7 +314,7 @@ identity shift. Disconnected components share the global norm, an edgeless
 selection scores each node `1 / sqrt(N)`, and an empty selection returns the
 typed zero-row schema. Stable order, UUID-only identity, shared Rust
 limits/cancellation/errors, and atomic opt-in write-back apply unchanged.
-Above the documented `4_096` selected-adjacency-entry crossover, destination
+Above the documented `8_192` selected-adjacency-entry crossover, destination
 updates that remain unconverged after the two required serial iterations may
 use the instance-owned private compute pool while preserving one-thread scores,
 ordering, and fingerprints. Python and Node contain no separate eigenvector

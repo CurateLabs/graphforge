@@ -252,7 +252,7 @@ Parallel entries contribute independently; a stored self-loop contributes once
 in addition to the implicit identity term.
 
 Destination updates may run through the instance-owned private compute pool
-(#337 / #507) above `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) selected
+(#337 / #507) above `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`8_192`) selected
 adjacency entries after the first two required iterations. Workloads that
 converge during that serial warm-up avoid inbound CSR setup entirely. When the
 parallel path runs, each destination applies inbound contributions after the

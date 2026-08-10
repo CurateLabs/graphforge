@@ -212,7 +212,15 @@ the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
 - selected adjacency entries are at least
-  `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+  `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`8_192`) in `graphforge-exec`.
+
+Release-mode local evidence on the 4-worker M4 agent host showed regular graphs
+that converge during warm-up avoid the pool, while irregular non-converged
+fixtures crossed over by ~8K selected adjacency entries:
+`8_689` edges `1.57ms → 0.87ms`, `24_440` edges `2.89ms → 1.43ms`,
+`65_505` edges `9.90ms → 4.25ms`, and `130_544` edges
+`14.56ms → 7.26ms` (one thread vs four private workers; hardware-specific
+timing, not a CI gate).
 
 Below that crossover, or when the policy provides one compute thread, the
 serial source-scatter path runs with no pool scheduling tax. Above the

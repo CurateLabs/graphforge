@@ -125,7 +125,7 @@ const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 /// exact serial contribution order for each destination. The first two required
 /// power iterations stay serial so quickly converging regular graphs avoid the
 /// inbound CSR setup cost entirely.
-pub const EIGENVECTOR_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
+pub const EIGENVECTOR_PARALLEL_CROSSOVER_EDGES: u64 = 8_192;
 const EIGENVECTOR_CHECKPOINT_DESTINATIONS: usize = 4_096;
 const EIGENVECTOR_SERIAL_WARMUP_ITERATIONS: usize = 2;
 const ARTICLE_RANK_DAMPING: f64 = 0.85;
@@ -4554,7 +4554,7 @@ mod tests {
         let nodes = 512_u64;
         let mut edges = Vec::new();
         for source in 0..nodes {
-            let degree = 8 + (source % 11) as usize;
+            let degree = 16 + (source % 11) as usize;
             for hop in 0..degree {
                 edges.push((source, (source + hop as u64) % nodes));
             }
@@ -4657,7 +4657,7 @@ mod tests {
             cases.push((format!("regular nodes={nodes} fanout={fanout}"), edges));
         }
         for (nodes, base, spread) in [
-            (512_usize, 8_usize, 17_usize),
+            (512_usize, 9_usize, 17_usize),
             (512, 32, 33),
             (2_048, 16, 33),
             (2_048, 32, 65),
