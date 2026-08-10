@@ -140,6 +140,34 @@ boundary as a GraphForge maximum graph size.
 Manual/scheduled 8M/128M reproduction (not CI): build or point at the measured
 fixture, publish through `GraphForge`, reopen, and record RSS/storage/fingerprint
 via the #334 evidence emitter.
+
+## CSR-native execution (#340)
+
+Persisted-index **hits** no longer expand the validated base CSR into
+`HashMap<u64, Vec<(edge_id, neighbor_id)>>` for traversal or analyst
+projection. Execution keeps:
+
+- directed CSR with checked O(1) row lookup over offsets + parallel
+  edge/neighbor columns;
+- undirected views as an out+in CSR pair merged **per accessed row**
+  (out-before-in on equal `edge_id`), without a full merged hash map;
+- delta overlays as a bounded replacement map over only keys touched by the
+  delta chain — the complete valid base CSR is retained, not recopied.
+
+Scan-build / missing / stale / corrupt index paths still use the historical
+hash-map oracle (or rebuild then serve CSR-native). Structural counters on
+`Adjacency` (`backing()`, `base_csr_entries_expanded()`, `overlay_row_count()`)
+assert zero base-CSR expansion on a fresh hit. Analyst export builds a
+selection-bounded flat CSR of `AlgorithmEdge` entries rather than per-node
+heap vectors for every graph edge.
+
+| Claim | Status |
+|---|---|
+| Fresh index hit: no O(E) HashMap / per-node Vec expansion | Covered by unit structural counter + parity vs scan |
+| Out / in / undirected / typed / wildcard semantics preserved | Covered by adjacency + persistent provider tests |
+| Bounded delta overlay without full base copy | Covered by storage overlay parity tests |
+| Selected-subgraph projection bounded by selection | Covered by export path iterating selected node ids |
+| Peak RSS / cold-warm first-use on #334 fixtures | Pending M4 scale evidence (timing remains hardware-specific) |
 ---
 
 ## Why Edge Count, Not Node Count

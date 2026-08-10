@@ -129,9 +129,8 @@ fn neighbor_csr_from_sorted(
             neighbor_edges.push(sorted[index].1);
             index += 1;
         }
-        neighbor_offsets.push(
-            u32::try_from(neighbor_edges.len()).expect("algorithm neighbor count fits u32"),
-        );
+        neighbor_offsets
+            .push(u32::try_from(neighbor_edges.len()).expect("algorithm neighbor count fits u32"));
         row = row.saturating_add(1);
     }
     (neighbor_row, neighbor_offsets, neighbor_edges)
@@ -692,7 +691,7 @@ pub(crate) fn export_adjacency(
     let mut raw = Vec::new();
     let mut edge_ids = HashSet::new();
     for &node_id in &node_ids {
-        for (edge_id, neighbor_id) in adjacency.neighbors(node_id) {
+        for (edge_id, neighbor_id) in adjacency.neighbors(node_id).iter() {
             if selected.contains(&neighbor_id) {
                 raw.push((node_id, edge_id, neighbor_id));
                 edge_ids.insert(edge_id);
@@ -2232,8 +2231,8 @@ mod tests {
         let uuid1 = u128::from(11_u8).to_be_bytes();
         let edge_uuid = u128::from(12_u8).to_be_bytes();
         let base = || {
-            let (neighbor_row, neighbor_offsets, neighbor_edges) = neighbor_csr_from_map(
-                HashMap::from([(
+            let (neighbor_row, neighbor_offsets, neighbor_edges) =
+                neighbor_csr_from_map(HashMap::from([(
                     0,
                     vec![AlgorithmEdge {
                         edge_id: 0,
@@ -2241,8 +2240,7 @@ mod tests {
                         edge_uuid,
                         weight: 2.5,
                     }],
-                )]),
-            );
+                )]));
             AdjacencyGraph {
                 directed: true,
                 node_ids: vec![0, 1],

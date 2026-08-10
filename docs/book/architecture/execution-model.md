@@ -124,6 +124,16 @@ falls back to scan-and-build with identical output. The pinned v0.5
 project-generation UUID and graph source fingerprint detect staleness; the
 committed Parquet graph participant is always the source of truth.
 
+Fresh index hits serve a **CSR-native** adjacency view (#340): validated
+offsets with parallel edge/neighbor columns and O(1) row lookup. Undirected
+requests keep separate out/in CSRs and merge per accessed row (out before in
+on equal `edge_id`) without materializing a full merged hash map. Delta
+overlays attach a bounded replacement map over touched keys only — they do
+not copy the complete valid base CSR. Scan-built fallback retains the
+historical hash-map representation for oracle parity. Analyst
+`export_adjacency` projects selected nodes into a flat CSR of algorithm
+edges rather than duplicating the full graph into per-node heap vectors.
+
 `explain` annotates each traversal node with `adjacency=hit | miss | building`, so plan
 inspection shows whether the accelerator was used (`ExecutionSession::explain_physical`
 renders the physical plan without executing it). One `PersistentAdjacencyProvider` lives per

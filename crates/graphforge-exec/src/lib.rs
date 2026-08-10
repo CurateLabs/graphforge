@@ -2722,7 +2722,7 @@ fn bfs_emit(
         if cfg.max_hops.is_some_and(|m| p.hops >= m) {
             continue;
         }
-        for (edge_id, next) in adjacency.neighbors(p.node) {
+        for (edge_id, next) in adjacency.neighbors(p.node).iter() {
             if p.visited_edges.contains(&edge_id) {
                 continue; // relationship isomorphism: no edge twice per path
             }

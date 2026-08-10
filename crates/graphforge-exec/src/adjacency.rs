@@ -170,6 +170,7 @@ impl<'a> NeighborRow<'a> {
     }
 
     /// Iterate `(edge_id, neighbor_id)` pairs.
+    #[must_use]
     pub fn iter(&self) -> NeighborRowIter<'_> {
         NeighborRowIter {
             row: self,
@@ -281,8 +282,7 @@ impl AdjacencyInner {
             Self::Map(map) => map.is_empty(),
             Self::Csr(csr) => csr.edge_count() == 0,
             Self::Overlay(overlay) => {
-                overlay.base.edge_count() == 0
-                    && overlay.replaced.values().all(|row| row.is_empty())
+                overlay.base.edge_count() == 0 && overlay.replaced.values().all(Vec::is_empty)
             }
             Self::Undirected { out, inbound } => out.is_empty() && inbound.is_empty(),
         }
@@ -300,7 +300,7 @@ impl AdjacencyInner {
                 }
             },
             Self::Undirected { out, inbound } => {
-                merge_undirected_row(out.neighbors(node_id), inbound.neighbors(node_id))
+                merge_undirected_row(&out.neighbors(node_id), &inbound.neighbors(node_id))
             }
         }
     }
@@ -393,7 +393,7 @@ impl PartialEq for Adjacency {
 impl Eq for Adjacency {}
 
 /// Merge out and in rows with ascending `edge_id` and **out before in on ties**.
-fn merge_undirected_row<'a>(out: NeighborRow<'a>, inbound: NeighborRow<'a>) -> NeighborRow<'a> {
+fn merge_undirected_row<'a>(out: &NeighborRow<'a>, inbound: &NeighborRow<'a>) -> NeighborRow<'a> {
     if out.is_empty() {
         return NeighborRow::owned(inbound.to_vec());
     }
@@ -405,8 +405,7 @@ fn merge_undirected_row<'a>(out: NeighborRow<'a>, inbound: NeighborRow<'a>) -> N
     let mut i = 0usize;
     while o < out.len() || i < inbound.len() {
         let take_out = i >= inbound.len()
-            || (o < out.len()
-                && out.get(o).map(|(e, _)| e) <= inbound.get(i).map(|(e, _)| e));
+            || (o < out.len() && out.get(o).map(|(e, _)| e) <= inbound.get(i).map(|(e, _)| e));
         if take_out {
             entries.push(out.get(o).expect("out index in range"));
             o += 1;
@@ -923,25 +922,6 @@ impl AdjacencyProvider for PersistentAdjacencyProvider {
     }
 }
 
-/// Convert a directed CSR into the traversal view without O(E) HashMap
-/// expansion (#340). Empty CSR becomes [`AdjacencyInner::Empty`].
-///
-/// Bounds safety: callers only pass [`CsrIndex`]es produced by
-/// `graphforge_storage::adjacency::read_csr`, which validates the invariants
-/// (offsets `[0]`-rooted, monotone, final offset == target lengths) before
-/// returning. A malformed file errors inside `read_csr`, taking the
-/// rebuild/fallback path in the provider, never a panic here.
-#[cfg(test)]
-fn adjacency_from_csr(index: CsrIndex) -> Adjacency {
-    if index.edge_count() == 0 {
-        Adjacency::default()
-    } else {
-        Adjacency {
-            inner: AdjacencyInner::Csr(Arc::new(index)),
-        }
-    }
-}
-
 /// Undirected CSR pair without materializing a merged hash map (#340).
 #[cfg(test)]
 fn merge_undirected(out: CsrIndex, inbound: CsrIndex) -> Adjacency {
@@ -1117,10 +1097,7 @@ mod tests {
         let provider =
             ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict);
         let view = provider.adjacency("KNOWS", Direction::Out).unwrap();
-        assert!(
-            view.neighbors(ids[1]).is_empty(),
-            "deleted id yields empty"
-        );
+        assert!(view.neighbors(ids[1]).is_empty(), "deleted id yields empty");
         assert_eq!(
             view.neighbors(ids[2]).to_vec(),
             vec![(3, ids[3])],
@@ -1186,13 +1163,15 @@ mod tests {
         assert_eq!(undirected.backing(), AdjacencyBacking::CsrUndirected);
         assert_eq!(undirected.base_csr_entries_expanded(), 0);
 
-        let scanned = ScanBuildAdjacencyProvider::new(
-            dir.path().to_path_buf(),
-            OntologyMode::Strict,
-        )
-        .adjacency("KNOWS", Direction::Out)
-        .unwrap();
-        assert_eq!(out.as_ref(), scanned.as_ref(), "CSR-native matches scan oracle");
+        let scanned =
+            ScanBuildAdjacencyProvider::new(dir.path().to_path_buf(), OntologyMode::Strict)
+                .adjacency("KNOWS", Direction::Out)
+                .unwrap();
+        assert_eq!(
+            out.as_ref(),
+            scanned.as_ref(),
+            "CSR-native matches scan oracle"
+        );
         assert!(scanned.base_csr_entries_expanded() > 0);
         assert_eq!(scanned.backing(), AdjacencyBacking::ScanHashMap);
     }

@@ -380,10 +380,10 @@ pub fn overlay_delta_segments(
         replaced.insert(key, row);
     }
 
-    let node_extent = if !saw_key {
-        base.node_count()
-    } else {
+    let node_extent = if saw_key {
         max_key.saturating_add(1).max(base.node_count())
+    } else {
+        base.node_count()
     };
 
     CsrDeltaOverlay {
@@ -502,13 +502,8 @@ mod tests {
 
     #[test]
     fn overlay_matches_full_rebuild_without_copying_untouched_base_rows() {
-        let base_edges: Vec<BuildEntry> = vec![
-            (0, 1, 1),
-            (0, 2, 1),
-            (1, 3, 2),
-            (2, 4, 0),
-            (2, 5, 2),
-        ];
+        let base_edges: Vec<BuildEntry> =
+            vec![(0, 1, 1), (0, 2, 1), (1, 3, 2), (2, 4, 0), (2, 5, 2)];
         let chain = vec![
             seg(8, &[("KNOWS", 6, 1, 3), ("KNOWS", 7, 3, 0)]),
             seg(9, &[("OWNS", 8, 0, 2), ("../evil", 9, 3, 1)]),
@@ -516,12 +511,8 @@ mod tests {
         for direction in [Direction::Out, Direction::In] {
             let base = Arc::new(csr_from_entries(&base_edges, direction));
             let rebuilt = apply_delta_segments(&base, ALL_RELATIONS_STEM, direction, &chain);
-            let overlay = overlay_delta_segments(
-                Arc::clone(&base),
-                ALL_RELATIONS_STEM,
-                direction,
-                &chain,
-            );
+            let overlay =
+                overlay_delta_segments(Arc::clone(&base), ALL_RELATIONS_STEM, direction, &chain);
             // Overlay keys are only those touched by filtered deltas — never |E|.
             assert!(overlay.overlay_row_count() < base.edge_count());
             assert!(
