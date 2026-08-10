@@ -217,10 +217,9 @@ the instance-owned private compute pool when:
 Release-mode local evidence on the 4-worker M4 agent host showed regular graphs
 that converge during warm-up avoid the pool, while irregular non-converged
 fixtures crossed over by ~8K selected adjacency entries:
-`8_689` edges `1.55ms → 0.81ms`, `24_440` edges `2.80ms → 1.57ms`,
-`65_505` edges `9.88ms → 3.99ms`, and `130_544` edges
-`14.29ms → 7.03ms` (one thread vs four private workers; hardware-specific
-timing, not a CI gate).
+`8_689`, `24_440`, `65_505`, and `130_544` edge irregular fixtures repeatedly
+ran at roughly `0.4×–0.6×` of the one-thread time on four private workers.
+Those timings are hardware-specific evidence, not a CI gate.
 
 Below that crossover, or when the policy provides one compute thread, the
 serial source-scatter path runs with no pool scheduling tax. Above the
