@@ -626,5 +626,6 @@ counts.
 ## Related docs
 
 - [M4 Entry Baseline](m4-entry-baseline.md)
+- [Dijkstra all-pairs source parallelism evidence](dijkstra-all-pairs-parallel-evidence.md)
 - [Scale Limits](../reference/scale-limits.md)
 - Contract: [`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
