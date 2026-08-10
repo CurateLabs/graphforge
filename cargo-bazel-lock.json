@@ -1,5 +1,5 @@
 {
-  "checksum": "ff07780c6da0c14fbccedd474016ead7caa83b11db8601da086498f55c659c48",
+  "checksum": "5f8f762b3ab87221b979d49753c6b9478b5e56e44789992a4423207cbd266d62",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13081,6 +13081,10 @@
             {
               "id": "fs4 1.1.0",
               "target": "fs4"
+            },
+            {
+              "id": "futures 0.3.32",
+              "target": "futures"
             },
             {
               "id": "parquet 58.3.0",
