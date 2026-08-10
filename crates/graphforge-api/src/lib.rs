@@ -13902,6 +13902,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let fingerprint = arrow_batch_fingerprint(&batch);
+            eprintln!("{id}: rows={} fingerprint={fingerprint}", batch.num_rows());
             let observed = (schema, batch.num_rows(), fingerprint);
             if let Some(expected) = &baseline {
                 assert_eq!(&observed, expected, "{id}: dijkstra_all_pairs parity");
