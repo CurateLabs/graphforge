@@ -245,7 +245,7 @@ A harness may:
 3. Separately require complete SNB Interactive / BI / Graphalytics / FinBench
    Transaction coverage at chosen SFs.
 
-M4 close is **not** blocked on full LDBC audit completion unless a milestone
+embedded-performance close is **not** blocked on full LDBC audit completion unless a milestone
 plan explicitly widens that gate.
 
 ---

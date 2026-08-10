@@ -1,4 +1,4 @@
-//! Direct release-conformance evidence for the public M18 Rust facade.
+//! Direct release-conformance evidence for the public algorithm Rust facade.
 
 use std::collections::{BTreeMap, HashSet};
 

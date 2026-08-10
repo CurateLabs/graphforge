@@ -1,4 +1,4 @@
-// Fresh-addon acceptance for canonical M18 embedding publication.
+// Fresh-addon acceptance for canonical algorithm embedding publication.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -82,7 +82,7 @@ function options(overrides = {}) {
     algorithmVersion: "node2vec-v1",
     dimensions: 2,
     hyperparameters: { walks: 8, nested: [true] },
-    inputRecipe: { recipe: "m18_nodes_v1" },
+    inputRecipe: { recipe: "algorithm_nodes_v1" },
     sourceProjection: { label: "Person", recipe: "all_people_v1" },
     ...overrides,
   };
@@ -96,8 +96,8 @@ function expectValidation(fragment, call) {
   );
 }
 
-test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
-  const project = mkdtempSync(join(tmpdir(), "gf-node-m18-publication-"));
+test("canonical algorithm IPC publishes, replaces, searches, and reopens", () => {
+  const project = mkdtempSync(join(tmpdir(), "gf-node-algorithm-publication-"));
   const forge = new GraphForge(project);
   try {
     const alice = forge.addNode("Person", { name: "Alice" });
@@ -108,18 +108,18 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
       [[bob.uuid, [0, 1]]],
     ]);
 
-    const identity = forge.publishM18Embeddings(
+    const identity = forge.publishAlgorithmEmbeddings(
       "structural",
       result,
       options(),
     );
     assert.equal(identity.length, 64);
     assert.equal(
-      forge.publishM18Embeddings("structural", result, options()),
+      forge.publishAlgorithmEmbeddings("structural", result, options()),
       identity,
     );
     assert.deepEqual(forge.embeddingSpace("structural").producer, {
-      kind: "m18",
+      kind: "algorithm",
       algorithm: "node2vec",
       algorithmVersion: "node2vec-v1",
     });
@@ -150,7 +150,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
     }
 
     expectValidation("non-canonical algorithm metadata", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "structural",
         result,
         options({ algorithmVersion: "node2vec-v2" }),
@@ -163,7 +163,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
         [bob.uuid, [0, 1]],
       ],
     ]);
-    const replaced = forge.publishM18Embeddings(
+    const replaced = forge.publishAlgorithmEmbeddings(
       "structural",
       replacementResult,
       options({ algorithmVersion: "node2vec-v2", replace: true }),
@@ -171,7 +171,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
     assert.notEqual(replaced, identity);
 
     expectValidation("requires an embedding analysis algorithm", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "unsupported",
         ipc(schema("is_dag", "not-an-embedding-v1"), [[[alice.uuid, [1, 0]]]]),
         options({
@@ -181,7 +181,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
       ),
     );
     expectValidation("duplicate", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "duplicate",
         ipc(canonical, [
           [
@@ -204,7 +204,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
       canonical.metadata,
     );
     expectValidation("exact node_uuid and embedding fields", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "variable-list",
         ipc(variableSchema, [[[alice.uuid, [1, 0]]]]),
         options(),
@@ -213,7 +213,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
     const missingMetadata = new Map(canonical.metadata);
     missingMetadata.delete("graphforge.rng_derivation");
     expectValidation("non-canonical algorithm metadata", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "missing-metadata",
         ipc(new Schema(canonical.fields, missingMetadata), [
           [[alice.uuid, [1, 0]]],
@@ -224,7 +224,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
     const extraMetadata = new Map(canonical.metadata);
     extraMetadata.set("graphforge.extra", "forbidden");
     expectValidation("non-canonical algorithm metadata", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "extra-metadata",
         ipc(new Schema(canonical.fields, extraMetadata), [
           [[alice.uuid, [1, 0]]],
@@ -233,54 +233,56 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
       ),
     );
     expectValidation("non-zero", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "zero",
         ipc(canonical, [[[alice.uuid, [0, 0]]]]),
         options(),
       ),
     );
     expectValidation("finite", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "non-finite",
         ipc(canonical, [[[alice.uuid, [Number.NaN, 1]]]]),
         options(),
       ),
     );
     expectValidation("exact node_uuid and embedding fields", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "dimension",
         ipc(canonical, [[[alice.uuid, [1, 0]]]]),
         options({ dimensions: 3 }),
       ),
     );
     expectValidation("input recipe", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "recipe",
         result,
         options({ inputRecipe: {} }),
       ),
     );
     expectValidation("normalization", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "normalization",
         result,
         options({ normalization: "unit-ish" }),
       ),
     );
     expectValidation("Arrow IPC", () =>
-      forge.publishM18Embeddings(
+      forge.publishAlgorithmEmbeddings(
         "invalid-ipc",
         Buffer.from("not arrow"),
         options(),
       ),
     );
 
-    const foreignProject = mkdtempSync(join(tmpdir(), "gf-node-m18-foreign-"));
+    const foreignProject = mkdtempSync(
+      join(tmpdir(), "gf-node-algorithm-foreign-"),
+    );
     const foreignForge = new GraphForge(foreignProject);
     try {
       const foreign = foreignForge.addNode("Person", { name: "Mallory" });
       expectValidation("matched no nodes", () =>
-        forge.publishM18Embeddings(
+        forge.publishAlgorithmEmbeddings(
           "foreign",
           ipc(canonical, [[[foreign.uuid, [1, 0]]]]),
           options(),
@@ -291,7 +293,7 @@ test("canonical M18 IPC publishes, replaces, searches, and reopens", () => {
       rmSync(foreignProject, { recursive: true, force: true });
     }
 
-    const empty = forge.publishM18Embeddings(
+    const empty = forge.publishAlgorithmEmbeddings(
       "empty",
       ipc(schema("node2vec", "node2vec-v1", 3), [[]]),
       options({ dimensions: 3, sourceProjection: { label: "Nobody" } }),

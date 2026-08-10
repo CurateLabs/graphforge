@@ -20,7 +20,7 @@ futures = { workspace = true }
 # `pyarrow` enables arrow's C Data Interface bridge (arrow-pyarrow, pinned to the
 # same pyo3 0.28) for zero-copy RecordBatch → pyarrow.Table transfer.
 arrow = { workspace = true, features = ["pyarrow"] }
-# M18 publication recipes are versioned JSON values owned by the Rust facade.
+# algorithm publication recipes are versioned JSON values owned by the Rust facade.
 serde_json.workspace = true
 uuid = { workspace = true }
 # `extension-module` is enabled HERE only (a Python extension must not link

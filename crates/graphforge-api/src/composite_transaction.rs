@@ -21,7 +21,7 @@ use uuid::{Uuid, Version};
 pub const COMPOSITE_TRANSACTION_CONTRACT_VERSION: u32 = 1;
 /// Maximum graph mutations plus explicit participant rows in one request.
 pub const MAX_COMPOSITE_TRANSACTION_ENTRIES: usize = 100_000;
-/// Ordered inventory of every explicit M20/M21 participant vector.
+/// Ordered inventory of every explicit knowledge/epistemic participant vector.
 #[rustfmt::skip]
 pub const COMPOSITE_KNOWLEDGE_PARTICIPANT_KINDS: [&str; 14] = [
     "provenance_events", "lineage", "assertions", "assertion_graph_refs",
@@ -213,7 +213,7 @@ impl CompositeTransactionRequest {
             validate_graph_mutation_shape(mutation)?;
         }
 
-        // Fingerprinting constructs each frozen M20/M21 ledger, thereby
+        // Fingerprinting constructs each frozen knowledge/epistemic ledger, thereby
         // reusing its domain validation and independent resource limits.
         self.canonical_fingerprint()?;
         Ok(())

@@ -15,8 +15,8 @@ from typing import Any
 import graphforge
 
 RESULT_PREFIX = "GRAPHFORGE_CONSUMER_RESULT="
-M18_VERBS = {"rank", "cluster", "similar", "paths", "analyze"}
-M19_MODES = {"text", "vector", "hybrid"}
+ALGORITHM_VERBS = {"rank", "cluster", "similar", "paths", "analyze"}
+SEARCH_MODES = {"text", "vector", "hybrid"}
 MIGRATED = (
     "benchmarks/algorithms/bench_gds.py",
     "scripts/build_feature_graph.py",
@@ -109,12 +109,12 @@ def main() -> None:
         )
         example = _run_consumer(root, MIGRATED[2])
 
-    m18 = set(benchmark["m18_verbs"]) | set(example["m18_verbs"])
-    m19 = set(example["m19_modes"])
-    if m18 != M18_VERBS:
-        raise AssertionError(f"incomplete M18 consumer coverage: {sorted(m18)}")
-    if m19 != M19_MODES:
-        raise AssertionError(f"incomplete M19 consumer coverage: {sorted(m19)}")
+    algorithm = set(benchmark["algorithm_verbs"]) | set(example["algorithm_verbs"])
+    search = set(example["search_modes"])
+    if algorithm != ALGORITHM_VERBS:
+        raise AssertionError(f"incomplete algorithm consumer coverage: {sorted(algorithm)}")
+    if search != SEARCH_MODES:
+        raise AssertionError(f"incomplete search consumer coverage: {sorted(search)}")
     for key in (
         "explicit_index",
         "lazy_text_index",
@@ -141,8 +141,8 @@ def main() -> None:
     for path in DELETED:
         print(f"  delete:  {path}")
     print(f"  wheel:   graphforge {graphforge.__version__} ({sha})")
-    print(f"  M18:     {', '.join(sorted(m18))}")
-    print(f"  M19:     {', '.join(sorted(m19))}")
+    print(f"  algorithm:     {', '.join(sorted(algorithm))}")
+    print(f"  search:     {', '.join(sorted(search))}")
     print("  indexing: explicit + lazy text")
     print("  embeddings: atomic multi-space + freshness inspection")
     print("  provider: tokenizer plan + semantic query + explicit rerank/advisory")

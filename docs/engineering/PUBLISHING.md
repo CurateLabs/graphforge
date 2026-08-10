@@ -17,7 +17,7 @@ Wall-clock targets: Binding RC ≤20m p50 warm / ≤35m cold; publish-track
 [`TESTING.md`](TESTING.md).
 
 **Human release close** (milestone / coordinated GA) adds optional evidence gates
-(M1 load, checkpoint, m20/m21 surface aggregates) on top of publish-track honesty.
+(release-load, checkpoint, knowledge/epistemic surface aggregates) on top of publish-track honesty.
 Those gates must not block every publish-track run.
 
 `Publish Track` schedules exact-`main` Binding RC dispatch every six hours and
@@ -52,7 +52,7 @@ operational sequence and recovery boundary.
   [`../development/release-process.md`](../development/release-process.md).
 - Commit messages follow Conventional Commit–style scopes used in the repo history; do not
   add new enforcement without maintainer agreement.
-- The coordinated **v0.5.1** publication (GitHub milestone **M1**, tracked on
+- The coordinated **v0.5.1** publication (GitHub milestone **release-certification**, tracked on
   [#192](https://github.com/CurateLabs/graphforge/issues/192)) is the current
   release close-out target. Partial v0.5.0 registry records remain immutable
   historical evidence and must not be overwritten.
@@ -92,10 +92,10 @@ must be green on the **same SHA** that is tagged for publication.
 
 | From | To | Required evidence / approval |
 | --- | --- | --- |
-| PR branch | `main` | Focused PR, green CI Gate, clean review threads (not Binding RC / M1) |
+| PR branch | `main` | Focused PR, green CI Gate, clean review threads (not Binding RC / release-certification) |
 | `main` SHA | Binding RC candidate | Same-SHA multi-OS retained partitions + offline rehearsal |
-| Binding RC candidate | Registries (publish-track) | Tag / release identity + `publish.yaml` retained bytes; M1/checkpoint/m20/m21 **not** required |
-| publish-track success | Human release close (optional) | Documented M1 / surface gates when the milestone runbook requires them |
+| Binding RC candidate | Registries (publish-track) | Tag / release identity + `publish.yaml` retained bytes; release-certification/checkpoint/knowledge/epistemic **not** required |
+| publish-track success | Human release close (optional) | Documented release-certification / surface gates when the milestone runbook requires them |
 | Published artifacts | Clean-install verification | Fresh pip/npm/Cargo consumers use only public registries |
 | `main` docs | Public docs site | Green `docs.yml` / Starlight build for the deployed commit |
 

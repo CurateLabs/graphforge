@@ -1,4 +1,4 @@
-//! Append-only M21 attachments connecting resolved interpretation to completed M20 runs.
+//! Append-only epistemic attachments connecting resolved interpretation to completed knowledge runs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -64,7 +64,7 @@ static SCHEMA_FINGERPRINT: LazyLock<[u8; 32]> = LazyLock::new(|| {
 pub struct BeliefProjectionAttachment {
     /// Stable attachment identity and idempotency key.
     pub attachment_uuid: Uuid,
-    /// Completed M20 run identity.
+    /// Completed knowledge run identity.
     pub run_uuid: Uuid,
     /// Source project generation pinned during resolution.
     pub source_generation_uuid: Uuid,
@@ -84,9 +84,9 @@ pub struct BeliefProjectionAttachment {
     pub valid_time_fingerprint: Option<[u8; 32]>,
     /// Canonical logical graph-content fingerprint.
     pub graph_content_fingerprint: [u8; 32],
-    /// Neutral M18 invocation-descriptor fingerprint.
+    /// Neutral algorithm invocation-descriptor fingerprint.
     pub descriptor_fingerprint: [u8; 32],
-    /// Sorted and deduplicated decision-relevant M21 records.
+    /// Sorted and deduplicated decision-relevant epistemic records.
     pub source_record_uuids: Vec<Uuid>,
     /// Producing provenance event.
     pub provenance_uuid: Uuid,

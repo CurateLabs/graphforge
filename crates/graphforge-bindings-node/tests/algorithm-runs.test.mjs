@@ -1,4 +1,4 @@
-// Fresh-native M20 recorded algorithm lifecycle acceptance (#2003).
+// Fresh-native knowledge recorded algorithm lifecycle acceptance (#2003).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

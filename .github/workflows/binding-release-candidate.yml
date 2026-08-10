@@ -516,13 +516,13 @@ jobs:
       - name: Retain aggregate publication evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}
           path: binding-rc-aggregate/report.json
           if-no-files-found: error
           retention-days: 30
 
   release_candidate:
-    name: Assemble immutable M1 release candidate
+    name: Assemble immutable release candidate
     needs: [validate_source, aggregate]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 90
@@ -709,7 +709,7 @@ jobs:
             --dist-dir candidate/release-artifacts \
             --out candidate/rehearsal-manifest.json \
             --recorded-at "$recorded_at" \
-            --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
+            --notes "Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
 
       - name: Rehearse exact partitioned release artifacts offline
         run: |
@@ -729,7 +729,7 @@ jobs:
             --dist-dir candidate/release-artifacts \
             --out "candidate/v${RELEASE_VERSION}-artifacts.json" \
             --recorded-at "$CANDIDATE_RECORDED_AT" \
-            --notes "M1 Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
+            --notes "Binding Release Candidate run $GITHUB_RUN_ID; exact SHA $EVIDENCE_SHA"
           python3 scripts/ci/clean-env-verify.py validate-release-record \
             "candidate/v${RELEASE_VERSION}-artifacts.json"
           python3 scripts/ci/release-candidate.py validate \
@@ -741,7 +741,7 @@ jobs:
       - name: Retain the candidate manifest for publication
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}
           path: candidate/v${{ env.RELEASE_VERSION }}-artifacts.json
           if-no-files-found: error
           retention-days: 30
@@ -749,7 +749,7 @@ jobs:
       - name: Retain the Python candidate partition
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}
           path: candidate/release-artifacts/python/
           if-no-files-found: error
           retention-days: 30
@@ -757,7 +757,7 @@ jobs:
       - name: Retain the npm candidate partition
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}
           path: candidate/release-artifacts/npm/
           if-no-files-found: error
           retention-days: 30
@@ -765,7 +765,7 @@ jobs:
       - name: Retain the crates candidate partition
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}
           path: candidate/release-artifacts/crates/
           if-no-files-found: error
           retention-days: 30
@@ -773,7 +773,7 @@ jobs:
       - name: Retain the evidence candidate partition
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}
+          name: Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}
           # upload-artifact does not expand bash brace globs; list both dirs.
           path: |
             candidate/release-artifacts/evidence/

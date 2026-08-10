@@ -16,23 +16,24 @@ use arrow::pyarrow::{FromPyArrow, IntoPyArrow, Table, ToPyArrow};
 use arrow::record_batch::RecordBatchReader;
 use futures::StreamExt;
 use graphforge_api::{
-    BulkEdgePublicationError, BulkNodePublicationError, CallerEmbeddingBatchRequest,
-    CallerEmbeddingBatchRow, CallerEmbeddingDistance, CallerEmbeddingNormalization, CapabilityId,
-    EmbeddingAnalyzeOptions, EmbeddingOptions, EmbeddingRefreshFailureClass,
-    EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy,
-    EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection,
-    EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo, EmbeddingSpaceProducer,
-    EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult, FastRpOptions,
-    FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError, GraphForgeOptions,
-    GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError,
-    IrLiteral, M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
-    Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
-    OpenRouterWireLimits, OperationId, ProjectWriteMode, PropValue, ProviderBatchLimits,
-    ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
-    ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
-    ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
-    TokenCountClass, WriteContext, validate_embedding_options,
+    AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization,
+    AlgorithmEmbeddingPublicationRequest, BulkEdgePublicationError, BulkNodePublicationError,
+    CallerEmbeddingBatchRequest, CallerEmbeddingBatchRow, CallerEmbeddingDistance,
+    CallerEmbeddingNormalization, CapabilityId, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    EmbeddingRefreshFailureClass, EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus,
+    EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState,
+    EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo,
+    EmbeddingSpaceProducer, EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult,
+    FastRpOptions, FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError,
+    GraphForgeOptions, GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor,
+    InvocationError, IrLiteral, Node2VecOptions, NodeSelector, OpenRouterProviderSession,
+    OpenRouterProviderSessionConfig, OpenRouterWireLimits, OperationId, ProjectWriteMode,
+    PropValue, ProviderBatchLimits, ProviderCapabilities, ProviderCapability,
+    ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection,
+    ProviderEmbeddingPlanRequest, ProviderExecutionLimits, ProviderRequestLimits,
+    RerankAdvisoryPolicy, RerankFailurePolicy, RuntimeGuard, SearchIndexOptions,
+    SendableRecordBatchStream, TextIndexInspection, TokenCountClass, WriteContext,
+    validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -779,11 +780,11 @@ fn embedding_space_to_python(py: Python<'_>, space: EmbeddingSpaceInfo) -> PyRes
 
     let producer = PyDict::new(py);
     match space.producer {
-        EmbeddingSpaceProducer::M18 {
+        EmbeddingSpaceProducer::Algorithm {
             algorithm,
             algorithm_version,
         } => {
-            producer.set_item("kind", "m18")?;
+            producer.set_item("kind", "algorithm")?;
             producer.set_item("algorithm", algorithm)?;
             producer.set_item("algorithm_version", algorithm_version)?;
         }
@@ -1637,7 +1638,7 @@ pub struct PyEdgeHandle {
     inner: graphforge_api::EdgeHandle,
 }
 
-/// Opaque Rust-owned neutral M18 invocation descriptor.
+/// Opaque Rust-owned neutral algorithm invocation descriptor.
 #[pyclass(name = "InvocationDescriptor", module = "graphforge")]
 pub struct PyInvocationDescriptor {
     inner: InvocationDescriptor,
@@ -2240,7 +2241,7 @@ fn py_rerank_options(
 ///
 /// Construct in-memory (`GraphForge()`) or over a Parquet project directory
 /// (`GraphForge(path)`), then query with [`execute`](Self::execute). The
-/// analyst verbs (`rank`/`cluster`/…) are exposed in a follow-up M16 PR.
+/// analyst verbs (`rank`/`cluster`/…) are exposed in a follow-up binding-surface PR.
 #[pyclass(module = "graphforge")]
 pub struct GraphForge {
     inner: graphforge_api::GraphForge,
@@ -3246,7 +3247,7 @@ impl GraphForge {
         result_to_pyarrow(py, &result)
     }
 
-    /// Atomically append one immutable M21 reasoning record.
+    /// Atomically append one immutable epistemic reasoning record.
     #[pyo3(signature = (*, operation_uuid, reasoning_uuid, assertion_uuid, kind, content_format, content, provenance_uuid, supersedes_reasoning_uuid=None, actor_uuid=None))]
     #[allow(clippy::too_many_arguments)]
     fn record_reasoning(
@@ -3837,7 +3838,7 @@ impl GraphForge {
         result_to_pyarrow(py, &result)
     }
 
-    /// Reconstruct one deterministic M21 transaction-time snapshot.
+    /// Reconstruct one deterministic epistemic transaction-time snapshot.
     #[pyo3(signature = (*, transaction_cutoff))]
     fn epistemic_snapshot(&self, py: Python<'_>, transaction_cutoff: i64) -> PyResult<Py<PyAny>> {
         self.ensure_open()?;
@@ -4331,7 +4332,7 @@ impl GraphForge {
         })
     }
 
-    /// Resolve an explicit M21 policy into an opaque graph-only projection.
+    /// Resolve an explicit epistemic policy into an opaque graph-only projection.
     #[pyo3(signature = (*, transaction_cutoff, included_statuses, statusless, supersession_branches, hypotheses, valid_time=None))]
     #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn resolve_belief_projection(
@@ -4413,7 +4414,7 @@ impl GraphForge {
         resolved_recorded_result_to_python(py, result, requested_attachment_uuid)
     }
 
-    /// Retry only the M21 attachment for an already-completed M20 run.
+    /// Retry only the epistemic attachment for an already-completed knowledge run.
     #[pyo3(signature = (*, projection, operation_uuid, attachment_uuid, run_uuid, descriptor, actor_uuid=None))]
     #[allow(clippy::too_many_arguments)]
     fn attach_resolved_run(
@@ -4937,10 +4938,10 @@ impl GraphForge {
         Ok(published.compatibility_id)
     }
 
-    /// Atomically publish one complete canonical M18 embedding Arrow result.
+    /// Atomically publish one complete canonical algorithm embedding Arrow result.
     #[pyo3(signature = (name, result, *, algorithm, algorithm_version, dimensions, input_recipe, source_projection, hyperparameters=None, normalization="none", replace=false))]
     #[allow(clippy::too_many_arguments)]
-    fn publish_m18_embeddings(
+    fn publish_algorithm_embeddings(
         &self,
         py: Python<'_>,
         name: &str,
@@ -4956,23 +4957,25 @@ impl GraphForge {
     ) -> PyResult<String> {
         self.ensure_open()?;
         let normalization = match normalization {
-            "none" => M18EmbeddingNormalization::None,
-            "l2" => M18EmbeddingNormalization::L2,
+            "none" => AlgorithmEmbeddingNormalization::None,
+            "l2" => AlgorithmEmbeddingNormalization::L2,
             other => {
                 return Err(to_pyerr(
                     py,
-                    &GfError::Validation(format!("unknown M18 embedding normalization {other:?}")),
+                    &GfError::Validation(format!(
+                        "unknown algorithm embedding normalization {other:?}"
+                    )),
                 ));
             }
         };
         let algorithm = algorithm.parse().map_err(|error| to_pyerr(py, &error))?;
-        let request = M18EmbeddingPublicationRequest {
+        let request = AlgorithmEmbeddingPublicationRequest {
             display_name: name.to_owned(),
             algorithm,
             algorithm_version: algorithm_version.to_owned(),
             dimensions,
             normalization,
-            distance: M18EmbeddingDistance::Cosine,
+            distance: AlgorithmEmbeddingDistance::Cosine,
             hyperparameters: json_map(hyperparameters)?,
             input_recipe: json_map(Some(input_recipe))?,
             source_projection_recipe: json_map(Some(source_projection))?,
@@ -4980,7 +4983,7 @@ impl GraphForge {
             replace_alias: replace,
         };
         let published = py
-            .detach(|| self.inner.publish_m18_embeddings(request))
+            .detach(|| self.inner.publish_algorithm_embeddings(request))
             .map_err(|error| to_pyerr(py, &error))?;
         Ok(published.compatibility_id)
     }
@@ -5284,7 +5287,7 @@ impl GraphForge {
             .map_err(|error| to_pyerr(py, &error))
     }
 
-    /// Publish one composite graph + M20/M21 transaction through Rust.
+    /// Publish one composite graph + knowledge/epistemic transaction through Rust.
     ///
     /// Python only converts the request; validation, staging, publication,
     /// recovery, and idempotency stay in Rust. Returns the canonical Arrow

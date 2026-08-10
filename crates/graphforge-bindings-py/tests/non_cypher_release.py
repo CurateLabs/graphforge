@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "466597ebafba730058500bec792bd055ce3588b173f47c0d3abcee870b08d9b8"
-EXPECTED_RELEASE_DIGEST = "c36590ea5e3427d3a3db1a80f5375f51c9071a1d9d951f9da4b9c56446e9a16d"
+EXPECTED_RUST_DIGEST = "b4f9e9cba9d75f8ae91cb47fc64b9e224b33d7629f6da4ff8c76328ce7f11979"
+EXPECTED_RELEASE_DIGEST = "41bac2ceb292e089ccafc3c896afd1fd60ae1518c917174d306fbf7beae07427"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -75,7 +75,7 @@ EVIDENCE = {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
     "checkpoint-view": {"checkpoints.py": ["main"]},
-    "m18": {
+    "algorithm": {
         "smoke.py": [
             "check_degree_rank",
             "check_components_cluster",
@@ -84,11 +84,11 @@ EVIDENCE = {
             "check_knn",
         ],
     },
-    "m19-provider-rerank": {
+    "search-provider-rerank": {
         "search_index.py": ["check_typed_search_indexing"],
         "provider_workflow.py": ["check_configured_provider_workflow"],
     },
-    "m20": {
+    "knowledge": {
         "smoke.py": [
             "check_assertions",
             "check_confidence_assessments",
@@ -99,7 +99,7 @@ EVIDENCE = {
             "check_no_inference_helpers",
         ],
     },
-    "m21": {
+    "epistemic": {
         "smoke.py": [
             "check_reasoning",
             "check_assertion_status",
@@ -528,7 +528,7 @@ def check_lifecycle_checkpoint_errors_and_reopen() -> None:
         reopened.close()
 
 
-def check_m20_m21_native_projection() -> None:
+def check_knowledge_epistemic_native_projection() -> None:
     """Exercise the shipped provenance/knowledge path without a Python implementation."""
     import graphforge as g
 
@@ -574,7 +574,7 @@ def main() -> None:
     check_native_artifact_and_no_fallback()
     check_stable_error_code_matrix()
     check_lifecycle_checkpoint_errors_and_reopen()
-    check_m20_m21_native_projection()
+    check_knowledge_epistemic_native_projection()
 
 
 if __name__ == "__main__":

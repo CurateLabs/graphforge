@@ -178,7 +178,7 @@ fn seed_project(root: &Path) -> GraphForge {
     graph
 }
 
-fn graph_m20_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionRequest {
+fn graph_knowledge_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionRequest {
     let operation = id(op_suffix);
     let node = id(0x0201);
     let edge = id(0x0202);
@@ -201,7 +201,7 @@ fn graph_m20_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionR
                 label: "Finding".into(),
                 properties: HashMap::from([
                     ("name".into(), PropValue::Str("Composite Finding".into())),
-                    ("claim_key".into(), PropValue::Str("claim-m20".into())),
+                    ("claim_key".into(), PropValue::Str("claim-knowledge".into())),
                     ("severity".into(), PropValue::Int(5)),
                 ]),
             },
@@ -249,7 +249,7 @@ fn graph_m20_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionR
             assertions: vec![
                 Assertion::new(
                     assertion,
-                    "composite m20 claim".into(),
+                    "composite knowledge claim".into(),
                     provenance.provenance_uuid,
                     now,
                 )
@@ -295,7 +295,10 @@ fn graph_m20_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionR
     }
 }
 
-fn graph_m20_m21_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionRequest {
+fn graph_knowledge_epistemic_request(
+    op_suffix: u16,
+    observation: Uuid,
+) -> CompositeTransactionRequest {
     let operation = id(op_suffix);
     let node = id(0x0301);
     let edge = id(0x0302);
@@ -321,7 +324,7 @@ fn graph_m20_m21_request(op_suffix: u16, observation: Uuid) -> CompositeTransact
                 label: "Finding".into(),
                 properties: HashMap::from([
                     ("name".into(), PropValue::Str("Epistemic Finding".into())),
-                    ("claim_key".into(), PropValue::Str("claim-m21".into())),
+                    ("claim_key".into(), PropValue::Str("claim-epistemic".into())),
                     ("severity".into(), PropValue::Int(7)),
                 ]),
             },
@@ -369,7 +372,7 @@ fn graph_m20_m21_request(op_suffix: u16, observation: Uuid) -> CompositeTransact
             assertions: vec![
                 Assertion::new(
                     assertion,
-                    "composite m21 claim".into(),
+                    "composite epistemic claim".into(),
                     provenance.provenance_uuid,
                     now,
                 )
@@ -452,7 +455,7 @@ fn graph_m20_m21_request(op_suffix: u16, observation: Uuid) -> CompositeTransact
 
 fn invalid_request(observation: Uuid) -> CompositeTransactionRequest {
     // Unknown strict-ontology entity type rejects before any participant staging.
-    let mut request = graph_m20_request(0x0400, observation);
+    let mut request = graph_knowledge_request(0x0400, observation);
     if let CompositeGraphMutation::CreateNode { label, .. } = &mut request.graph_mutations[0] {
         *label = "NotInOntology".into();
     }
@@ -478,26 +481,26 @@ fn main() {
     let graph = seed_project(project.path());
     let observation = observation_uuid(&graph);
 
-    // AR-02 graph+M20
-    let m20 = graph_m20_request(0x0200, observation);
-    let before_m20 = finding_names(&graph);
-    let _receipt_m20 = publish(&graph, m20);
-    let after_m20 = finding_names(&graph);
-    assert!(!before_m20.contains(&"Composite Finding".into()));
-    assert!(after_m20.contains(&"Composite Finding".into()));
+    // AR-02 graph+knowledge
+    let knowledge = graph_knowledge_request(0x0200, observation);
+    let before_knowledge = finding_names(&graph);
+    let _receipt_knowledge = publish(&graph, knowledge);
+    let after_knowledge = finding_names(&graph);
+    assert!(!before_knowledge.contains(&"Composite Finding".into()));
+    assert!(after_knowledge.contains(&"Composite Finding".into()));
 
-    // AR-03 graph+M20+M21
-    let m21 = graph_m20_m21_request(0x0300, observation);
-    let _receipt_m21 = publish(&graph, m21.clone());
-    let after_m21 = finding_names(&graph);
-    assert!(after_m21.contains(&"Epistemic Finding".into()));
+    // AR-03 graph+knowledge+epistemic
+    let epistemic = graph_knowledge_epistemic_request(0x0300, observation);
+    let _receipt_epistemic = publish(&graph, epistemic.clone());
+    let after_epistemic = finding_names(&graph);
+    assert!(after_epistemic.contains(&"Epistemic Finding".into()));
 
     // AR-04 rejection before publication
     let rejected = graph
         .publish_composite_transaction(invalid_request(observation))
         .expect_err("invalid composite request must reject");
     assert_eq!(rejected.code(), "GF_ONTOLOGY");
-    assert_eq!(finding_names(&graph), after_m21);
+    assert_eq!(finding_names(&graph), after_epistemic);
 
     // Neutral analysis surfaces remain usable on the committed generation.
     let _ = graph
@@ -521,12 +524,12 @@ fn main() {
         .unwrap();
 
     // AR-08 / AR-09 idempotency
-    let exact = publish(&graph, m21.clone());
-    let exact_again = publish(&graph, m21.clone());
+    let exact = publish(&graph, epistemic.clone());
+    let exact_again = publish(&graph, epistemic.clone());
     assert_eq!(exact.num_rows(), 1);
     assert_eq!(exact_again.num_rows(), 1);
-    assert_eq!(finding_names(&graph), after_m21);
-    let mut conflicting = m21;
+    assert_eq!(finding_names(&graph), after_epistemic);
+    let mut conflicting = epistemic;
     if let CompositeGraphMutation::CreateNode { properties, .. } =
         &mut conflicting.graph_mutations[0]
     {
@@ -536,7 +539,7 @@ fn main() {
         .publish_composite_transaction(conflicting)
         .expect_err("conflicting reuse must fail");
     assert_eq!(conflict.code(), "GF_IDEMPOTENCY_CONFLICT");
-    assert_eq!(finding_names(&graph), after_m21);
+    assert_eq!(finding_names(&graph), after_epistemic);
 
     let snapshot = graph.epistemic_snapshot(i64::MAX).unwrap();
     let names = finding_names(&graph);
@@ -589,8 +592,8 @@ fn main() {
         "schema_version": 1,
         "scenario_id": "atomic-recovery",
         "commit_sha": sha,
-        "graph_m20_committed": true,
-        "graph_m20_m21_committed": true,
+        "graph_knowledge_committed": true,
+        "graph_knowledge_epistemic_committed": true,
         "validation_rejection": {
             "code": "GF_ONTOLOGY",
             "publication": "none",

@@ -3,7 +3,7 @@
 This deterministic synthetic workflow freezes one strict graph and ontology,
 then evolves only evidence and epistemic records. Confidence never chooses a
 hypothesis. Working interpretations change only through explicit selection
-events, and neutral query/search/M18/M19 results must remain identical. Belief
+events, and neutral query/search/algorithm/search results must remain identical. Belief
 resolution is invoked only through the explicit public projection surface.
 
 Run from the repository root:

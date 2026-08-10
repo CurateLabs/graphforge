@@ -77,8 +77,8 @@ impl EmbeddingDisplayName {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EmbeddingProducerIdentity {
-    /// Read-only M18 algorithm output.
-    M18 {
+    /// Read-only analyst-verb algorithm output.
+    Algorithm {
         /// Stable algorithm token.
         algorithm: String,
         /// Frozen algorithm contract version.
@@ -516,7 +516,7 @@ impl EmbeddingGenerationId {
 
 fn validate_producer(producer: &EmbeddingProducerIdentity) -> Result<(), SearchArtifactError> {
     let fields: &[(&str, &str)] = match producer {
-        EmbeddingProducerIdentity::M18 {
+        EmbeddingProducerIdentity::Algorithm {
             algorithm,
             algorithm_version,
         } => &[
@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn every_producer_kind_is_explicit_in_identity() {
         let producers = [
-            EmbeddingProducerIdentity::M18 {
+            EmbeddingProducerIdentity::Algorithm {
                 algorithm: "node2vec".to_owned(),
                 algorithm_version: "node2vec-v1".to_owned(),
             },

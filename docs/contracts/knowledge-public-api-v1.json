@@ -1,6 +1,6 @@
 {
   "format": "graphforge-public-api",
-  "api_contract": "graphforge-m20-api/1",
+  "api_contract": "graphforge-knowledge-api/1",
   "canonical_contract": "graphforge-canonical/1",
   "surfaces": {
     "rust_result": "graphforge_exec::ExecutionResult",

@@ -48,7 +48,7 @@ the accepted bundle retains actual elapsed time for diagnosis.
 
 `tests/contracts/load-workload-matrix.json` resolves against the authoritative
 non-Cypher surface inventory. It maps every release-tested public method, all
-94 M18 registry entries, and every required M19 contract to XS through XL and
+94 algorithm registry entries, and every required search contract to XS through XL and
 to Rust, Python, and Node. Adding or removing a public entry without a workload
 assignment fails repository policy.
 
@@ -59,15 +59,15 @@ language it locates and hashes the built native artifact, runs the existing
 exhaustive native public-surface suite once per SHA/artifact/inventory, and
 retains that content-addressed preflight proof. Every one of the 144 cases then
 loads its complete supplied fixture through the Rust, Python, or Node public
-facade, executes the selected lifecycle, M18, or M19 load operation, closes and
+facade, executes the selected lifecycle, algorithm, or search load operation, closes and
 reopens the project, and reports measured results. It cannot substitute a
 smaller graph, committed binary, fallback implementation, network provider, or
 proprietary data.
 
 The exhaustive proof is not inferred from the representative load operation.
-Rust runs the complete `graphforge-api` suite, including typed dispatch of all 94 M18
+Rust runs the complete `graphforge-api` suite, including typed dispatch of all 94 algorithm
 entries across rank, cluster, paths, analyze, and similar plus every public
-checkpoint/M20/M21/M19 test reference. Python runs every shipped native-wheel
+checkpoint/knowledge/epistemic/search test reference. Python runs every shipped native-wheel
 acceptance file, and Node runs the complete native `node:test` suite. The
 authoritative surface manifest, adapter, language probe, command, artifact,
 inventory, output, and source SHA are all hashed into each case's provenance.

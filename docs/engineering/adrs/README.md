@@ -48,7 +48,7 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0009 | Nested Heterogeneous List Values | Accepted | [`../../adr/0009-nested-heterogeneous-lists.md`](../../adr/0009-nested-heterogeneous-lists.md) |
 | 0010 | Wide date and duration | Accepted | [`../../adr/0010-wide-date-and-duration.md`](../../adr/0010-wide-date-and-duration.md) |
 | 0011 | Dynamic Heterogeneous Value Lists | Accepted | [`../../adr/0011-dynamic-heterogeneous-values.md`](../../adr/0011-dynamic-heterogeneous-values.md) |
-| 0012 | Knowledge and epistemic domain ownership and schema evolution | Accepted | [`../../adr/0012-m20-domain-ownership.md`](../../adr/0012-m20-domain-ownership.md) |
+| 0012 | Knowledge and epistemic domain ownership and schema evolution | Accepted | [`../../adr/0012-knowledge-domain-ownership.md`](../../adr/0012-knowledge-domain-ownership.md) |
 | 0013 | Durable v0.5 project-generation protocol | Accepted | [`../../adr/0013-project-generation-protocol.md`](../../adr/0013-project-generation-protocol.md) |
 | 0014 | Complete-workspace checkpoints | Accepted | [`../../adr/0014-workspace-checkpoints.md`](../../adr/0014-workspace-checkpoints.md) |
 | 0015 | Three embedded project-write modes | Accepted | [`../../adr/0015-embedded-write-modes.md`](../../adr/0015-embedded-write-modes.md) |

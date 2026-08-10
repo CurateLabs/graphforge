@@ -45,7 +45,7 @@
     "operation_chain": "query-find-rank-cluster-bfs-is_dag-knowledge-hypotheses",
     "result_cardinality": "small-bounded",
     "streaming_cancellation": "not-applicable-bounded-scenario",
-    "state_transitions": "graph-plus-m20-plus-m21",
+    "state_transitions": "graph-plus-knowledge-plus-epistemic",
     "correction_mechanism": "preserve-source-add-compensation-supersede",
     "temporal_interpretation": "transaction-time-checkpoint",
     "epistemic_pattern": "three-unresolved-alternatives-then-explicit-working-selection",

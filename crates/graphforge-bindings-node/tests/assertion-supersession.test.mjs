@@ -1,4 +1,4 @@
-// Fresh-native M21 assertion-supersession acceptance (#778).
+// Fresh-native epistemic assertion-supersession acceptance (#778).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

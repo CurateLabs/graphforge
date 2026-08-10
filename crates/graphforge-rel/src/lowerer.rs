@@ -1,7 +1,7 @@
 //! [`GraphPlanLowerer`] — converts a [`GraphPlan`] operator pipeline into a
 //! DataFusion [`LogicalPlan`].
 //!
-//! ## Scope (M12 #575 + #576)
+//! ## Scope (logical-plan lowering #575 + #576)
 //!
 //! | [`GraphOp`] | DataFusion node |
 //! |---|---|
@@ -23,7 +23,7 @@
 //! | `Unwind { list_expr, alias }` | `UnwindNode` (`graphforge-plan` Extension stub) |
 //!
 //! Graph-native operators (#578) lower to `graphforge-plan` logical stub nodes wrapped
-//! as [`LogicalPlan::Extension`]; their physical execution is deferred to M13.
+//! as [`LogicalPlan::Extension`]; their physical execution is deferred to physical execution.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -916,7 +916,7 @@ impl<'a> GraphPlanLowerer<'a> {
                     .map_unsupported_expr();
             }
             // UNWIND — emit the graphforge-plan stub Extension node (physical execution
-            // deferred to M13).  Needs the expression lowerer for `list_expr`.
+            // deferred to physical execution).  Needs the expression lowerer for `list_expr`.
             GraphOp::Unwind { list_expr, alias } => {
                 let expr_lowerer = self
                     .expr_lowerer(exprs, var_map)
@@ -3454,7 +3454,7 @@ fn plan_columns(plan: &LogicalPlan) -> Vec<DfExpr> {
 }
 
 /// Lower a variable-length `Expand` (`min_hops != 1 || max_hops != Some(1)`)
-/// into the `VarLenExpandNode` Extension whose physical execution (M13) runs an
+/// into the `VarLenExpandNode` Extension whose physical execution (physical execution) runs an
 /// iterative BFS over the edge table.
 #[allow(clippy::too_many_arguments)]
 #[allow(
@@ -3670,7 +3670,7 @@ fn lower_expand(
     relational_reference: bool,
 ) -> Result<LogicalPlan, LoweringError> {
     // Variable-length expand cannot be expressed in relational algebra; emit
-    // the graphforge-plan Extension node whose physical execution (M13) performs an
+    // the graphforge-plan Extension node whose physical execution (physical execution) performs an
     // iterative BFS over the edge table.
     if min_hops != 1 || max_hops != Some(1) {
         return lower_var_len_expand(

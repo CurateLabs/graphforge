@@ -1,4 +1,4 @@
-//! Deterministic Kahn topology shared by the M18 DAG analysis family.
+//! Deterministic Kahn topology shared by the algorithm DAG analysis family.
 
 use std::collections::{BTreeSet, HashMap};
 

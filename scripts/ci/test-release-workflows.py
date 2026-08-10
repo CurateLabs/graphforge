@@ -98,8 +98,8 @@ def fixture(
                     "sha256": digest,
                 },
                 "public_surfaces": ["execute"],
-                "m18_m19": [],
-                "m20_m21": [],
+                "algorithm_search": [],
+                "knowledge_epistemic": [],
                 "axes": {
                     "correction": "none",
                     "temporal": "none",

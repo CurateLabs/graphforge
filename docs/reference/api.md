@@ -19,13 +19,13 @@ and its shared golden vectors.
 
 The shipped immutable provenance, assertion, confidence, evidence, capability,
 and algorithm-run surfaces implement the frozen
-[Immutable knowledge public API contract](../book/architecture/m20-public-api-v1.md). Their
+[Immutable knowledge public API contract](../book/architecture/knowledge-public-api-v1.md). Their
 generation, recovery, isolation, and schema contracts are summarized in the
 [Immutable knowledge ledger](../book/architecture/knowledge-ledger.md).
 The shipped additive epistemic status, reasoning, supersession, hypothesis,
 valid-time, resolved-projection, and attachment behavior is normative in
 [ADR 0006](../adr/0006-epistemic-model.md), with exact Arrow schemas in the
-[Epistemic inventory](m21-schema-inventory.json).
+[Epistemic inventory](epistemic-schema-inventory.json).
 
 ---
 
@@ -3473,7 +3473,7 @@ Atomically publish one complete embedding-space generation. `request` is one
 of three statically distinct Rust-owned variants with matching Python/Node
 types:
 
-- `M18EmbeddingPublication(result=table)`: validates a canonical analyze embedding
+- `AlgorithmEmbeddingPublication(result=table)`: validates a canonical analyze embedding
   Arrow result and its schema metadata against the current committed graph
   projection. `analyze()` itself remains read-only.
 - `EmbeddingBatchPublication(batch=table, identity=...)`: publishes a complete
@@ -3497,7 +3497,7 @@ embeddings = forge.analyze("Paper", by="node2vec", directed=False)
 forge.publish_embeddings(
     "Paper",
     space="node2vec-v1",
-    request=M18EmbeddingPublication(result=embeddings),
+    request=AlgorithmEmbeddingPublication(result=embeddings),
 )
 
 # Complete caller-supplied batch; independent from the structural space.

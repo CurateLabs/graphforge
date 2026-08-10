@@ -71,8 +71,8 @@ def inventory(matrix: dict[str, Any]) -> tuple[dict[str, Any], dict[str, set[str
     }
     selectors = {
         "release-tested-methods": release_methods,
-        "m18-registry": set(source["m18_registry"]["release-tested"]["ids"]),
-        "m19-contracts": set(source["m19_contracts"]["release-tested"]["ids"]),
+        "algorithm-registry": set(source["algorithm_registry"]["release-tested"]["ids"]),
+        "search-contracts": set(source["search_contracts"]["release-tested"]["ids"]),
     }
     return source, selectors
 

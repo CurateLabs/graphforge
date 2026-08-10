@@ -1,4 +1,4 @@
-//! Rust-owned cluster handlers registered under the shared M18 dispatch contract.
+//! Rust-owned cluster handlers registered under the shared algorithm dispatch contract.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;

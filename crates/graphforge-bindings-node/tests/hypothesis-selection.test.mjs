@@ -1,4 +1,4 @@
-// Fresh-native M21 explicit hypothesis-selection acceptance (#779).
+// Fresh-native epistemic explicit hypothesis-selection acceptance (#779).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

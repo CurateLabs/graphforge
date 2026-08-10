@@ -1,4 +1,4 @@
-// Fresh-native M20 immutable confidence acceptance (#774).
+// Fresh-native knowledge immutable confidence acceptance (#774).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

@@ -5,11 +5,11 @@
 //!
 //! # Milestone status
 //!
-//! - M11 #565 — Newtype IDs and core IR primitives
-//! - M11 #566 — Expression arena
-//! - M11 #567 — GraphOp enum and GraphPlan envelope
-//! - M11 #568 — Binder (AST → Graph IR) ← **this issue**
-//! - M11 #681 — RuntimeCatalog
+//! - phase-11 #565 — Newtype IDs and core IR primitives
+//! - phase-11 #566 — Expression arena
+//! - phase-11 #567 — GraphOp enum and GraphPlan envelope
+//! - phase-11 #568 — Binder (AST → Graph IR) ← **this issue**
+//! - phase-11 #681 — RuntimeCatalog
 #![forbid(unsafe_code)]
 
 pub mod binder;
