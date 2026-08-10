@@ -245,9 +245,8 @@ pub(crate) fn shape_min_cost_flow_output(
     });
     let output_rows = if edges { solution.edge_flows.len() } else { 1 };
     control.check_output_rows(output_rows)?;
-    let mut rows = Vec::new();
-    reserve_vec(&mut rows, output_rows, "output rows")?;
-    let rows = if edges {
+    let mut output = control.output_sink(algorithm)?;
+    if edges {
         for row in solution.edge_flows {
             let mut values = Vec::new();
             reserve_vec(&mut values, 6, "edge output values")?;
@@ -259,9 +258,8 @@ pub(crate) fn shape_min_cost_flow_output(
                 AlgorithmValue::Float64(row.edge.unit_cost),
                 AlgorithmValue::Float64(row.flow_cost),
             ]);
-            rows.push(values);
+            output.append_row(&values)?;
         }
-        rows
     } else {
         let mut values = Vec::new();
         reserve_vec(&mut values, 4, "scalar output values")?;
@@ -271,13 +269,9 @@ pub(crate) fn shape_min_cost_flow_output(
             AlgorithmValue::Float64(solution.flow),
             AlgorithmValue::Float64(solution.cost),
         ]);
-        rows.push(values);
-        rows
-    };
-    Ok(AlgorithmOutput {
-        schema: algorithm.result_schema(),
-        rows,
-    })
+        output.append_row(&values)?;
+    }
+    output.finish()
 }
 
 fn refine_lexicographic_ties(
@@ -820,8 +814,8 @@ mod tests {
             scalar.schema,
             Algorithm::Paths(PathAlgorithm::MinCostMaxFlow).result_schema()
         );
-        assert_eq!(scalar.rows.len(), 1);
-        assert_eq!(scalar.rows[0].len(), 4);
+        assert_eq!(scalar.rows().len(), 1);
+        assert_eq!(scalar.rows()[0].len(), 4);
 
         let edges =
             shape_min_cost_flow_output(solution, uuid(1), uuid(2), true, &control()).unwrap();
@@ -829,8 +823,8 @@ mod tests {
             edges.schema,
             Algorithm::Paths(PathAlgorithm::MinCostMaxFlowEdges).result_schema()
         );
-        assert_eq!(edges.rows.len(), 1);
-        assert_eq!(edges.rows[0].len(), 6);
+        assert_eq!(edges.rows().len(), 1);
+        assert_eq!(edges.rows()[0].len(), 6);
     }
 
     #[test]

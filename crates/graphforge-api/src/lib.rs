@@ -2320,13 +2320,15 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        let batch = graphforge_exec::rank_algorithm(
+        let batch = graphforge_exec::rank_algorithm_with_limits(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
             &dispatch_options,
+            graphforge_exec::AlgorithmLimits::default()
+                .with_batch_size(self.resource_policy.batch_size),
         )?;
         self.write_algorithm_property(
             label,
@@ -2374,13 +2376,15 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        let batch = graphforge_exec::cluster_algorithm(
+        let batch = graphforge_exec::cluster_algorithm_with_limits(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
             &dispatch_options,
+            graphforge_exec::AlgorithmLimits::default()
+                .with_batch_size(self.resource_policy.batch_size),
         )?;
         self.write_algorithm_property(
             label,
@@ -2518,13 +2522,15 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        graphforge_exec::similar_algorithm(
+        graphforge_exec::similar_algorithm_with_limits(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
             label_id,
             std::slice::from_ref(&stem),
             options,
+            graphforge_exec::AlgorithmLimits::default()
+                .with_batch_size(self.resource_policy.batch_size),
         )
     }
 

@@ -111,7 +111,7 @@ impl RustAlgorithm for DeltaStepping {
                 })
             })
             .transpose()?;
-        let rows = exact_delta_stepping(graph, source, target, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_delta_stepping(graph, source, target, control)?
             .into_iter()
             .map(|result| {
                 Ok(vec![
@@ -127,11 +127,12 @@ impl RustAlgorithm for DeltaStepping {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::DeltaStepping).result_schema(),
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::DeltaStepping),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -176,7 +177,7 @@ impl RustAlgorithm for GomoryHuTree {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         control.check_cancelled()?;
-        let rows = gomory_hu_forest(
+        let rows: Vec<Vec<AlgorithmValue>> = gomory_hu_forest(
             &graph.node_uuids().collect::<Vec<_>>(),
             &capacity_edges(graph)?,
             graph.is_directed(),
@@ -191,10 +192,7 @@ impl RustAlgorithm for GomoryHuTree {
             ]
         })
         .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -247,7 +245,7 @@ impl RustAlgorithm for PrizeCollectingSteinerTree {
                 cost: ResolvedNumber::Float64(edge.capacity),
             })
             .collect::<Vec<_>>();
-        let rows = prize_collecting_steiner_tree(
+        let rows: Vec<Vec<AlgorithmValue>> = prize_collecting_steiner_tree(
             &nodes,
             &self.prizes,
             &edges,
@@ -265,10 +263,7 @@ impl RustAlgorithm for PrizeCollectingSteinerTree {
             ]
         })
         .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -294,7 +289,7 @@ impl RustAlgorithm for MinSteinerTree {
             &self.terminals,
             control,
         )?;
-        let rows = solution
+        let rows: Vec<Vec<AlgorithmValue>> = solution
             .edges
             .into_iter()
             .map(|edge| {
@@ -306,10 +301,7 @@ impl RustAlgorithm for MinSteinerTree {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -353,7 +345,7 @@ impl RustAlgorithm for RandomWalk {
                 "random_walk source UUID is not in the selected graph",
             ));
         }
-        let rows = random_walks(
+        let rows: Vec<Vec<AlgorithmValue>> = random_walks(
             &GraphRandomWalkAdjacency(graph),
             &[self.source],
             self.k,
@@ -370,10 +362,7 @@ impl RustAlgorithm for RandomWalk {
             ]
         })
         .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -407,7 +396,7 @@ impl RustAlgorithm for MaxFlow {
             graph.is_directed(),
             control,
         )?;
-        let rows = if self.edges {
+        let rows: Vec<Vec<AlgorithmValue>> = if self.edges {
             solution
                 .edge_flows
                 .into_iter()
@@ -427,10 +416,7 @@ impl RustAlgorithm for MaxFlow {
                 AlgorithmValue::Float64(solution.value),
             ]]
         };
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -464,7 +450,7 @@ impl RustAlgorithm for MinCut {
             graph.is_directed(),
             control,
         )?;
-        let rows = if self.edges {
+        let rows: Vec<Vec<AlgorithmValue>> = if self.edges {
             solution
                 .cut_edges
                 .into_iter()
@@ -484,10 +470,7 @@ impl RustAlgorithm for MinCut {
                 AlgorithmValue::Float64(solution.value),
             ]]
         };
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -640,7 +623,7 @@ impl RustAlgorithm for TransitiveClosure {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let rows = positive_transitive_closure(graph, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = positive_transitive_closure(graph, control)?
             .into_iter()
             .map(|pair| {
                 Ok(vec![
@@ -648,11 +631,12 @@ impl RustAlgorithm for TransitiveClosure {
                     AlgorithmValue::Uuid(node_uuid(graph, pair.target)?),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::TransitiveClosure).result_schema(),
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::TransitiveClosure),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -679,7 +663,7 @@ impl RustAlgorithm for Yens {
         let target = graph
             .node_id(&target_uuid)
             .ok_or_else(|| execution("yens target UUID is not in the selected graph"))?;
-        let rows = exact_yens(graph, source, target, self.k, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_yens(graph, source, target, self.k, control)?
             .into_iter()
             .enumerate()
             .map(|(index, result)| {
@@ -699,11 +683,8 @@ impl RustAlgorithm for Yens {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::Yens).result_schema(),
-            rows,
-        })
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::Yens), control, rows)
     }
 }
 
@@ -726,7 +707,7 @@ impl RustAlgorithm for FloydWarshall {
                 "floyd_warshall source UUID is not in the selected graph",
             ));
         }
-        let rows = exact_floyd_warshall(graph, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_floyd_warshall(graph, control)?
             .into_iter()
             .map(|result| {
                 Ok(vec![
@@ -742,11 +723,12 @@ impl RustAlgorithm for FloydWarshall {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::FloydWarshall).result_schema(),
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::FloydWarshall),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -775,7 +757,7 @@ impl RustAlgorithm for BellmanFord {
                 })
             })
             .transpose()?;
-        let rows = exact_bellman_ford(graph, source, target, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_bellman_ford(graph, source, target, control)?
             .into_iter()
             .map(|result| {
                 Ok(vec![
@@ -791,11 +773,8 @@ impl RustAlgorithm for BellmanFord {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::BellmanFord).result_schema(),
-            rows,
-        })
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::BellmanFord), control, rows)
     }
 }
 
@@ -822,27 +801,25 @@ impl RustAlgorithm for AStar {
         let target = graph
             .node_id(&target_uuid)
             .ok_or_else(|| execution("astar target UUID is not in the selected graph"))?;
-        let rows = exact_astar(graph, source, target, self.heuristic.as_ref(), control)?
-            .into_iter()
-            .map(|result| {
-                Ok(vec![
-                    AlgorithmValue::Uuid(self.source),
-                    AlgorithmValue::Uuid(target_uuid),
-                    AlgorithmValue::Float64(result.cost),
-                    AlgorithmValue::UuidList(
-                        result
-                            .nodes
-                            .into_iter()
-                            .map(|node| node_uuid(graph, node))
-                            .collect::<Result<_, _>>()?,
-                    ),
-                ])
-            })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::AStar).result_schema(),
-            rows,
-        })
+        let rows: Vec<Vec<AlgorithmValue>> =
+            exact_astar(graph, source, target, self.heuristic.as_ref(), control)?
+                .into_iter()
+                .map(|result| {
+                    Ok(vec![
+                        AlgorithmValue::Uuid(self.source),
+                        AlgorithmValue::Uuid(target_uuid),
+                        AlgorithmValue::Float64(result.cost),
+                        AlgorithmValue::UuidList(
+                            result
+                                .nodes
+                                .into_iter()
+                                .map(|node| node_uuid(graph, node))
+                                .collect::<Result<_, _>>()?,
+                        ),
+                    ])
+                })
+                .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::AStar), control, rows)
     }
 }
 
@@ -865,7 +842,7 @@ impl RustAlgorithm for DijkstraAllPairs {
                 "dijkstra_all_pairs source UUID is not in the selected graph",
             ));
         }
-        let rows = exact_dijkstra_all_pairs(graph, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_dijkstra_all_pairs(graph, control)?
             .into_iter()
             .map(|result| {
                 Ok(vec![
@@ -881,11 +858,12 @@ impl RustAlgorithm for DijkstraAllPairs {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::DijkstraAllPairs).result_schema(),
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::DijkstraAllPairs),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -914,7 +892,7 @@ impl RustAlgorithm for Dijkstra {
                     .ok_or_else(|| execution("dijkstra target UUID is not in the selected graph"))
             })
             .transpose()?;
-        let rows = exact_dijkstra(graph, source, target, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_dijkstra(graph, source, target, control)?
             .into_iter()
             .map(|result| {
                 Ok(vec![
@@ -930,11 +908,8 @@ impl RustAlgorithm for Dijkstra {
                     ),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::Dijkstra).result_schema(),
-            rows,
-        })
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::Dijkstra), control, rows)
     }
 }
 
@@ -1020,10 +995,7 @@ impl RustAlgorithm for Bfs {
                 AlgorithmValue::UuidList(path_uuids(graph, source, target, &predecessor)?),
             ]);
         }
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::Bfs).result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::Bfs), control, rows)
     }
 }
 
@@ -1044,7 +1016,7 @@ impl RustAlgorithm for Dfs {
         let source = graph
             .node_id(&self.source)
             .ok_or_else(|| execution("dfs source UUID is not in the selected graph"))?;
-        let rows = depth_first_search(graph, source, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = depth_first_search(graph, source, control)?
             .into_iter()
             .map(|visit| {
                 Ok(vec![
@@ -1053,11 +1025,8 @@ impl RustAlgorithm for Dfs {
                     AlgorithmValue::UInt64(visit.order),
                 ])
             })
-            .collect::<Result<_, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Paths(PathAlgorithm::Dfs).result_schema(),
-            rows,
-        })
+            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::Dfs), control, rows)
     }
 }
 
@@ -1945,7 +1914,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
             );
         }
@@ -1965,7 +1934,7 @@ mod tests {
             Algorithm::Paths(PathAlgorithm::GomoryHuTree).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 vec![value(0), value(1), AlgorithmValue::Float64(5.0),],
                 vec![value(1), value(2), AlgorithmValue::Float64(6.0),],
@@ -1997,7 +1966,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&directed, 0, 2, 3, 42, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![
                 vec![value(0), path(&[0, 2])],
                 vec![value(0), path(&[0, 1, 3])],
@@ -2006,7 +1975,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&directed, 2, 1, 3, 42, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(2), path(&[2])]]
         );
 
@@ -2014,7 +1983,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&undirected, 1, 1, 1, 0, false)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(1), path(&[1, 0])]]
         );
 
@@ -2023,7 +1992,7 @@ mod tests {
         assert_eq!(
             execute_random_walk(&weighted, 0, 1, 1, 0, true)
                 .unwrap()
-                .rows,
+                .rows(),
             vec![vec![value(0), path(&[0, 2])]]
         );
     }
@@ -2038,7 +2007,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            scalar.rows,
+            scalar.rows(),
             vec![vec![
                 value(0),
                 value(2),
@@ -2063,7 +2032,7 @@ mod tests {
             AlgorithmLimits::default(),
         )
         .unwrap();
-        assert_eq!(edges.rows.len(), 3);
+        assert_eq!(edges.rows().len(), 3);
         assert_eq!(
             edges.schema,
             Algorithm::Paths(PathAlgorithm::MinCostMaxFlowEdges).result_schema()
@@ -2191,13 +2160,16 @@ mod tests {
         .unwrap();
         assert_eq!(
             scalar,
-            AlgorithmOutput {
-                schema: Algorithm::Paths(PathAlgorithm::MaxFlow).result_schema(),
-                rows: vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
-            }
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MaxFlow),
+                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
+                8192,
+                u64::MAX
+            )
+            .unwrap()
         );
         assert_eq!(
-            edges.rows.iter().map(|row| &row[3]).collect::<Vec<_>>(),
+            edges.rows().iter().map(|row| &row[3]).collect::<Vec<_>>(),
             vec![
                 &AlgorithmValue::Float64(3.0),
                 &AlgorithmValue::Float64(2.0),
@@ -2218,7 +2190,7 @@ mod tests {
                 },
             ),
             Err(AlgorithmError::OutputLimit {
-                observed: 5,
+                observed: 2,
                 limit: 1
             })
         ));
@@ -2250,26 +2222,32 @@ mod tests {
 
         assert_eq!(
             scalar,
-            AlgorithmOutput {
-                schema: Algorithm::Paths(PathAlgorithm::MinCut).result_schema(),
-                rows: vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
-            }
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MinCut),
+                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
+                8192,
+                u64::MAX
+            )
+            .unwrap()
         );
         assert_eq!(
             edges,
-            AlgorithmOutput {
-                schema: Algorithm::Paths(PathAlgorithm::MinCutEdges).result_schema(),
-                rows: vec![
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MinCutEdges),
+                vec![
                     vec![value(0), value(0), value(1), AlgorithmValue::Float64(3.0)],
                     vec![value(1), value(0), value(2), AlgorithmValue::Float64(2.0)],
                 ],
-            }
+                8192,
+                u64::MAX
+            )
+            .unwrap()
         );
         assert_eq!(
-            scalar.rows[0][2],
+            scalar.rows()[0][2],
             AlgorithmValue::Float64(
                 edges
-                    .rows
+                    .rows()
                     .iter()
                     .map(|row| match &row[3] {
                         AlgorithmValue::Float64(capacity) => *capacity,
@@ -2332,7 +2310,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![
                 value(10),
                 value(0),
@@ -2352,7 +2330,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![value(0), value(2), AlgorithmValue::Float64(0.0)]]
         );
         assert!(
@@ -2365,7 +2343,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -2438,7 +2416,7 @@ mod tests {
             &[(10, 1, 0), (11, 2, 1), (12, 3, 2)],
         )
         .with_test_edge_weights(&[2.0, 2.0, 2.0, 2.0, 2.0, 2.0]);
-        let rows = execute_flow(
+        let rows: Vec<Vec<AlgorithmValue>> = execute_flow(
             &graph,
             PathAlgorithm::MaxFlowEdges,
             3,
@@ -2446,7 +2424,7 @@ mod tests {
             AlgorithmLimits::default(),
         )
         .unwrap()
-        .rows;
+        .rows();
         assert_eq!(
             rows,
             vec![
@@ -2471,7 +2449,7 @@ mod tests {
             Algorithm::Paths(PathAlgorithm::TransitiveClosure).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 vec![value(0), value(0)],
                 vec![value(0), value(1)],
@@ -2520,7 +2498,7 @@ mod tests {
             Algorithm::Paths(PathAlgorithm::Yens).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 vec![
                     value(0),
@@ -2581,7 +2559,7 @@ mod tests {
         let schema = Algorithm::Paths(PathAlgorithm::Bfs).result_schema();
         assert_eq!(all.schema, schema);
         assert_eq!(
-            all.rows,
+            all.rows(),
             vec![
                 vec![value(0), value(0), AlgorithmValue::Float64(0.0), path(&[0])],
                 vec![
@@ -2619,7 +2597,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![vec![
                 value(0),
                 value(4),
@@ -2644,7 +2622,7 @@ mod tests {
             Algorithm::Paths(PathAlgorithm::Dfs).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 traversal(0, 0, 0),
                 traversal(1, 1, 1),
@@ -2673,7 +2651,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             ),
             Err(AlgorithmError::OutputLimit {
-                observed: 4,
+                observed: 3,
                 limit: 2
             })
         ));
@@ -3041,9 +3019,9 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows().len(), 2);
         assert_eq!(
-            output.rows.iter().map(|row| &row[0]).collect::<Vec<_>>(),
+            output.rows().iter().map(|row| &row[0]).collect::<Vec<_>>(),
             [&value(6), &value(7)]
         );
 
@@ -3076,8 +3054,8 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
-            output.rows
+            .rows(),
+            output.rows()
         );
     }
 
@@ -3097,7 +3075,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![vec![
                 value(8),
                 value(0),
@@ -3148,8 +3126,8 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
-            output.rows
+            .rows(),
+            output.rows()
         );
     }
 
@@ -3165,7 +3143,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         assert!(matches!(

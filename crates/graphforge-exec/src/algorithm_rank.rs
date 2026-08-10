@@ -17,7 +17,9 @@ use crate::algorithm_dispatch::{
 use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
 use crate::algorithm_k_core::k_core_numbers;
 use crate::algorithm_neighbors::{simple_neighbors, simple_undirected_neighbors};
-use crate::algorithm_output::{materialize_node_properties, shape_algorithm_output};
+use crate::algorithm_output::{
+    materialize_node_properties_with_batch_size, shape_algorithm_output,
+};
 
 const BUILTIN_REVIEW: DependencyReview = DependencyReview {
     implementation: "graphforge-exec built-in",
@@ -95,7 +97,8 @@ impl RustAlgorithm for Degree {
             graph.node_ids().len().saturating_sub(1).max(1),
             "node count",
         )?;
-        let mut rows = Vec::with_capacity(graph.node_ids().len());
+        let algorithm = Algorithm::Rank(RankAlgorithm::Degree);
+        let mut sink = control.output_sink(algorithm)?;
         for (index, &node_id) in graph.node_ids().iter().enumerate() {
             if index % 1024 == 0 {
                 control.checkpoint()?;
@@ -104,15 +107,12 @@ impl RustAlgorithm for Degree {
                 .node_uuid(node_id)
                 .ok_or_else(|| execution("selected node has no UUID identity"))?;
             let degree = exact_u32(graph.neighbors(node_id).len(), "node degree")?;
-            rows.push(vec![
+            sink.append_row(&[
                 AlgorithmValue::Uuid(uuid),
                 AlgorithmValue::Float64(f64::from(degree) / f64::from(denominator)),
-            ]);
+            ])?;
         }
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Rank(RankAlgorithm::Degree).result_schema(),
-            rows,
-        })
+        sink.finish()
     }
 }
 
@@ -133,10 +133,7 @@ impl RustAlgorithm for PageRank {
         let algorithm = Algorithm::Rank(RankAlgorithm::PageRank);
         let node_count = graph.node_ids().len();
         if node_count == 0 {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = graph
@@ -199,10 +196,7 @@ impl RustAlgorithm for PageRank {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -223,10 +217,7 @@ impl RustAlgorithm for Betweenness {
         let algorithm = Algorithm::Rank(RankAlgorithm::Betweenness);
         let node_ids = graph.node_ids();
         if node_ids.is_empty() {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = node_ids
@@ -319,10 +310,7 @@ impl RustAlgorithm for Betweenness {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -343,10 +331,7 @@ impl RustAlgorithm for Closeness {
         let algorithm = Algorithm::Rank(RankAlgorithm::Closeness);
         let node_ids = graph.node_ids();
         if node_ids.is_empty() {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = node_ids
@@ -414,10 +399,7 @@ impl RustAlgorithm for Closeness {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -438,10 +420,7 @@ impl RustAlgorithm for HarmonicCloseness {
         let algorithm = Algorithm::Rank(RankAlgorithm::HarmonicCloseness);
         let node_ids = graph.node_ids();
         if node_ids.is_empty() {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = node_ids
@@ -507,10 +486,7 @@ impl RustAlgorithm for HarmonicCloseness {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -531,10 +507,7 @@ impl RustAlgorithm for Eigenvector {
         let algorithm = Algorithm::Rank(RankAlgorithm::Eigenvector);
         let node_ids = graph.node_ids();
         if node_ids.is_empty() {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = node_ids
@@ -595,10 +568,7 @@ impl RustAlgorithm for Eigenvector {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -619,10 +589,7 @@ impl RustAlgorithm for ArticleRank {
         let algorithm = Algorithm::Rank(RankAlgorithm::ArticleRank);
         let node_ids = graph.node_ids();
         if node_ids.is_empty() {
-            return Ok(AlgorithmOutput {
-                schema: algorithm.result_schema(),
-                rows: Vec::new(),
-            });
+            return AlgorithmOutput::empty(algorithm, control);
         }
 
         let indices: HashMap<u64, usize> = node_ids
@@ -694,10 +661,7 @@ impl RustAlgorithm for ArticleRank {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(algorithm, control, rows)
     }
 }
 
@@ -717,7 +681,7 @@ impl RustAlgorithm for HitsHub {
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::HitsHub);
         let (_, hubs) = hits_scores(graph, control)?;
-        rank_scores_output(algorithm, graph, hubs)
+        rank_scores_output(algorithm, graph, hubs, control)
     }
 }
 
@@ -737,7 +701,7 @@ impl RustAlgorithm for HitsAuthority {
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::HitsAuthority);
         let (authorities, _) = hits_scores(graph, control)?;
-        rank_scores_output(algorithm, graph, authorities)
+        rank_scores_output(algorithm, graph, authorities, control)
     }
 }
 
@@ -756,7 +720,7 @@ impl RustAlgorithm for Celf {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::Celf);
-        rank_scores_output(algorithm, graph, celf_scores(graph, control)?)
+        rank_scores_output(algorithm, graph, celf_scores(graph, control)?, control)
     }
 }
 
@@ -779,6 +743,7 @@ impl RustAlgorithm for ClusteringCoefficient {
             algorithm,
             graph,
             clustering_coefficient_scores(graph, control)?,
+            control,
         )
     }
 }
@@ -798,7 +763,7 @@ impl RustAlgorithm for Triangles {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::Triangles);
-        rank_scores_output(algorithm, graph, triangle_scores(graph, control)?)
+        rank_scores_output(algorithm, graph, triangle_scores(graph, control)?, control)
     }
 }
 
@@ -817,7 +782,7 @@ impl RustAlgorithm for KCore {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::KCore);
-        rank_scores_output(algorithm, graph, k_core_scores(graph, control)?)
+        rank_scores_output(algorithm, graph, k_core_scores(graph, control)?, control)
     }
 }
 
@@ -840,6 +805,7 @@ impl RustAlgorithm for PreferentialAttachment {
             algorithm,
             graph,
             preferential_attachment_scores(graph, control)?,
+            control,
         )
     }
 }
@@ -859,7 +825,12 @@ impl RustAlgorithm for AdamicAdar {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::AdamicAdar);
-        rank_scores_output(algorithm, graph, adamic_adar_scores(graph, control)?)
+        rank_scores_output(
+            algorithm,
+            graph,
+            adamic_adar_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -878,7 +849,12 @@ impl RustAlgorithm for CommonNeighbors {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::CommonNeighbors);
-        rank_scores_output(algorithm, graph, common_neighbor_scores(graph, control)?)
+        rank_scores_output(
+            algorithm,
+            graph,
+            common_neighbor_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -901,6 +877,7 @@ impl RustAlgorithm for ResourceAllocation {
             algorithm,
             graph,
             resource_allocation_scores(graph, control)?,
+            control,
         )
     }
 }
@@ -920,7 +897,12 @@ impl RustAlgorithm for TotalNeighbors {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::TotalNeighbors);
-        rank_scores_output(algorithm, graph, total_neighbor_scores(graph, control)?)
+        rank_scores_output(
+            algorithm,
+            graph,
+            total_neighbor_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -1554,25 +1536,16 @@ fn rank_scores_output(
     algorithm: Algorithm,
     graph: &AdjacencyGraph,
     scores: Vec<f64>,
+    control: &AlgorithmControl,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
-    let rows = graph
-        .node_ids()
-        .iter()
-        .zip(scores)
-        .map(|(&node, score)| {
-            let uuid = graph
-                .node_uuid(node)
-                .ok_or_else(|| execution("selected node has no UUID identity"))?;
-            Ok(vec![
-                AlgorithmValue::Uuid(uuid),
-                AlgorithmValue::Float64(score),
-            ])
-        })
-        .collect::<Result<Vec<_>, AlgorithmError>>()?;
-    Ok(AlgorithmOutput {
-        schema: algorithm.result_schema(),
-        rows,
-    })
+    let mut sink = control.output_sink(algorithm)?;
+    for (&node, score) in graph.node_ids().iter().zip(scores) {
+        let uuid = graph
+            .node_uuid(node)
+            .ok_or_else(|| execution("selected node has no UUID identity"))?;
+        sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Float64(score)])?;
+    }
+    sink.finish()
 }
 
 fn accumulate_hits_phase(
@@ -1654,11 +1627,33 @@ pub fn rank_algorithm(
     property_stems: &[String],
     options: &RankOptions,
 ) -> Result<RecordBatch, GfError> {
+    rank_algorithm_with_limits(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        AlgorithmLimits::default(),
+    )
+}
+
+/// Execute rank with an explicit output/memory shaping policy (#341).
+pub fn rank_algorithm_with_limits(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: &RankOptions,
+    limits: AlgorithmLimits,
+) -> Result<RecordBatch, GfError> {
     let graph = rank_projection(provider, dir, mode, label, options)?;
     let algorithm = Algorithm::Rank(options.by);
-    let output = execute_rank(&graph, algorithm, AlgorithmLimits::default())?;
+    let output = execute_rank(&graph, algorithm, limits)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
-    materialize_node_properties(dir, property_stems, &batch).map_err(Into::into)
+    materialize_node_properties_with_batch_size(dir, property_stems, &batch, limits.batch_size)
+        .map_err(Into::into)
 }
 
 /// Fingerprint the exact logical topology consumed by a rank invocation.
@@ -1770,7 +1765,7 @@ mod tests {
 
     fn pagerank_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1795,7 +1790,7 @@ mod tests {
 
     fn betweenness_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1820,7 +1815,7 @@ mod tests {
 
     fn closeness_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1845,7 +1840,7 @@ mod tests {
 
     fn harmonic_closeness_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1870,7 +1865,7 @@ mod tests {
 
     fn eigenvector_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1906,7 +1901,7 @@ mod tests {
 
     fn article_rank_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1931,7 +1926,7 @@ mod tests {
 
     fn hits_hub_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -1956,7 +1951,7 @@ mod tests {
 
     fn hits_authority_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
-            .rows
+            .rows()
             .iter()
             .map(|row| match row[1] {
                 AlgorithmValue::Float64(score) => score,
@@ -2155,7 +2150,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 vec![AlgorithmValue::Uuid([0; 16]), AlgorithmValue::Float64(2.0)],
                 vec![
@@ -2178,7 +2173,7 @@ mod tests {
         assert!(
             execute_degree(&AdjacencyGraph::default(), AlgorithmLimits::default())
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
         );
         let limits = AlgorithmLimits {
@@ -2237,7 +2232,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(empty.rows.is_empty());
+        assert!(empty.rows().is_empty());
     }
 
     #[test]
@@ -2397,7 +2392,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -2531,7 +2526,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert_eq!(
@@ -2676,7 +2671,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert_eq!(
@@ -2839,7 +2834,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3002,7 +2997,7 @@ mod tests {
                 AlgorithmCancellation::default()
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3147,7 +3142,7 @@ mod tests {
                 AlgorithmCancellation::default()
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3283,7 +3278,7 @@ mod tests {
                 AlgorithmCancellation::default()
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3482,7 +3477,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3573,7 +3568,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3674,7 +3669,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3825,7 +3820,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -3974,7 +3969,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -4117,7 +4112,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -4262,7 +4257,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }
@@ -4428,7 +4423,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
     }

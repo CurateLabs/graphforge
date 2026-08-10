@@ -208,10 +208,11 @@ impl RustAlgorithm for CountAutomorphisms {
         edges.dedup_by_key(|edge| edge.edge);
         let graph = AutomorphismGraph::try_new(&nodes, &edges, self.directed, control)?;
         let count = count_automorphisms(&graph, control)?;
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows: vec![vec![AlgorithmValue::UInt64(count)]],
-        })
+        AlgorithmOutput::from_rows(
+            self.capability().algorithm,
+            control,
+            vec![vec![AlgorithmValue::UInt64(count)]],
+        )
     }
 }
 
@@ -263,7 +264,7 @@ impl RustAlgorithm for MaxCardinalityMatching {
                 });
             }
         }
-        let rows = maximum_cardinality_matching(&nodes, &edges, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = maximum_cardinality_matching(&nodes, &edges, control)?
             .into_iter()
             .map(|edge| {
                 vec![
@@ -273,10 +274,7 @@ impl RustAlgorithm for MaxCardinalityMatching {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -316,7 +314,7 @@ impl RustAlgorithm for MaxWeightMatching {
             }
         }
         let graph = normalize_weighted_undirected(&nodes, &edges, control, &mut work)?;
-        let rows = solve_exact_matching(&graph, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = solve_exact_matching(&graph, control)?
             .into_iter()
             .map(|edge| {
                 vec![
@@ -327,10 +325,7 @@ impl RustAlgorithm for MaxWeightMatching {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -382,7 +377,7 @@ impl RustAlgorithm for Conductance {
                 }
             }
         }
-        let rows = conductance(
+        let rows: Vec<Vec<AlgorithmValue>> = conductance(
             &nodes,
             &edges.into_values().collect::<Vec<_>>(),
             graph.is_directed(),
@@ -397,10 +392,11 @@ impl RustAlgorithm for Conductance {
             ]
         })
         .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::Conductance).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::Conductance),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -516,7 +512,7 @@ impl RustAlgorithm for MaxBipartiteMatching {
             self.partitions.as_ref(),
             control,
         )?;
-        let rows = maximum_bipartite_matching(&projection, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = maximum_bipartite_matching(&projection, control)?
             .into_iter()
             .map(|edge| {
                 vec![
@@ -526,10 +522,11 @@ impl RustAlgorithm for MaxBipartiteMatching {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::MaxBipartiteMatching).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::MaxBipartiteMatching),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -570,10 +567,11 @@ impl RustAlgorithm for ChromaticNumber {
             }
         }
         let value = exact_chromatic_number(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber).result_schema(),
-            rows: vec![vec![AlgorithmValue::UInt64(value)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber),
+            control,
+            vec![vec![AlgorithmValue::UInt64(value)]],
+        )
     }
 }
 
@@ -613,7 +611,7 @@ impl RustAlgorithm for NodeColoring {
                 });
             }
         }
-        let rows = greedy_node_coloring(&nodes, &edges, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = greedy_node_coloring(&nodes, &edges, control)?
             .into_iter()
             .map(|entry| {
                 vec![
@@ -622,10 +620,11 @@ impl RustAlgorithm for NodeColoring {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -665,7 +664,7 @@ impl RustAlgorithm for K1Coloring {
                 });
             }
         }
-        let rows = k1_coloring(&nodes, &edges, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = k1_coloring(&nodes, &edges, control)?
             .into_iter()
             .map(|entry| {
                 vec![
@@ -674,10 +673,11 @@ impl RustAlgorithm for K1Coloring {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::K1Coloring).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::K1Coloring),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -717,7 +717,7 @@ impl RustAlgorithm for EdgeColoring {
                 });
             }
         }
-        let rows = greedy_edge_coloring(&nodes, &edges, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = greedy_edge_coloring(&nodes, &edges, control)?
             .into_iter()
             .map(|color| {
                 vec![
@@ -726,10 +726,11 @@ impl RustAlgorithm for EdgeColoring {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::EdgeColoring).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::EdgeColoring),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -753,17 +754,14 @@ impl RustAlgorithm for EulerConstruction {
             AnalyzeAlgorithm::EulerPath => EulerTrailKind::Path,
             _ => unreachable!("Euler construction only registers Euler algorithms"),
         };
-        let rows = match projection.trail(kind, control)? {
+        let rows: Vec<Vec<AlgorithmValue>> = match projection.trail(kind, control)? {
             EulerTrailOutcome::EmptySelection => Vec::new(),
             EulerTrailOutcome::Trail(trail) => vec![vec![
                 AlgorithmValue::UuidList(trail.node_path),
                 AlgorithmValue::UuidList(trail.edge_path),
             ]],
         };
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -860,10 +858,11 @@ impl RustAlgorithm for HasEulerPath {
             }
         }
         let value = has_euler_path(&nodes, &edges, self.directed, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::HasEulerPath).result_schema(),
-            rows: vec![vec![AlgorithmValue::Boolean(value)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::HasEulerPath),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -904,10 +903,11 @@ impl RustAlgorithm for HasEulerCircuit {
             }
         }
         let value = has_euler_circuit(&nodes, &edges, self.directed, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::HasEulerCircuit).result_schema(),
-            rows: vec![vec![AlgorithmValue::Boolean(value)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::HasEulerCircuit),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -947,14 +947,15 @@ impl RustAlgorithm for FindCycles {
                 });
             }
         }
-        let rows = find_cycles(&nodes, &edges, self.directed, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = find_cycles(&nodes, &edges, self.directed, control)?
             .into_iter()
             .map(|cycle| vec![AlgorithmValue::UuidList(cycle)])
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::FindCycles).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::FindCycles),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -995,13 +996,14 @@ impl RustAlgorithm for DagLongestPath {
             }
         }
         let result = dag_longest_path(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPath).result_schema(),
-            rows: vec![vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPath),
+            control,
+            vec![vec![
                 AlgorithmValue::Float64(result.cost),
                 AlgorithmValue::UuidList(result.path),
             ]],
-        })
+        )
     }
 }
 
@@ -1043,13 +1045,14 @@ impl RustAlgorithm for WeightedDagLongestPath {
             }
         }
         let result = weighted_dag_longest_path(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPathWeighted).result_schema(),
-            rows: vec![vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPathWeighted),
+            control,
+            vec![vec![
                 AlgorithmValue::Float64(result.cost),
                 AlgorithmValue::UuidList(result.path),
             ]],
-        })
+        )
     }
 }
 
@@ -1099,10 +1102,11 @@ impl RustAlgorithm for TriangleCount {
             }
         }
         let count = triangle_count(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::TriangleCount).result_schema(),
-            rows: vec![vec![AlgorithmValue::UInt64(count)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::TriangleCount),
+            control,
+            vec![vec![AlgorithmValue::UInt64(count)]],
+        )
     }
 }
 
@@ -1152,10 +1156,11 @@ impl RustAlgorithm for Transitivity {
             }
         }
         let value = transitivity(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::Transitivity).result_schema(),
-            rows: vec![vec![AlgorithmValue::Float64(value)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::Transitivity),
+            control,
+            vec![vec![AlgorithmValue::Float64(value)]],
+        )
     }
 }
 
@@ -1205,10 +1210,11 @@ impl RustAlgorithm for IsPlanar {
             }
         }
         let value = is_planar(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::IsPlanar).result_schema(),
-            rows: vec![vec![AlgorithmValue::Boolean(value)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::IsPlanar),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -1258,19 +1264,21 @@ impl RustAlgorithm for TriadCensus {
             }
         }
         let counts = triad_census(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::TriadCensus).result_schema(),
-            rows: TRIAD_NAMES
-                .iter()
-                .zip(counts)
-                .map(|(name, count)| {
-                    vec![
-                        AlgorithmValue::Utf8((*name).to_owned()),
-                        AlgorithmValue::UInt64(count),
-                    ]
-                })
-                .collect(),
-        })
+        let rows: Vec<Vec<AlgorithmValue>> = TRIAD_NAMES
+            .iter()
+            .zip(counts)
+            .map(|(name, count)| {
+                vec![
+                    AlgorithmValue::Utf8((*name).to_owned()),
+                    AlgorithmValue::UInt64(count),
+                ]
+            })
+            .collect();
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::TriadCensus),
+            control,
+            rows,
+        )
     }
 }
 
@@ -1320,9 +1328,10 @@ impl RustAlgorithm for DyadCensus {
             }
         }
         let counts = dyad_census(&nodes, &edges, control)?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::DyadCensus).result_schema(),
-            rows: vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DyadCensus),
+            control,
+            vec![
                 vec![
                     AlgorithmValue::Utf8("mutual".into()),
                     AlgorithmValue::UInt64(counts.mutual),
@@ -1336,7 +1345,7 @@ impl RustAlgorithm for DyadCensus {
                     AlgorithmValue::UInt64(counts.null),
                 ],
             ],
-        })
+        )
     }
 }
 
@@ -1380,7 +1389,7 @@ impl RustAlgorithm for Bridges {
         edges.sort_unstable_by_key(|&(edge_uuid, source_uuid, target_uuid)| {
             (source_uuid, target_uuid, edge_uuid)
         });
-        let rows = edges
+        let rows: Vec<Vec<AlgorithmValue>> = edges
             .into_iter()
             .map(|(edge_uuid, source_uuid, target_uuid)| {
                 vec![
@@ -1390,10 +1399,7 @@ impl RustAlgorithm for Bridges {
                 ]
             })
             .collect();
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::Bridges).result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::Bridges), control, rows)
     }
 }
 
@@ -1412,7 +1418,7 @@ impl RustAlgorithm for ArticulationPoints {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let result = low_link(graph, control)?;
-        let rows = result
+        let rows: Vec<Vec<AlgorithmValue>> = result
             .articulation_nodes
             .into_iter()
             .map(|node| {
@@ -1424,10 +1430,11 @@ impl RustAlgorithm for ArticulationPoints {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::ArticulationPoints).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::ArticulationPoints),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -1476,10 +1483,7 @@ impl RustAlgorithm for SpanningTree {
                 AlgorithmValue::Float64(edge.weight),
             ]);
         }
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(self.algorithm).result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(Algorithm::Analyze(self.algorithm), control, rows)
     }
 }
 
@@ -1548,10 +1552,7 @@ impl RustAlgorithm for MinimumKSpanningTree {
                 ]);
             }
         }
-        Ok(AlgorithmOutput {
-            schema: self.capability().algorithm.result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(self.capability().algorithm, control, rows)
     }
 }
 
@@ -1574,10 +1575,11 @@ impl RustAlgorithm for IsDag {
         } else {
             false
         };
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::IsDag).result_schema(),
-            rows: vec![vec![AlgorithmValue::Boolean(is_dag)]],
-        })
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::IsDag),
+            control,
+            vec![vec![AlgorithmValue::Boolean(is_dag)]],
+        )
     }
 }
 
@@ -1608,10 +1610,11 @@ impl RustAlgorithm for TopologicalSort {
                 AlgorithmValue::UInt64(order),
             ]);
         }
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Analyze(AnalyzeAlgorithm::TopologicalSort).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::TopologicalSort),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -3968,7 +3971,8 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::CountAutomorphisms).result_schema()
         );
-        let [row] = output.rows.as_slice() else {
+        let rows = output.rows();
+        let [row] = rows.as_slice() else {
             panic!("automorphism dispatch must return exactly one row");
         };
         let [AlgorithmValue::UInt64(count)] = row.as_slice() else {
@@ -4147,7 +4151,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::Conductance).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Utf8("alpha".into()),
@@ -4194,9 +4198,9 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::Modularity).result_schema()
         );
-        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows().len(), 1);
         assert!(
-            matches!(output.rows[0].as_slice(), [AlgorithmValue::Float64(value)] if value.is_finite())
+            matches!(output.rows()[0].as_slice(), [AlgorithmValue::Float64(value)] if value.is_finite())
         );
         assert_eq!(
             shape_algorithm_output(Algorithm::Analyze(AnalyzeAlgorithm::Modularity), &output)
@@ -4383,7 +4387,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MaxWeightMatching).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(u128::from(8_u8).to_be_bytes()),
@@ -4448,7 +4452,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MaxCardinalityMatching).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(u128::from(4_u8).to_be_bytes()),
@@ -4506,7 +4510,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(empty.rows.is_empty());
+        assert!(empty.rows().is_empty());
 
         let graph = AdjacencyGraph::with_test_undirected_multigraph(4, &[(1, 0, 1), (2, 2, 3)]);
         assert!(matches!(
@@ -4581,7 +4585,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(empty.rows.is_empty());
+        assert!(empty.rows().is_empty());
 
         let graph = AdjacencyGraph::with_test_undirected_multigraph(4, &[(1, 0, 1), (2, 2, 3)]);
         assert!(matches!(
@@ -4679,7 +4683,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MaxBipartiteMatching).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(u128::from(3_u8).to_be_bytes()),
@@ -4739,7 +4743,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            output.rows[0][1..],
+            output.rows()[0][1..],
             [
                 AlgorithmValue::Uuid(u128::from(1_u8).to_be_bytes()),
                 AlgorithmValue::Uuid(u128::from(0_u8).to_be_bytes())
@@ -4796,7 +4800,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap();
-            assert_eq!(output.rows, [vec![AlgorithmValue::Boolean(true)]]);
+            assert_eq!(output.rows(), [vec![AlgorithmValue::Boolean(true)]]);
             assert_eq!(
                 output.schema,
                 Algorithm::Analyze(AnalyzeAlgorithm::IsDag).result_schema()
@@ -4841,7 +4845,7 @@ mod tests {
                 output.schema,
                 Algorithm::Analyze(AnalyzeAlgorithm::HasEulerCircuit).result_schema()
             );
-            assert_eq!(output.rows, [vec![AlgorithmValue::Boolean(expected)]]);
+            assert_eq!(output.rows(), [vec![AlgorithmValue::Boolean(expected)]]);
         }
     }
 
@@ -4913,7 +4917,7 @@ mod tests {
                 output.schema,
                 Algorithm::Analyze(AnalyzeAlgorithm::HasEulerPath).result_schema()
             );
-            assert_eq!(output.rows, [vec![AlgorithmValue::Boolean(expected)]]);
+            assert_eq!(output.rows(), [vec![AlgorithmValue::Boolean(expected)]]);
         }
     }
 
@@ -4971,12 +4975,12 @@ mod tests {
         for algorithm in [AnalyzeAlgorithm::EulerCircuit, AnalyzeAlgorithm::EulerPath] {
             let empty = euler_output(&AdjacencyGraph::default(), algorithm, false).unwrap();
             assert_eq!(empty.schema, Algorithm::Analyze(algorithm).result_schema());
-            assert!(empty.rows.is_empty());
+            assert!(empty.rows().is_empty());
 
             let singleton =
                 euler_output(&AdjacencyGraph::with_test_edges(1, &[]), algorithm, false).unwrap();
             assert_eq!(
-                singleton.rows,
+                singleton.rows(),
                 [vec![
                     AlgorithmValue::UuidList(vec![uuid(0)]),
                     AlgorithmValue::UuidList(Vec::new()),
@@ -4992,7 +4996,7 @@ mod tests {
         assert_eq!(
             euler_output(&undirected_open, AnalyzeAlgorithm::EulerPath, false)
                 .unwrap()
-                .rows,
+                .rows(),
             [vec![
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(2)]),
                 AlgorithmValue::UuidList(vec![uuid(10), uuid(11)]),
@@ -5007,7 +5011,7 @@ mod tests {
         assert_eq!(
             euler_output(&directed_open, AnalyzeAlgorithm::EulerPath, true)
                 .unwrap()
-                .rows,
+                .rows(),
             [vec![
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(2)]),
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1)]),
@@ -5029,13 +5033,13 @@ mod tests {
             ),
         ] {
             let circuit = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, directed).unwrap();
-            assert_eq!(circuit.rows.len(), 1);
+            assert_eq!(circuit.rows().len(), 1);
             assert_eq!(
-                circuit.rows[0][0],
+                circuit.rows()[0][0],
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1), uuid(0)])
             );
             assert_eq!(
-                circuit.rows[0][1],
+                circuit.rows()[0][1],
                 AlgorithmValue::UuidList(if directed {
                     vec![uuid(0), uuid(1)]
                 } else {
@@ -5054,7 +5058,8 @@ mod tests {
         let first = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, false).unwrap();
         let second = euler_output(&graph, AnalyzeAlgorithm::EulerCircuit, false).unwrap();
         assert_eq!(first, second);
-        let [row] = first.rows.as_slice() else {
+        let rows = first.rows();
+        let [row] = rows.as_slice() else {
             panic!("Euler circuit must be one row");
         };
         let [
@@ -5092,7 +5097,7 @@ mod tests {
             euler_output(&graph, AnalyzeAlgorithm::EulerPath, true).unwrap()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [vec![
                 AlgorithmValue::UuidList(vec![uuid(90), uuid(20), uuid(70)]),
                 AlgorithmValue::UuidList(vec![uuid(0), uuid(1)]),
@@ -5187,7 +5192,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::EdgeColoring).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [(10_u64, 0_u64), (11, 1), (12, 2), (14, 3), (20, 0),]
                 .into_iter()
                 .map(|(edge, color)| vec![
@@ -5209,7 +5214,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         assert!(matches!(
@@ -5279,7 +5284,7 @@ mod tests {
                 output.schema,
                 Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber).result_schema()
             );
-            assert_eq!(output.rows, [vec![AlgorithmValue::UInt64(expected)]]);
+            assert_eq!(output.rows(), [vec![AlgorithmValue::UInt64(expected)]]);
         }
     }
 
@@ -5343,7 +5348,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::TopologicalSort).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [1_u64, 3, 2, 0, 4, 5]
                 .into_iter()
                 .enumerate()
@@ -5375,7 +5380,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPath).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [vec![
                 AlgorithmValue::Float64(2.0),
                 AlgorithmValue::UuidList(vec![[10; 16], [20; 16], [40; 16]]),
@@ -5394,7 +5399,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![
                 AlgorithmValue::Float64(0.0),
                 AlgorithmValue::UuidList(Vec::new()),
@@ -5459,7 +5464,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPathWeighted).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [vec![
                 AlgorithmValue::Float64(5.0),
                 AlgorithmValue::UuidList(vec![[10; 16], [20; 16], [40; 16]]),
@@ -5478,7 +5483,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![
                 AlgorithmValue::Float64(0.0),
                 AlgorithmValue::UuidList(Vec::new()),
@@ -5601,7 +5606,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows,
+                .rows(),
                 [vec![AlgorithmValue::Boolean(false)]]
             );
         }
@@ -5614,7 +5619,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [vec![AlgorithmValue::Boolean(false)]]
         );
     }
@@ -5697,7 +5702,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MinimumSpanningTree).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(5_u128.to_be_bytes()),
@@ -5793,7 +5798,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MinimumKSpanningTree).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::UInt64(0),
@@ -5886,7 +5891,7 @@ mod tests {
                     AlgorithmCancellation::default(),
                 )
                 .unwrap()
-                .rows
+                .rows()
                 .is_empty()
             );
         }
@@ -5932,7 +5937,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::MaximumSpanningTree).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(0_u128.to_be_bytes()),
@@ -6007,7 +6012,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::FindCycles).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![AlgorithmValue::UuidList(vec![[10; 16], [20; 16], [30; 16]])],
                 vec![AlgorithmValue::UuidList(vec![[20; 16], [40; 16]])],
@@ -6037,7 +6042,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             [
                 vec![AlgorithmValue::UuidList(
                     [0_u128, 1, 2].map(u128::to_be_bytes).to_vec()
@@ -6064,7 +6069,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             Vec::<Vec<AlgorithmValue>>::new()
         );
         let graph = AdjacencyGraph::with_test_directed_edges(3, &[(0, 1), (1, 2), (2, 0)]);
@@ -6122,7 +6127,7 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::TriangleCount).result_schema()
         );
-        assert_eq!(output.rows, [vec![AlgorithmValue::UInt64(2)]]);
+        assert_eq!(output.rows(), [vec![AlgorithmValue::UInt64(2)]]);
 
         assert!(matches!(
             execute(
@@ -6166,10 +6171,10 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::TriadCensus).result_schema()
         );
-        assert_eq!(output.rows.len(), 16);
+        assert_eq!(output.rows().len(), 16);
         for (index, name) in TRIAD_NAMES.iter().enumerate() {
             assert_eq!(
-                output.rows[index],
+                output.rows()[index],
                 [
                     AlgorithmValue::Utf8((*name).to_owned()),
                     AlgorithmValue::UInt64(u64::from(index == 9)),
@@ -6231,7 +6236,7 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::Transitivity).result_schema()
         );
-        assert_eq!(output.rows, [vec![AlgorithmValue::Float64(0.75)]]);
+        assert_eq!(output.rows(), [vec![AlgorithmValue::Float64(0.75)]]);
 
         assert!(matches!(
             execute(
@@ -6303,7 +6308,7 @@ mod tests {
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::IsPlanar).result_schema()
         );
-        assert_eq!(output.rows, [vec![AlgorithmValue::Boolean(false)]]);
+        assert_eq!(output.rows(), [vec![AlgorithmValue::Boolean(false)]]);
 
         assert!(matches!(
             execute(
@@ -6351,7 +6356,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::DyadCensus).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Utf8("mutual".into()),
@@ -6455,7 +6460,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(0_u128.to_be_bytes()),
@@ -6539,7 +6544,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::K1Coloring).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [0_u64, 1, 0, 1, 0]
                 .into_iter()
                 .enumerate()
@@ -6558,7 +6563,7 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert_ne!(output.rows, legacy.rows);
+        assert_ne!(output.rows(), legacy.rows());
         assert_ne!(
             output.schema,
             Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber).result_schema()
@@ -6596,7 +6601,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(matches!(
@@ -6748,7 +6753,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::ArticulationPoints).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![AlgorithmValue::Uuid(1_u128.to_be_bytes())],
                 vec![AlgorithmValue::Uuid(3_u128.to_be_bytes())],
@@ -6824,7 +6829,7 @@ mod tests {
             Algorithm::Analyze(AnalyzeAlgorithm::Bridges).result_schema()
         );
         assert_eq!(
-            output.rows,
+            output.rows(),
             [
                 vec![
                     AlgorithmValue::Uuid(15_u128.to_be_bytes()),

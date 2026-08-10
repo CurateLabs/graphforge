@@ -76,7 +76,7 @@ impl RustAlgorithm for Knn {
                     .ok_or_else(|| execution("validated KNN vector is missing"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let rows = exact_cosine_knn(&vectors, self.k, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_cosine_knn(&vectors, self.k, control)?
             .into_iter()
             .map(|pair| {
                 let source = graph.node_ids()[pair.source_index];
@@ -96,10 +96,7 @@ impl RustAlgorithm for Knn {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Similar(SimilarAlgorithm::Knn).result_schema(),
-            rows,
-        })
+        AlgorithmOutput::from_rows(Algorithm::Similar(SimilarAlgorithm::Knn), control, rows)
     }
 }
 
@@ -118,7 +115,7 @@ impl RustAlgorithm for Cosine {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let pairs = exact_cosine_similarity(&selected_vectors(graph)?, self.k, control)?;
-        knn_output(graph, SimilarAlgorithm::Cosine, pairs)
+        knn_output(graph, SimilarAlgorithm::Cosine, pairs, control)
     }
 }
 
@@ -139,7 +136,7 @@ impl RustAlgorithm for FilteredKnn {
         let candidates = neighbor_indices(graph, "filtered KNN")?;
         let pairs =
             exact_filtered_cosine_knn(&selected_vectors(graph)?, &candidates, self.k, control)?;
-        knn_output(graph, SimilarAlgorithm::FilteredKnn, pairs)
+        knn_output(graph, SimilarAlgorithm::FilteredKnn, pairs, control)
     }
 }
 
@@ -159,8 +156,9 @@ fn knn_output(
     graph: &AdjacencyGraph,
     algorithm: SimilarAlgorithm,
     pairs: Vec<SimilarityPair>,
+    control: &AlgorithmControl,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
-    let rows = pairs
+    let rows: Vec<Vec<AlgorithmValue>> = pairs
         .into_iter()
         .map(|pair| {
             let source = graph.node_ids()[pair.source_index];
@@ -180,10 +178,7 @@ fn knn_output(
             ])
         })
         .collect::<Result<Vec<_>, AlgorithmError>>()?;
-    Ok(AlgorithmOutput {
-        schema: Algorithm::Similar(algorithm).result_schema(),
-        rows,
-    })
+    AlgorithmOutput::from_rows(Algorithm::Similar(algorithm), control, rows)
 }
 
 impl RustAlgorithm for NodeSimilarity {
@@ -211,7 +206,7 @@ impl RustAlgorithm for NodeSimilarity {
                     .collect()
             })
             .collect();
-        let rows = exact_jaccard(&neighborhoods, None, self.k, control)?
+        let rows: Vec<Vec<AlgorithmValue>> = exact_jaccard(&neighborhoods, None, self.k, control)?
             .into_iter()
             .map(|pair| {
                 let source_uuid = graph
@@ -227,10 +222,11 @@ impl RustAlgorithm for NodeSimilarity {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Similar(SimilarAlgorithm::NodeSimilarity).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Similar(SimilarAlgorithm::NodeSimilarity),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -250,7 +246,7 @@ impl RustAlgorithm for FilteredNodeSimilarity {
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let candidates = neighbor_indices(graph, "filtered node similarity")?;
         let pairs = exact_jaccard(&neighborhoods(graph), Some(&candidates), self.k, control)?;
-        let rows = pairs
+        let rows: Vec<Vec<AlgorithmValue>> = pairs
             .into_iter()
             .map(|pair| {
                 let source_uuid = graph
@@ -266,10 +262,11 @@ impl RustAlgorithm for FilteredNodeSimilarity {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        Ok(AlgorithmOutput {
-            schema: Algorithm::Similar(SimilarAlgorithm::FilteredNodeSimilarity).result_schema(),
+        AlgorithmOutput::from_rows(
+            Algorithm::Similar(SimilarAlgorithm::FilteredNodeSimilarity),
+            control,
             rows,
-        })
+        )
     }
 }
 
@@ -339,6 +336,27 @@ pub fn similar_algorithm(
     property_stems: &[String],
     options: SimilarOptions,
 ) -> Result<RecordBatch, GfError> {
+    similar_algorithm_with_limits(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        crate::algorithm_dispatch::AlgorithmLimits::default(),
+    )
+}
+
+/// Execute similarity with an explicit output/memory shaping policy (#341).
+pub fn similar_algorithm_with_limits(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: SimilarOptions,
+    limits: crate::algorithm_dispatch::AlgorithmLimits,
+) -> Result<RecordBatch, GfError> {
     let graph = similar_projection(provider, dir, mode, label, property_stems, &options)?;
     let algorithm = Algorithm::Similar(options.by);
     let mut registry = AlgorithmRegistry::default();
@@ -348,7 +366,7 @@ pub fn similar_algorithm(
         algorithm,
         &graph,
         &AlgorithmControl::new(
-            crate::algorithm_dispatch::AlgorithmLimits::default(),
+            limits,
             crate::algorithm_dispatch::AlgorithmCancellation::default(),
         ),
     )?;
@@ -541,7 +559,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            output.rows,
+            output.rows(),
             vec![
                 vec![uuid(0), uuid(1), AlgorithmValue::Float64(1.0)],
                 vec![uuid(0), uuid(2), AlgorithmValue::Float64(0.5)],
@@ -564,7 +582,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            top_one.rows,
+            top_one.rows(),
             vec![
                 vec![uuid(0), uuid(1), AlgorithmValue::Float64(1.0)],
                 vec![uuid(1), uuid(0), AlgorithmValue::Float64(1.0)],
@@ -584,7 +602,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows,
+            .rows(),
             vec![
                 vec![uuid(0), uuid(1), AlgorithmValue::Float64(1.0)],
                 vec![uuid(1), uuid(0), AlgorithmValue::Float64(1.0)],
@@ -599,7 +617,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(
@@ -610,7 +628,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             )
             .unwrap()
-            .rows
+            .rows()
             .is_empty()
         );
         assert!(matches!(

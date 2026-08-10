@@ -1035,6 +1035,31 @@ pub fn read_properties(dir: &Path, stem: &str) -> Result<Vec<RecordBatch>, DataF
     }
 }
 
+/// Stream `properties/<stem>.parquet` as bounded batches without concatenating
+/// the complete property table into one `RecordBatch` (#341 enrichment).
+///
+/// Returns an empty `Vec` when the file is absent. When present, batches honor
+/// `batch_size` (clamped to at least 1) and retain natural Parquet row-group
+/// boundaries subject to that cap.
+///
+/// # Errors
+/// Propagates Parquet / Arrow errors encountered while reading.
+pub fn read_properties_batched(
+    dir: &Path,
+    stem: &str,
+    batch_size: usize,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let path = dir.join("properties").join(format!("{stem}.parquet"));
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let file = File::open(&path).map_err(|e| io_err(&e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let builder = builder.with_batch_size(batch_size.max(1));
+    let reader = builder.build().map_err(parquet_err)?;
+    reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)
+}
+
 /// Edge analogue of [`read_properties`]: read `edge_properties/<stem>.parquet`
 /// (keyed by `edge_uuid`), discovering its dynamic schema from the file. Returns
 /// an **empty `Vec`** when the file is absent.

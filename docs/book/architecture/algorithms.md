@@ -40,7 +40,12 @@ semijoins) are added as needed without breaking the verb design.
 
 Production algorithms register one `RustAlgorithm` handler per typed catalog value in
 `graphforge-exec`. Dispatch, limits, cancellation, and Arrow result shaping are shared across the
-five verbs. igraph and NetworkX are optional development parity oracles only: they are not
+five verbs. Handlers append canonical values into a shared columnar
+`AlgorithmArrowSink` (#341) that builds bounded Arrow batches under the
+invocation `batch_size` from the [embedded resource policy](../../development/execution-resource-policy.md);
+they do not retain a second complete `Vec<Vec<AlgorithmValue>>` beside the final
+Arrow buffers. Property enrichment streams selected property tables by batch
+rather than concatenating them before UUID gather. igraph and NetworkX are optional development parity oracles only: they are not
 runtime backends, fallbacks, packaging dependencies, or recovery paths.
 
 ### Invocation and knowledge-layer boundary
