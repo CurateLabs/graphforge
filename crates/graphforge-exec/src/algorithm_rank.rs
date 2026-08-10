@@ -6430,7 +6430,12 @@ mod tests {
     #[test]
     fn common_neighbors_thread_matrix_matches_one_thread_bits_and_ordering() {
         let graph = dense_common_neighbors_graph(128);
-        let neighbors = simple_neighbors(&graph, &control(), false).unwrap();
+        let neighbors = simple_neighbors(
+            &graph,
+            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+            false,
+        )
+        .unwrap();
         assert!(
             estimated_common_neighbors_work(&neighbors) >= COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK
         );
@@ -6572,7 +6577,15 @@ mod tests {
             (1024, 32),
         ] {
             let graph = common_neighbors_ring_graph(nodes, fanout);
-            let neighbors = simple_neighbors(&graph, &control(), false).unwrap();
+            let neighbors = simple_neighbors(
+                &graph,
+                &AlgorithmControl::new(
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                ),
+                false,
+            )
+            .unwrap();
             let work = estimated_common_neighbors_work(&neighbors);
             let measurement_limits = AlgorithmLimits {
                 iterations: 1_000_000,
