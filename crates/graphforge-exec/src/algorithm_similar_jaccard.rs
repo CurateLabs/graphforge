@@ -20,14 +20,14 @@ const CHECKPOINT_INTERVAL: usize = 16_384;
 /// Chosen from release-mode serial-vs-parallel timings of exact Jaccard on this
 /// M4 agent host (4× Xeon vCPU, adversarial set fixture, 4 private workers; see
 /// ignored `measure_jaccard_parallel_crossover`):
-/// - ≤3.3k probes: serial and parallel are noise-dominated
-/// - ~4.3k probes: first measured win (~0.85× serial)
-/// - ≥17k probes: ≥2× speedup
+/// - ≤4.3k probes: serial and parallel are noise-dominated
+/// - ~17k probes: first stable win (~0.65× serial)
+/// - ≥48k probes: ≥2× speedup
 ///
-/// `4_096` is the smallest power-of-two below that measured win boundary while
-/// still preserving a serial path for tiny workloads.
+/// `16_384` is the smallest power-of-two below that measured stable-win
+/// boundary while still preserving a serial path for tiny workloads.
 /// Exact numeric results remain identical on either path.
-pub const JACCARD_PARALLEL_CROSSOVER_OPS: u64 = 4_096;
+pub const JACCARD_PARALLEL_CROSSOVER_OPS: u64 = 16_384;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct JaccardPair {

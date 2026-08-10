@@ -106,11 +106,11 @@ Exact and filtered `similar(by="node_similarity")` Jaccard partition
 - `compute_threads > 1`, and
 - estimated source-degree candidate probes (source neighborhood size × candidate
   count, summed over non-empty sources) are at least
-  `JACCARD_PARALLEL_CROSSOVER_OPS` (`4_096`) in `graphforge-exec`. That
-  threshold is the smallest power-of-two probe count below the first measured
-  win boundary on the M4 agent host (4 vCPU, adversarial set fixture, 4 private
-  workers, release build): ≤3.3k probes are noise-dominated, ~4.3k probes first
-  win (~0.85× serial), ≥17k probes ≥2×. Smaller workloads stay serial.
+  `JACCARD_PARALLEL_CROSSOVER_OPS` (`16_384`) in `graphforge-exec`. That
+  threshold is the smallest power-of-two probe count below the first stable win
+  boundary on the M4 agent host (4 vCPU, adversarial set fixture, 4 private
+  workers, release build): ≤4.3k probes are noise-dominated, ~17k probes first
+  stable win (~0.65× serial), ≥48k probes ≥2×. Smaller workloads stay serial.
   Worker-local checkpoint counters avoid shared atomic contention on the
   candidate path.
 
