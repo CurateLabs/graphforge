@@ -117,7 +117,7 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
 EXPECTED_STICKY_KEYS = Counter(
     {
         # PR job-isolated Cargo target/ sticky disks retired after #4.
-        # Binding RC / fuzz / release-certification / release-load retain sticky for packaging lanes.
+        # Binding RC / fuzz / release-certification / release-load retain sticky packaging.
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"

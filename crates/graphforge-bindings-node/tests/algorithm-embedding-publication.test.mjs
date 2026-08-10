@@ -275,7 +275,9 @@ test("canonical algorithm IPC publishes, replaces, searches, and reopens", () =>
       ),
     );
 
-    const foreignProject = mkdtempSync(join(tmpdir(), "gf-node-algorithm-foreign-"));
+    const foreignProject = mkdtempSync(
+      join(tmpdir(), "gf-node-algorithm-foreign-"),
+    );
     const foreignForge = new GraphForge(foreignProject);
     try {
       const foreign = foreignForge.addNode("Person", { name: "Mallory" });

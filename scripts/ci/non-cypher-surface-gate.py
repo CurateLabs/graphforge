@@ -247,7 +247,8 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
     actual_algorithm = algorithm_registry()
     if len(actual_algorithm) != 94:
         errors.append(
-            f"source algorithm registry must contain exactly 94 entries, found {len(actual_algorithm)}"
+            "source algorithm registry must contain exactly 94 entries, "
+            f"found {len(actual_algorithm)}"
         )
     if missing := sorted(actual_algorithm - algorithm.keys()):
         errors.append("unclassified algorithm entries: " + ", ".join(missing))
