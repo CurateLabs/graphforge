@@ -3630,7 +3630,6 @@ mod tests {
         Int64Array, ListArray, StringArray, StructArray, UInt64Array,
     };
     use arrow::datatypes::DataType;
-    use sha2::Digest as _;
     use std::collections::HashSet;
 
     #[test]
