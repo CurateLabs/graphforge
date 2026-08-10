@@ -193,6 +193,10 @@ pub struct ValidatedProjectGeneration(StagedProjectGeneration);
 /// no participant until it owns that lock and has resolved the complete parent
 /// generation.
 ///
+/// When the request includes a `graph`/`files` inventory and no explicit tree
+/// source is provided, the parent's generation-owned `graph/` directory is
+/// carried forward after inventory verification.
+///
 /// # Errors
 /// Returns a stable project error for a busy writer, malformed participant,
 /// conflicting transaction replay, corrupt parent, or I/O failure.
@@ -200,7 +204,23 @@ pub fn stage_project_generation(
     container_root: impl AsRef<Path>,
     request: &ProjectGenerationRequest,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request)
+    stage_project_generation_with_graph_tree(container_root, request, None)
+}
+
+/// Stage a generation while supplying an explicit file-backed graph tree source.
+///
+/// `graph_tree` is required when publishing a new or replaced `graph`/`files`
+/// inventory that does not match the parent generation tree. Unchanged
+/// carry-forward can omit it; the parent tree is verified and copied.
+///
+/// # Errors
+/// Returns the same stable staging errors as [`stage_project_generation`].
+pub fn stage_project_generation_with_graph_tree(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_inner(container_root.as_ref(), request, graph_tree)
         .map_err(|error| map_stage_error(request, error))
 }
 
@@ -220,10 +240,30 @@ pub fn stage_project_generation_optimistic(
     request: &ProjectGenerationRequest,
     operation_fingerprint: [u8; 32],
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_optimistic_with_graph_tree(
+        container_root,
+        request,
+        operation_fingerprint,
+        None,
+    )
+}
+
+/// Optimistic staging with an explicit file-backed graph tree source.
+///
+/// # Errors
+/// Returns the same stable staging errors as
+/// [`stage_project_generation_optimistic`].
+pub fn stage_project_generation_optimistic_with_graph_tree(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    operation_fingerprint: [u8; 32],
+    graph_tree: Option<&Path>,
+) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_optimistic_inner(
         container_root.as_ref(),
         request,
         operation_fingerprint,
+        graph_tree,
     )
     .map_err(|error| map_stage_error(request, error))
 }
@@ -238,6 +278,7 @@ fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfErro
 fn stage_project_generation_inner(
     container_root: &Path,
     request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let root = canonical_supported_root(container_root)?;
     let writer_lock = acquire_writer_lock(&root, request)?;
@@ -249,13 +290,14 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
-    stage_project_generation_with_lock(root, writer_lock, parent, request, None)
+    stage_project_generation_with_lock(root, writer_lock, parent, request, None, graph_tree)
 }
 
 fn stage_project_generation_optimistic_inner(
     container_root: &Path,
     request: &ProjectGenerationRequest,
     operation_fingerprint: [u8; 32],
+    graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     let root = canonical_supported_root(container_root)?;
     let transaction_lock = acquire_transaction_lock(&root, request)?;
@@ -267,17 +309,22 @@ fn stage_project_generation_optimistic_inner(
         request,
         None,
         Some(operation_fingerprint),
+        graph_tree,
     )
 }
 
 /// Stage a generation using a writer lock and parent resolved by a composed
 /// storage operation such as complete-workspace checkpoint revert.
+///
+/// Pass `graph_tree` when the request's `graph`/`files` inventory must be
+/// staged from a non-parent source (for example a pinned checkpoint generation).
 pub(crate) fn stage_project_generation_with_lock(
     root: PathBuf,
     writer_lock: File,
     parent: ResolvedProjectGeneration,
     request: &ProjectGenerationRequest,
     revert: Option<RevertJournalExtension>,
+    graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_inner_with_locks(
         root,
@@ -286,6 +333,7 @@ pub(crate) fn stage_project_generation_with_lock(
         request,
         revert,
         None,
+        graph_tree,
     )
 }
 
@@ -296,6 +344,7 @@ fn stage_project_generation_inner_with_locks(
     request: &ProjectGenerationRequest,
     revert: Option<RevertJournalExtension>,
     operation_fingerprint: Option<[u8; 32]>,
+    graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let (capabilities, participants, request_fingerprint) = request_metadata(request)?;
@@ -343,6 +392,7 @@ fn stage_project_generation_inner_with_locks(
 
     stage_participant_files(request, &generation_root, &participants)?;
     sync_participant_directories(&generation_root.join(PARTICIPANTS_DIR), &participants)?;
+    stage_optional_graph_tree(request, &parent, &generation_root, graph_tree)?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",
         Some(request.transaction_uuid),
@@ -672,6 +722,82 @@ fn prepare_generation_directory(
     Ok(generation_root)
 }
 
+fn stage_optional_graph_tree(
+    request: &ProjectGenerationRequest,
+    parent: &ResolvedProjectGeneration,
+    generation_root: &Path,
+    graph_tree: Option<&Path>,
+) -> Result<(), GfError> {
+    let files_participant = request.participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    });
+    let snapshot_participant = request.participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == "snapshot"
+    });
+    if files_participant.is_some() && snapshot_participant.is_some() {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "graph generation cannot declare both snapshot and files participants",
+        ));
+    }
+    let Some(files_participant) = files_participant else {
+        if graph_tree.is_some() {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "graph_tree source requires a graph/files inventory participant",
+            ));
+        }
+        return Ok(());
+    };
+    if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
+        || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
+        || files_participant.encoding != ProjectParticipantEncoding::Json
+    {
+        return Err(project_error(
+            ProjectErrorCode::PublicationFailed,
+            "unsupported graph files participant contract",
+        ));
+    }
+    let inventory = crate::decode_inventory(&files_participant.bytes)?;
+    let parent_tree = parent.graph_tree_root();
+    let source = match graph_tree {
+        Some(path) => path,
+        None if parent_tree.exists() => {
+            crate::verify_graph_tree(&parent_tree, &inventory)?;
+            parent_tree.as_path()
+        }
+        None => {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "graph/files participant requires a graph_tree source directory",
+            ));
+        }
+    };
+    crate::stage_graph_tree(source, generation_root, &inventory)?;
+    sync_directory(generation_root)?;
+    Ok(())
+}
+
+fn verify_optional_graph_tree(
+    generation_root: &Path,
+    participants: &[StagedParticipant],
+) -> Result<(), GfError> {
+    let Some(files) = participants.iter().find(|participant| {
+        participant.capability_id == crate::GRAPH_CAPABILITY_ID
+            && participant.record_family_id == crate::GRAPH_FILES_FAMILY
+    }) else {
+        return Ok(());
+    };
+    let path = generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files.relative_path);
+    let bytes = std::fs::read(&path).map_err(publication_io)?;
+    let inventory = crate::decode_inventory(&bytes)?;
+    crate::verify_graph_tree(&crate::graph_tree_root(generation_root), &inventory)
+}
+
 fn stage_participant_files(
     request: &ProjectGenerationRequest,
     generation_root: &Path,
@@ -751,6 +877,7 @@ impl StagedProjectGeneration {
                 participant,
             )?;
         }
+        verify_optional_graph_tree(&self.generation_root, &self.participants)?;
         domain_validation(&self.participants)?;
         project_failpoint::hit(
             "project.after_domain_validation",
@@ -965,6 +1092,7 @@ fn make_generation_durable(staged: &StagedProjectGeneration) -> Result<[u8; 32],
             participant,
         )?;
     }
+    verify_optional_graph_tree(&staged.generation_root, &staged.participants)?;
     verify_exact_file(&manifest_path, &manifest_bytes)?;
     sync_participant_directories(
         &staged.generation_root.join(PARTICIPANTS_DIR),

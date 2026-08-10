@@ -83,12 +83,19 @@ eager Parquet materialization, single-partition custom plans, serial algorithm
 kernels, and CSR-to-map conversion where still observable. Optimizations belong
 to later M4 issues.
 
-## Discovery evidence (not a public baseline)
+## Discovery evidence (not a universal size ceiling)
 
-The lower-level **~8M-node / ~128M-edge** local scale report is classified as
-`discovery_not_public_facade_baseline`. It does not traverse the current public
-snapshot path. Public-product claims at that scale require #338 and public-facade
-reruns (#345).
+The lower-level **~8M-node / ~128M-edge** local scale report remains
+`discovery_not_public_facade_baseline` for full measured public-product
+baselines (#345). Public persistence itself is no longer blocked by the legacy
+1/2 GiB Arrow snapshot envelope: #338 publishes `graph`/`files` generations and
+proves reopen through `GraphForge::new` past 2 GiB validated bytes (see
+[`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json);
+regenerate into `build/` with the ignored oversize test).
+
+CI proves the path with a small multi-file fixture
+(`--test file_backed_graph_generation`) and does not download 8M/128M data.
+Optional measured 8M/128M public-facade reruns stay under local resource stops.
 
 ## Citation for M4 implementation issues
 

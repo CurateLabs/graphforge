@@ -208,7 +208,15 @@
       "approx_edges": 128000000,
       "path": "lower-level Rust construction/execution (not GraphForge::new public snapshot path)",
       "public_facade_owner_issue": 338,
-      "notes": "Retain as qualified discovery evidence only. Do not present as an accepted public-product baseline until #338 and public-facade reruns prove the supported path."
+      "notes": "Retain as qualified discovery evidence. Public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed graph/files (#338 oversize evidence). Full 8M/128M public-facade reruns remain optional measured evidence under local resource stops for #345."
+    },
+    {
+      "id": "file-backed-oversize-beyond-snapshot-envelope",
+      "classification": "public_facade_persistence_proof",
+      "owner_issue": 338,
+      "path": "crates/graphforge-api/tests/file_backed_graph_generation.rs::oversize_file_backed_generation_exceeds_legacy_snapshot_envelope",
+      "evidence_artifact": "docs/development/file-backed-oversize-evidence.json",
+      "notes": "Deterministic sparse multi-file generation whose validated bytes exceed 2 GiB; published and reopened through the public GraphForge path without Arrow snapshot hydrate. CI keeps the small fixture only; regenerate via the ignored oversize test into build/."
     }
   ],
   "evidence_artifact": {
@@ -229,7 +237,7 @@
     "Eager Parquet materialization into single-partition MemTable remains observable.",
     "CSR-to-hash-map expansion remains on analyst/traversal paths (#340).",
     "Algorithm kernels remain serial (#342-#344).",
-    "Public snapshot envelope still bounds GraphForge::new scale claims (#338).",
+    "Portable interchange does not yet encode file-backed graph/files trees (structured GF_UNSUPPORTED_PROJECT_FORMAT); copy the project directory instead (#338).",
     "Wall-clock numbers are hardware-specific and never CI pass/fail gates.",
     "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results."
   ]

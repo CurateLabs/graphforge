@@ -177,7 +177,7 @@ impl GraphForge {
         let expected_parent = parent.generation_uuid();
         let transaction_uuid = request.context.operation_uuid.0;
 
-        let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
+        let prior_generation = parent.clone();
         let prior_catalog = self
             .runtime_catalog
             .lock()
@@ -191,7 +191,7 @@ impl GraphForge {
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
-            let graph = crate::graph_snapshot::capture(&self.dir)?;
+            let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
             let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
                 .capabilities()
@@ -208,13 +208,18 @@ impl GraphForge {
                 participants,
             };
             let staged = if optimistic {
-                graphforge_storage::stage_project_generation_optimistic(
+                graphforge_storage::stage_project_generation_optimistic_with_graph_tree(
                     root,
                     &publication,
                     content_fingerprint,
+                    Some(self.dir.as_path()),
                 )?
             } else {
-                graphforge_storage::stage_project_generation(root, &publication)?
+                graphforge_storage::stage_project_generation_with_graph_tree(
+                    root,
+                    &publication,
+                    Some(self.dir.as_path()),
+                )?
             };
             #[cfg(test)]
             optimistic_publish_barrier_for_test(optimistic);
@@ -261,7 +266,8 @@ impl GraphForge {
                 // the validation or conflict that caused publication to abort.
                 if let Ok(durable) = graphforge_storage::resolve_project_generation(root) {
                     if durable.generation_uuid() == expected_parent {
-                        if crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir).is_ok()
+                        if crate::rematerialize_graph_workspace(&prior_generation, &self.dir)
+                            .is_ok()
                         {
                             *self
                                 .runtime_catalog
@@ -509,18 +515,7 @@ fn reconcile_workspace_to(
     graph: &GraphForge,
     generation: &ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
-    let snapshot = generation
-        .participant_snapshot("graph", "snapshot")?
-        .ok_or_else(|| GfError::Validation("generation is missing graph snapshot".into()))?;
-    if snapshot.capability_version != 1
-        || snapshot.record_version != 1
-        || snapshot.encoding != "arrow"
-    {
-        return Err(GfError::Validation(
-            "unsupported graph snapshot participant contract".into(),
-        ));
-    }
-    crate::graph_snapshot::restore(&snapshot.bytes, &graph.dir)?;
+    crate::rematerialize_graph_workspace(generation, &graph.dir)?;
     *graph
         .runtime_catalog
         .lock()
@@ -965,7 +960,8 @@ fn assemble_composite_participants(
             !(replaced.contains(&(
                 snapshot.capability_id.as_str(),
                 snapshot.record_family_id.as_str(),
-            )) || snapshot.capability_id == "graph" && snapshot.record_family_id == "snapshot")
+            )) || snapshot.capability_id == "graph"
+                && matches!(snapshot.record_family_id.as_str(), "snapshot" | "files"))
         })
         .map(crate::knowledge::snapshot_to_participant)
         .collect::<Result<Vec<_>, _>>()?;
@@ -1050,6 +1046,7 @@ fn replacement_families(
     let mut replaced = HashSet::new();
     if !request.graph_mutations.is_empty() {
         replaced.insert(("graph", "snapshot"));
+        replaced.insert(("graph", "files"));
     }
     if !k.provenance_events.is_empty() || !k.lineage.is_empty() {
         replaced.insert(("provenance", "events"));

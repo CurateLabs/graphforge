@@ -13,14 +13,14 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Inventory SHA | `6e8b8e3fdc1ecd960eacf14a73e5be7b54fcef3c` |
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
-| Cargo metadata targets | **90** |
-| Bazel modeling claimed complete? | **Yes** — all 90 Cargo targets mapped (#10–#6); retained tools justified in exceptions |
+| Cargo metadata targets | **93** |
+| Bazel modeling claimed complete? | **Yes** — all 93 Cargo targets mapped (#10–#6 + #338); retained tools justified in exceptions |
 | Machine-readable map | `tools/bazel/parity/migration_target_map.json` (fail-closed via `scripts/ci/bazel-migration-ledger-check.py`) |
 | Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); parity evidence [bazel-migration-parity.md](bazel-migration-parity.md) |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
-This freeze uses the **current authoritative** metadata count (**90** targets;
-**59** integration-test binaries). Later slices must update rows,
+This freeze uses the **current authoritative** metadata count (**93** targets;
+**62** integration-test binaries). Later slices must update rows,
 not silently ignore new targets.
 
 ## Target class summary
@@ -28,12 +28,12 @@ not silently ignore new targets.
 | Class | Count | Notes |
 | --- | ---: | --- |
 | `lib` | 15 | First-party libraries (unit/doctest surface rides these targets under `cargo test --lib` / doctests) |
-| `integration-test` | 59 | `tests/*.rs` integration binaries |
+| `integration-test` | 62 | `tests/*.rs` integration binaries |
 | `cdylib` | 2 | PyO3 + napi-rs native libs |
 | `bin` | 1 | CLI (`gf`) |
 | `custom-build` | 2 | `build.rs` scripts |
 | `example` | 11 | API examples mapped as `//crates/graphforge-api:<name>` (#6) |
-| **Total** | **90** | |
+| **Total** | **93** | |
 
 ### Unit tests and doctests
 
@@ -86,6 +86,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `m22_m19_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m19_public_surface.rs` | `//crates/graphforge-api:m22_m19_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m22_provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_provider_public_surface.rs` | `//crates/graphforge-api:m22_provider_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m4_entry_baseline` | `integration-test` | `crates/graphforge-api/tests/m4_entry_baseline.rs` | `//crates/graphforge-api:m4_entry_baseline` | `mapped` | #8 |
+| `graphforge-api` | `file_backed_graph_generation` | `integration-test` | `crates/graphforge-api/tests/file_backed_graph_generation.rs` | `//crates/graphforge-api:file_backed_graph_generation` | `mapped` | #338 |
 | `graphforge-api` | `max_bipartite_matching` | `integration-test` | `crates/graphforge-api/tests/max_bipartite_matching.rs` | `//crates/graphforge-api:max_bipartite_matching` | `mapped` | #8 |
 | `graphforge-api` | `max_cardinality_matching` | `integration-test` | `crates/graphforge-api/tests/max_cardinality_matching.rs` | `//crates/graphforge-api:max_cardinality_matching` | `mapped` | #8 |
 | `graphforge-api` | `max_weight_matching` | `integration-test` | `crates/graphforge-api/tests/max_weight_matching.rs` | `//crates/graphforge-api:max_weight_matching` | `mapped` | #8 |

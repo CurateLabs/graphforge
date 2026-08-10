@@ -114,8 +114,9 @@ project/
 │   └── <generation-uuid>/
 │       ├── lease.lock
 │       ├── manifest.json
+│       ├── graph/              # file-backed graph workspace (optional; with graph/files)
 │       └── participants/
-│           ├── graph/...
+│           ├── graph/...       # snapshot.arrow (legacy) or files.json (inventory)
 │           ├── workspace/
 │           │   ├── configuration.json
 │           │   └── ontology.json
@@ -128,9 +129,12 @@ project/
 A minimal committed generation declares `graph@1` and `workspace@1`.
 `workspace@1` contains canonical JSON records for explicit ontology absence (or
 an adopted advisory/strict ontology) and authoritative registered project
-configuration. Project open validates these records before hydrating graph
-data. Root YAML/JSON and environment settings are inputs only and cannot
-override the selected generation.
+configuration. Project open validates these records before opening graph
+data. New publications store graph workspace files under the generation-owned
+`graph/` tree with a `graph`/`files` inventory participant; legacy
+`graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
+environment settings are inputs only and cannot override the selected
+generation.
 
 Optional capability absence is recorded in the generation manifest; it is not
 inferred by scanning folders. Graph-only readers validate the mandatory

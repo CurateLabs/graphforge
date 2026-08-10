@@ -154,7 +154,7 @@ fn strict_runtime_properties_are_owner_validated_atomic_and_reopen_stable() {
     let generation_before_failure =
         graphforge_storage::resolve_project_generation(project.path()).unwrap();
     let graph_bytes_before_failure = generation_before_failure
-        .participant_snapshot("graph", "snapshot")
+        .participant_snapshot("graph", graphforge_storage::GRAPH_FILES_FAMILY)
         .unwrap()
         .unwrap()
         .bytes;
@@ -188,7 +188,7 @@ fn strict_runtime_properties_are_owner_validated_atomic_and_reopen_stable() {
     );
     assert_eq!(
         generation_after_failure
-            .participant_snapshot("graph", "snapshot")
+            .participant_snapshot("graph", graphforge_storage::GRAPH_FILES_FAMILY)
             .unwrap()
             .unwrap()
             .bytes,

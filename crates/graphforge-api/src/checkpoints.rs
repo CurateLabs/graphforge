@@ -161,6 +161,11 @@ impl CheckpointView {
     pub fn generation_uuid(&self) -> Uuid {
         self.checkpoint.generation_uuid
     }
+    /// Structural evidence for how the pinned graph workspace was opened.
+    #[must_use]
+    pub fn graph_open_evidence(&self) -> &graphforge_storage::GraphFilesOpenEvidence {
+        self.graph.graph_open_evidence()
+    }
     /// Execute a read-only Cypher statement against the pinned generation.
     pub fn execute(&self, cypher: &str) -> Result<ExecutionResult, GfError> {
         self.graph.execute_read_only(cypher)
@@ -1015,7 +1020,9 @@ fn logical_records(
             continue;
         }
         cancellation(page)?;
-        if descriptor.capability_id == "graph" && descriptor.record_family_id == "snapshot" {
+        if descriptor.capability_id == "graph"
+            && matches!(descriptor.record_family_id.as_str(), "snapshot" | "files")
+        {
             let records = crate::checkpoint_graph_diff::extract_logical_graph_records(
                 generation,
                 page.cancellation.as_ref(),
@@ -1290,7 +1297,7 @@ fn validate_revert_source(
     generation: &graphforge_storage::ResolvedProjectGeneration,
 ) -> Result<(), GfError> {
     generation.validate_complete_participant_inventory()?;
-    let _workspace = crate::hydrate_graph_workspace(generation)?;
+    let _workspace = crate::hydrate_graph_workspace(generation, true)?;
     let _ontology = generation
         .participant_snapshot(
             graphforge_storage::WORKSPACE_CAPABILITY_ID,
@@ -3649,7 +3656,12 @@ mod tests {
                     let (_, generation) =
                         graphforge_storage::open_checkpoint_generation(directory.path(), "Stable")
                             .unwrap();
-                    let path = generation.participant_path("graph", "snapshot").unwrap();
+                    let path = generation
+                        .participant_path(
+                            graphforge_storage::GRAPH_CAPABILITY_ID,
+                            graphforge_storage::GRAPH_FILES_FAMILY,
+                        )
+                        .unwrap();
                     std::fs::write(path, b"corrupt checkpoint participant").unwrap();
                 }
                 _ => unreachable!(),

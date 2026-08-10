@@ -340,11 +340,13 @@ pub struct GraphForge {
     /// Injected durable-write UTC microsecond clock.
     clock: Mutex<Arc<dyn Fn() -> Result<i64, GfError> + Send + Sync>>,
     /// Project directory backing topology/properties Parquet files. For an
-    /// instance this is a private mutable workspace hydrated from the pinned
-    /// graph snapshot.
+    /// instance this is a private mutable workspace materialized from the pinned
+    /// graph generation (file-backed tree or legacy snapshot).
     dir: PathBuf,
     /// Keeps the private mutable graph workspace alive for the engine's life.
     workspace_guard: Arc<tempfile::TempDir>,
+    /// Structural evidence for how the graph workspace was opened.
+    graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
     tempdir: Option<Arc<tempfile::TempDir>>,
     /// Compiled ontology, present in advisory/strict mode.
@@ -464,8 +466,8 @@ impl GraphForge {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
-        let workspace = hydrate_graph_workspace(&resolved_generation)?;
-        let dir = workspace.path().to_path_buf();
+        let (dir, workspace, graph_open_evidence) =
+            hydrate_graph_workspace(&resolved_generation, false)?;
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
@@ -493,6 +495,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             dir,
             workspace_guard: workspace,
+            graph_open_evidence,
             tempdir: Some(Arc::new(tmp)),
             ontology,
             ontology_document,
@@ -507,6 +510,12 @@ impl GraphForge {
     #[cfg(test)]
     fn set_clock_for_test(&self, clock: impl Fn() -> Result<i64, GfError> + Send + Sync + 'static) {
         *self.clock.lock().expect("clock lock poisoned") = Arc::new(clock);
+    }
+
+    /// Structural evidence for the graph open/materialization strategy.
+    #[must_use]
+    pub fn graph_open_evidence(&self) -> &graphforge_storage::GraphFilesOpenEvidence {
+        &self.graph_open_evidence
     }
 
     fn open_dir_with_options(
@@ -551,8 +560,8 @@ impl GraphForge {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
-        let workspace = hydrate_graph_workspace(&resolved_generation)?;
-        let dir = workspace.path().to_path_buf();
+        let (dir, workspace, graph_open_evidence) =
+            hydrate_graph_workspace(&resolved_generation, read_only)?;
 
         let runtime_catalog = load_runtime_catalog(&dir);
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
@@ -586,6 +595,7 @@ impl GraphForge {
             provider_find_runtimes: Arc::new(Mutex::new(Vec::new())),
             dir,
             workspace_guard: workspace,
+            graph_open_evidence,
             tempdir: None,
             ontology,
             ontology_document,
@@ -844,8 +854,15 @@ impl GraphForge {
             .current_generation_uuid
             .lock()
             .expect("generation UUID lock poisoned");
-        let prior_snapshot = is_write
-            .then(|| graph_snapshot::capture(&self.dir))
+        // File-backed generations restore from the still-authoritative parent
+        // generation on publish failure instead of capturing a whole-workspace
+        // Arrow snapshot envelope.
+        let rollback_generation = is_write
+            .then(|| {
+                graphforge_storage::resolve_project_generation(
+                    self.resolved_generation.container_root(),
+                )
+            })
             .transpose()?;
 
         // Open a catalog snapshot reflecting the freshly-bound runtime catalog so
@@ -893,9 +910,9 @@ impl GraphForge {
             .as_ref()
             .filter(|receipt| !receipt.is_empty())
         {
-            let prior_snapshot = prior_snapshot
+            let rollback_generation = rollback_generation
                 .as_ref()
-                .expect("write path captured a rollback snapshot");
+                .expect("write path resolved a rollback generation");
             if let Err(error) = self.publish_graph_mutation(receipt) {
                 let still_prior = *self
                     .current_generation_uuid
@@ -903,7 +920,7 @@ impl GraphForge {
                     .expect("generation UUID lock poisoned")
                     == expected_generation_before_write;
                 if still_prior {
-                    graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
+                    rematerialize_graph_workspace(rollback_generation, &self.dir)?;
                     self.adjacency_provider.invalidate();
                 }
                 return Err(error);
@@ -953,7 +970,7 @@ impl GraphForge {
             ));
         }
 
-        let graph = graph_snapshot::capture(&self.dir)?;
+        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -979,7 +996,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation(root, &request)? {
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+            root,
+            &request,
+            Some(self.dir.as_path()),
+        )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
                 .validate(
@@ -1036,7 +1057,7 @@ impl GraphForge {
                 "project generation changed before graph publication".into(),
             ));
         }
-        let graph = graph_snapshot::capture(&self.dir)?;
+        let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
             &parent,
@@ -1061,7 +1082,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation(root, &request)? {
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+            root,
+            &request,
+            Some(self.dir.as_path()),
+        )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
                 .validate(
@@ -3073,7 +3098,66 @@ fn build_runtime(
 
 fn hydrate_graph_workspace(
     generation: &ResolvedProjectGeneration,
-) -> Result<Arc<tempfile::TempDir>, GfError> {
+    read_only: bool,
+) -> Result<
+    (
+        PathBuf,
+        Arc<tempfile::TempDir>,
+        graphforge_storage::GraphFilesOpenEvidence,
+    ),
+    GfError,
+> {
+    let files = generation.participant_snapshot(
+        graphforge_storage::GRAPH_CAPABILITY_ID,
+        graphforge_storage::GRAPH_FILES_FAMILY,
+    )?;
+    let snapshot = generation.participant_snapshot("graph", "snapshot")?;
+    if files.is_some() && snapshot.is_some() {
+        return Err(GfError::Validation(
+            "graph generation cannot declare both snapshot and files participants".into(),
+        ));
+    }
+
+    if let Some(files) = files {
+        if files.capability_version != graphforge_storage::GRAPH_CAPABILITY_VERSION
+            || files.record_version != graphforge_storage::GRAPH_FILES_RECORD_VERSION
+            || files.encoding != "json"
+        {
+            return Err(GfError::Validation(
+                "unsupported graph files participant contract".into(),
+            ));
+        }
+        let inventory = graphforge_storage::decode_inventory(&files.bytes)?;
+        let tree = generation.graph_tree_root();
+        graphforge_storage::verify_graph_tree(&tree, &inventory)?;
+        if read_only {
+            let guard = Arc::new(
+                tempfile::Builder::new()
+                    .prefix("graphforge-graph-pinned-")
+                    .tempdir()
+                    .map_err(|error| {
+                        GfError::Storage(format!("failed to create graph workspace guard: {error}"))
+                    })?,
+            );
+            return Ok((
+                tree,
+                guard,
+                graphforge_storage::pinned_open_evidence(&inventory),
+            ));
+        }
+        let workspace = Arc::new(
+            tempfile::Builder::new()
+                .prefix("graphforge-graph-workspace-")
+                .tempdir()
+                .map_err(|error| {
+                    GfError::Storage(format!("failed to create graph workspace: {error}"))
+                })?,
+        );
+        let evidence =
+            graphforge_storage::materialize_graph_tree(&tree, &inventory, workspace.path())?;
+        return Ok((workspace.path().to_path_buf(), workspace, evidence));
+    }
+
     let workspace = Arc::new(
         tempfile::Builder::new()
             .prefix("graphforge-graph-workspace-")
@@ -3082,7 +3166,11 @@ fn hydrate_graph_workspace(
                 GfError::Storage(format!("failed to create graph workspace: {error}"))
             })?,
     );
-    if let Some(snapshot) = generation.participant_snapshot("graph", "snapshot")? {
+    let mut evidence = graphforge_storage::GraphFilesOpenEvidence {
+        strategy: graphforge_storage::GraphFilesOpenStrategy::Empty,
+        ..graphforge_storage::GraphFilesOpenEvidence::default()
+    };
+    if let Some(snapshot) = snapshot {
         if snapshot.capability_version != 1
             || snapshot.record_version != 1
             || snapshot.encoding != "arrow"
@@ -3092,8 +3180,63 @@ fn hydrate_graph_workspace(
             ));
         }
         graph_snapshot::hydrate(&snapshot.bytes, workspace.path())?;
+        evidence.strategy = graphforge_storage::GraphFilesOpenStrategy::LegacySnapshotHydrate;
+        evidence.bytes_copied = u64::try_from(snapshot.bytes.len()).unwrap_or(u64::MAX);
+        evidence.files_copied = 1;
     }
-    Ok(workspace)
+    Ok((workspace.path().to_path_buf(), workspace, evidence))
+}
+
+pub(crate) fn rematerialize_graph_workspace(
+    generation: &ResolvedProjectGeneration,
+    target: &std::path::Path,
+) -> Result<(), GfError> {
+    if target.exists() {
+        for entry in std::fs::read_dir(target).map_err(|error| {
+            GfError::Storage(format!(
+                "failed to read graph workspace for restore: {error}"
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                GfError::Storage(format!("failed to read graph workspace entry: {error}"))
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                GfError::Storage(format!("failed to inspect graph workspace entry: {error}"))
+            })?;
+            if file_type.is_dir() {
+                std::fs::remove_dir_all(&path).map_err(|error| {
+                    GfError::Storage(format!(
+                        "failed to clear graph workspace directory: {error}"
+                    ))
+                })?;
+            } else {
+                std::fs::remove_file(&path).map_err(|error| {
+                    GfError::Storage(format!("failed to clear graph workspace file: {error}"))
+                })?;
+            }
+        }
+    }
+    if let Some(inventory) = generation.graph_files_inventory()? {
+        graphforge_storage::materialize_graph_tree(
+            &generation.graph_tree_root(),
+            &inventory,
+            target,
+        )?;
+        return Ok(());
+    }
+    if let Some(snapshot) = generation.participant_snapshot("graph", "snapshot")? {
+        if snapshot.capability_version != 1
+            || snapshot.record_version != 1
+            || snapshot.encoding != "arrow"
+        {
+            return Err(GfError::Validation(
+                "unsupported graph snapshot participant contract".into(),
+            ));
+        }
+        graph_snapshot::hydrate(&snapshot.bytes, target)?;
+    }
+    Ok(())
 }
 
 fn load_workspace_ontology(
@@ -3187,7 +3330,8 @@ fn graph_publication_participants(
         .participant_snapshots()?
         .into_iter()
         .filter(|snapshot| {
-            !(snapshot.capability_id == "graph" && snapshot.record_family_id == "snapshot"
+            !(snapshot.capability_id == "graph"
+                && matches!(snapshot.record_family_id.as_str(), "snapshot" | "files")
                 || provenance_enabled
                     && snapshot.capability_id == "provenance"
                     && matches!(snapshot.record_family_id.as_str(), "events" | "lineage"))

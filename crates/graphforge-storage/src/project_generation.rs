@@ -137,6 +137,36 @@ impl ResolvedProjectGeneration {
         self.generation_root.join(PARTICIPANTS_DIR)
     }
 
+    /// Generation-owned file-backed graph tree root (`graph/`).
+    #[must_use]
+    pub fn graph_tree_root(&self) -> PathBuf {
+        crate::graph_tree_root(&self.generation_root)
+    }
+
+    /// Load and validate the file-backed graph inventory when declared.
+    ///
+    /// # Errors
+    /// Returns structured validation/corruption errors for unsupported
+    /// contracts or inventory/tree mismatch.
+    pub fn graph_files_inventory(&self) -> Result<Option<crate::GraphFilesInventory>, GfError> {
+        let Some(snapshot) =
+            self.participant_snapshot(crate::GRAPH_CAPABILITY_ID, crate::GRAPH_FILES_FAMILY)?
+        else {
+            return Ok(None);
+        };
+        if snapshot.capability_version != crate::GRAPH_CAPABILITY_VERSION
+            || snapshot.record_version != crate::GRAPH_FILES_RECORD_VERSION
+            || snapshot.encoding != "json"
+        {
+            return Err(GfError::Validation(
+                "unsupported graph files participant contract".into(),
+            ));
+        }
+        let inventory = crate::decode_inventory(&snapshot.bytes)?;
+        crate::verify_graph_tree(&self.graph_tree_root(), &inventory)?;
+        Ok(Some(inventory))
+    }
+
     /// SHA-256 over the exact selected `manifest.json` bytes.
     #[must_use]
     pub const fn manifest_sha256(&self) -> [u8; 32] {

@@ -25,6 +25,15 @@ pub use graph_projection::{
     GraphProjectionSelection, GraphProjectionSummary, materialize_graph_projection,
 };
 
+pub mod graph_files;
+pub use graph_files::{
+    GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GRAPH_FILES_FAMILY, GRAPH_FILES_RECORD_VERSION,
+    GRAPH_TREE_DIR, GraphFileEntry, GraphFileRole, GraphFilesInventory, GraphFilesOpenEvidence,
+    GraphFilesOpenStrategy, capture_graph_files, decode_inventory, encode_inventory,
+    graph_tree_root, inventory_participant, materialize_graph_tree, pinned_open_evidence,
+    stage_graph_tree, verify_graph_tree,
+};
+
 pub mod project_generation;
 pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
@@ -46,7 +55,8 @@ pub use project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectPublicationReceipt, ProjectStageOutcome, StagedParticipant, StagedProjectGeneration,
     ValidatedProjectGeneration, published_project_transaction, stage_project_generation,
-    stage_project_generation_optimistic,
+    stage_project_generation_optimistic, stage_project_generation_optimistic_with_graph_tree,
+    stage_project_generation_with_graph_tree,
 };
 
 pub mod project_recovery;

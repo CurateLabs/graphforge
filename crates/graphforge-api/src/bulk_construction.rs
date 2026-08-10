@@ -492,7 +492,9 @@ impl GraphForge {
             .into());
         }
 
-        let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
+        let prior_generation = graphforge_storage::resolve_project_generation(
+            self.resolved_generation.container_root(),
+        )?;
         let prior_catalog = self
             .runtime_catalog
             .lock()
@@ -558,7 +560,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned")
                 == expected_parent;
             if still_prior {
-                crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
+                crate::rematerialize_graph_workspace(&prior_generation, &self.dir)?;
             } else {
                 *self
                     .runtime_catalog
@@ -763,7 +765,9 @@ impl GraphForge {
             .into());
         }
 
-        let prior_snapshot = crate::graph_snapshot::capture(&self.dir)?;
+        let prior_generation = graphforge_storage::resolve_project_generation(
+            self.resolved_generation.container_root(),
+        )?;
         let prior_catalog = self
             .runtime_catalog
             .lock()
@@ -842,7 +846,7 @@ impl GraphForge {
                 .expect("generation UUID lock poisoned")
                 == expected_parent;
             if still_prior {
-                crate::graph_snapshot::restore(&prior_snapshot.bytes, &self.dir)?;
+                crate::rematerialize_graph_workspace(&prior_generation, &self.dir)?;
             } else {
                 *self
                     .runtime_catalog
