@@ -4,7 +4,8 @@
 //! batch size, memory, spill, I/O concurrency, and heavy-query admission
 //! before a [`crate::GraphForge`] instance begins work. `compute_threads`
 //! sizes the instance-owned private CPU pool consumed by parallel cosine KNN
-//! (#342), parallel PageRank (#343), and sibling deterministic CPU kernels.
+//! (#342), parallel PageRank (#343), Node2Vec walk generation (#344), and
+//! sibling deterministic CPU kernels.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -54,11 +55,11 @@ pub struct ExecutionResourcePolicy {
     pub io_concurrency: Option<usize>,
     /// Maximum concurrent heavy Cypher / analyst invocations. `None` → 64.
     pub max_concurrent_heavy_queries: Option<usize>,
-    /// Compute-thread budget for the instance-owned private CPU pool (#337 / #342 / #343).
+    /// Compute-thread budget for the instance-owned private CPU pool (#337 / #342 / #343 / #344).
     ///
-    /// Parallel cosine KNN partitions work by canonical source, and parallel
-    /// PageRank partitions destination-owned updates, through that pool
-    /// when work exceeds the documented crossover; `1` keeps the serial path.
+    /// Parallel cosine KNN, PageRank destination updates, and Node2Vec walk
+    /// generation partition work through that pool above documented crossovers;
+    /// `1` keeps the serial path.
     pub compute_threads: Option<usize>,
 }
 
@@ -102,7 +103,7 @@ pub struct NormalizedResourcePolicy {
     pub io_concurrency: usize,
     /// Heavy-query admission slots.
     pub max_concurrent_heavy_queries: usize,
-    /// Compute-thread budget for the instance-owned private CPU pool (#342 / #343).
+    /// Compute-thread budget for the instance-owned private CPU pool (#342 / #343 / #344).
     pub compute_threads: usize,
     /// Machine logical parallelism observed at normalize time.
     pub observed_logical_cpus: usize,

@@ -364,6 +364,16 @@ impl<'a> EmbeddingControl<'a> {
         self.algorithm.check_cancelled()?;
         Ok(())
     }
+
+    /// Declared compute-thread budget for parallel embedding kernels (#344).
+    pub(crate) fn compute_threads(&self) -> usize {
+        self.algorithm.compute_threads()
+    }
+
+    /// Borrow the instance-owned private compute pool when attached (#344).
+    pub(crate) fn compute_pool(&self) -> Option<&crate::ComputePool> {
+        self.algorithm.compute_pool()
+    }
 }
 
 #[cfg(test)]

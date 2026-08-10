@@ -2020,7 +2020,35 @@ pub fn embedding_algorithm_execution(
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
 ) -> Result<EmbeddingExecution, GfError> {
-    let prepared = prepare_embedding_projection(provider, dir, mode, label, invocation)?;
+    embedding_algorithm_execution_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        label_name,
+        invocation,
+        AlgorithmLimits::default(),
+        None,
+    )
+}
+
+/// Execute an embedding with shaping/compute limits and an optional private pool (#344).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors embedding_algorithm_execution plus instance compute handles"
+)]
+pub fn embedding_algorithm_execution_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: Option<TypeId>,
+    label_name: Option<&str>,
+    invocation: &EmbeddingAnalyzeOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<EmbeddingExecution, GfError> {
+    let prepared =
+        prepare_embedding_projection(provider, dir, mode, label, invocation, limits, compute)?;
     let invocation = &prepared.invocation;
     embedding_algorithm_execution_with_controls(
         &prepared.graph,
@@ -2051,6 +2079,8 @@ fn prepare_embedding_projection(
     mode: OntologyMode,
     label: Option<TypeId>,
     invocation: &EmbeddingAnalyzeOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
 ) -> Result<PreparedEmbeddingProjection, GfError> {
     let invocation = normalize_embedding_options(invocation)?;
     let mut graph = export_adjacency(
@@ -2091,8 +2121,10 @@ fn prepare_embedding_projection(
         }
         _ => None,
     };
-    let algorithm_control =
-        AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+    let mut algorithm_control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    if let Some(pool) = compute {
+        algorithm_control = algorithm_control.with_compute_pool(pool);
+    }
     let resource_limits = EmbeddingResourceLimits::default();
     if let EmbeddingOptions::HashGnn(options) = &invocation.options {
         let topology = TopologyResources {
@@ -2134,7 +2166,35 @@ pub fn prepare_embedding_invocation_descriptor(
     label_name: Option<&str>,
     invocation: &EmbeddingAnalyzeOptions,
 ) -> Result<EmbeddingInvocationDescriptor, GfError> {
-    let prepared = prepare_embedding_projection(provider, dir, mode, label, invocation)?;
+    prepare_embedding_invocation_descriptor_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        label_name,
+        invocation,
+        AlgorithmLimits::default(),
+        None,
+    )
+}
+
+/// Prepare an embedding descriptor with the instance compute budget recorded (#344).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors prepare_embedding_invocation_descriptor plus compute handles"
+)]
+pub fn prepare_embedding_invocation_descriptor_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: Option<TypeId>,
+    label_name: Option<&str>,
+    invocation: &EmbeddingAnalyzeOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<EmbeddingInvocationDescriptor, GfError> {
+    let prepared =
+        prepare_embedding_projection(provider, dir, mode, label, invocation, limits, compute)?;
     let invocation = &prepared.invocation;
     let limits = prepared.algorithm_control.configured_limits();
     Ok(EmbeddingInvocationDescriptor {
