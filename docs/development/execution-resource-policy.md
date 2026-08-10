@@ -68,12 +68,13 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Cosine dot products retain serial coordinate order,
-PageRank keeps canonical contribution order with serial dangling/delta
-reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
-the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+betweenness Brandes source searches (#501) may partition independent work across
+that pool above documented crossovers; work never uses Rayon's process-global
+pool. Cosine dot products retain serial coordinate order, PageRank keeps
+canonical contribution order with serial dangling/delta reductions, Node2Vec
+skip-gram training stays serial, and betweenness reduces per-source dependency
+arrays in canonical source order, so fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -128,6 +129,33 @@ serial path runs with no pool scheduling tax. Worker-local token counts merge
 by canonical node ordinal with checked addition. Training order and arithmetic
 are unchanged, so schemas, row order, metadata, and fingerprints match the
 one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel betweenness Brandes BFS (#501)
+
+`rank(by="betweenness")` partitions independent Brandes **source** searches
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated source-search work
+  (`selected_nodes × (selected_nodes + selected_adjacency_entries)`) is at least
+  `BETWEENNESS_PARALLEL_CROSSOVER_WORK` (`65_536`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial source loop runs with no pool scheduling tax. The crossover is the
+smallest power-of-two work estimate at/above the measured win boundary on the
+M4 agent host (4 vCPU, directed chord fixture, 4 private workers, release
+build): sub-32k source-search work remains noise dominated, while fixtures above
+64k first amortize pool scheduling.
+
+Each worker runs a complete serial Brandes BFS/dependency pass for every source
+it owns; no individual BFS frontier, predecessor list, or dependency array is
+parallelized. Worker outputs carry one dependency contribution array per source.
+The caller replays cooperative checkpoints and accumulates those arrays in
+ascending source ordinal order, matching the one-thread floating-point addition
+order. Worker loops use cancellation checks rather than shared checkpoint
+mutation; cancellation and limit failures remain structured. Schemas, row order,
+scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 
