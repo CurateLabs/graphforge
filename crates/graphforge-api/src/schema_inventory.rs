@@ -248,7 +248,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{inventory_json, inventory_sha256, epistemic_inventory_json};
+    use super::{epistemic_inventory_json, inventory_json, inventory_sha256};
 
     fn repository_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

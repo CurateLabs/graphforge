@@ -287,7 +287,11 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
             "search contracts assigned to multiple evidence groups: " + ", ".join(duplicates)
         )
 
-    for group, entries in (("methods", methods), ("algorithm_registry", algorithm), ("search_contracts", search)):
+    for group, entries in (
+        ("methods", methods),
+        ("algorithm_registry", algorithm),
+        ("search_contracts", search),
+    ):
         for entry_id, entry in entries.items():
             classification = entry.get("classification")
             if classification not in ALLOWED_CLASSIFICATIONS:

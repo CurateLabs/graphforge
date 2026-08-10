@@ -398,7 +398,9 @@ fn decode_algorithm_rows(
             .downcast_ref::<Float32Array>()
             .ok_or_else(|| validation("algorithm embedding row is not Float32"))?;
         if values.null_count() != 0 {
-            return Err(validation("algorithm embedding row contains null coordinates"));
+            return Err(validation(
+                "algorithm embedding row contains null coordinates",
+            ));
         }
         if values.len() != dimensions {
             return Err(validation(format!(
@@ -416,8 +418,9 @@ fn decode_algorithm_rows(
 
 fn normalized_seed(hyperparameters: &BTreeMap<String, serde_json::Value>) -> Result<u64, GfError> {
     hyperparameters.get("seed").map_or(Ok(0), |seed| {
-        seed.as_u64()
-            .ok_or_else(|| validation("algorithm embedding seed must be an unsigned 64-bit integer"))
+        seed.as_u64().ok_or_else(|| {
+            validation("algorithm embedding seed must be an unsigned 64-bit integer")
+        })
     })
 }
 

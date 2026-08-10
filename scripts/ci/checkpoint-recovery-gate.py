@@ -12,7 +12,15 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = ROOT / "tests/contracts/checkpoint-recovery-matrix.json"
 REQUIRED_LAYERS = {"rust-storage", "rust-api", "python", "node", "cli"}
-REQUIRED_SHAPES = {"graph-only", "ontology-free", "emergent", "advisory", "strict", "knowledge", "epistemic"}
+REQUIRED_SHAPES = {
+    "graph-only",
+    "ontology-free",
+    "emergent",
+    "advisory",
+    "strict",
+    "knowledge",
+    "epistemic",
+}
 REQUIRED_CASES = {
     "checkpoint-registry-lifecycle",
     "checkpoint-pin-lease-cleanup",

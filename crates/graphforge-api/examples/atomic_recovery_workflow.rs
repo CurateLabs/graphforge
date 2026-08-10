@@ -295,7 +295,10 @@ fn graph_knowledge_request(op_suffix: u16, observation: Uuid) -> CompositeTransa
     }
 }
 
-fn graph_knowledge_epistemic_request(op_suffix: u16, observation: Uuid) -> CompositeTransactionRequest {
+fn graph_knowledge_epistemic_request(
+    op_suffix: u16,
+    observation: Uuid,
+) -> CompositeTransactionRequest {
     let operation = id(op_suffix);
     let node = id(0x0301);
     let edge = id(0x0302);

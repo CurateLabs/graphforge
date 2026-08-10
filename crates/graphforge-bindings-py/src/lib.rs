@@ -16,23 +16,24 @@ use arrow::pyarrow::{FromPyArrow, IntoPyArrow, Table, ToPyArrow};
 use arrow::record_batch::RecordBatchReader;
 use futures::StreamExt;
 use graphforge_api::{
-    BulkEdgePublicationError, BulkNodePublicationError, CallerEmbeddingBatchRequest,
-    CallerEmbeddingBatchRow, CallerEmbeddingDistance, CallerEmbeddingNormalization, CapabilityId,
-    EmbeddingAnalyzeOptions, EmbeddingOptions, EmbeddingRefreshFailureClass,
-    EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy,
-    EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection,
-    EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo, EmbeddingSpaceProducer,
-    EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult, FastRpOptions,
-    FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError, GraphForgeOptions,
-    GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError,
-    IrLiteral, AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization, AlgorithmEmbeddingPublicationRequest,
-    Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
-    OpenRouterWireLimits, OperationId, ProjectWriteMode, PropValue, ProviderBatchLimits,
-    ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
-    ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
-    ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
-    TokenCountClass, WriteContext, validate_embedding_options,
+    AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization,
+    AlgorithmEmbeddingPublicationRequest, BulkEdgePublicationError, BulkNodePublicationError,
+    CallerEmbeddingBatchRequest, CallerEmbeddingBatchRow, CallerEmbeddingDistance,
+    CallerEmbeddingNormalization, CapabilityId, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    EmbeddingRefreshFailureClass, EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus,
+    EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState,
+    EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo,
+    EmbeddingSpaceProducer, EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult,
+    FastRpOptions, FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError,
+    GraphForgeOptions, GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor,
+    InvocationError, IrLiteral, Node2VecOptions, NodeSelector, OpenRouterProviderSession,
+    OpenRouterProviderSessionConfig, OpenRouterWireLimits, OperationId, ProjectWriteMode,
+    PropValue, ProviderBatchLimits, ProviderCapabilities, ProviderCapability,
+    ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection,
+    ProviderEmbeddingPlanRequest, ProviderExecutionLimits, ProviderRequestLimits,
+    RerankAdvisoryPolicy, RerankFailurePolicy, RuntimeGuard, SearchIndexOptions,
+    SendableRecordBatchStream, TextIndexInspection, TokenCountClass, WriteContext,
+    validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -4961,7 +4962,9 @@ impl GraphForge {
             other => {
                 return Err(to_pyerr(
                     py,
-                    &GfError::Validation(format!("unknown algorithm embedding normalization {other:?}")),
+                    &GfError::Validation(format!(
+                        "unknown algorithm embedding normalization {other:?}"
+                    )),
                 ));
             }
         };

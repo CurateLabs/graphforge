@@ -129,7 +129,12 @@ def validate_rust(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         )
     algorithm = inventory["algorithm_registry"]["release-tested"]
     algorithm_test_ids = [ref["symbol"] for ref in algorithm["test_refs"]]
-    expected.update({("algorithm_registry", identity): (None, algorithm_test_ids) for identity in algorithm["ids"]})
+    expected.update(
+        {
+            ("algorithm_registry", identity): (None, algorithm_test_ids)
+            for identity in algorithm["ids"]
+        }
+    )
     for group_name, group in inventory["search_evidence_groups"].items():
         test_ids = [ref["symbol"] for ref in group["test_refs"]]
         expected.update(
@@ -237,7 +242,9 @@ def validate_load(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         raise ValueError("load taxonomy digest drift")
     if report.get("matrix_sha256") != digest(LOAD_MATRIX):
         raise ValueError("load workload matrix digest drift")
-    load_validator = import_script("release_load_validator", ROOT / "scripts/ci/release-load-matrix.py")
+    load_validator = import_script(
+        "release_load_validator", ROOT / "scripts/ci/release-load-matrix.py"
+    )
     matrix = load_json(LOAD_MATRIX)
     _surface, selectors = load_validator.inventory(matrix)
     expected_inventory = {name: sorted(values) for name, values in sorted(selectors.items())}

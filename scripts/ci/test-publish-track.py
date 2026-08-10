@@ -46,8 +46,7 @@ validate = section(workflow, "  validate_candidate:\n", "  dispatch_binding_rc:\
 assert "actions/download-artifact@" in validate
 for group in ("manifest", "python", "npm", "crates", "evidence"):
     assert (
-        f"Release-Candidate-{group}-${{{{ needs.resolve_source.outputs.release_sha }}}}"
-        in validate
+        f"Release-Candidate-{group}-${{{{ needs.resolve_source.outputs.release_sha }}}}" in validate
     )
 assert "scripts/ci/release-candidate.py validate" in validate
 assert '--expected-sha "$RELEASE_SHA"' in validate

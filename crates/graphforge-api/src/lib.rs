@@ -39,6 +39,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 mod adjacency_rebuild_barrier;
+mod algorithm_embedding_publication;
 mod algorithm_runs;
 mod algorithm_writeback;
 mod belief_projection;
@@ -68,7 +69,6 @@ mod graph_snapshot;
 mod hypotheses;
 mod invocation_descriptor;
 mod knowledge;
-mod algorithm_embedding_publication;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
@@ -268,7 +268,8 @@ fn insert_usize(
     Ok(())
 }
 pub use algorithm_embedding_publication::{
-    AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization, AlgorithmEmbeddingPublicationRequest,
+    AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization,
+    AlgorithmEmbeddingPublicationRequest,
 };
 pub use provider_embedding::{
     ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanError,

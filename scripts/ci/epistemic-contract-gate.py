@@ -19,7 +19,9 @@ KNOWLEDGE_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
 EPISTEMIC_INVENTORY = ROOT / "docs/reference/epistemic-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
 KNOWLEDGE_BASELINE_SHA = "8101c2c52246b903a39ff502dc325915974e4d69"
-KNOWLEDGE_BASELINE_INVENTORY_SHA256 = "ac69d81108121f3510390d619904fa49cddf08b92d3a26afd65ab870f1ae30b2"
+KNOWLEDGE_BASELINE_INVENTORY_SHA256 = (
+    "ac69d81108121f3510390d619904fa49cddf08b92d3a26afd65ab870f1ae30b2"
+)
 REQUIRED_CASES = {
     "knowledge-frozen-baseline",
     "status-events",
@@ -177,9 +179,16 @@ def validate_matrix() -> dict[str, Any]:
 
     if sha256(KNOWLEDGE_INVENTORY) != KNOWLEDGE_BASELINE_INVENTORY_SHA256:
         raise GateError("frozen knowledge inventory differs from the closed knowledge baseline")
-    checked_knowledge = (ROOT / "docs/reference/knowledge-schema-inventory.sha256").read_text().split()[0]
-    checked_epistemic = (ROOT / "docs/reference/epistemic-schema-inventory.sha256").read_text().split()[0]
-    if sha256(KNOWLEDGE_INVENTORY) != checked_knowledge or sha256(EPISTEMIC_INVENTORY) != checked_epistemic:
+    checked_knowledge = (
+        (ROOT / "docs/reference/knowledge-schema-inventory.sha256").read_text().split()[0]
+    )
+    checked_epistemic = (
+        (ROOT / "docs/reference/epistemic-schema-inventory.sha256").read_text().split()[0]
+    )
+    if (
+        sha256(KNOWLEDGE_INVENTORY) != checked_knowledge
+        or sha256(EPISTEMIC_INVENTORY) != checked_epistemic
+    ):
         raise GateError("checked schema inventory digest mismatch")
     inventory = load_json(EPISTEMIC_INVENTORY, "epistemic inventory")
     families = {record.get("record_family") for record in inventory.get("records", [])}

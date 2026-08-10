@@ -309,9 +309,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            cross_run = name != "Release-Load-${{ github.run_id }}" and not name.startswith(
-                "pr-"
-            )
+            cross_run = name != "Release-Load-${{ github.run_id }}" and not name.startswith("pr-")
             if cross_run:
                 assert field(step, "github-token") == "${{ github.token }}", (
                     f"cross-run artifact has no token: {name}"

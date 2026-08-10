@@ -203,7 +203,9 @@ def validate_matrix() -> dict[str, Any]:
     if not SCHEMA_INVENTORY.is_file():
         raise GateError("checked knowledge schema inventory is absent")
     expected_digest = (
-        (ROOT / "docs/reference/knowledge-schema-inventory.sha256").read_text(encoding="utf-8").split()[0]
+        (ROOT / "docs/reference/knowledge-schema-inventory.sha256")
+        .read_text(encoding="utf-8")
+        .split()[0]
     )
     if sha256(SCHEMA_INVENTORY) != expected_digest:
         raise GateError("checked knowledge schema inventory digest does not match")

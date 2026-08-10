@@ -977,7 +977,12 @@ function invokeRetrieve(graph, request) {
   if (surface === "rank") {
     if (typeof graph.prepareRankInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.prepareRankInvocation(algorithm.label, algorithm.algorithm, algorithm.via, algorithm.directed),
+        graph.prepareRankInvocation(
+          algorithm.label,
+          algorithm.algorithm,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
     return graph.rank(algorithm.label, algorithm.algorithm, algorithm.via, algorithm.directed);
@@ -994,20 +999,43 @@ function invokeRetrieve(graph, request) {
         ),
       );
     }
-    return graph.cluster(algorithm.label, algorithm.algorithm, algorithm.via, algorithm.directed, algorithm.vectorProperty);
+    return graph.cluster(
+      algorithm.label,
+      algorithm.algorithm,
+      algorithm.via,
+      algorithm.directed,
+      algorithm.vectorProperty,
+    );
   }
   if (surface === "paths") {
     if (typeof graph.preparePathsInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.preparePathsInvocation(algorithm.source, algorithm.target, algorithm.algorithm, algorithm.via, algorithm.directed),
+        graph.preparePathsInvocation(
+          algorithm.source,
+          algorithm.target,
+          algorithm.algorithm,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
-    return graph.paths(algorithm.source, algorithm.target, algorithm.algorithm, algorithm.via, algorithm.directed);
+    return graph.paths(
+      algorithm.source,
+      algorithm.target,
+      algorithm.algorithm,
+      algorithm.via,
+      algorithm.directed,
+    );
   }
   if (surface === "analyze") {
     if (typeof graph.prepareAnalyzeInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.prepareAnalyzeInvocation(algorithm.algorithm, algorithm.label, algorithm.via, algorithm.directed),
+        graph.prepareAnalyzeInvocation(
+          algorithm.algorithm,
+          algorithm.label,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
     return graph.analyze(algorithm.algorithm, algorithm.label, algorithm.via, algorithm.directed);
@@ -1023,7 +1051,13 @@ function invokeRetrieve(graph, request) {
       ),
     );
   }
-  return graph.similar(algorithm.label, algorithm.algorithm, request.resultLimit, algorithm.vectorProperty, algorithm.via);
+  return graph.similar(
+    algorithm.label,
+    algorithm.algorithm,
+    request.resultLimit,
+    algorithm.vectorProperty,
+    algorithm.via,
+  );
 }
 
 function configuredSurfaces(GraphForge, tableFromIPC) {
