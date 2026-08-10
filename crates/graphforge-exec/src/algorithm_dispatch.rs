@@ -170,6 +170,11 @@ pub struct AlgorithmLimits {
     pub states: u64,
     /// Internal Arrow shaping batch size (from #337 resource policy).
     pub batch_size: usize,
+    /// Declared compute-thread budget from the instance resource policy (#337 / #342).
+    ///
+    /// `1` forces the serial cosine path; larger values may activate the private
+    /// pool when work exceeds the documented crossover.
+    pub compute_threads: usize,
 }
 
 impl Default for AlgorithmLimits {
@@ -181,6 +186,7 @@ impl Default for AlgorithmLimits {
             iterations: 10_000,
             states: 10_000_000,
             batch_size: 8_192,
+            compute_threads: 1,
         }
     }
 }
@@ -190,6 +196,13 @@ impl AlgorithmLimits {
     #[must_use]
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size.max(1);
+        self
+    }
+
+    /// Override the compute-thread budget used by parallel CPU kernels (#342).
+    #[must_use]
+    pub fn with_compute_threads(mut self, compute_threads: usize) -> Self {
+        self.compute_threads = compute_threads.max(1);
         self
     }
 }
@@ -216,6 +229,8 @@ pub(crate) struct AlgorithmControl {
     cancellation: AlgorithmCancellation,
     iterations: AtomicU64,
     states: AtomicU64,
+    /// Optional private compute pool from the owning GraphForge instance (#342).
+    compute_pool: Option<crate::SharedComputePool>,
 }
 
 impl AlgorithmControl {
@@ -225,11 +240,30 @@ impl AlgorithmControl {
             cancellation,
             iterations: AtomicU64::new(0),
             states: AtomicU64::new(0),
+            compute_pool: None,
         }
+    }
+
+    /// Attach the instance-owned private CPU pool (#337 / #342).
+    #[must_use]
+    pub(crate) fn with_compute_pool(mut self, pool: crate::SharedComputePool) -> Self {
+        self.limits.compute_threads = pool.num_threads().max(1);
+        self.compute_pool = Some(pool);
+        self
     }
 
     pub(crate) fn configured_limits(&self) -> AlgorithmLimits {
         self.limits
+    }
+
+    /// Declared compute-thread budget (at least one).
+    pub(crate) fn compute_threads(&self) -> usize {
+        self.limits.compute_threads.max(1)
+    }
+
+    /// Borrow the private compute pool when one was attached.
+    pub(crate) fn compute_pool(&self) -> Option<&crate::ComputePool> {
+        self.compute_pool.as_deref()
     }
 
     /// Internal Arrow shaping batch size for bounded columnar sinks (#341).
@@ -722,6 +756,7 @@ mod tests {
             iterations: 10,
             states: 10,
             batch_size: AlgorithmLimits::default().batch_size,
+            compute_threads: AlgorithmLimits::default().compute_threads,
         };
         assert_eq!(
             registry

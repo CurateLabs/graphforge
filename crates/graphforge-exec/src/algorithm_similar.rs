@@ -336,7 +336,7 @@ pub fn similar_algorithm(
     property_stems: &[String],
     options: SimilarOptions,
 ) -> Result<RecordBatch, GfError> {
-    similar_algorithm_with_limits(
+    similar_algorithm_with_compute(
         provider,
         dir,
         mode,
@@ -344,6 +344,7 @@ pub fn similar_algorithm(
         property_stems,
         options,
         crate::algorithm_dispatch::AlgorithmLimits::default(),
+        None,
     )
 }
 
@@ -357,19 +358,42 @@ pub fn similar_algorithm_with_limits(
     options: SimilarOptions,
     limits: crate::algorithm_dispatch::AlgorithmLimits,
 ) -> Result<RecordBatch, GfError> {
+    similar_algorithm_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        limits,
+        None,
+    )
+}
+
+/// Execute similarity with shaping limits and an optional private compute pool (#342).
+pub fn similar_algorithm_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: SimilarOptions,
+    limits: crate::algorithm_dispatch::AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<RecordBatch, GfError> {
     let graph = similar_projection(provider, dir, mode, label, property_stems, &options)?;
     let algorithm = Algorithm::Similar(options.by);
     let mut registry = AlgorithmRegistry::default();
     register_similar_algorithms(&mut registry, options.k)?;
     drop(options);
-    let output = registry.execute(
-        algorithm,
-        &graph,
-        &AlgorithmControl::new(
-            limits,
-            crate::algorithm_dispatch::AlgorithmCancellation::default(),
-        ),
-    )?;
+    let mut control = AlgorithmControl::new(
+        limits,
+        crate::algorithm_dispatch::AlgorithmCancellation::default(),
+    );
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
+    let output = registry.execute(algorithm, &graph, &control)?;
     shape_algorithm_output(algorithm, &output).map_err(Into::into)
 }
 

@@ -22,6 +22,7 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
+rayon = "1.10"
 
 [dev-dependencies]
 graphforge-cypher = { path = "../graphforge-cypher" }

@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Reserved future private CPU-pool budget |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; future kernels) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -66,9 +66,28 @@ state.
    natural file fragments, and acquire the session `io_concurrency` semaphore
    before opening each fragment
 
-Resources are **instance-owned**, not process-global. `compute_threads` is a
-structural reserve for a future private Rayon pool; this issue does **not**
-parallelize graph algorithms.
+Resources are **instance-owned**, not process-global. `compute_threads` sizes a
+private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
+(#342) may partition independent source rows across that pool above a documented
+crossover; work never uses Rayon's process-global pool. Dot products retain
+serial coordinate order so fingerprints match the one-thread path.
+
+## Parallel cosine KNN (#342)
+
+Exact, all-score, and filtered cosine partition **independent source rows**
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated multiply-adds (`sources × candidates × dimensions`, or the filtered
+  candidate total × dimensions) are at least
+  `COSINE_PARALLEL_CROSSOVER_OPS` (`16_384`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Inner floating-point reductions
+stay serial per source→target pair (no parallel dot products, no approximate
+similarity). Worker outputs merge in canonical source order so schemas, row
+order, scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 
