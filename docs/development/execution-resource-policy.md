@@ -277,11 +277,12 @@ serial scatter. L2 normalization and component-wise convergence checks stay
 serial, so scores, iteration counts, and fingerprints match the one-thread
 result at `1`/`2`/`4`/`8`/automatic configurations.
 ## Parallel HITS hub (#510)
+## Parallel HITS hub / authority (#510 / #509)
 
 The shared `hits_scores` kernel used by `rank(by="hits_hub")` prepares selected
-adjacency once as dense-ordinal outgoing and incoming CSR, then partitions
-independent node-score updates across the instance-owned private compute pool
-when:
+and `rank(by="hits_authority")` prepares selected adjacency once as
+dense-ordinal outgoing and incoming CSR, then partitions independent node-score
+updates across the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
 - selected adjacency entries are at least

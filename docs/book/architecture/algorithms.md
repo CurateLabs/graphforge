@@ -376,6 +376,15 @@ contract, disconnected components share global norms, isolated nodes score
 `0.0`, an edgeless selection is all zero, and a self-loop singleton scores
 `1.0`. Empty selections return the same typed zero-row table.
 
+For selected adjacency at or above `HITS_PARALLEL_CROSSOVER_EDGES` (`4_096`)
+and a multi-thread private compute policy, the authority handler uses the same
+shared HITS CSR kernel as `hits_hub`. Authority updates own contiguous target
+ranges over incoming CSR, each target sums predecessor hub scores serially in
+canonical source/edge order, and the global L2 norm remains a serial
+dense-ordinal reduction. Smaller workloads and one-thread policies retain the
+serial path. This is the documented CPU-only crossover for #509, with no GPU or
+universal scaling claim.
+
 The public schema, UUID-only identity and order, materialized properties,
 atomic opt-in `write_property`, shared node/edge/output/iteration limits,
 edge-heavy cancellation checkpoints, finite-score validation, and structured

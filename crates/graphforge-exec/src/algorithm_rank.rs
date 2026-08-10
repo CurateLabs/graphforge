@@ -11,6 +11,10 @@
 //! updates across the instance-owned private compute pool while preserving the
 //! serial contribution order, deterministic reductions, and bit-identical
 //! fingerprints.
+//! PageRank (#343), HITS hub (#510), and HITS authority (#509) may partition
+//! destination-owned score updates across the instance-owned private compute
+//! pool while preserving the serial contribution order, deterministic
+//! reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -3363,6 +3367,26 @@ mod tests {
         )
     }
 
+    fn execute_hits_authority_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(
+            Algorithm::Rank(RankAlgorithm::HitsAuthority),
+            graph,
+            &control,
+        )
+    }
+
     fn hits_authority_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
             .rows()
@@ -3371,6 +3395,13 @@ mod tests {
                 AlgorithmValue::Float64(score) => score,
                 _ => panic!("HITS authority score must be Float64"),
             })
+            .collect()
+    }
+
+    fn hits_authority_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        hits_authority_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
             .collect()
     }
 
@@ -5448,6 +5479,80 @@ mod tests {
             })
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn hits_authority_path_selection_reuses_shared_hits_crossover() {
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(8),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(8).unwrap()));
+        assert_eq!(
+            select_hits_path(&parallel, HITS_PARALLEL_CROSSOVER_EDGES, 128),
+            HitsExecutionPath::Parallel {
+                threads: 8,
+                chunks: 8
+            }
+        );
+        assert_eq!(
+            select_hits_path(&parallel, HITS_PARALLEL_CROSSOVER_EDGES - 1, 128),
+            HitsExecutionPath::Serial
+        );
+    }
+
+    #[test]
+    fn hits_authority_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_hits_graph(128);
+        assert!(graph.edge_entry_count() >= HITS_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_hits_authority_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let serial_bits = hits_authority_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_hits_authority_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(hits_authority_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn hits_authority_parallel_preserves_multigraph_self_loop_and_disconnected_bits() {
+        let mut edges = Vec::new();
+        let nodes = 256_u64;
+        for source in 0..nodes {
+            edges.push((source, source));
+            edges.push((source, (source + 1) % nodes));
+            edges.push((source, (source + 1) % nodes));
+            for hop in 2..18 {
+                edges.push((source, (source + hop) % nodes));
+            }
+        }
+        let graph = AdjacencyGraph::with_test_edges(nodes, &edges);
+        assert!(graph.edge_entry_count() >= HITS_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_hits_authority_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_hits_authority_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(hits_authority_bits(&parallel), hits_authority_bits(&serial));
+            assert_eq!(parallel.rows(), serial.rows());
+        }
+    }
+
+    #[test]
+    fn hits_authority_parallel_cancellation_returns_structured_cancelled() {
+        let graph = dense_hits_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_hits_authority_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
     }
 
     #[test]
