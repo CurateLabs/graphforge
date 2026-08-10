@@ -639,22 +639,24 @@ mod tests {
     #[test]
     #[ignore = "manual crossover evidence; timing is hardware-specific"]
     fn measure_delta_stepping_parallel_crossover() {
-        let graph = parallel_wave_fixture(192, 96);
-        let oracle = exact_delta_stepping(&graph, 0, None, &control_with_threads(1)).unwrap();
-        eprintln!(
-            "delta_stepping fixture: nodes={} edge_entries={} rows={} crossover_edge_scans={}",
-            graph.node_ids().len(),
-            graph.edge_entry_count(),
-            oracle.len(),
-            DELTA_STEPPING_PARALLEL_CROSSOVER_EDGE_SCANS
-        );
-        for threads in [1, 2, 4, 8] {
-            let control = control_with_threads(threads);
-            let started = Instant::now();
-            let paths = exact_delta_stepping(&graph, 0, None, &control).unwrap();
-            let elapsed = started.elapsed();
-            assert_eq!(paths, oracle);
-            eprintln!("threads={threads} elapsed={elapsed:?}");
+        for (middles, fanout) in [(192, 96), (512, 256), (1024, 384)] {
+            let graph = parallel_wave_fixture(middles, fanout);
+            let oracle = exact_delta_stepping(&graph, 0, None, &control_with_threads(1)).unwrap();
+            eprintln!(
+                "delta_stepping fixture: middles={middles} fanout={fanout} nodes={} edge_entries={} rows={} crossover_edge_scans={}",
+                graph.node_ids().len(),
+                graph.edge_entry_count(),
+                oracle.len(),
+                DELTA_STEPPING_PARALLEL_CROSSOVER_EDGE_SCANS
+            );
+            for threads in [1, 2, 4, 8] {
+                let control = control_with_threads(threads);
+                let started = Instant::now();
+                let paths = exact_delta_stepping(&graph, 0, None, &control).unwrap();
+                let elapsed = started.elapsed();
+                assert_eq!(paths, oracle);
+                eprintln!("threads={threads} elapsed={elapsed:?}");
+            }
         }
     }
 }
