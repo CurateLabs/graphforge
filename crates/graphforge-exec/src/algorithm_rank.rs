@@ -2062,9 +2062,14 @@ mod tests {
     }
 
     fn dense_cycle_graph(nodes: usize) -> AdjacencyGraph {
+        // Enough parallel edges per source to clear the documented crossover on
+        // modest node counts while keeping the fixture deterministic.
+        let fanout =
+            ((PAGERANK_PARALLEL_CROSSOVER_EDGES as usize) / nodes.max(1)).saturating_add(2);
         let edges = (0..nodes)
-            .map(|node| (node as u64, ((node + 1) % nodes) as u64))
-            .chain((0..nodes).map(|node| (node as u64, ((node + 3) % nodes) as u64)))
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
             .collect::<Vec<_>>();
         AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
@@ -2699,15 +2704,16 @@ mod tests {
 
         // Adversarial magnitudes: force parallel on a graph above crossover with
         // dangling nodes and uneven outdegrees.
+        let nodes = 512_u64;
         let mut edges = Vec::new();
-        for source in 0..96_u64 {
-            let degree = 1 + (source % 7) as usize;
+        for source in 0..(nodes - 64) {
+            let degree = 12 + (source % 17) as usize;
             for hop in 0..degree {
-                edges.push((source, (source + 1 + hop as u64) % 96));
+                edges.push((source, (source + 1 + hop as u64) % nodes));
             }
         }
         // Leave high-index nodes dangling.
-        let adversarial = AdjacencyGraph::with_test_edges(128, &edges);
+        let adversarial = AdjacencyGraph::with_test_edges(nodes, &edges);
         assert!(adversarial.edge_entry_count() >= PAGERANK_PARALLEL_CROSSOVER_EDGES);
         let serial =
             execute_pagerank_with_pool(&adversarial, 1, AlgorithmCancellation::default()).unwrap();
