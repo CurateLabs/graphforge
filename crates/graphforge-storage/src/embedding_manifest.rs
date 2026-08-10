@@ -84,7 +84,7 @@ impl EmbeddingSourceState {
         hasher.update(label_membership_digest);
         hasher.update(dependency_input_digest);
         hasher.update(eligible_uuid_count.to_le_bytes());
-        let fingerprint = EmbeddingSourceFingerprint::from_hex(&hex_lower(&hasher.finalize()))
+        let fingerprint = EmbeddingSourceFingerprint::from_hex(&hex_lower(hasher.finalize()))
             .expect("SHA-256 output is always a valid lowercase source fingerprint");
         Self {
             graph_generation,
@@ -440,7 +440,14 @@ fn corrupt(path: &Path, reason: impl Into<String>) -> SearchArtifactError {
 }
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.as_ref().iter().fold(
+        String::with_capacity(bytes.as_ref().len() * 2),
+        |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        },
+    )
 }
 
 #[cfg(test)]

@@ -917,7 +917,7 @@ fn checksum(material: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CHECKSUM_DOMAIN);
     hasher.update(material);
-    hex_lower(&hasher.finalize())
+    hex_lower(hasher.finalize())
 }
 
 struct ConfigWriterLock {
@@ -1137,7 +1137,14 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> SearchArt
 }
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.as_ref().iter().fold(
+        String::with_capacity(bytes.as_ref().len() * 2),
+        |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        },
+    )
 }
 
 #[cfg(test)]

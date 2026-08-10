@@ -133,7 +133,7 @@ where
             hasher.update(value.to_le_bytes());
         }
     }
-    let content_digest = EmbeddingContentDigest::from_hex(&hex_lower(&hasher.finalize()))?;
+    let content_digest = EmbeddingContentDigest::from_hex(&hex_lower(hasher.finalize()))?;
     Ok(ValidatedEmbeddingBatch {
         rows,
         dimension,
@@ -177,7 +177,14 @@ fn exhausted(resource: &'static str, limit: usize) -> SearchArtifactError {
 }
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.as_ref().iter().fold(
+        String::with_capacity(bytes.as_ref().len() * 2),
+        |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        },
+    )
 }
 
 #[cfg(test)]
