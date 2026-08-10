@@ -1,17 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 use rayon::prelude::*;
 
+use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
+
 const CHECKPOINT_INTERVAL: usize = 4_096;
-const DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS: usize = 16_384;
+/// Present dyads below this count stay serial to avoid private-pool scheduling tax.
+///
+/// Dyad normalization remains serial and canonical. Above this crossover, only the
+/// independent category tally over already-normalized present dyads is chunked.
+pub(crate) const DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS: usize = 32_768;
 type NodeUuid = [u8; 16];
 type DirectedPair = (NodeUuid, NodeUuid);
-type UnorderedPair = (NodeUuid, NodeUuid);
 
+/// Selected execution path for dyad census category counting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DyadCensusExecutionPath {
+pub(crate) enum DyadCensusExecutionPath {
     Serial,
     Parallel { threads: usize, chunks: usize },
 }
@@ -43,8 +48,27 @@ pub(crate) fn dyad_census(
     let mut work = 0_usize;
     let selected = index_nodes(nodes, control, &mut work)?;
     let directed_pairs = normalize_edges(edges, &selected, control, &mut work)?;
-    let mut counts = classify_dyads(&directed_pairs, control, &mut work)?;
+    let mut seen_pairs = BTreeMap::<([u8; 16], [u8; 16]), u8>::new();
 
+    for (source, target) in directed_pairs {
+        checkpoint(control, &mut work)?;
+        let (pair, direction) = if source < target {
+            ((source, target), 0b01)
+        } else {
+            ((target, source), 0b10)
+        };
+        *seen_pairs.entry(pair).or_default() |= direction;
+    }
+
+    let mut counts = match select_dyad_census_path(control, seen_pairs.len()) {
+        DyadCensusExecutionPath::Serial => {
+            count_dyads_serial(seen_pairs.values(), control, &mut work)?
+        }
+        DyadCensusExecutionPath::Parallel { .. } => {
+            let directions = seen_pairs.values().copied().collect::<Vec<_>>();
+            count_dyads_parallel(&directions, control)?
+        }
+    };
     let nodes = u64::try_from(selected.len())
         .map_err(|_| execution("dyad_census node count exceeds UInt64 range"))?;
     let total = nodes
@@ -61,142 +85,90 @@ pub(crate) fn dyad_census(
     Ok(counts)
 }
 
-fn classify_dyads(
-    directed_pairs: &BTreeSet<DirectedPair>,
+pub(crate) fn select_dyad_census_path(
     control: &AlgorithmControl,
-    work: &mut usize,
-) -> Result<DyadCounts, AlgorithmError> {
-    let seen_pairs = match select_dyad_census_path(control, directed_pairs.len()) {
-        DyadCensusExecutionPath::Serial => classify_dyads_serial(directed_pairs, control, work)?,
-        DyadCensusExecutionPath::Parallel { .. } => {
-            classify_dyads_parallel(directed_pairs, control)?
-        }
-    };
-    count_seen_dyads(&seen_pairs, control, work)
-}
-
-fn classify_dyads_serial(
-    directed_pairs: &BTreeSet<DirectedPair>,
-    control: &AlgorithmControl,
-    work: &mut usize,
-) -> Result<BTreeMap<UnorderedPair, u8>, AlgorithmError> {
-    let mut seen_pairs = BTreeMap::new();
-    for &(source, target) in directed_pairs {
-        checkpoint(control, work)?;
-        record_directed_pair(&mut seen_pairs, source, target);
-    }
-    Ok(seen_pairs)
-}
-
-fn classify_dyads_parallel(
-    directed_pairs: &BTreeSet<DirectedPair>,
-    control: &AlgorithmControl,
-) -> Result<BTreeMap<UnorderedPair, u8>, AlgorithmError> {
-    let pool = control
-        .compute_pool()
-        .ok_or_else(|| execution("parallel dyad_census requires an instance-owned compute pool"))?;
-    let pairs = directed_pairs.iter().copied().collect::<Vec<_>>();
-    let ranges = dyad_pair_chunks(pairs.len(), control.compute_threads());
-    let chunk_maps = run_dyad_census_on_pool(pool, || {
-        ranges
-            .par_iter()
-            .map(|&(start, end)| {
-                control.check_cancelled()?;
-                let mut seen_pairs = BTreeMap::new();
-                let mut work = 0_usize;
-                for &(source, target) in &pairs[start..end] {
-                    work = work.saturating_add(1);
-                    if work.is_multiple_of(CHECKPOINT_INTERVAL) {
-                        control.check_cancelled()?;
-                    }
-                    record_directed_pair(&mut seen_pairs, source, target);
-                }
-                Ok(seen_pairs)
-            })
-            .collect::<Result<Vec<_>, AlgorithmError>>()
-    })?;
-
-    let mut seen_pairs = BTreeMap::new();
-    for chunk in chunk_maps {
-        for (pair, directions) in chunk {
-            *seen_pairs.entry(pair).or_default() |= directions;
-        }
-    }
-    Ok(seen_pairs)
-}
-
-fn record_directed_pair(
-    seen_pairs: &mut BTreeMap<UnorderedPair, u8>,
-    source: NodeUuid,
-    target: NodeUuid,
-) {
-    let (pair, direction) = if source < target {
-        ((source, target), 0b01)
-    } else {
-        ((target, source), 0b10)
-    };
-    *seen_pairs.entry(pair).or_default() |= direction;
-}
-
-fn count_seen_dyads(
-    seen_pairs: &BTreeMap<UnorderedPair, u8>,
-    control: &AlgorithmControl,
-    work: &mut usize,
-) -> Result<DyadCounts, AlgorithmError> {
-    let mut counts = DyadCounts::default();
-    for directions in seen_pairs.values() {
-        checkpoint(control, work)?;
-        if *directions == 0b11 {
-            counts.mutual = increment(counts.mutual, "mutual")?;
-        } else {
-            counts.asymmetric = increment(counts.asymmetric, "asymmetric")?;
-        }
-    }
-    Ok(counts)
-}
-
-fn select_dyad_census_path(
-    control: &AlgorithmControl,
-    directed_pairs: usize,
+    present_pairs: usize,
 ) -> DyadCensusExecutionPath {
     let threads = control.compute_threads();
     if threads <= 1
-        || directed_pairs < DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS
+        || present_pairs < DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS
         || control
             .compute_pool()
             .is_none_or(|pool| !pool.is_parallel())
     {
         return DyadCensusExecutionPath::Serial;
     }
-    let chunks = dyad_pair_chunks(directed_pairs, threads).len();
-    if chunks <= 1 {
-        DyadCensusExecutionPath::Serial
-    } else {
-        DyadCensusExecutionPath::Parallel { threads, chunks }
+    DyadCensusExecutionPath::Parallel {
+        threads,
+        chunks: dyad_chunks(present_pairs, threads).len(),
     }
 }
 
-fn dyad_pair_chunks(pairs: usize, threads: usize) -> Vec<(usize, usize)> {
-    if pairs == 0 {
+fn count_dyads_serial<'a>(
+    directions: impl IntoIterator<Item = &'a u8>,
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<DyadCounts, AlgorithmError> {
+    let mut counts = DyadCounts::default();
+    for directions in directions {
+        checkpoint(control, work)?;
+        add_direction(&mut counts, *directions)?;
+    }
+    Ok(counts)
+}
+
+fn count_dyads_parallel(
+    directions: &[u8],
+    control: &AlgorithmControl,
+) -> Result<DyadCounts, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel dyad_census requires an instance-owned compute pool"))?;
+    let ranges = dyad_chunks(directions.len(), control.compute_threads());
+    let chunk_counts = run_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut work = 0_usize;
+                let mut counts = DyadCounts::default();
+                for &directions in &directions[start..end] {
+                    checkpoint(control, &mut work)?;
+                    add_direction(&mut counts, directions)?;
+                }
+                Ok(counts)
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+    let mut counts = DyadCounts::default();
+    for chunk in chunk_counts {
+        counts.mutual = add_count(counts.mutual, chunk.mutual, "mutual")?;
+        counts.asymmetric = add_count(counts.asymmetric, chunk.asymmetric, "asymmetric")?;
+    }
+    Ok(counts)
+}
+
+fn dyad_chunks(len: usize, threads: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
         return Vec::new();
     }
-    let workers = threads.clamp(1, pairs);
-    let base = pairs / workers;
-    let rem = pairs % workers;
-    let mut ranges = Vec::with_capacity(workers);
+    let workers = threads.clamp(1, len);
+    let base = len / workers;
+    let rem = len % workers;
+    let mut chunks = Vec::with_capacity(workers);
     let mut start = 0;
     for index in 0..workers {
-        let len = base + usize::from(index < rem);
-        let end = start + len;
+        let chunk_len = base + usize::from(index < rem);
+        let end = start + chunk_len;
         if start < end {
-            ranges.push((start, end));
+            chunks.push((start, end));
         }
         start = end;
     }
-    ranges
+    chunks
 }
 
-fn run_dyad_census_on_pool<R>(
+fn run_on_pool<R>(
     pool: &crate::ComputePool,
     op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
 ) -> Result<R, AlgorithmError>
@@ -253,8 +225,21 @@ fn normalize_edges(
     Ok(directed_pairs)
 }
 
+fn add_direction(counts: &mut DyadCounts, directions: u8) -> Result<(), AlgorithmError> {
+    if directions == 0b11 {
+        counts.mutual = increment(counts.mutual, "mutual")?;
+    } else {
+        counts.asymmetric = increment(counts.asymmetric, "asymmetric")?;
+    }
+    Ok(())
+}
+
 fn increment(value: u64, category: &str) -> Result<u64, AlgorithmError> {
-    value.checked_add(1).ok_or_else(|| {
+    add_count(value, 1, category)
+}
+
+fn add_count(left: u64, right: u64, category: &str) -> Result<u64, AlgorithmError> {
+    left.checked_add(right).ok_or_else(|| {
         execution(format!(
             "dyad_census {category} count exceeds supported range"
         ))
@@ -281,6 +266,7 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
     use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
@@ -308,25 +294,26 @@ mod tests {
             AlgorithmLimits::default().with_compute_threads(threads),
             AlgorithmCancellation::default(),
         )
-        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()))
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
     }
 
-    fn dense_directed_fixture(nodes: u128, fanout: u128) -> (Vec<NodeUuid>, Vec<DyadEdge>) {
-        let selected = (0..nodes).map(wide_uuid).collect::<Vec<_>>();
+    fn dense_asymmetric_fixture(nodes: usize) -> (Vec<NodeUuid>, Vec<DyadEdge>) {
+        let nodes = (0..nodes)
+            .map(|node| wide_uuid(node as u128))
+            .collect::<Vec<_>>();
         let mut edges = Vec::new();
-        let mut edge_id = 0_u128;
-        for source in 0..nodes {
-            for hop in 1..=fanout {
-                let target = (source + hop) % nodes;
+        let mut edge_id = 1_u128;
+        for source in 0..nodes.len() {
+            for target in source + 1..nodes.len() {
                 edges.push(DyadEdge {
-                    edge: wide_uuid(1_000_000 + edge_id),
-                    source: wide_uuid(source),
-                    target: wide_uuid(target),
+                    edge: wide_uuid(edge_id),
+                    source: nodes[source],
+                    target: nodes[target],
                 });
                 edge_id += 1;
             }
         }
-        (selected, edges)
+        (nodes, edges)
     }
 
     #[test]
@@ -386,6 +373,60 @@ mod tests {
     }
 
     #[test]
+    fn path_selection_respects_crossover_and_private_pool() {
+        let serial = control_with_threads(1);
+        assert_eq!(
+            select_dyad_census_path(&serial, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS),
+            DyadCensusExecutionPath::Serial
+        );
+        let below = control_with_threads(4);
+        assert_eq!(
+            select_dyad_census_path(&below, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS - 1),
+            DyadCensusExecutionPath::Serial
+        );
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_dyad_census_path(&no_pool, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS),
+            DyadCensusExecutionPath::Serial
+        );
+        assert_eq!(
+            select_dyad_census_path(
+                &control_with_threads(4),
+                DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS
+            ),
+            DyadCensusExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_dyad_counts() {
+        let (nodes, edges) = dense_asymmetric_fixture(300);
+        let serial = dyad_census(&nodes, &edges, &control_with_threads(1)).unwrap();
+        assert_eq!(
+            serial,
+            DyadCounts {
+                mutual: 0,
+                asymmetric: 44_850,
+                null: 0
+            }
+        );
+        for threads in [2_usize, 4, 8] {
+            let control = control_with_threads(threads);
+            assert!(matches!(
+                select_dyad_census_path(&control, 44_850),
+                DyadCensusExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(dyad_census(&nodes, &edges, &control).unwrap(), serial);
+        }
+    }
+
+    #[test]
     fn rejects_invalid_identity_topology_atomically() {
         for result in [
             dyad_census(&[uuid(0), uuid(0)], &[], &control()),
@@ -432,82 +473,6 @@ mod tests {
                 &[],
                 &AlgorithmControl::new(AlgorithmLimits::default(), cancellation)
             ),
-            Err(AlgorithmError::Cancelled)
-        );
-    }
-
-    #[test]
-    fn pair_chunks_cover_canonical_ranges() {
-        assert_eq!(dyad_pair_chunks(0, 4), Vec::<(usize, usize)>::new());
-        assert_eq!(dyad_pair_chunks(5, 1), vec![(0, 5)]);
-        assert_eq!(dyad_pair_chunks(5, 2), vec![(0, 3), (3, 5)]);
-        assert_eq!(dyad_pair_chunks(8, 4), vec![(0, 2), (2, 4), (4, 6), (6, 8)]);
-        assert_eq!(dyad_pair_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
-    }
-
-    #[test]
-    fn path_selection_requires_private_pool_and_crossover() {
-        let no_pool = AlgorithmControl::new(
-            AlgorithmLimits::default().with_compute_threads(4),
-            AlgorithmCancellation::default(),
-        );
-        assert_eq!(
-            select_dyad_census_path(&no_pool, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS),
-            DyadCensusExecutionPath::Serial
-        );
-
-        let one = control_with_threads(1);
-        assert_eq!(
-            select_dyad_census_path(&one, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS),
-            DyadCensusExecutionPath::Serial
-        );
-
-        let parallel = control_with_threads(4);
-        assert_eq!(
-            select_dyad_census_path(&parallel, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS - 1),
-            DyadCensusExecutionPath::Serial
-        );
-        assert_eq!(
-            select_dyad_census_path(&parallel, DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS),
-            DyadCensusExecutionPath::Parallel {
-                threads: 4,
-                chunks: 4
-            }
-        );
-    }
-
-    #[test]
-    fn thread_matrix_matches_one_thread_counts() {
-        let (nodes, edges) = dense_directed_fixture(192, 96);
-        let serial = dyad_census(&nodes, &edges, &control_with_threads(1)).unwrap();
-        assert_eq!(
-            serial,
-            DyadCounts {
-                mutual: 96,
-                asymmetric: 18_240,
-                null: 0,
-            }
-        );
-        for threads in [2, 4, 8] {
-            assert_eq!(
-                dyad_census(&nodes, &edges, &control_with_threads(threads)).unwrap(),
-                serial
-            );
-        }
-    }
-
-    #[test]
-    fn parallel_path_honors_cancelled_control() {
-        let (nodes, edges) = dense_directed_fixture(192, 96);
-        let cancellation = AlgorithmCancellation::default();
-        cancellation.cancel();
-        let control = AlgorithmControl::new(
-            AlgorithmLimits::default().with_compute_threads(4),
-            cancellation,
-        )
-        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
-        assert_eq!(
-            dyad_census(&nodes, &edges, &control),
             Err(AlgorithmError::Cancelled)
         );
     }

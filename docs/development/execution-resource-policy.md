@@ -108,6 +108,14 @@ keeps per-destination incoming contribution order with serial norm/convergence
 reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
 the one-thread path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and dyad census
+category counting (#570) may partition independent work across that pool above
+documented crossovers; work never uses Rayon's process-global pool. Cosine dot
+products retain serial coordinate order, PageRank keeps canonical contribution
+order with serial dangling/delta reductions, Node2Vec skip-gram training stays
+serial, and dyad census merges integer category counts in canonical chunk order,
+so fingerprints match the one-thread path.
+
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and dyad
 census (#570) may partition independent work across that pool above documented
 crossovers; work never uses Rayon's process-global pool. Cosine dot products
@@ -806,6 +814,26 @@ unordered-pair direction maps; the main thread merges those maps in canonical
 directed-pair chunk order before counting `mutual`, `asymmetric`, and `null`.
 Schemas, category values, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel dyad census category counting (#570)
+
+`analyze(by="dyad_census")` keeps UUID selection and edge normalization serial:
+those steps own duplicate-edge validation, loop filtering, and canonical
+`BTreeMap` / `BTreeSet` ordering. After that normalization, present dyad
+directions are independent one-byte category inputs. The category tally runs on
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- normalized present dyads are at least
+  `DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS` (`32_768`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, dyad
+census stays serial and does not allocate the parallel direction slice. The
+parallel path chunks normalized present dyads by canonical pair order, uses
+worker-local integer counts, and merges chunks in ascending range order before
+deriving the closed-form null count. Schemas, row order, category counts,
+structured errors, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`
+/ automatic configurations.
 
 ## Observability
 
