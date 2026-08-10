@@ -119,7 +119,11 @@ the transition distribution.
 The implementation uses damping `0.85`, uniform initial scores, uniform teleportation, and
 uniform redistribution of dangling-node mass. Iteration stops when the L1 score delta is at
 most `selected_node_count * 1e-10`. Rows and floating-point accumulation follow stable
-topology order, so identical graph state and options produce identical results. Disconnected
+topology order, so identical graph state and options produce identical results. Destination
+updates may run through the instance-owned private compute pool (#337 / #343) above a
+documented edge-count crossover; each destination still applies inbound contributions in the
+same canonical source/edge order as serial scatter, and dangling/delta reductions remain
+serial, so scores, iteration counts, and fingerprints match the one-thread path. Disconnected
 graphs retain every selected node and normalized mass; an empty selection returns a typed
 zero-row table.
 

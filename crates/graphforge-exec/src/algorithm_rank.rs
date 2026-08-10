@@ -1,13 +1,20 @@
 //! Rust-owned rank handlers registered under the shared M18 dispatch contract.
+//!
+//! PageRank (#343) may partition destination-owned score updates across the
+//! instance-owned private compute pool while preserving the serial contribution
+//! order, dangling/delta reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, RankAlgorithm};
 use graphforge_core::{GfError, OntologyMode, RankOptions, TypeId};
 use graphforge_ir::Direction;
+use rayon::prelude::*;
 
 use crate::AdjacencyProvider;
 use crate::algorithm_dispatch::{
@@ -69,6 +76,13 @@ struct TotalNeighbors;
 
 const PAGERANK_DAMPING: f64 = 0.85;
 const PAGERANK_TOLERANCE: f64 = 1.0e-10;
+/// Selected adjacency entries below which PageRank stays on the serial path (#343).
+///
+/// Keeps accepted small fixtures and micro-invocations off the worker pool; above
+/// this, destination-owned parallel updates amortize scheduling on typical
+/// embedded hosts. Numeric results remain identical either way.
+pub const PAGERANK_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
+const PAGERANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 const ARTICLE_RANK_DAMPING: f64 = 0.85;
@@ -131,46 +145,38 @@ impl RustAlgorithm for PageRank {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::PageRank);
-        let node_count = graph.node_ids().len();
-        if node_count == 0 {
+        let node_len = graph.node_ids().len();
+        if node_len == 0 {
             return AlgorithmOutput::empty(algorithm, control);
         }
 
-        let indices: HashMap<u64, usize> = graph
-            .node_ids()
-            .iter()
-            .enumerate()
-            .map(|(index, &node)| (node, index))
-            .collect();
-        let node_count = f64::from(exact_u32(node_count, "node count")?);
-        let mut scores = vec![1.0 / node_count; graph.node_ids().len()];
+        let prepared = prepare_pagerank(graph)?;
+        let node_count = f64::from(exact_u32(node_len, "node count")?);
+        let mut scores = vec![1.0 / node_count; node_len];
+        let path = select_pagerank_path(control, prepared.edge_count, node_len);
         loop {
             control.checkpoint()?;
-            let dangling: f64 = graph
-                .node_ids()
-                .iter()
-                .enumerate()
-                .filter(|(_, node)| graph.neighbors(**node).is_empty())
-                .map(|(index, _)| scores[index])
-                .sum();
+            // Serial dangling reduction in dense ordinal order (accepted oracle).
+            let dangling: f64 = prepared.dangling.iter().map(|&index| scores[index]).sum();
             let base =
                 (1.0 - PAGERANK_DAMPING) / node_count + PAGERANK_DAMPING * dangling / node_count;
-            let mut next = vec![base; scores.len()];
-            for (source_index, &source) in graph.node_ids().iter().enumerate() {
-                let edges = graph.neighbors(source);
-                if edges.is_empty() {
-                    continue;
+            let mut next = vec![base; node_len];
+            match path {
+                PageRankExecutionPath::Serial => {
+                    pagerank_scatter_serial(graph, &prepared.indices, &scores, &mut next)?;
                 }
-                let outdegree = f64::from(exact_u32(edges.len(), "node degree")?);
-                let contribution = PAGERANK_DAMPING * scores[source_index] / outdegree;
-                for edge in edges {
-                    let target = indices
-                        .get(&edge.neighbor_id)
-                        .copied()
-                        .ok_or_else(|| execution("adjacency references an unselected node"))?;
-                    next[target] += contribution;
+                PageRankExecutionPath::Parallel { .. } => {
+                    pagerank_pull_parallel(
+                        &prepared.inbound,
+                        &prepared.outdegrees,
+                        &scores,
+                        base,
+                        &mut next,
+                        control,
+                    )?;
                 }
             }
+            // Serial L1 delta in dense ordinal order (accepted oracle).
             let delta: f64 = scores
                 .iter()
                 .zip(&next)
@@ -182,21 +188,251 @@ impl RustAlgorithm for PageRank {
             }
         }
 
-        let rows = graph
-            .node_ids()
-            .iter()
-            .enumerate()
-            .map(|(index, &node)| {
-                let uuid = graph
-                    .node_uuid(node)
-                    .ok_or_else(|| execution("selected node has no UUID identity"))?;
-                Ok(vec![
-                    AlgorithmValue::Uuid(uuid),
-                    AlgorithmValue::Float64(scores[index]),
-                ])
+        let mut sink = control.output_sink(algorithm)?;
+        for (index, &node) in graph.node_ids().iter().enumerate() {
+            if index % 1024 == 0 {
+                control.checkpoint()?;
+            }
+            let uuid = graph
+                .node_uuid(node)
+                .ok_or_else(|| execution("selected node has no UUID identity"))?;
+            sink.append_row(&[
+                AlgorithmValue::Uuid(uuid),
+                AlgorithmValue::Float64(scores[index]),
+            ])?;
+        }
+        sink.finish()
+    }
+}
+
+/// Selected PageRank execution path for observability and crossover tests (#343).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageRankExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+/// Dense inbound CSR: source ordinals in canonical source/edge order per destination.
+#[derive(Clone, Debug, Default)]
+struct PageRankInboundCsr {
+    offsets: Vec<u32>,
+    sources: Vec<u32>,
+}
+
+struct PreparedPageRank {
+    indices: HashMap<u64, usize>,
+    outdegrees: Vec<f64>,
+    dangling: Vec<usize>,
+    inbound: PageRankInboundCsr,
+    edge_count: u64,
+}
+
+fn prepare_pagerank(graph: &AdjacencyGraph) -> Result<PreparedPageRank, AlgorithmError> {
+    let node_ids = graph.node_ids();
+    let node_len = node_ids.len();
+    let indices: HashMap<u64, usize> = node_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &node)| (node, index))
+        .collect();
+    let mut outdegrees = Vec::with_capacity(node_len);
+    let mut dangling = Vec::new();
+    let mut inbound_counts = vec![0_u32; node_len];
+    let mut edge_count = 0_u64;
+    for (source_index, &source) in node_ids.iter().enumerate() {
+        let edges = graph.neighbors(source);
+        let degree = exact_u32(edges.len(), "node degree")?;
+        outdegrees.push(f64::from(degree));
+        if edges.is_empty() {
+            dangling.push(source_index);
+            continue;
+        }
+        for edge in edges {
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            inbound_counts[target] = inbound_counts[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("inbound degree exceeds supported range"))?;
+            edge_count = edge_count
+                .checked_add(1)
+                .ok_or_else(|| execution("edge count exceeds supported range"))?;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(node_len + 1);
+    offsets.push(0_u32);
+    for &count in &inbound_counts {
+        let next = offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(count)
+            .ok_or_else(|| execution("inbound CSR offsets exceed supported range"))?;
+        offsets.push(next);
+    }
+    let total = usize::try_from(*offsets.last().unwrap_or(&0))
+        .map_err(|_| execution("inbound CSR length exceeds supported range"))?;
+    let mut sources = vec![0_u32; total];
+    let mut write_at = offsets[..node_len].to_vec();
+    for (source_index, &source) in node_ids.iter().enumerate() {
+        let source_u32 = exact_u32(source_index, "source ordinal")?;
+        for edge in graph.neighbors(source) {
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            let slot = usize::try_from(write_at[target])
+                .map_err(|_| execution("inbound write cursor exceeds supported range"))?;
+            sources[slot] = source_u32;
+            write_at[target] = write_at[target]
+                .checked_add(1)
+                .ok_or_else(|| execution("inbound write cursor overflow"))?;
+        }
+    }
+
+    Ok(PreparedPageRank {
+        indices,
+        outdegrees,
+        dangling,
+        inbound: PageRankInboundCsr { offsets, sources },
+        edge_count,
+    })
+}
+
+/// Choose serial vs private-pool parallel execution for a PageRank workload.
+pub(crate) fn select_pagerank_path(
+    control: &AlgorithmControl,
+    edge_count: u64,
+    nodes: usize,
+) -> PageRankExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes <= 1
+        || edge_count < PAGERANK_PARALLEL_CROSSOVER_EDGES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return PageRankExecutionPath::Serial;
+    }
+    let chunks = destination_chunks(nodes, threads).len();
+    PageRankExecutionPath::Parallel { threads, chunks }
+}
+
+fn destination_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+    if nodes == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, nodes);
+    let base = nodes / workers;
+    let rem = nodes % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
+}
+
+fn pagerank_scatter_serial(
+    graph: &AdjacencyGraph,
+    indices: &HashMap<u64, usize>,
+    scores: &[f64],
+    next: &mut [f64],
+) -> Result<(), AlgorithmError> {
+    for (source_index, &source) in graph.node_ids().iter().enumerate() {
+        let edges = graph.neighbors(source);
+        if edges.is_empty() {
+            continue;
+        }
+        let outdegree = f64::from(exact_u32(edges.len(), "node degree")?);
+        let contribution = PAGERANK_DAMPING * scores[source_index] / outdegree;
+        for edge in edges {
+            let target = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            next[target] += contribution;
+        }
+    }
+    Ok(())
+}
+
+fn pagerank_pull_destination(
+    inbound: &PageRankInboundCsr,
+    outdegrees: &[f64],
+    scores: &[f64],
+    base: f64,
+    dest: usize,
+) -> f64 {
+    let start = usize::try_from(inbound.offsets[dest]).unwrap_or(0);
+    let end = usize::try_from(inbound.offsets[dest + 1]).unwrap_or(start);
+    let mut acc = base;
+    for &source in &inbound.sources[start.min(end)..end.min(inbound.sources.len())] {
+        let source = usize::try_from(source).unwrap_or(usize::MAX);
+        if source < scores.len() {
+            acc += PAGERANK_DAMPING * scores[source] / outdegrees[source];
+        }
+    }
+    acc
+}
+
+fn pagerank_pull_parallel(
+    inbound: &PageRankInboundCsr,
+    outdegrees: &[f64],
+    scores: &[f64],
+    base: f64,
+    next: &mut [f64],
+    control: &AlgorithmControl,
+) -> Result<(), AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel PageRank requires an instance-owned compute pool"))?;
+    let ranges = destination_chunks(next.len(), control.compute_threads());
+    let work = AtomicUsize::new(0);
+    let chunk_results = run_pagerank_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut local = Vec::with_capacity(end - start);
+                for dest in start..end {
+                    let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
+                    if observed.is_multiple_of(PAGERANK_CHECKPOINT_DESTINATIONS) {
+                        control.check_cancelled()?;
+                    }
+                    local.push(pagerank_pull_destination(
+                        inbound, outdegrees, scores, base, dest,
+                    ));
+                }
+                Ok((start, local))
             })
-            .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(algorithm, control, rows)
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+    // Merge chunk outputs in ascending destination-range order (canonical).
+    for (start, local) in chunk_results {
+        next[start..start + local.len()].copy_from_slice(&local);
+    }
+    Ok(())
+}
+
+fn run_pagerank_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("PageRank worker panicked")),
     }
 }
 
@@ -1648,9 +1884,36 @@ pub fn rank_algorithm_with_limits(
     options: &RankOptions,
     limits: AlgorithmLimits,
 ) -> Result<RecordBatch, GfError> {
+    rank_algorithm_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        limits,
+        None,
+    )
+}
+
+/// Execute rank with shaping limits and an optional private compute pool (#343).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors rank_algorithm_with_limits plus the instance compute pool handle"
+)]
+pub fn rank_algorithm_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: &RankOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<RecordBatch, GfError> {
     let graph = rank_projection(provider, dir, mode, label, options)?;
     let algorithm = Algorithm::Rank(options.by);
-    let output = execute_rank(&graph, algorithm, limits)?;
+    let output = execute_rank_with_compute(&graph, algorithm, limits, compute)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
     materialize_node_properties_with_batch_size(dir, property_stems, &batch, limits.batch_size)
         .map_err(Into::into)
@@ -1703,18 +1966,19 @@ fn rank_projection(
     )
 }
 
-fn execute_rank(
+fn execute_rank_with_compute(
     graph: &AdjacencyGraph,
     algorithm: Algorithm,
     limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut registry = AlgorithmRegistry::default();
     register_rank_algorithms(&mut registry)?;
-    registry.execute(
-        algorithm,
-        graph,
-        &AlgorithmControl::new(limits, AlgorithmCancellation::default()),
-    )
+    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
+    registry.execute(algorithm, graph, &control)
 }
 
 fn exact_u32(value: usize, kind: &str) -> Result<u32, AlgorithmError> {
@@ -1746,7 +2010,7 @@ mod tests {
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        execute_rank(graph, Algorithm::Rank(RankAlgorithm::Degree), limits)
+        execute_rank_with_compute(graph, Algorithm::Rank(RankAlgorithm::Degree), limits, None)
     }
 
     fn execute_pagerank(
@@ -1763,6 +2027,22 @@ mod tests {
         )
     }
 
+    fn execute_pagerank_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::PageRank), graph, &control)
+    }
+
     fn pagerank_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
             .rows()
@@ -1772,6 +2052,26 @@ mod tests {
                 _ => panic!("pagerank score must be Float64"),
             })
             .collect()
+    }
+
+    fn pagerank_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        pagerank_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    fn dense_cycle_graph(nodes: usize) -> AdjacencyGraph {
+        // Enough parallel edges per source to clear the documented crossover on
+        // modest node counts while keeping the fixture deterministic.
+        let fanout =
+            ((PAGERANK_PARALLEL_CROSSOVER_EDGES as usize) / nodes.max(1)).saturating_add(2);
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
 
     fn execute_betweenness(
@@ -2317,6 +2617,172 @@ mod tests {
             .find(|capability| capability.algorithm == Algorithm::Rank(RankAlgorithm::PageRank))
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn pagerank_path_selection_respects_crossover_and_one_thread() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_pagerank_path(&serial_control, PAGERANK_PARALLEL_CROSSOVER_EDGES - 1, 64),
+            PageRankExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_pagerank_path(&one, PAGERANK_PARALLEL_CROSSOVER_EDGES, 64),
+            PageRankExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_pagerank_path(&parallel, PAGERANK_PARALLEL_CROSSOVER_EDGES, 64),
+            PageRankExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn pagerank_thread_matrix_matches_one_thread_bits_and_ordering() {
+        // Above crossover so multi-thread policies exercise the parallel path.
+        let graph = dense_cycle_graph(128);
+        assert!(graph.edge_entry_count() >= PAGERANK_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_pagerank_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let serial_bits = pagerank_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_pagerank_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(pagerank_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn pagerank_parallel_preserves_dangling_parallel_self_loop_and_direction_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (0, 1), (0, 2), (1, 1)]);
+        let directed = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+        let undirected = AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
+        for graph in [
+            &multigraph,
+            &directed,
+            &undirected,
+            &empty,
+            &single,
+            &disconnected,
+        ] {
+            let serial =
+                execute_pagerank_with_pool(graph, 1, AlgorithmCancellation::default()).unwrap();
+            for threads in [2_usize, 4, 8] {
+                // Force parallel path selection by attaching a multi-thread pool even
+                // when edge counts are below the crossover: call pull through registry
+                // with an oversized synthetic control only when edges meet crossover,
+                // otherwise verify serial path still matches across thread budgets.
+                let parallel =
+                    execute_pagerank_with_pool(graph, threads, AlgorithmCancellation::default())
+                        .unwrap();
+                assert_eq!(pagerank_bits(&parallel), pagerank_bits(&serial));
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+
+        // Adversarial magnitudes: force parallel on a graph above crossover with
+        // dangling nodes and uneven outdegrees.
+        let nodes = 512_u64;
+        let mut edges = Vec::new();
+        for source in 0..(nodes - 64) {
+            let degree = 12 + (source % 17) as usize;
+            for hop in 0..degree {
+                edges.push((source, (source + 1 + hop as u64) % nodes));
+            }
+        }
+        // Leave high-index nodes dangling.
+        let adversarial = AdjacencyGraph::with_test_edges(nodes, &edges);
+        assert!(adversarial.edge_entry_count() >= PAGERANK_PARALLEL_CROSSOVER_EDGES);
+        let serial =
+            execute_pagerank_with_pool(&adversarial, 1, AlgorithmCancellation::default()).unwrap();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_pagerank_with_pool(&adversarial, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(pagerank_bits(&parallel), pagerank_bits(&serial));
+        }
+    }
+
+    #[test]
+    fn pagerank_parallel_cancellation_returns_structured_cancelled() {
+        let graph = dense_cycle_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_pagerank_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn pagerank_destination_chunks_cover_canonical_ranges() {
+        assert_eq!(destination_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(destination_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(destination_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(
+            destination_chunks(8, 4),
+            vec![(0, 2), (2, 4), (4, 6), (6, 8)]
+        );
+        assert_eq!(destination_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn pagerank_pull_matches_serial_scatter_contribution_order() {
+        let fixtures = [
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (0, 1), (0, 2), (1, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1)]),
+            AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]),
+            AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
+            AdjacencyGraph::with_test_edges(1, &[]),
+            dense_cycle_graph(64),
+        ];
+        for graph in &fixtures {
+            if graph.node_ids().is_empty() {
+                continue;
+            }
+            let prepared = prepare_pagerank(graph).unwrap();
+            let scores = vec![1.0 / graph.node_ids().len() as f64; graph.node_ids().len()];
+            let base = 0.15 / graph.node_ids().len() as f64;
+            let mut scatter = vec![base; scores.len()];
+            pagerank_scatter_serial(graph, &prepared.indices, &scores, &mut scatter).unwrap();
+            let mut pull = vec![0.0; scores.len()];
+            for dest in 0..scores.len() {
+                pull[dest] = pagerank_pull_destination(
+                    &prepared.inbound,
+                    &prepared.outdegrees,
+                    &scores,
+                    base,
+                    dest,
+                );
+            }
+            assert_eq!(
+                scatter.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                pull.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "pull must apply contributions in serial source/edge order"
+            );
+        }
     }
 
     #[test]

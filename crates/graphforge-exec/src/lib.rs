@@ -207,7 +207,10 @@ pub use algorithm_embedding_invocation::{
     EmbeddingProjectionSelector, EmbeddingRngContract,
 };
 pub use algorithm_paths::{paths_algorithm, paths_projection_fingerprint};
-pub use algorithm_rank::{rank_algorithm, rank_algorithm_with_limits, rank_projection_fingerprint};
+pub use algorithm_rank::{
+    rank_algorithm, rank_algorithm_with_compute, rank_algorithm_with_limits,
+    rank_projection_fingerprint,
+};
 pub use algorithm_similar::{
     similar_algorithm, similar_algorithm_with_compute, similar_algorithm_with_limits,
     similar_projection_fingerprint,
