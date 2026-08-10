@@ -1,9 +1,10 @@
 ---
 source: crates/graphforge-exec/tests/explain_snapshots.rs
+assertion_line: 141
 ---
 ProjectionExec: expr=[1 as one]
   HashJoinExec: mode=CollectLeft, join_type=Right, on=[(node_uuid@0, node_uuid@0)]
-    DataSourceExec: partitions=1, partition_sizes=[1]
+    GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
     FilterExec: array_has(type_ids@1, 0), projection=[node_uuid@0]
       RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
         ProjectionExec: expr=[node_uuid@7 as node_uuid, type_ids@10 as type_ids]
@@ -12,5 +13,5 @@ ProjectionExec: expr=[1 as one]
               RepartitionExec: partitioning=RoundRobinBatch(<N>), input_partitions=1
                 HashJoinExec: mode=CollectLeft, join_type=Left, on=[(node_uuid@0, node_uuid@0)], projection=[node_uuid@0, node_id@1, type_id@2, type_ids@3, created_at@4, updated_at@5, name@7]
                   FilterExec: array_has(type_ids@3, 0)
-                    DataSourceExec: partitions=1, partition_sizes=[1]
-                  DataSourceExec: partitions=1, partition_sizes=[1]
+                    GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
+                  GraphForgeParquetExec: fragments=1, batch_size=8192, limit=none
