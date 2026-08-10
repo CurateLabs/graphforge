@@ -194,8 +194,8 @@ pub use adjacency::{
     ScanBuildAdjacencyProvider,
 };
 pub use algorithm_analyze::{
-    analyze_algorithm, analyze_projection_fingerprint, embedding_algorithm,
-    embedding_algorithm_execution, embedding_algorithm_execution_with_compute,
+    analyze_algorithm, analyze_algorithm_with_compute, analyze_projection_fingerprint,
+    embedding_algorithm, embedding_algorithm_execution, embedding_algorithm_execution_with_compute,
     prepare_embedding_invocation_descriptor, prepare_embedding_invocation_descriptor_with_compute,
 };
 pub use algorithm_cluster::{
