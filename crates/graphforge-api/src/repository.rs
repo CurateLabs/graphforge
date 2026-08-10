@@ -1356,7 +1356,7 @@ fn digest_definition_tree(root: &Path, definition_kind: DefinitionKind) -> Resul
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(&bytes);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(encode_hex(&hash.finalize()))
 }
 
 fn validate_definition_document(bytes: &[u8], extension: &str) -> Result<(), GfError> {
@@ -2152,7 +2152,7 @@ fn validate_skill_bundle(bundle: &SkillBundle<'_>) -> Result<CanonicalSkillManif
             ));
         }
         digest(&expected.sha256)?;
-        let actual_digest = format!("{:x}", Sha256::digest(actual.bytes));
+        let actual_digest = encode_hex(&Sha256::digest(actual.bytes));
         if actual_digest != expected.sha256 {
             return Err(validation(format!(
                 "packaged project skill digest mismatch: {}",
@@ -2239,7 +2239,7 @@ fn verify_installed_files(
     for file in &manifest.files {
         let path = context.contained_path(Path::new(SKILLS_ROOT).join(&file.path))?;
         match fs::read(&path) {
-            Ok(bytes) if format!("{:x}", Sha256::digest(&bytes)) == file.sha256 => {}
+            Ok(bytes) if encode_hex(&Sha256::digest(&bytes)) == file.sha256 => {}
             Ok(_) => edited.push(file.path.clone()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 edited.push(file.path.clone());
@@ -2583,7 +2583,7 @@ mod tests {
             "skills": MANAGED_SKILL_NAMES,
             "files": files.iter().map(|file| json!({
                 "path": file.path,
-                "sha256": format!("{:x}", Sha256::digest(file.bytes))
+                "sha256": encode_hex(&Sha256::digest(file.bytes))
             })).collect::<Vec<_>>()
         }))
         .unwrap();

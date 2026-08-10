@@ -1,5 +1,5 @@
 {
-  "checksum": "b74a15b35763bdfd082f303def35cc16a39310445b26d13e8569a953de79e9c3",
+  "checksum": "9ff880bc510c97efaa7c5600ab49f73b1d8ee12ff2711319ff13f267d68f4490",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -4769,74 +4769,6 @@
         },
         "edition": "2018",
         "version": "0.8.7"
-      },
-      "license": "MIT OR Apache-2.0",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "license_file": "LICENSE-APACHE"
-    },
-    "cpufeatures 0.2.17": {
-      "name": "cpufeatures",
-      "version": "0.2.17",
-      "package_url": "https://github.com/RustCrypto/utils",
-      "repository": {
-        "Http": {
-          "url": "https://static.crates.io/crates/cpufeatures/0.2.17/download",
-          "sha256": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "cpufeatures",
-            "crate_root": "src/lib.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        }
-      ],
-      "library_target_name": "cpufeatures",
-      "common_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "deps": {
-          "common": [],
-          "selects": {
-            "aarch64-linux-android": [
-              {
-                "id": "libc 0.2.189",
-                "target": "libc"
-              }
-            ],
-            "cfg(all(target_arch = \"aarch64\", target_os = \"linux\"))": [
-              {
-                "id": "libc 0.2.189",
-                "target": "libc"
-              }
-            ],
-            "cfg(all(target_arch = \"aarch64\", target_vendor = \"apple\"))": [
-              {
-                "id": "libc 0.2.189",
-                "target": "libc"
-              }
-            ],
-            "cfg(all(target_arch = \"loongarch64\", target_os = \"linux\"))": [
-              {
-                "id": "libc 0.2.189",
-                "target": "libc"
-              }
-            ]
-          }
-        },
-        "edition": "2018",
-        "version": "0.2.17"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -12018,7 +11950,7 @@
               "alias": "serde_yaml"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
             },
             {
@@ -12379,7 +12311,7 @@
               "alias": "serde_yaml"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
             },
             {
@@ -12499,7 +12431,7 @@
               "target": "rayon"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
             },
             {
@@ -12763,7 +12695,7 @@
               "alias": "serde_yaml"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
             },
             {
@@ -13103,7 +13035,7 @@
               "target": "serde_json"
             },
             {
-              "id": "sha2 0.10.9",
+              "id": "sha2 0.11.0",
               "target": "sha2"
             },
             {
@@ -23009,72 +22941,6 @@
       ],
       "license_file": "LICENSE"
     },
-    "sha2 0.10.9": {
-      "name": "sha2",
-      "version": "0.10.9",
-      "package_url": "https://github.com/RustCrypto/hashes",
-      "repository": {
-        "Http": {
-          "url": "https://static.crates.io/crates/sha2/0.10.9/download",
-          "sha256": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "sha2",
-            "crate_root": "src/lib.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        }
-      ],
-      "library_target_name": "sha2",
-      "common_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "crate_features": {
-          "common": [
-            "default",
-            "std"
-          ],
-          "selects": {}
-        },
-        "deps": {
-          "common": [
-            {
-              "id": "cfg-if 1.0.4",
-              "target": "cfg_if"
-            },
-            {
-              "id": "digest 0.10.7",
-              "target": "digest"
-            }
-          ],
-          "selects": {
-            "cfg(any(target_arch = \"aarch64\", target_arch = \"x86_64\", target_arch = \"x86\"))": [
-              {
-                "id": "cpufeatures 0.2.17",
-                "target": "cpufeatures"
-              }
-            ]
-          }
-        },
-        "edition": "2018",
-        "version": "0.10.9"
-      },
-      "license": "MIT OR Apache-2.0",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "license_file": "LICENSE-APACHE"
-    },
     "sha2 0.11.0": {
       "name": "sha2",
       "version": "0.11.0",
@@ -32329,7 +32195,6 @@
     "aarch64-apple-darwin": [
       "aarch64-apple-darwin"
     ],
-    "aarch64-linux-android": [],
     "aarch64-pc-windows-gnullvm": [],
     "aarch64-unknown-linux-gnu": [
       "aarch64-unknown-linux-gnu"
@@ -32538,7 +32403,7 @@
     "serde 1.0.228",
     "serde_json 1.0.151",
     "serde_yaml_ng 0.9.36",
-    "sha2 0.10.9",
+    "sha2 0.11.0",
     "tantivy 0.26.1",
     "tempfile 3.27.0",
     "thiserror 2.0.19",
