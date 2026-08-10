@@ -100,6 +100,39 @@ reductions, Node2Vec skip-gram training stays serial, and resource allocation
 keeps serial candidate/intersection order per source, so fingerprints match the
 one-thread path.
 
+eigenvector destination updates (#507) may partition independent work across
+that pool above documented crossovers; work never uses Rayon's process-global
+pool. Cosine dot products retain serial coordinate order, PageRank keeps
+canonical contribution order with serial dangling/delta reductions, eigenvector
+keeps per-destination incoming contribution order with serial norm/convergence
+reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
+the one-thread path.
+
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and dyad
+census (#570) may partition independent work across that pool above documented
+crossovers; work never uses Rayon's process-global pool. Cosine dot products
+retain serial coordinate order, PageRank keeps canonical contribution order with
+serial dangling/delta reductions, Node2Vec skip-gram training stays serial, and
+dyad census merges chunk-local pair classifications canonically, so fingerprints
+match the one-thread path.
+
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and triad census
+source-range enumeration (#587) may partition independent work across that pool
+above documented crossovers; work never uses Rayon's process-global pool. Cosine
+dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Node2Vec skip-gram
+training stays serial, and triad census merges integer class counts in canonical
+source-range order, so fingerprints match the one-thread path.
+
+(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
+independent work across that pool above documented crossovers; work never uses
+Rayon's process-global pool. Leiden (#527) is explicitly dispositioned serial
+because local moves, refinement, fixed random sampling, and aggregation consume
+the accepted state from the previous step. Cosine dot products retain serial
+coordinate order, PageRank keeps canonical contribution order with serial
+dangling/delta reductions, Node2Vec skip-gram training stays serial, and Leiden
+keeps one-thread refinement order, so fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -757,6 +790,22 @@ order as serial propagation, then chunk outputs merge by canonical public UUID
 node order before the next iteration. Schemas, row order, binary vectors,
 heterogeneous type-token handling, and fingerprints match the one-thread result
 at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel dyad census (#570)
+
+`analyze(by="dyad_census")` partitions normalized directed-pair classification
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- normalized directed pairs are at least
+  `DYAD_CENSUS_PARALLEL_CROSSOVER_PAIRS` (`16_384`) in `graphforge-exec`.
+
+Node identity validation, edge UUID consistency checks, null-pair arithmetic,
+and final category counting remain serial. Parallel workers build chunk-local
+unordered-pair direction maps; the main thread merges those maps in canonical
+directed-pair chunk order before counting `mutual`, `asymmetric`, and `null`.
+Schemas, category values, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 
