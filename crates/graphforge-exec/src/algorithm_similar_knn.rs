@@ -7,7 +7,6 @@
 //! stay bit-for-bit identical to the serial path.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
@@ -17,10 +16,16 @@ const CHECKPOINT_INTERVAL: usize = 16_384;
 
 /// Multiply-add ops below which cosine stays on the serial path (#342).
 ///
-/// Measured to keep accepted small fixtures and micro-invocations off the
-/// worker pool; above this, source-parallel execution amortizes scheduling on
-/// typical embedded hosts. Exact numeric results remain identical either way.
-pub const COSINE_PARALLEL_CROSSOVER_OPS: u64 = 16_384;
+/// Chosen from release-mode serial-vs-parallel timings of exact cosine KNN on
+/// this M4 agent host (4× Xeon vCPU, adversarial fixture, 4 private workers;
+/// see ignored `measure_cosine_parallel_crossover`):
+/// - ~16k ops: parallel still slower (Rayon install + merge tax)
+/// - ~36k ops: first clear win (~0.81× serial)
+/// - ≥65k ops: ≥2× speedup
+///
+/// `32_768` is the smallest power-of-two at/above that measured win boundary.
+/// Exact numeric results remain identical on either path.
+pub const COSINE_PARALLEL_CROSSOVER_OPS: u64 = 32_768;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SimilarityPair {
@@ -87,7 +92,7 @@ fn exact_cosine_pairs_serial(
     include_negative: bool,
     control: &AlgorithmControl,
 ) -> Result<Vec<SimilarityPair>, AlgorithmError> {
-    let work = AtomicUsize::new(0);
+    let mut work = 0usize;
     let mut pairs = Vec::new();
     for source_index in 0..vectors.len() {
         let source_pairs = score_source_all_pairs(
@@ -97,7 +102,7 @@ fn exact_cosine_pairs_serial(
             k,
             include_negative,
             control,
-            &work,
+            &mut work,
         )?;
         append_checked(&mut pairs, source_pairs, control)?;
     }
@@ -115,11 +120,11 @@ fn exact_cosine_pairs_parallel(
         .compute_pool()
         .ok_or_else(|| execution("parallel cosine requires an instance-owned compute pool"))?;
     let ranges = source_chunks(vectors.len(), control.compute_threads());
-    let work = AtomicUsize::new(0);
     let chunk_results = run_on_pool(pool, || {
-        ranges
+        let results = ranges
             .par_iter()
             .map(|&(start, end)| {
+                let mut work = 0usize;
                 let mut chunk_pairs = Vec::new();
                 for source_index in start..end {
                     let source_pairs = score_source_all_pairs(
@@ -129,13 +134,14 @@ fn exact_cosine_pairs_parallel(
                         k,
                         include_negative,
                         control,
-                        &work,
+                        &mut work,
                     )?;
                     chunk_pairs.extend(source_pairs);
                 }
                 Ok(chunk_pairs)
             })
-            .collect::<Result<Vec<_>, AlgorithmError>>()
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_error(results)
     })?;
     merge_chunk_pairs(chunk_results, control)
 }
@@ -147,7 +153,7 @@ fn score_source_all_pairs(
     k: usize,
     include_negative: bool,
     control: &AlgorithmControl,
-    work: &AtomicUsize,
+    work: &mut usize,
 ) -> Result<Vec<SimilarityPair>, AlgorithmError> {
     let mut candidates = Vec::with_capacity(vectors.len().saturating_sub(1));
     for target_index in 0..vectors.len() {
@@ -205,7 +211,7 @@ fn exact_filtered_cosine_knn_serial(
     k: usize,
     control: &AlgorithmControl,
 ) -> Result<Vec<SimilarityPair>, AlgorithmError> {
-    let work = AtomicUsize::new(0);
+    let mut work = 0usize;
     let mut pairs = Vec::new();
     for (source_index, source_candidates) in candidate_indices.iter().enumerate() {
         let source_pairs = score_source_filtered(
@@ -215,7 +221,7 @@ fn exact_filtered_cosine_knn_serial(
             source_candidates,
             k,
             control,
-            &work,
+            &mut work,
         )?;
         append_checked(&mut pairs, source_pairs, control)?;
     }
@@ -233,11 +239,11 @@ fn exact_filtered_cosine_knn_parallel(
         .compute_pool()
         .ok_or_else(|| execution("parallel cosine requires an instance-owned compute pool"))?;
     let ranges = source_chunks(vectors.len(), control.compute_threads());
-    let work = AtomicUsize::new(0);
     let chunk_results = run_on_pool(pool, || {
-        ranges
+        let results = ranges
             .par_iter()
             .map(|&(start, end)| {
+                let mut work = 0usize;
                 let mut chunk_pairs = Vec::new();
                 for (source_index, source_candidates) in
                     candidate_indices.iter().enumerate().take(end).skip(start)
@@ -249,15 +255,33 @@ fn exact_filtered_cosine_knn_parallel(
                         source_candidates,
                         k,
                         control,
-                        &work,
+                        &mut work,
                     )?;
                     chunk_pairs.extend(source_pairs);
                 }
                 Ok(chunk_pairs)
             })
-            .collect::<Result<Vec<_>, AlgorithmError>>()
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_error(results)
     })?;
     merge_chunk_pairs(chunk_results, control)
+}
+
+/// Prefer the lowest-index chunk error so parallel failures stay deterministic.
+fn first_chunk_error<T>(results: Vec<Result<T, AlgorithmError>>) -> Result<Vec<T>, AlgorithmError> {
+    let mut ok = Vec::with_capacity(results.len());
+    let mut first_error: Option<AlgorithmError> = None;
+    for result in results {
+        match result {
+            Ok(value) if first_error.is_none() => ok.push(value),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Ok(_) | Err(_) => {}
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(ok),
+    }
 }
 
 fn score_source_filtered(
@@ -267,7 +291,7 @@ fn score_source_filtered(
     source_candidates: &[usize],
     k: usize,
     control: &AlgorithmControl,
-    work: &AtomicUsize,
+    work: &mut usize,
 ) -> Result<Vec<SimilarityPair>, AlgorithmError> {
     let mut seen = vec![false; vectors.len()];
     let mut candidates = Vec::with_capacity(source_candidates.len());
@@ -295,7 +319,7 @@ fn cosine(
     source_index: usize,
     target_index: usize,
     control: &AlgorithmControl,
-    work: &AtomicUsize,
+    work: &mut usize,
 ) -> Result<f64, AlgorithmError> {
     let mut dot = 0.0;
     for (&left, &right) in vectors[source_index].iter().zip(vectors[target_index]) {
@@ -396,9 +420,9 @@ fn validate(vectors: &[&[f64]]) -> Result<Vec<f64>, AlgorithmError> {
         .collect()
 }
 
-fn checkpoint(control: &AlgorithmControl, work: &AtomicUsize) -> Result<(), AlgorithmError> {
-    let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
-    if observed.is_multiple_of(CHECKPOINT_INTERVAL) {
+fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
+    *work = work.saturating_add(1);
+    if (*work).is_multiple_of(CHECKPOINT_INTERVAL) {
         control.checkpoint()?;
     }
     Ok(())
@@ -780,6 +804,7 @@ mod tests {
 
     #[test]
     fn thread_matrix_preserves_exact_knn_cosine_and_filtered_fingerprints() {
+        // 48×47×16 ≈ 36k ops exceeds COSINE_PARALLEL_CROSSOVER_OPS.
         let values = adversarial_vectors(48, 16);
         let vectors = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let candidates = (0..values.len())
@@ -823,7 +848,9 @@ mod tests {
 
     #[test]
     fn parallel_output_limits_and_cancellation_remain_atomic() {
-        let values = adversarial_vectors(32, 8);
+        // 48×47×16 ≈ 36k ops exceeds COSINE_PARALLEL_CROSSOVER_OPS so
+        // this exercises the private-pool path, not the serial fallback.
+        let values = adversarial_vectors(48, 16);
         let vectors = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let pool = Arc::new(ComputePool::new(4).unwrap());
         let limited = AlgorithmControl::new(
@@ -835,6 +862,14 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .with_compute_pool(pool.clone());
+        assert!(matches!(
+            select_cosine_path(
+                &limited,
+                values.len(),
+                estimated_ops(values.len(), (values.len() - 1) as u64, 16)
+            ),
+            CosineExecutionPath::Parallel { .. }
+        ));
         assert_eq!(
             exact_cosine_knn(&vectors, 2, &limited),
             Err(AlgorithmError::OutputLimit {
@@ -854,5 +889,77 @@ mod tests {
             exact_cosine_similarity(&vectors, 3, &cancelled),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn first_chunk_error_prefers_lowest_index() {
+        let results = vec![
+            Err(AlgorithmError::Cancelled),
+            Err(AlgorithmError::OutputLimit {
+                observed: 9,
+                limit: 1,
+            }),
+            Ok(vec![SimilarityPair {
+                source_index: 0,
+                target_index: 1,
+                similarity: 1.0,
+            }]),
+        ];
+        assert_eq!(first_chunk_error(results), Err(AlgorithmError::Cancelled));
+    }
+
+    #[test]
+    #[ignore = "manual crossover measurement; run with --ignored --nocapture"]
+    fn measure_cosine_parallel_crossover() {
+        use std::time::Instant;
+        let pool = Arc::new(ComputePool::new(4).unwrap());
+        for &(sources, dim) in &[
+            (16usize, 16),
+            (32, 16),
+            (48, 16),
+            (64, 32),
+            (96, 32),
+            (128, 32),
+            (256, 64),
+            (512, 64),
+            (512, 128),
+        ] {
+            let values = adversarial_vectors(sources, dim);
+            let vectors = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let norms = validate(&vectors).unwrap();
+            let ops = estimated_ops(sources, (sources - 1) as u64, dim);
+            let limits = AlgorithmLimits {
+                iterations: u64::MAX,
+                ..AlgorithmLimits::default()
+            };
+            let serial_ctl = AlgorithmControl::new(
+                limits.with_compute_threads(1),
+                AlgorithmCancellation::default(),
+            );
+            let parallel_ctl = AlgorithmControl::new(
+                limits.with_compute_threads(4),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(pool.clone());
+            // Warm once.
+            let _ = exact_cosine_pairs_serial(&vectors, &norms, 5, false, &serial_ctl).unwrap();
+            let _ = exact_cosine_pairs_parallel(&vectors, &norms, 5, false, &parallel_ctl).unwrap();
+            let mut serial_ns = u128::MAX;
+            let mut parallel_ns = u128::MAX;
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                let a = exact_cosine_pairs_serial(&vectors, &norms, 5, false, &serial_ctl).unwrap();
+                serial_ns = serial_ns.min(t0.elapsed().as_nanos());
+                let t1 = Instant::now();
+                let b =
+                    exact_cosine_pairs_parallel(&vectors, &norms, 5, false, &parallel_ctl).unwrap();
+                parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
+                assert_eq!(fingerprint(&a), fingerprint(&b));
+            }
+            eprintln!(
+                "sources={sources} dim={dim} ops={ops} serial_ns={serial_ns} parallel_ns={parallel_ns} ratio={}",
+                parallel_ns as f64 / serial_ns as f64
+            );
+        }
     }
 }

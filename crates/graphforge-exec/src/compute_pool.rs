@@ -89,7 +89,15 @@ mod tests {
             use rayon::prelude::*;
             (0..32_usize)
                 .into_par_iter()
-                .map(|value| value * value)
+                .map(|value| {
+                    let thread = std::thread::current();
+                    let name = thread.name().unwrap_or("unnamed");
+                    assert!(
+                        name.starts_with("graphforge-compute-"),
+                        "expected private pool worker, got {name:?}"
+                    );
+                    value * value
+                })
                 .sum::<usize>()
         });
         assert_eq!(sum, (0..32).map(|value| value * value).sum::<usize>());

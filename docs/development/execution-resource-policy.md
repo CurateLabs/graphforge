@@ -80,7 +80,12 @@ across the instance-owned private compute pool when:
 - `compute_threads > 1`, and
 - estimated multiply-adds (`sources × candidates × dimensions`, or the filtered
   candidate total × dimensions) are at least
-  `COSINE_PARALLEL_CROSSOVER_OPS` (`16_384`) in `graphforge-exec`.
+  `COSINE_PARALLEL_CROSSOVER_OPS` (`32_768`) in `graphforge-exec`. That
+  threshold is the smallest power-of-two multiply-add count at/above the measured
+  win boundary on the M4 agent host (4 vCPU, adversarial fixture, 4 private
+  workers, release build): ~16k ops still tax serial, ~36k ops first clear win,
+  ≥65k ops ≥2×. Smaller workloads stay serial. Worker-local checkpoint counters
+  avoid shared atomic contention on the multiply-add path.
 
 Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Inner floating-point reductions
