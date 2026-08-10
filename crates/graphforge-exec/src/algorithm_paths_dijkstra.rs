@@ -1,3 +1,7 @@
+//! Dijkstra single-source and source-target execution remains serial for #541.
+//! Its heap, best-path map, and target early exit are one canonical state
+//! machine. The all-pairs variant has a separate #542 disposition.
+
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
