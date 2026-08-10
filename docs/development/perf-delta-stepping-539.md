@@ -22,17 +22,24 @@ results must match the one-thread oracle.
 Synthetic fixtures create one source, a light-edge middle bucket, and repeated
 middle-to-target relaxations so the second bucket wave is eligible for
 parallel proposal generation. All thread counts below matched the one-thread
-oracle exactly.
+oracle exactly. Rows below the 262,144 crossover stay on the serial path even
+when the control carries a multi-thread pool, so those columns reflect serial
+noise under different controls rather than parallel speedups.
 
 | Middle nodes | Fanout | Edge entries | Rows | 1 thread | 2 threads | 4 threads | 8 threads |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 192 | 96 | 18,816 | 289 | 12.005 ms | 15.840 ms | 11.871 ms | 18.963 ms |
-| 512 | 256 | 132,096 | 769 | 63.214 ms | 105.937 ms | 87.360 ms | 59.756 ms |
-| 1,024 | 384 | 395,264 | 1,409 | 271.509 ms | 154.973 ms | 130.093 ms | 108.390 ms |
+| 192 | 96 | 18,816 | 289 | 4.851 ms | 3.916 ms | 3.971 ms | 3.561 ms |
+| 512 | 256 | 132,096 | 769 | 40.090 ms | 46.920 ms | 34.302 ms | 41.604 ms |
+| 1,024 | 384 | 395,264 | 1,409 | 139.790 ms | 137.109 ms | 120.984 ms | 102.622 ms |
 
-The first two fixtures do not consistently justify the pool tax across supported
-thread counts. The 395k-edge-entry fixture is the first measured wave where
-2/4/8 workers all beat one thread, so the implementation uses the conservative
+Peak resident set reported by `/proc/self/status` `VmHWM` for the evidence test
+process: **276,480 KiB**.
+
+An exploratory release-mode run with the provisional 8,192 threshold showed that
+the 132k-edge-entry fixture did not consistently justify the pool tax (2 and 4
+threads were slower while 8 threads was only slightly faster). The 395k fixture
+is the first measured wave where 2/4/8 workers beat one thread in the repeat
+production-threshold run above, so the implementation uses the conservative
 power-of-two threshold below that fixture and above the inconsistent 132k
 fixture: `262_144`.
 
