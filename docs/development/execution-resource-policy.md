@@ -217,9 +217,9 @@ the instance-owned private compute pool when:
 Release-mode local evidence on the 4-worker M4 agent host showed regular graphs
 that converge during warm-up avoid the pool, while irregular non-converged
 fixtures crossed over by ~8K selected adjacency entries:
-`8_689` edges `1.57ms → 0.87ms`, `24_440` edges `2.89ms → 1.43ms`,
-`65_505` edges `9.90ms → 4.25ms`, and `130_544` edges
-`14.56ms → 7.26ms` (one thread vs four private workers; hardware-specific
+`8_689` edges `1.55ms → 0.81ms`, `24_440` edges `2.80ms → 1.57ms`,
+`65_505` edges `9.88ms → 3.99ms`, and `130_544` edges
+`14.29ms → 7.03ms` (one thread vs four private workers; hardware-specific
 timing, not a CI gate).
 
 Below that crossover, or when the policy provides one compute thread, the
