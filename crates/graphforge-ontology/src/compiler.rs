@@ -203,7 +203,7 @@ fn empty_batch(schema: &std::sync::LazyLock<arrow::datatypes::SchemaRef>) -> Rec
 fn build_ontology_meta(doc: &OntologyDoc) -> Result<RecordBatch, OntologyError> {
     // Checksum: SHA-256 of the stable JSON serialisation.
     let json = serde_json::to_string(doc).map_err(|e| OntologyError::Arrow(e.to_string()))?;
-    let checksum = hex_digest(&Sha256::digest(json.as_bytes()));
+    let checksum = hex_digest(Sha256::digest(json.as_bytes()));
 
     let mut ids = StringBuilder::new();
     let mut versions = StringBuilder::new();
@@ -500,7 +500,14 @@ fn build_inheritance_closure(doc: &OntologyDoc, name_to_id: &HashMap<String, u32
 // ---------------------------------------------------------------------------
 
 fn hex_digest(digest: impl AsRef<[u8]>) -> String {
-    digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write;
+    digest.as_ref().iter().fold(
+        String::with_capacity(digest.as_ref().len() * 2),
+        |mut output, byte| {
+            write!(output, "{byte:02x}").expect("writing to String cannot fail");
+            output
+        },
+    )
 }
 
 #[cfg(test)]
