@@ -262,6 +262,21 @@ and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
 
+## Serial k-core decomposition (#523)
+
+`cluster(by="k_core_decomposition")` is intentionally SERIAL. The exact
+core-number peel mutates node degrees through a canonical min-heap; each removal
+changes later heap priorities and stale-entry rejection. Splitting that frontier
+across workers would either change tie order/core assignment evidence or add a
+global synchronization point around every peel, leaving no safe independent
+kernel for the private compute pool.
+
+The handler keeps the Rust-owned projection path and bounded Arrow sink, avoids
+the Rayon global pool, and observes shared graph/output/iteration limits. A
+fingerprint test attaches private compute pools for `1`/`2`/`4`/`8` configured
+compute threads and requires identical schemas, row ordering, core labels, and
+rows.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
