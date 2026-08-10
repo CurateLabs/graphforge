@@ -637,6 +637,11 @@ checkpoints, structured numeric errors, UUID-only identity, and atomic opt-in
 `write_property` apply. Python and Node remain thin Arrow IPC bindings with no
 algorithm backend, fallback, packaging dependency, or recovery path.
 
+`leiden` has an explicit serial performance disposition (#527): local moves,
+connected refinement, fixed random-stream choices, and seeded aggregation
+consume the accepted state from the previous step. No parallel crossover, GPU,
+or foreign-engine fallback is claimed.
+
 `by="girvan_newman"` performs the deterministic, unweighted algorithm of
 [Girvan and Newman](https://doi.org/10.1073/pnas.122653799) in Rust. It computes
 all-shortest-path edge betweenness, removes one highest-scoring edge, and
