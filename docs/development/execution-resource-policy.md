@@ -720,6 +720,25 @@ one-thread oracle, and worker chunks merge by canonical node ordinal. Schemas,
 row order, f32 embedding bits, cancellation, and work-limit errors are covered at
 `1`/`2`/`4`/`8` thread configurations.
 
+## Parallel HashGNN propagation (#561)
+
+HashGNN propagation partitions **independent canonical node updates** across
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated minhash candidate comparisons per propagation iteration
+  (`active_bits^2 * (nodes + adjacency_entries)`) are at least
+  `HASHGNN_PROPAGATE_PARALLEL_CROSSOVER` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. The parallel path only separates
+node-owned output rows for one iteration at a time. Each worker evaluates the
+node's samples, self candidates, adjacency candidates, and tie keys in the same
+order as serial propagation, then chunk outputs merge by canonical public UUID
+node order before the next iteration. Schemas, row order, binary vectors,
+heterogeneous type-token handling, and fingerprints match the one-thread result
+at `1`/`2`/`4`/`8`/automatic configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

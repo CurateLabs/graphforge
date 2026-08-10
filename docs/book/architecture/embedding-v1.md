@@ -507,6 +507,18 @@ those terms and at least
 Cancellation is checked per iteration, node, sample, adjacency row, and output
 row. These controls and the aggregate 1 GiB default are GraphForge v1 choices.
 
+HashGNN propagation may use the instance-owned private compute pool when
+`compute_threads > 1` and the estimated per-iteration candidate work
+`K^2 * (nodes + adjacency_entries)` is at least
+`HASHGNN_PROPAGATE_PARALLEL_CROSSOVER` (`4,096`). Smaller workloads and
+one-thread policies stay serial. Parallel execution partitions only independent
+node updates; every node still evaluates samples, self candidates, neighbor
+candidates, type-token fields, and tie-breaks in the serial order above. Worker
+chunks merge by canonical public UUID node order before the next iteration, so
+schemas, row order, binary vectors, and fingerprints match the one-thread
+oracle. This is a CPU scheduling disposition only, with no GPU or approximate
+HashGNN mode.
+
 ## Embedding-space publication
 
 ### Ownership and identity
