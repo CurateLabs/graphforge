@@ -195,7 +195,7 @@ impl CompositeTransactionRequest {
         Ok(result)
     }
 
-    /// Validate every M20/M21 participant reference against existing or
+    /// Validate every knowledge/epistemic participant reference against existing or
     /// same-request identities before any staging.
     ///
     /// Provenance/assertion families run before epistemic event families so
@@ -210,7 +210,7 @@ impl CompositeTransactionRequest {
         Ok(())
     }
 
-    /// Validate graph then M20/M21 participant cross-references before staging.
+    /// Validate graph then knowledge/epistemic participant cross-references before staging.
     ///
     /// Graph endpoint/kind checks precede participant-family checks so
     /// multi-defect requests keep the documented reference precedence.

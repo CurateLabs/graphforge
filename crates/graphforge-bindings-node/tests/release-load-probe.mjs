@@ -215,7 +215,7 @@ try {
   let findRows = 0;
   let rankResultSha256 = fingerprint([]);
   let findResultSha256 = fingerprint([]);
-  if (workload.startsWith("m18-")) {
+  if (workload.startsWith("algorithm-")) {
     const rank = tableFromIPC(forge.rank("Entity", "degree", "LINK"));
     rankRows = rank.numRows;
     rankResultSha256 = fingerprint(
@@ -227,7 +227,7 @@ try {
         .sort((left, right) => left[0].localeCompare(right[0])),
     );
   }
-  if (workload.startsWith("m19-")) {
+  if (workload.startsWith("search-")) {
     forge.index("Entity", { properties: ["name"] });
     const found = tableFromIPC(
       forge.find("n-00000001", "Entity", undefined, undefined, undefined, 10),
@@ -253,13 +253,13 @@ try {
   const reopenNodeResultSha256 = fingerprint([
     ...reopenedNodes.getChild("name").toArray(),
   ]);
-  if (workload.startsWith("m18-")) {
+  if (workload.startsWith("algorithm-")) {
     assert.equal(
       tableFromIPC(reopened.rank("Entity", "degree", "LINK")).numRows,
       rankRows,
     );
   }
-  if (workload.startsWith("m19-")) {
+  if (workload.startsWith("search-")) {
     assert.equal(
       tableFromIPC(
         reopened.find(

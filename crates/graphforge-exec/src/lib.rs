@@ -3,15 +3,15 @@
 //!
 //! # Milestone status
 //!
-//! - M12 #573 — SessionContext wiring
-//! - M12 #575/#576 — Operator lowering
-//! - M13 #700 — CREATE execution: first physical [`ExecutionPlan`] + custom
+//! - logical-plan lowering #573 — SessionContext wiring
+//! - logical-plan lowering #575/#576 — Operator lowering
+//! - physical execution #700 — CREATE execution: first physical [`ExecutionPlan`] + custom
 //!   [`ExtensionPlanner`]
-//! - M13 #580 — `VarLenExpandExec`: variable-length path expansion (BFS over the
+//! - physical execution #580 — `VarLenExpandExec`: variable-length path expansion (BFS over the
 //!   edge table)
-//! - M13 #581 — `OptionalMatchExec`: `OPTIONAL MATCH` left-join with openCypher
+//! - physical execution #581 — `OptionalMatchExec`: `OPTIONAL MATCH` left-join with openCypher
 //!   null-shaping
-//! - M13 #582 — `UnwindExec`: `UNWIND` list explosion (one row per element)
+//! - physical execution #582 — `UnwindExec`: `UNWIND` list explosion (one row per element)
 //!   ← **this issue**
 #![forbid(unsafe_code)]
 // `name()` returns a string literal but the trait ties it to `&self`.

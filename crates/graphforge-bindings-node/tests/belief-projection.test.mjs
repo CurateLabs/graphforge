@@ -1,11 +1,11 @@
-// Fresh-native M20/M21 resolved-belief projection acceptance (#2004).
+// Fresh-native knowledge/epistemic resolved-belief projection acceptance (#2004).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge } from "../index.js";
 
-test("resolved rank records M20 output and exactly retries its M21 attachment", async () => {
+test("resolved rank records knowledge output and exactly retries its epistemic attachment", async () => {
   const forge = new GraphForge();
   await forge.enableCapability({
     operationUuid: "018f0f4e-7b8c-7000-8000-000000000801",

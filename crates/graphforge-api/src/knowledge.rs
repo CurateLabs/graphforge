@@ -133,14 +133,14 @@ pub struct ListEvidenceLinksRequest {
     pub page: PageRequest,
 }
 
-/// Frozen request for one immutable M21 reasoning record or amendment.
+/// Frozen request for one immutable epistemic reasoning record or amendment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordReasoningRequest {
     /// Idempotency identity for the atomic generation publication.
     pub context: WriteContext,
     /// Caller-supplied UUIDv7 reasoning identity.
     pub reasoning_uuid: Uuid,
-    /// Existing immutable M20 assertion.
+    /// Existing immutable knowledge assertion.
     pub assertion_uuid: Uuid,
     /// Closed reasoning purpose.
     pub kind: ReasoningKind,
@@ -150,7 +150,7 @@ pub struct RecordReasoningRequest {
     pub content: Vec<u8>,
     /// Optional prior reasoning record explicitly amended by this record.
     pub supersedes_reasoning_uuid: Option<Uuid>,
-    /// Existing M20 provenance event.
+    /// Existing knowledge provenance event.
     pub provenance_uuid: Uuid,
 }
 
@@ -170,7 +170,7 @@ pub struct RecordAssertionStatusRequest {
     pub context: WriteContext,
     /// Caller-supplied UUIDv7 event identity.
     pub status_event_uuid: Uuid,
-    /// Existing immutable M20 assertion.
+    /// Existing immutable knowledge assertion.
     pub assertion_uuid: Uuid,
     /// Explicit non-supersession status.
     pub status: AssertionStatus,
@@ -205,7 +205,7 @@ pub struct FirstAssertionStatusInput {
 pub struct CreateAssertionWithStatusRequest {
     /// Complete assertion request; its operation UUID owns the publication.
     pub assertion: CreateAssertionRequest,
-    /// Explicit first status stored in the separate M21 participant.
+    /// Explicit first status stored in the separate epistemic participant.
     pub first_status: FirstAssertionStatusInput,
 }
 
@@ -267,7 +267,7 @@ impl GraphForge {
     /// Atomically create one assertion, its graph references, and provenance.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn create_assertion(
         &self,
@@ -376,10 +376,10 @@ impl GraphForge {
         ))
     }
 
-    /// Atomically create an M20 assertion and its first explicit M21 status.
+    /// Atomically create a Bazel-migration0 assertion and its first explicit epistemic status.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn create_assertion_with_status(
         &self,
@@ -485,7 +485,7 @@ impl GraphForge {
     /// Return one exact `assertion@1` row.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes an owned optional cancellation token"
+        reason = "graphforge-knowledge-api/1 freezes an owned optional cancellation token"
     )]
     pub fn assertion(
         &self,
@@ -517,7 +517,7 @@ impl GraphForge {
     /// Return one deterministic assertion page.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn list_assertions(
         &self,
@@ -561,7 +561,7 @@ impl GraphForge {
     /// Return one assertion's graph references in canonical order.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned page requests"
+        reason = "graphforge-knowledge-api/1 freezes owned page requests"
     )]
     pub fn assertion_graph_refs(
         &self,
@@ -601,7 +601,7 @@ impl GraphForge {
     /// Atomically record one confidence assessment, its input snapshot, and provenance.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn assess_confidence(
         &self,
@@ -700,7 +700,7 @@ impl GraphForge {
     /// Return one exact `confidence_assessment@1` row.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes an owned optional cancellation token"
+        reason = "graphforge-knowledge-api/1 freezes an owned optional cancellation token"
     )]
     pub fn confidence_assessment(
         &self,
@@ -732,7 +732,7 @@ impl GraphForge {
     /// Return a deterministic page of confidence assessments.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn list_confidence_assessments(
         &self,
@@ -773,7 +773,7 @@ impl GraphForge {
     /// Return one assessment's immutable normalized input snapshot.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned page requests"
+        reason = "graphforge-knowledge-api/1 freezes owned page requests"
     )]
     pub fn confidence_inputs(
         &self,
@@ -813,7 +813,7 @@ impl GraphForge {
     /// Atomically create one assertion together with a non-empty evidence bundle.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn create_assertion_with_evidence(
         &self,
@@ -912,7 +912,7 @@ impl GraphForge {
     /// Atomically attach one immutable evidence link and its provenance.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn attach_evidence(
         &self,
@@ -1003,7 +1003,7 @@ impl GraphForge {
     /// Return one exact `evidence_link@1` row.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes an owned optional cancellation token"
+        reason = "graphforge-knowledge-api/1 freezes an owned optional cancellation token"
     )]
     pub fn evidence_link(
         &self,
@@ -1032,7 +1032,7 @@ impl GraphForge {
     /// Return a deterministic page of immutable evidence links.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn list_evidence_links(
         &self,
@@ -1077,7 +1077,7 @@ impl GraphForge {
     /// Atomically append one immutable reasoning record.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn record_reasoning(
         &self,
@@ -1161,7 +1161,7 @@ impl GraphForge {
     /// Return one exact immutable reasoning record.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes an owned optional cancellation token"
+        reason = "graphforge-epistemic-api/1 freezes an owned optional cancellation token"
     )]
     pub fn reasoning(
         &self,
@@ -1187,7 +1187,7 @@ impl GraphForge {
     /// Return deterministic immutable reasoning history.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn list_reasoning(
         &self,
@@ -1228,7 +1228,7 @@ impl GraphForge {
     /// Atomically append one explicit assertion-status event.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn record_assertion_status(
         &self,
@@ -1334,7 +1334,7 @@ impl GraphForge {
     /// Return deterministic append-only assertion-status history.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn list_assertion_status(
         &self,
@@ -1376,7 +1376,7 @@ impl GraphForge {
     #[allow(
         clippy::needless_pass_by_value,
         clippy::too_many_lines,
-        reason = "graphforge-m21-api/1 freezes one explicit atomic validation transaction"
+        reason = "graphforge-epistemic-api/1 freezes one explicit atomic validation transaction"
     )]
     pub fn supersede_assertion(
         &self,
@@ -1529,7 +1529,7 @@ impl GraphForge {
     /// Return deterministic branch-preserving supersession history.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m21-api/1 freezes owned request structs"
+        reason = "graphforge-epistemic-api/1 freezes owned request structs"
     )]
     pub fn list_assertion_supersessions(
         &self,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the M21 closure-ledger validator."""
+"""Regression tests for the epistemic closure-ledger validator."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/ci/m21-contract-gate.py"
-SPEC = importlib.util.spec_from_file_location("m21_contract_gate", SCRIPT)
+SCRIPT = ROOT / "scripts/ci/epistemic-contract-gate.py"
+SPEC = importlib.util.spec_from_file_location("epistemic_contract_gate", SCRIPT)
 if SPEC is None or SPEC.loader is None:
-    raise SystemExit("cannot load M21 contract gate")
+    raise SystemExit("cannot load epistemic contract gate")
 GATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GATE)
 
@@ -53,7 +53,7 @@ def main() -> None:
     expect_gate_error(stale_test)
 
     wrong_baseline = copy.deepcopy(validated["matrix"])
-    wrong_baseline["m20_baseline_sha"] = "0" * 40
+    wrong_baseline["knowledge_baseline_sha"] = "0" * 40
     expect_gate_error(wrong_baseline)
 
     forbidden = copy.deepcopy(validated["matrix"])
@@ -94,23 +94,23 @@ def main() -> None:
             check=True,
         ).stdout.strip()
         GATE.build_report(sha, fragments, output)
-        report = json.loads((output / "m21-contract-gate-report.json").read_text())
+        report = json.loads((output / "epistemic-contract-gate-report.json").read_text())
         require(report["commit_sha"] == sha, "report SHA mismatch")
         require(
-            report["m20_baseline_sha"] == GATE.M20_BASELINE_SHA,
-            "M20 baseline SHA mismatch",
+            report["knowledge_baseline_sha"] == GATE.KNOWLEDGE_BASELINE_SHA,
+            "knowledge baseline SHA mismatch",
         )
         require(
             report["summary"] == {"total": 16, "passed": 16, "failed": 0},
             "report summary mismatch",
         )
         require(
-            (output / "m20-baseline-schema-inventory.json").is_file(),
-            "M20 schema evidence missing",
+            (output / "knowledge-baseline-schema-inventory.json").is_file(),
+            "knowledge schema evidence missing",
         )
         require(
-            (output / "m21-schema-inventory.json").is_file(),
-            "M21 schema evidence missing",
+            (output / "epistemic-schema-inventory.json").is_file(),
+            "epistemic schema evidence missing",
         )
 
         stale = json.loads((fragments / "node.json").read_text(encoding="utf-8"))
@@ -123,7 +123,7 @@ def main() -> None:
         else:
             raise AssertionError("report accepted commands outside the checked matrix")
 
-    print("M21 contract gate tests passed")
+    print("epistemic contract gate tests passed")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-//! Direct release-conformance evidence for the public M19 Rust facade.
+//! Direct release-conformance evidence for the public search Rust facade.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -46,7 +46,7 @@ fn publish_search_artifacts(
     graph
         .publish_caller_embeddings(CallerEmbeddingBatchRequest {
             display_name: "semantic".into(),
-            contract_version: "m22-v1".into(),
+            contract_version: "public-surface-v1".into(),
             dimensions: 2,
             normalization: CallerEmbeddingNormalization::None,
             distance: CallerEmbeddingDistance::Cosine,

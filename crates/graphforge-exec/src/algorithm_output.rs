@@ -1,7 +1,7 @@
 //! Stable UUID-only Arrow shaping for typed Rust algorithm output.
 #![allow(
     dead_code,
-    reason = "M18 shaping foundation consumed incrementally by algorithm leaves"
+    reason = "algorithm shaping foundation consumed incrementally by algorithm leaves"
 )]
 
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -98,7 +98,7 @@ architecture deep-dives in [`../book/architecture/`](../book/architecture/overvi
 - **Build system:** Bazel (Bazelisk) owns CI Rust compilation and the mapped test
   graph; Cargo manifests remain ecosystem inputs. See
   [`../development/bazel.md`](../development/bazel.md). Publish credentials stay
-  outside cacheable Bazel actions. Swift/Kotlin UniFFI bindings are not an M2
+  outside cacheable Bazel actions. Swift/Kotlin UniFFI bindings are not a Bazel-migration
   build-migration deliverable.
 
 ## Decisions
@@ -119,7 +119,7 @@ The DocSlime index is [`adrs/README.md`](adrs/README.md) (links only; does not r
 | [0009](../adr/0009-nested-heterogeneous-lists.md) | Nested heterogeneous lists |
 | [0010](../adr/0010-wide-date-and-duration.md) | Wide date and duration |
 | [0011](../adr/0011-dynamic-heterogeneous-values.md) | Dynamic heterogeneous value lists |
-| [0012](../adr/0012-m20-domain-ownership.md) | Knowledge and epistemic domain ownership and schema evolution |
+| [0012](../adr/0012-knowledge-domain-ownership.md) | Knowledge and epistemic domain ownership and schema evolution |
 | [0013](../adr/0013-project-generation-protocol.md) | Durable project-generation protocol |
 | [0014](../adr/0014-workspace-checkpoints.md) | Complete-workspace checkpoints |
 | [0015](../adr/0015-embedded-write-modes.md) | Three embedded project-write modes |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and aggregate the exact-SHA M1 release certification release gate."""
+"""Validate and aggregate the exact-SHA release certification release gate."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ LOAD_MATRIX = ROOT / "tests/contracts/load-workload-matrix.json"
 BINDING_TARGETS = ROOT / "tests/contracts/binding-release-candidate-targets.json"
 REPOSITORY = "CurateLabs/graphforge"
 
-SCHEMA = "graphforge-m1-release-certification/1"
+SCHEMA = "graphforge-release-certification/1"
 RUST_SCHEMA = "graphforge-rust-non-cypher-evidence/1"
 BINDING_SCHEMA = "graphforge-binding-rc-aggregate/1"
 LOAD_SCHEMA = "graphforge-load-evidence/1"
@@ -71,13 +71,13 @@ def validate_component_runs(
             "rust",
             rust_run,
             ".github/workflows/non-cypher-surface-gate.yml",
-            "M1-Rust-Non-Cypher-" + expected_sha,
+            "Rust-Non-Cypher-" + expected_sha,
         ),
         (
             "binding",
             binding_run,
             ".github/workflows/binding-release-candidate.yml",
-            "M1-Binding-Release-Candidate-" + expected_sha,
+            "Binding-Release-Candidate-" + expected_sha,
         ),
     )
     components: dict[str, Any] = {}
@@ -127,13 +127,13 @@ def validate_rust(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         expected.update(
             {("public_method", identity): (group_name, test_ids) for identity in group["ids"]}
         )
-    m18 = inventory["m18_registry"]["release-tested"]
-    m18_test_ids = [ref["symbol"] for ref in m18["test_refs"]]
-    expected.update({("m18_registry", identity): (None, m18_test_ids) for identity in m18["ids"]})
-    for group_name, group in inventory["m19_evidence_groups"].items():
+    algorithm = inventory["algorithm_registry"]["release-tested"]
+    algorithm_test_ids = [ref["symbol"] for ref in algorithm["test_refs"]]
+    expected.update({("algorithm_registry", identity): (None, algorithm_test_ids) for identity in algorithm["ids"]})
+    for group_name, group in inventory["search_evidence_groups"].items():
         test_ids = [ref["symbol"] for ref in group["test_refs"]]
         expected.update(
-            {("m19_contracts", identity): (group_name, test_ids) for identity in group["ids"]}
+            {("search_contracts", identity): (group_name, test_ids) for identity in group["ids"]}
         )
     evidence = report.get("evidence")
     if not isinstance(evidence, list) or any(not isinstance(item, dict) for item in evidence):
@@ -160,9 +160,9 @@ def validate_rust(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
     expected_binaries = {
         "knowledge_isolation",
         "public_lifecycle_conformance",
-        "m22_m18_public_surface",
-        "m22_m19_public_surface",
-        "m22_provider_public_surface",
+        "algorithm_public_surface",
+        "search_public_surface",
+        "provider_public_surface",
         "provider_session",
         "public_facade_remaining_conformance",
     }
@@ -176,8 +176,8 @@ def validate_rust(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         "cargo test -p graphforge-api --lib --no-fail-fast",
         "cargo test -p graphforge-api --test knowledge_isolation "
         "--test public_lifecycle_conformance --test public_facade_remaining_conformance "
-        "--test m22_m18_public_surface "
-        "--test m22_m19_public_surface --test m22_provider_public_surface "
+        "--test algorithm_public_surface "
+        "--test search_public_surface --test provider_public_surface "
         "--test provider_session --no-fail-fast",
     ]
     if report.get("commands") != commands:
@@ -197,7 +197,7 @@ def validate_binding(report: dict[str, Any], expected_sha: str) -> dict[str, Any
     if report.get("source_sha") != expected_sha:
         raise ValueError("binding component SHA drift")
     validator = import_script(
-        "m1_binding_validator", ROOT / "scripts/ci/validate-binding-release-candidate.py"
+        "release_binding_validator", ROOT / "scripts/ci/validate-binding-release-candidate.py"
     )
     targets = report.get("targets")
     if not isinstance(targets, list):
@@ -237,7 +237,7 @@ def validate_load(report: dict[str, Any], expected_sha: str) -> dict[str, Any]:
         raise ValueError("load taxonomy digest drift")
     if report.get("matrix_sha256") != digest(LOAD_MATRIX):
         raise ValueError("load workload matrix digest drift")
-    load_validator = import_script("m1_load_validator", ROOT / "scripts/ci/release-load-matrix.py")
+    load_validator = import_script("release_load_validator", ROOT / "scripts/ci/release-load-matrix.py")
     matrix = load_json(LOAD_MATRIX)
     _surface, selectors = load_validator.inventory(matrix)
     expected_inventory = {name: sorted(values) for name, values in sorted(selectors.items())}
@@ -334,8 +334,8 @@ def aggregate(
         run_attempt = _run_id(component["run_attempt"], f"{name} attempt")
         expected_url = f"https://github.com/{REPOSITORY}/actions/runs/{run_id}"
         expected_artifact = {
-            "rust": "M1-Rust-Non-Cypher-" + expected_sha,
-            "binding": "M1-Binding-Release-Candidate-" + expected_sha,
+            "rust": "Rust-Non-Cypher-" + expected_sha,
+            "binding": "Binding-Release-Candidate-" + expected_sha,
         }[name]
         if (
             component["run_url"] != expected_url
@@ -438,7 +438,7 @@ def main() -> int:
             }
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(canonical(failure))
-        print(f"M1 release certification gate failed: {error}")
+        print(f"release certification gate failed: {error}")
         return 1
     return 0
 

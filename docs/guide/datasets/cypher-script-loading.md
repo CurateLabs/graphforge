@@ -276,14 +276,14 @@ CREATE CONSTRAINT movie_title FOR (m:Movie) REQUIRE m.title IS UNIQUE;
 // ======================
 // Nodes
 // ======================
-CREATE (m1:Movie {title:'The Matrix'});
-CREATE (m2:Movie {title:'The Matrix Reloaded'});
+CREATE (release-certification:Movie {title:'The Matrix'});
+CREATE (bazel-migration:Movie {title:'The Matrix Reloaded'});
 
 // ======================
 // Relationships
 // ======================
-MATCH (m1:Movie {title:'The Matrix'}), (m2:Movie {title:'The Matrix Reloaded'})
-CREATE (m1)-[:SEQUEL]->(m2);
+MATCH (release-certification:Movie {title:'The Matrix'}), (bazel-migration:Movie {title:'The Matrix Reloaded'})
+CREATE (release-certification)-[:SEQUEL]->(bazel-migration);
 ```
 
 ### 3. Use Variables for Complex Patterns

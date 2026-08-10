@@ -29,7 +29,7 @@ and assembled through `graphforge-api`. It never changes a knowledge schema, row
 fingerprint, ordering rule, or identity.
 
 The authoritative machine-readable contract is the generated
-[Epistemic schema inventory](../reference/m21-schema-inventory.json). It is generated
+[Epistemic schema inventory](../reference/epistemic-schema-inventory.json). It is generated
 only from the `graphforge-knowledge` registry; its checked SHA-256 digest makes
 undocumented registry drift fail CI. All epistemic records use contract version `1`.
 
@@ -172,8 +172,8 @@ reported rather than hidden behind defaults.
 ## References
 
 - [ADR 0005: Layered Architecture](0005-layered-architecture.md)
-- [ADR 0012: knowledge/epistemic Domain Ownership](0012-m20-domain-ownership.md)
+- [ADR 0012: knowledge/epistemic Domain Ownership](0012-knowledge-domain-ownership.md)
 - [Immutable knowledge ledger](../book/architecture/knowledge-ledger.md)
 - [Algorithm Verbs](../book/architecture/algorithms.md#invocation-and-knowledge-layer-boundary)
 - [Execution Model](../book/architecture/execution-model.md#reproducible-algorithm-execution)
-- [Epistemic schema inventory](../reference/m21-schema-inventory.json)
+- [Epistemic schema inventory](../reference/epistemic-schema-inventory.json)

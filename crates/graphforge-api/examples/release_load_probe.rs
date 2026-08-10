@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// Same fixed bulk operation UUIDs as the Python/Node load probes so generated
-/// entity UUIDs (and therefore m19 top-k find tie-breaks) are cross-language stable.
+/// entity UUIDs (and therefore search top-k find tie-breaks) are cross-language stable.
 const NODE_OPERATION: &str = "018f0f4e-7b8c-7000-8000-00000000b001";
 const EDGE_OPERATION: &str = "018f0f4e-7b8c-7000-8000-00000000b002";
 
@@ -270,7 +270,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut find_rows = 0;
     let mut rank_result_sha256 = fingerprint(&Vec::<(String, f64)>::new())?;
     let mut find_result_sha256 = fingerprint(&Vec::<(String, String)>::new())?;
-    if request.workload.id.starts_with("m18-") {
+    if request.workload.id.starts_with("algorithm-") {
         let rank = graph.rank(
             "Entity",
             RankOptions {
@@ -294,7 +294,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         values.sort_by(|left, right| left.0.cmp(&right.0));
         rank_result_sha256 = fingerprint(&values)?;
     }
-    if request.workload.id.starts_with("m19-") {
+    if request.workload.id.starts_with("search-") {
         graph.index_search(
             "Entity",
             SearchIndexOptions::Text {
@@ -341,7 +341,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         reopened_names.extend((0..values.len()).map(|index| values.value(index).to_owned()));
     }
     let reopen_node_result_sha256 = fingerprint(&reopened_names)?;
-    if request.workload.id.starts_with("m18-") {
+    if request.workload.id.starts_with("algorithm-") {
         let repeated = reopened
             .rank(
                 "Entity",
@@ -356,7 +356,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("rank result changed after reopen".into());
         }
     }
-    if request.workload.id.starts_with("m19-") {
+    if request.workload.id.starts_with("search-") {
         let repeated = reopened
             .find(FindOptions {
                 query: Some("n-00000001".into()),

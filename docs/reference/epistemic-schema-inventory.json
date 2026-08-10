@@ -1,6 +1,6 @@
 {
-  "inventory_format": "graphforge-m21-schema-inventory/1",
-  "m20_baseline": "docs/reference/m20-schema-inventory.sha256",
+  "inventory_format": "graphforge-epistemic-schema-inventory/1",
+  "knowledge_baseline": "docs/reference/knowledge-schema-inventory.sha256",
   "records": [
     {
       "capability_id": "epistemic",

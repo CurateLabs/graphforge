@@ -27,7 +27,7 @@ use graphforge_api::{
     EmbeddingTokenCountClass, ExecutionResult, FastRpOptions, FindDiagnostic, FindExecutionOptions,
     FindOptions, FindRerankOptions, GfError, GraphForgeOptions, GraphObjectKind,
     GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError,
-    IrLiteral, M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
+    IrLiteral, AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization, AlgorithmEmbeddingPublicationRequest,
     Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
     OpenRouterWireLimits, OperationId, PathsOptions, ProjectWriteMode, PropValue,
     ProviderBatchLimits, ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
@@ -325,11 +325,11 @@ fn ontology_export_format(value: &str) -> Result<graphforge_api::OntologyExportF
 
 fn embedding_space_to_json(space: EmbeddingSpaceInfo) -> serde_json::Value {
     let producer = match space.producer {
-        EmbeddingSpaceProducer::M18 {
+        EmbeddingSpaceProducer::Algorithm {
             algorithm,
             algorithm_version,
         } => serde_json::json!({
-            "kind": "m18",
+            "kind": "algorithm",
             "algorithm": algorithm,
             "algorithmVersion": algorithm_version,
         }),
@@ -1341,7 +1341,7 @@ pub struct ListEvidenceLinksInput {
     pub signal: Option<AbortSignal>,
 }
 
-/// Thin Node request for one immutable M21 reasoning record.
+/// Thin Node request for one immutable epistemic reasoning record.
 #[napi(object)]
 pub struct RecordReasoningInput {
     /// Required operation/idempotency UUID.
@@ -1641,7 +1641,7 @@ pub struct BeliefProjectionPolicyInput {
     pub hypotheses: String,
 }
 
-/// Resolve an immutable graph-only projection at one M21 cutoff.
+/// Resolve an immutable graph-only projection at one epistemic cutoff.
 #[napi(object, object_to_js = false)]
 pub struct ResolveBeliefProjectionInput {
     /// Mandatory transaction-time cutoff.
@@ -1691,7 +1691,7 @@ pub struct ResolvedBeliefSubjectOutput {
     evidence: Vec<u8>,
 }
 
-/// Thin Node request for one recorded M18 invocation.
+/// Thin Node request for one recorded algorithm invocation.
 #[napi(object, object_to_js = false)]
 pub struct RecordedAlgorithmInput<'env> {
     /// Required operation/idempotency UUID.
@@ -1716,7 +1716,7 @@ pub struct RecordedAlgorithmOutput {
     pub result: Buffer,
 }
 
-/// Execute an M20 descriptor against a resolved projection and attach M21 context.
+/// Execute a Bazel-migration0 descriptor against a resolved projection and attach epistemic context.
 #[napi(object, object_to_js = false)]
 pub struct ResolvedRecordedAlgorithmInput<'env> {
     /// Required operation/idempotency UUID.
@@ -1737,11 +1737,11 @@ pub struct ResolvedRecordedAlgorithmInput<'env> {
 /// Recorded result plus the separately observable attachment outcome.
 #[napi(object)]
 pub struct ResolvedRecordedAlgorithmOutput {
-    /// Durable M20 run UUID.
+    /// Durable knowledge run UUID.
     pub run_uuid: String,
-    /// Canonical M20 result as Arrow IPC.
+    /// Canonical knowledge result as Arrow IPC.
     pub result: Buffer,
-    /// Stable M21 attachment UUID.
+    /// Stable epistemic attachment UUID.
     pub attachment_uuid: String,
     /// `attached` or `attachment_failed`.
     pub attachment_state: String,
@@ -1751,14 +1751,14 @@ pub struct ResolvedRecordedAlgorithmOutput {
     pub attachment_error_code: Option<String>,
 }
 
-/// Retry only the M21 attachment for an already completed M20 run.
+/// Retry only the epistemic attachment for an already completed knowledge run.
 #[napi(object, object_to_js = false)]
 pub struct AttachResolvedRunInput<'env> {
     /// Required operation/idempotency UUID.
     pub operation_uuid: String,
     /// Stable attachment retry UUID.
     pub attachment_uuid: String,
-    /// Existing completed M20 run UUID.
+    /// Existing completed knowledge run UUID.
     pub run_uuid: String,
     /// Exact descriptor used by the completed run.
     #[napi(ts_type = "InvocationDescriptor")]
@@ -1888,10 +1888,10 @@ pub struct CallerEmbeddingPublicationInput<'env> {
     pub replace: Option<bool>,
 }
 
-/// Canonical M18 embedding publication options.
+/// Canonical algorithm embedding publication options.
 #[napi(object)]
-pub struct M18EmbeddingPublicationInput {
-    /// Explicit eligible M18 embedding algorithm.
+pub struct AlgorithmEmbeddingPublicationInput {
+    /// Explicit eligible algorithm embedding algorithm.
     pub algorithm: String,
     /// Frozen algorithm contract version.
     pub algorithm_version: String,
@@ -1899,7 +1899,7 @@ pub struct M18EmbeddingPublicationInput {
     pub dimensions: u32,
     /// Normalized algorithm hyperparameters.
     pub hyperparameters: Option<HashMap<String, serde_json::Value>>,
-    /// Non-empty versioned M18 input recipe.
+    /// Non-empty versioned algorithm input recipe.
     pub input_recipe: HashMap<String, serde_json::Value>,
     /// Non-empty graph projection identity.
     pub source_projection: HashMap<String, serde_json::Value>,
@@ -2485,13 +2485,13 @@ fn emit_node_warnings(env: Env, diagnostics: &[FindDiagnostic]) -> Result<()> {
     Ok(())
 }
 
-/// Opaque Rust-owned neutral M18 invocation descriptor.
+/// Opaque Rust-owned neutral algorithm invocation descriptor.
 #[napi(js_name = "InvocationDescriptor")]
 pub struct InvocationDescriptorHandle {
     inner: InvocationDescriptor,
 }
 
-/// Thin Node projection of one live Rust M18 descriptor contract.
+/// Thin Node projection of one live Rust algorithm descriptor contract.
 #[napi(object)]
 pub struct AlgorithmDescriptorContractJs {
     /// Owning analyst verb.
@@ -2611,7 +2611,7 @@ fn belief_subject_policy(
     })
 }
 
-/// Opaque Rust-owned graph projection resolved from explicit M21 policy.
+/// Opaque Rust-owned graph projection resolved from explicit epistemic policy.
 #[napi(js_name = "ResolvedBeliefProjection")]
 pub struct ResolvedBeliefProjectionHandle {
     inner: Arc<ResolvedBeliefProjection>,
@@ -2677,7 +2677,7 @@ impl ResolvedBeliefProjectionHandle {
             .map(|value| hex_bytes(&value))
     }
 
-    /// Sorted M21 source-record UUIDs used by resolution.
+    /// Sorted epistemic source-record UUIDs used by resolution.
     #[napi(getter)]
     #[must_use]
     pub fn source_record_uuids(&self) -> Vec<String> {
@@ -3771,7 +3771,7 @@ impl GraphForge {
         }))
     }
 
-    /// Atomically append one immutable M21 reasoning record.
+    /// Atomically append one immutable epistemic reasoning record.
     #[napi]
     pub fn record_reasoning(
         &self,
@@ -4340,7 +4340,7 @@ impl GraphForge {
         }))
     }
 
-    /// Reconstruct one deterministic M21 transaction-time snapshot as Arrow IPC.
+    /// Reconstruct one deterministic epistemic transaction-time snapshot as Arrow IPC.
     #[napi]
     pub fn epistemic_snapshot(
         &self,
@@ -4749,7 +4749,7 @@ impl GraphForge {
             .map_err(|error| to_napi_invocation_err(&error))
     }
 
-    /// Return every live M18 descriptor contract in deterministic catalog order.
+    /// Return every live algorithm descriptor contract in deterministic catalog order.
     ///
     /// This projects the Rust-owned registry without opening knowledge or
     /// epistemic storage. Callers still prepare and invoke descriptors through
@@ -4795,7 +4795,7 @@ impl GraphForge {
             .map_err(|error| to_napi_err(&error))
     }
 
-    /// Resolve an immutable graph-only projection from explicit M21 policy.
+    /// Resolve an immutable graph-only projection from explicit epistemic policy.
     #[napi(ts_return_type = "Promise<ResolvedBeliefProjection>")]
     pub fn resolve_belief_projection(
         &self,
@@ -4907,7 +4907,7 @@ impl GraphForge {
     /// Retry only the attachment for an already-completed resolved run.
     ///
     /// Cancellation is cooperative before publication starts; an already-started
-    /// durable M21 publication still runs to its atomic outcome.
+    /// durable epistemic publication still runs to its atomic outcome.
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn attach_resolved_run(
         &self,
@@ -5463,20 +5463,20 @@ impl GraphForge {
             .map_err(|error| to_napi_err(&error))
     }
 
-    /// Atomically publish one complete canonical M18 Arrow IPC result.
+    /// Atomically publish one complete canonical algorithm Arrow IPC result.
     #[napi]
-    pub fn publish_m18_embeddings(
+    pub fn publish_algorithm_embeddings(
         &self,
         name: String,
         result: Buffer,
-        input: M18EmbeddingPublicationInput,
+        input: AlgorithmEmbeddingPublicationInput,
     ) -> Result<String> {
         let normalization = match input.normalization.as_deref().unwrap_or("none") {
-            "none" => M18EmbeddingNormalization::None,
-            "l2" => M18EmbeddingNormalization::L2,
+            "none" => AlgorithmEmbeddingNormalization::None,
+            "l2" => AlgorithmEmbeddingNormalization::L2,
             other => {
                 return Err(to_napi_err(&GfError::Validation(format!(
-                    "unknown M18 embedding normalization {other:?}"
+                    "unknown algorithm embedding normalization {other:?}"
                 ))));
             }
         };
@@ -5486,13 +5486,13 @@ impl GraphForge {
             .map_err(|error| to_napi_err(&error))?;
         let graph = self.open_guard()?;
         graph
-            .publish_m18_embeddings(M18EmbeddingPublicationRequest {
+            .publish_algorithm_embeddings(AlgorithmEmbeddingPublicationRequest {
                 display_name: name,
                 algorithm,
                 algorithm_version: input.algorithm_version,
                 dimensions: input.dimensions,
                 normalization,
-                distance: M18EmbeddingDistance::Cosine,
+                distance: AlgorithmEmbeddingDistance::Cosine,
                 hyperparameters: input
                     .hyperparameters
                     .unwrap_or_default()
@@ -6798,7 +6798,7 @@ impl Task for HypothesisTask {
     }
 }
 
-/// Worker task for one deterministic M21 transaction-time snapshot.
+/// Worker task for one deterministic epistemic transaction-time snapshot.
 pub struct EpistemicSnapshotTask {
     engine: Arc<RwLock<graphforge_api::GraphForge>>,
     transaction_cutoff: i64,
@@ -6825,7 +6825,7 @@ impl Task for EpistemicSnapshotTask {
     }
 }
 
-/// Worker task for one resolved M21 projection.
+/// Worker task for one resolved epistemic projection.
 pub struct ResolveBeliefProjectionTask {
     engine: Arc<RwLock<graphforge_api::GraphForge>>,
     request: ResolveBeliefProjectionRequest,

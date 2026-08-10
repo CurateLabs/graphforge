@@ -1,4 +1,4 @@
-//! Durable, knowledge-neutral orchestration around M18 descriptor dispatch.
+//! Durable, knowledge-neutral orchestration around algorithm descriptor dispatch.
 
 use std::sync::Arc;
 
@@ -30,14 +30,14 @@ use crate::{
 /// Frozen public algorithm identifier.
 pub type AlgorithmId = Algorithm;
 
-/// Frozen request for one recorded M18 invocation.
+/// Frozen request for one recorded algorithm invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordedAlgorithmRequest {
     /// Idempotency identity and optional actor.
     pub context: WriteContext,
     /// Caller-supplied UUIDv7 run identity.
     pub run_uuid: Uuid,
-    /// Canonical neutral M18 descriptor.
+    /// Canonical neutral algorithm descriptor.
     pub descriptor: InvocationDescriptor,
     /// Optional cooperative cancellation state.
     pub cancellation: Option<CancellationToken>,
@@ -62,10 +62,10 @@ pub struct RecordedAlgorithmResult {
 }
 
 impl GraphForge {
-    /// Publish a start, dispatch the unchanged M18 path, then publish one terminal event.
+    /// Publish a start, dispatch the unchanged algorithm path, then publish one terminal event.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn invoke_recorded(
         &self,
@@ -168,7 +168,7 @@ impl GraphForge {
     /// List immutable run identities in `(started_at, run_uuid)` order.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn list_algorithm_runs(
         &self,
@@ -196,7 +196,7 @@ impl GraphForge {
     /// List one run's events in `(recorded_at, event_uuid)` order.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn algorithm_run_events(
         &self,

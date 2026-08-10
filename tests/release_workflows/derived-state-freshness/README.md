@@ -1,6 +1,6 @@
 # Derived-state freshness workflow
 
-This deterministic M22 release workflow proves that public freshness contracts never
+This deterministic public-surface release workflow proves that public freshness contracts never
 silently serve stale text, adjacency, caller-vector, or analytical results after
 independent source mutations. It uses one immutable strict ontology throughout; phase
 manifests record the same ontology digest so schema drift cannot explain the outcome.

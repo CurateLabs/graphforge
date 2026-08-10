@@ -218,9 +218,9 @@ class ReleaseLoadMatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             fixtures = Path(raw) / "fixtures"
             manifests = GATE.generate(fixtures)
-            identity = "rust/m18-closed-algorithm-registry/xs-sparse-path"
+            identity = "rust/algorithm-closed-algorithm-registry/xs-sparse-path"
             manifest = next(item for item in manifests if item["dataset_id"] == "xs-sparse-path")
-            covered = sorted(selectors["m18-registry"])
+            covered = sorted(selectors["algorithm-registry"])
             base = self.report(identity, sha, manifest["content_sha256"], covered)
             for key, value, message in (
                 ("source_sha", "2" * 40, "SHA drift"),
@@ -262,13 +262,13 @@ class ReleaseLoadMatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             free = GATE.ensure_case_disk_headroom(
-                root, "node/m18-closed-algorithm-registry/l-dense-cyclic"
+                root, "node/algorithm-closed-algorithm-registry/l-dense-cyclic"
             )
             self.assertGreater(free, 0)
             with self.assertRaisesRegex(ValueError, "insufficient free disk"):
                 GATE.ensure_case_disk_headroom(
                     root,
-                    "node/m18-closed-algorithm-registry/l-dense-cyclic",
+                    "node/algorithm-closed-algorithm-registry/l-dense-cyclic",
                     minimum=free + 1,
                 )
             case_tmp = root / "tmp"

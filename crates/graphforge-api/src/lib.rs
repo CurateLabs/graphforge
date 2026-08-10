@@ -68,7 +68,7 @@ mod graph_snapshot;
 mod hypotheses;
 mod invocation_descriptor;
 mod knowledge;
-mod m18_embedding_publication;
+mod algorithm_embedding_publication;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
@@ -152,7 +152,7 @@ pub use belief_projection::{
     StatuslessPolicyV1, SupersessionBranchPolicyV1,
 };
 pub use capabilities::{
-    CapabilityId, EnableCapabilityRequest, M20_API_VERSION, OperationId, WriteContext,
+    CapabilityId, EnableCapabilityRequest, KNOWLEDGE_API_VERSION, OperationId, WriteContext,
 };
 pub use checkpoints::{
     CheckpointDiffDetail, CheckpointDiffScope, CheckpointRequest, CheckpointSelector,
@@ -267,8 +267,8 @@ fn insert_usize(
     );
     Ok(())
 }
-pub use m18_embedding_publication::{
-    M18EmbeddingDistance, M18EmbeddingNormalization, M18EmbeddingPublicationRequest,
+pub use algorithm_embedding_publication::{
+    AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization, AlgorithmEmbeddingPublicationRequest,
 };
 pub use provider_embedding::{
     ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanError,
@@ -2255,7 +2255,7 @@ impl GraphForge {
         )
     }
 
-    /// Dispatch any prepared neutral M18 descriptor through its owning verb.
+    /// Dispatch any prepared neutral algorithm descriptor through its owning verb.
     ///
     /// # Errors
     /// Returns the same structured descriptor, projection, graph, or execution

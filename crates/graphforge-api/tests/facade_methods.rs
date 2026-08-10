@@ -1,4 +1,4 @@
-//! Phase-0 facade methods wired for the M16 bindings (#850): `explain`,
+//! Phase-0 facade methods wired for the binding-surface bindings (#850): `explain`,
 //! `load_ontology`, and `execute_to_parquet`. These back the Python (#589) and
 //! Node (#593) binding surfaces.
 
@@ -79,7 +79,7 @@ fn comment_only_query_is_empty_validation() {
 // ---------------------------------------------------------------------------
 
 const MINIMAL_ONTOLOGY: &str = "\
-ontology_id: m16_test
+ontology_id: binding_surface_test
 version: \"v1\"
 entity_types:
   - name: Person

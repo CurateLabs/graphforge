@@ -18,10 +18,10 @@
     "ontology-lifecycle": "ontologyLifecycle",
     "lifecycle-construction": "lifecycleConstruction",
     "checkpoint-view": "checkpointView",
-    "m18": "m18",
-    "m19-provider-rerank": "m19ProviderRerank",
-    "m20": "m20",
-    "m21": "m21",
+    "algorithm": "algorithm",
+    "search-provider-rerank": "m19ProviderRerank",
+    "knowledge": "knowledge",
+    "epistemic": "epistemic",
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
     "compatibility": "arrowIpc"
   },
@@ -111,7 +111,7 @@
       "GraphForge.publish_bulk_nodes",
       "GraphForge.publish_caller_embeddings",
       "GraphForge.publish_composite_transaction",
-      "GraphForge.publish_m18_embeddings",
+      "GraphForge.publish_algorithm_embeddings",
       "GraphForge.publish_provider_embeddings",
       "GraphForge.rank",
       "GraphForge.reasoning",
@@ -202,7 +202,7 @@
         "checkpoint pagination and diff cancellation use the shared adapter"
       ]
     },
-    "m18": {
+    "algorithm": {
       "invocation-descriptor.test.mjs": [
         "rank descriptor matches the frozen cross-language vector and dispatches"
       ],
@@ -224,7 +224,7 @@
         "configured provider indexing, semantic find, rerank, and warnings stay in parity"
       ]
     },
-    "m20": {
+    "knowledge": {
       "provenance.test.mjs": [
         "provenance reads, addEdge, and cancellation use the native contract"
       ],
@@ -245,7 +245,7 @@
         "Node exposes one composite publish entrypoint with no inference helpers"
       ]
     },
-    "m21": {
+    "epistemic": {
       "algorithm-runs.test.mjs": [
         "recorded rank exposes the same result and durable lifecycle"
       ],
@@ -256,7 +256,7 @@
         "valid time is opt-in, append-only, and evaluated after transaction time"
       ],
       "belief-projection.test.mjs": [
-        "resolved rank records M20 output and exactly retries its M21 attachment"
+        "resolved rank records knowledge output and exactly retries its epistemic attachment"
       ],
       "belief-subject.test.mjs": [
         "belief subjects preserve Rust projection and canonical Arrow evidence"

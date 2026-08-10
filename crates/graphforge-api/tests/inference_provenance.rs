@@ -1,6 +1,6 @@
 //! Inference planning remains observable through `explain()`, but a read-only
 //! match does not publish mutation provenance. Persisted inference
-//! materialization, when implemented, must emit the M20 event explicitly.
+//! materialization, when implemented, must emit the knowledge event explicitly.
 
 use arrow::array::{Array, StringArray};
 use graphforge_api::GraphForge;

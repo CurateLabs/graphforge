@@ -102,8 +102,8 @@ def validate_registry(registry_path: Path = REGISTRY) -> list[dict[str, Any]]:
         "evidence",
         "generator",
         "public_surfaces",
-        "m18_m19",
-        "m20_m21",
+        "algorithm_search",
+        "knowledge_epistemic",
         "axes",
         "coverage_signature",
         "ontology_profile",
@@ -139,7 +139,7 @@ def validate_registry(registry_path: Path = REGISTRY) -> list[dict[str, Any]]:
             or row["timeout_seconds"] <= 0
             or not all(
                 isinstance(row[field], list) and all(isinstance(item, str) for item in row[field])
-                for field in ("public_surfaces", "m18_m19", "m20_m21")
+                for field in ("public_surfaces", "algorithm_search", "knowledge_epistemic")
             )
             or not isinstance(row["axes"], dict)
             or not {"correction", "temporal", "epistemic", "binding"}.issubset(row["axes"])

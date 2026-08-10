@@ -18,14 +18,14 @@ use uuid::Uuid;
 
 use crate::GraphForge;
 
-/// Frozen M20 public API contract version.
-pub const M20_API_VERSION: u32 = 1;
+/// Frozen knowledge public API contract version.
+pub const KNOWLEDGE_API_VERSION: u32 = 1;
 
-/// Stable idempotency identity for an M20 write.
+/// Stable idempotency identity for a Bazel-migration0 write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationId(pub Uuid);
 
-/// Shared context for an M20 write.
+/// Shared context for a Bazel-migration0 write.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriteContext {
     /// Required operation/idempotency UUID.
@@ -43,9 +43,9 @@ pub enum CapabilityId {
     Provenance,
     /// Immutable knowledge ledger.
     Knowledge,
-    /// M21 epistemic extension.
+    /// epistemic extension.
     Epistemic,
-    /// Optional M21 valid-time interpretation.
+    /// Optional epistemic valid-time interpretation.
     ValidTime,
 }
 
@@ -148,7 +148,7 @@ impl GraphForge {
     /// failure.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn enable_capability(
         &self,

@@ -1,11 +1,11 @@
-//! Rust-owned adapter from [`AdjacencyProvider`] to the graph consumed by M18.
+//! Rust-owned adapter from [`AdjacencyProvider`] to the graph consumed by algorithm.
 //!
 //! The provider remains the sole adjacency implementation. This module adds
 //! stable UUID metadata, optional label selection, and optional edge weights;
 //! it never constructs adjacency from Parquet topology rows.
 #![allow(
     dead_code,
-    reason = "M18 foundation consumed by the Rust dispatch slice in issue #1146"
+    reason = "algorithm foundation consumed by the Rust dispatch slice in issue #1146"
 )]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -53,7 +53,7 @@ pub(crate) struct AlgorithmEdge {
     pub weight: f64,
 }
 
-/// Knowledge-agnostic graph projection resolved before M18 dispatch.
+/// Knowledge-agnostic graph projection resolved before algorithm dispatch.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedGraphProjection {
     pub(crate) directed: bool,
@@ -70,7 +70,7 @@ pub(crate) struct ResolvedGraphEdge {
     pub(crate) weight: f64,
 }
 
-/// Versioned digest of the exact public-identity projection consumed by M18.
+/// Versioned digest of the exact public-identity projection consumed by algorithm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct AlgorithmProjectionFingerprint([u8; 32]);
 

@@ -1,4 +1,4 @@
-//! Rust-owned similarity handlers registered under the shared M18 dispatch contract.
+//! Rust-owned similarity handlers registered under the shared algorithm dispatch contract.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

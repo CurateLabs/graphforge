@@ -523,7 +523,7 @@ retention count. Deleting an alias does not delete generations. Deleting a
 lineage is explicit, refuses active readers, and removes only that identity.
 
 The persisted compatibility descriptor records these producer kinds exactly:
-`m18`, `local`, `callback`, `remote`, and `caller_supplied`. `m18` includes the
+`algorithm`, `local`, `callback`, `remote`, and `caller_supplied`. `algorithm` includes the
 algorithm version and graph projection fingerprint. `remote` includes provider,
 model, immutable revision when exposed, and response-contract version. An
 unknown immutable model revision is recorded as `unavailable`, not guessed.
