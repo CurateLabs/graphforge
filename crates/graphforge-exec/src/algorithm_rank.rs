@@ -17,7 +17,9 @@ use crate::algorithm_dispatch::{
 use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
 use crate::algorithm_k_core::k_core_numbers;
 use crate::algorithm_neighbors::{simple_neighbors, simple_undirected_neighbors};
-use crate::algorithm_output::{materialize_node_properties, shape_algorithm_output};
+use crate::algorithm_output::{
+    materialize_node_properties_with_batch_size, shape_algorithm_output,
+};
 
 const BUILTIN_REVIEW: DependencyReview = DependencyReview {
     implementation: "graphforge-exec built-in",
@@ -737,7 +739,12 @@ impl RustAlgorithm for ClusteringCoefficient {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::ClusteringCoefficient);
-        rank_scores_output(algorithm, graph, clustering_coefficient_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            clustering_coefficient_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -794,7 +801,12 @@ impl RustAlgorithm for PreferentialAttachment {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::PreferentialAttachment);
-        rank_scores_output(algorithm, graph, preferential_attachment_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            preferential_attachment_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -813,7 +825,12 @@ impl RustAlgorithm for AdamicAdar {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::AdamicAdar);
-        rank_scores_output(algorithm, graph, adamic_adar_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            adamic_adar_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -832,7 +849,12 @@ impl RustAlgorithm for CommonNeighbors {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::CommonNeighbors);
-        rank_scores_output(algorithm, graph, common_neighbor_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            common_neighbor_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -851,7 +873,12 @@ impl RustAlgorithm for ResourceAllocation {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::ResourceAllocation);
-        rank_scores_output(algorithm, graph, resource_allocation_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            resource_allocation_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -870,7 +897,12 @@ impl RustAlgorithm for TotalNeighbors {
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
         let algorithm = Algorithm::Rank(RankAlgorithm::TotalNeighbors);
-        rank_scores_output(algorithm, graph, total_neighbor_scores(graph, control)?, control)
+        rank_scores_output(
+            algorithm,
+            graph,
+            total_neighbor_scores(graph, control)?,
+            control,
+        )
     }
 }
 
@@ -1511,10 +1543,7 @@ fn rank_scores_output(
         let uuid = graph
             .node_uuid(node)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
-        sink.append_row(&[
-            AlgorithmValue::Uuid(uuid),
-            AlgorithmValue::Float64(score),
-        ])?;
+        sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Float64(score)])?;
     }
     sink.finish()
 }
@@ -1598,11 +1627,33 @@ pub fn rank_algorithm(
     property_stems: &[String],
     options: &RankOptions,
 ) -> Result<RecordBatch, GfError> {
+    rank_algorithm_with_limits(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        AlgorithmLimits::default(),
+    )
+}
+
+/// Execute rank with an explicit output/memory shaping policy (#341).
+pub fn rank_algorithm_with_limits(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: &RankOptions,
+    limits: AlgorithmLimits,
+) -> Result<RecordBatch, GfError> {
     let graph = rank_projection(provider, dir, mode, label, options)?;
     let algorithm = Algorithm::Rank(options.by);
-    let output = execute_rank(&graph, algorithm, AlgorithmLimits::default())?;
+    let output = execute_rank(&graph, algorithm, limits)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
-    materialize_node_properties(dir, property_stems, &batch).map_err(Into::into)
+    materialize_node_properties_with_batch_size(dir, property_stems, &batch, limits.batch_size)
+        .map_err(Into::into)
 }
 
 /// Fingerprint the exact logical topology consumed by a rank invocation.

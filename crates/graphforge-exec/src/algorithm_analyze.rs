@@ -208,7 +208,11 @@ impl RustAlgorithm for CountAutomorphisms {
         edges.dedup_by_key(|edge| edge.edge);
         let graph = AutomorphismGraph::try_new(&nodes, &edges, self.directed, control)?;
         let count = count_automorphisms(&graph, control)?;
-        AlgorithmOutput::from_rows(self.capability().algorithm, control, vec![vec![AlgorithmValue::UInt64(count)]])
+        AlgorithmOutput::from_rows(
+            self.capability().algorithm,
+            control,
+            vec![vec![AlgorithmValue::UInt64(count)]],
+        )
     }
 }
 
@@ -388,7 +392,11 @@ impl RustAlgorithm for Conductance {
             ]
         })
         .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::Conductance), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::Conductance),
+            control,
+            rows,
+        )
     }
 }
 
@@ -514,7 +522,11 @@ impl RustAlgorithm for MaxBipartiteMatching {
                 ]
             })
             .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::MaxBipartiteMatching), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::MaxBipartiteMatching),
+            control,
+            rows,
+        )
     }
 }
 
@@ -555,7 +567,11 @@ impl RustAlgorithm for ChromaticNumber {
             }
         }
         let value = exact_chromatic_number(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber), control, vec![vec![AlgorithmValue::UInt64(value)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::ChromaticNumber),
+            control,
+            vec![vec![AlgorithmValue::UInt64(value)]],
+        )
     }
 }
 
@@ -604,7 +620,11 @@ impl RustAlgorithm for NodeColoring {
                 ]
             })
             .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::NodeColoring),
+            control,
+            rows,
+        )
     }
 }
 
@@ -653,7 +673,11 @@ impl RustAlgorithm for K1Coloring {
                 ]
             })
             .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::K1Coloring), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::K1Coloring),
+            control,
+            rows,
+        )
     }
 }
 
@@ -702,7 +726,11 @@ impl RustAlgorithm for EdgeColoring {
                 ]
             })
             .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::EdgeColoring), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::EdgeColoring),
+            control,
+            rows,
+        )
     }
 }
 
@@ -830,7 +858,11 @@ impl RustAlgorithm for HasEulerPath {
             }
         }
         let value = has_euler_path(&nodes, &edges, self.directed, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::HasEulerPath), control, vec![vec![AlgorithmValue::Boolean(value)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::HasEulerPath),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -871,7 +903,11 @@ impl RustAlgorithm for HasEulerCircuit {
             }
         }
         let value = has_euler_circuit(&nodes, &edges, self.directed, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::HasEulerCircuit), control, vec![vec![AlgorithmValue::Boolean(value)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::HasEulerCircuit),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -915,7 +951,11 @@ impl RustAlgorithm for FindCycles {
             .into_iter()
             .map(|cycle| vec![AlgorithmValue::UuidList(cycle)])
             .collect();
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::FindCycles), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::FindCycles),
+            control,
+            rows,
+        )
     }
 }
 
@@ -956,10 +996,14 @@ impl RustAlgorithm for DagLongestPath {
             }
         }
         let result = dag_longest_path(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPath), control, vec![vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPath),
+            control,
+            vec![vec![
                 AlgorithmValue::Float64(result.cost),
                 AlgorithmValue::UuidList(result.path),
-            ]])
+            ]],
+        )
     }
 }
 
@@ -1001,10 +1045,14 @@ impl RustAlgorithm for WeightedDagLongestPath {
             }
         }
         let result = weighted_dag_longest_path(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPathWeighted), control, vec![vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DagLongestPathWeighted),
+            control,
+            vec![vec![
                 AlgorithmValue::Float64(result.cost),
                 AlgorithmValue::UuidList(result.path),
-            ]])
+            ]],
+        )
     }
 }
 
@@ -1054,7 +1102,11 @@ impl RustAlgorithm for TriangleCount {
             }
         }
         let count = triangle_count(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::TriangleCount), control, vec![vec![AlgorithmValue::UInt64(count)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::TriangleCount),
+            control,
+            vec![vec![AlgorithmValue::UInt64(count)]],
+        )
     }
 }
 
@@ -1104,7 +1156,11 @@ impl RustAlgorithm for Transitivity {
             }
         }
         let value = transitivity(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::Transitivity), control, vec![vec![AlgorithmValue::Float64(value)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::Transitivity),
+            control,
+            vec![vec![AlgorithmValue::Float64(value)]],
+        )
     }
 }
 
@@ -1154,7 +1210,11 @@ impl RustAlgorithm for IsPlanar {
             }
         }
         let value = is_planar(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::IsPlanar), control, vec![vec![AlgorithmValue::Boolean(value)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::IsPlanar),
+            control,
+            vec![vec![AlgorithmValue::Boolean(value)]],
+        )
     }
 }
 
@@ -1268,7 +1328,10 @@ impl RustAlgorithm for DyadCensus {
             }
         }
         let counts = dyad_census(&nodes, &edges, control)?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::DyadCensus), control, vec![
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::DyadCensus),
+            control,
+            vec![
                 vec![
                     AlgorithmValue::Utf8("mutual".into()),
                     AlgorithmValue::UInt64(counts.mutual),
@@ -1281,7 +1344,8 @@ impl RustAlgorithm for DyadCensus {
                     AlgorithmValue::Utf8("null".into()),
                     AlgorithmValue::UInt64(counts.null),
                 ],
-            ])
+            ],
+        )
     }
 }
 
@@ -1366,7 +1430,11 @@ impl RustAlgorithm for ArticulationPoints {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::ArticulationPoints), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::ArticulationPoints),
+            control,
+            rows,
+        )
     }
 }
 
@@ -1507,7 +1575,11 @@ impl RustAlgorithm for IsDag {
         } else {
             false
         };
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::IsDag), control, vec![vec![AlgorithmValue::Boolean(is_dag)]])
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::IsDag),
+            control,
+            vec![vec![AlgorithmValue::Boolean(is_dag)]],
+        )
     }
 }
 
@@ -1538,7 +1610,11 @@ impl RustAlgorithm for TopologicalSort {
                 AlgorithmValue::UInt64(order),
             ]);
         }
-        AlgorithmOutput::from_rows(Algorithm::Analyze(AnalyzeAlgorithm::TopologicalSort), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Analyze(AnalyzeAlgorithm::TopologicalSort),
+            control,
+            rows,
+        )
     }
 }
 

@@ -12,7 +12,7 @@ Tokio runtime or any DataFusion execution session.
 |---|---|---|
 | `tokio_worker_threads` | `2` | Facade multi-thread Tokio runtime |
 | `target_partitions` | `2` | DataFusion `SessionConfig` |
-| `batch_size` | `8192` | DataFusion `SessionConfig` |
+| `batch_size` | `8192` | DataFusion `SessionConfig`; analyst Arrow shaping / property enrichment (#341) |
 | `memory_budget_bytes` | `512 MiB` | DataFusion `RuntimeEnv` memory pool |
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |

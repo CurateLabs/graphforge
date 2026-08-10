@@ -26,7 +26,7 @@ use crate::algorithm_graph::{
     AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_vectors,
 };
 use crate::algorithm_k_core::k_core_numbers;
-use crate::algorithm_output::{materialize_node_properties, shape_algorithm_output};
+use crate::algorithm_output::shape_algorithm_output;
 
 const BUILTIN_REVIEW: DependencyReview = DependencyReview {
     implementation: "graphforge-exec built-in",
@@ -456,10 +456,7 @@ fn community_output(
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
         let community = i64::try_from(communities[index])
             .map_err(|_| execution("community count exceeds Int64 result range"))?;
-        sink.append_row(&[
-            AlgorithmValue::Uuid(uuid),
-            AlgorithmValue::Int64(community),
-        ])?;
+        sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Int64(community)])?;
     }
     sink.finish()
 }
@@ -477,10 +474,7 @@ fn label_output(
         let uuid = graph
             .node_uuid(node_id)
             .ok_or_else(|| execution("selected node has no UUID identity"))?;
-        sink.append_row(&[
-            AlgorithmValue::Uuid(uuid),
-            AlgorithmValue::Int64(community),
-        ])?;
+        sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Int64(community)])?;
     }
     sink.finish()
 }
@@ -591,11 +585,38 @@ pub fn cluster_algorithm(
     property_stems: &[String],
     options: &ClusterOptions,
 ) -> Result<RecordBatch, GfError> {
+    cluster_algorithm_with_limits(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        AlgorithmLimits::default(),
+    )
+}
+
+/// Execute clustering with an explicit output/memory shaping policy (#341).
+pub fn cluster_algorithm_with_limits(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: &ClusterOptions,
+    limits: AlgorithmLimits,
+) -> Result<RecordBatch, GfError> {
     let graph = cluster_projection(provider, dir, mode, label, property_stems, options)?;
     let algorithm = Algorithm::Cluster(options.by);
-    let output = execute_cluster(&graph, algorithm, AlgorithmLimits::default())?;
+    let output = execute_cluster(&graph, algorithm, limits)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
-    materialize_node_properties(dir, property_stems, &batch).map_err(Into::into)
+    crate::algorithm_output::materialize_node_properties_with_batch_size(
+        dir,
+        property_stems,
+        &batch,
+        limits.batch_size,
+    )
+    .map_err(Into::into)
 }
 
 /// Fingerprint the exact topology and vector values consumed by clustering.
@@ -3543,7 +3564,10 @@ mod tests {
             first.schema,
             Algorithm::Cluster(ClusterAlgorithm::Louvain).result_schema()
         );
-        assert_eq!(first.rows()[0][0], AlgorithmValue::Uuid(0_u128.to_be_bytes()));
+        assert_eq!(
+            first.rows()[0][0],
+            AlgorithmValue::Uuid(0_u128.to_be_bytes())
+        );
     }
 
     #[test]

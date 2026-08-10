@@ -222,7 +222,11 @@ impl RustAlgorithm for NodeSimilarity {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Similar(SimilarAlgorithm::NodeSimilarity), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Similar(SimilarAlgorithm::NodeSimilarity),
+            control,
+            rows,
+        )
     }
 }
 
@@ -258,7 +262,11 @@ impl RustAlgorithm for FilteredNodeSimilarity {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Similar(SimilarAlgorithm::FilteredNodeSimilarity), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Similar(SimilarAlgorithm::FilteredNodeSimilarity),
+            control,
+            rows,
+        )
     }
 }
 
@@ -328,6 +336,27 @@ pub fn similar_algorithm(
     property_stems: &[String],
     options: SimilarOptions,
 ) -> Result<RecordBatch, GfError> {
+    similar_algorithm_with_limits(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        crate::algorithm_dispatch::AlgorithmLimits::default(),
+    )
+}
+
+/// Execute similarity with an explicit output/memory shaping policy (#341).
+pub fn similar_algorithm_with_limits(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: SimilarOptions,
+    limits: crate::algorithm_dispatch::AlgorithmLimits,
+) -> Result<RecordBatch, GfError> {
     let graph = similar_projection(provider, dir, mode, label, property_stems, &options)?;
     let algorithm = Algorithm::Similar(options.by);
     let mut registry = AlgorithmRegistry::default();
@@ -337,7 +366,7 @@ pub fn similar_algorithm(
         algorithm,
         &graph,
         &AlgorithmControl::new(
-            crate::algorithm_dispatch::AlgorithmLimits::default(),
+            limits,
             crate::algorithm_dispatch::AlgorithmCancellation::default(),
         ),
     )?;

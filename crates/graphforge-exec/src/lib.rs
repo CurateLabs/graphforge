@@ -113,6 +113,7 @@ mod algorithm_embedding_invocation;
 pub(crate) mod algorithm_embedding_options;
 pub use algorithm_embedding_options::validate_embedding_options;
 pub use algorithm_graph::AlgorithmProjectionFingerprint;
+pub(crate) mod algorithm_arrow_sink;
 #[allow(
     dead_code,
     reason = "Node2Vec activation consumes the deterministic walk corpus"
@@ -133,7 +134,6 @@ pub(crate) mod algorithm_k_core;
 pub(crate) mod algorithm_matching_blossom;
 pub(crate) mod algorithm_matching_state;
 pub(crate) mod algorithm_neighbors;
-pub(crate) mod algorithm_arrow_sink;
 pub(crate) mod algorithm_output;
 #[allow(
     dead_code,
@@ -197,14 +197,19 @@ pub use algorithm_analyze::{
     analyze_algorithm, analyze_projection_fingerprint, embedding_algorithm,
     embedding_algorithm_execution, prepare_embedding_invocation_descriptor,
 };
-pub use algorithm_cluster::{cluster_algorithm, cluster_projection_fingerprint};
+pub use algorithm_cluster::{
+    cluster_algorithm, cluster_algorithm_with_limits, cluster_projection_fingerprint,
+};
+pub use algorithm_dispatch::AlgorithmLimits;
 pub use algorithm_embedding_invocation::{
     EmbeddingExecution, EmbeddingInvocationDescriptor, EmbeddingInvocationLimits,
     EmbeddingProjectionSelector, EmbeddingRngContract,
 };
 pub use algorithm_paths::{paths_algorithm, paths_projection_fingerprint};
-pub use algorithm_rank::{rank_algorithm, rank_projection_fingerprint};
-pub use algorithm_similar::{similar_algorithm, similar_projection_fingerprint};
+pub use algorithm_rank::{rank_algorithm, rank_algorithm_with_limits, rank_projection_fingerprint};
+pub use algorithm_similar::{
+    similar_algorithm, similar_algorithm_with_limits, similar_projection_fingerprint,
+};
 
 mod write_driver;
 

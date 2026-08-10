@@ -24,6 +24,7 @@ const SCHEMA_VERSION: &str = "1";
 
 /// Typed, bounded Arrow builder set for one algorithm result schema.
 pub(crate) struct AlgorithmArrowSink {
+    #[allow(dead_code, reason = "retained for diagnostics and future observability")]
     algorithm: Algorithm,
     schema: AlgorithmResultSchema,
     arrow_schema: Arc<Schema>,
@@ -119,10 +120,12 @@ impl AlgorithmArrowSink {
         &self.schema
     }
 
+    #[cfg(test)]
     pub(crate) fn peak_builder_rows(&self) -> usize {
         self.peak_builder_rows
     }
 
+    #[cfg(test)]
     pub(crate) fn internal_batch_count(&self) -> usize {
         self.finished.len() + usize::from(self.current_rows > 0)
     }
@@ -180,13 +183,13 @@ impl ColumnBuilder {
     fn new(data_type: AlgorithmFieldType) -> Result<Self, AlgorithmError> {
         Ok(match data_type {
             AlgorithmFieldType::Uuid => Self::Uuid(FixedSizeBinaryBuilder::new(16)),
-            AlgorithmFieldType::UuidList => Self::UuidList(
-                ListBuilder::new(FixedSizeBinaryBuilder::new(16)).with_field(Arc::new(Field::new(
-                    "item",
-                    DataType::FixedSizeBinary(16),
-                    false,
-                ))),
-            ),
+            AlgorithmFieldType::UuidList => {
+                Self::UuidList(
+                    ListBuilder::new(FixedSizeBinaryBuilder::new(16)).with_field(Arc::new(
+                        Field::new("item", DataType::FixedSizeBinary(16), false),
+                    )),
+                )
+            }
             AlgorithmFieldType::Float32List => Self::Float32List(
                 ListBuilder::new(Float32Builder::new()).with_field(Arc::new(Field::new(
                     "item",
@@ -348,9 +351,7 @@ fn coalesce_batches(
 
 fn check_batch_capacity(batch: &RecordBatch) -> Result<(), AlgorithmError> {
     if batch.num_rows() > i32::MAX as usize {
-        return Err(shape_error(
-            "Arrow batch exceeds checked i32 row capacity",
-        ));
+        return Err(shape_error("Arrow batch exceeds checked i32 row capacity"));
     }
     for column in batch.columns() {
         if let Some(list) = column.as_any().downcast_ref::<ListArray>() {

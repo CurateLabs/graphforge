@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, AlgorithmFieldType};
 
-use crate::algorithm_arrow_sink::{schema_version, shape_error, AlgorithmArrowSink};
+use crate::algorithm_arrow_sink::{AlgorithmArrowSink, schema_version, shape_error};
 use crate::algorithm_dispatch::{AlgorithmError, AlgorithmOutput, AlgorithmValue};
 
 const SCHEMA_VERSION: &str = schema_version();
@@ -175,8 +175,8 @@ fn gather_property_column(
     column_index: usize,
     locations: &[Option<(usize, u32)>],
 ) -> Result<ArrayRef, AlgorithmError> {
-    use arrow::compute::kernels::zip::zip;
     use arrow::array::BooleanArray;
+    use arrow::compute::kernels::zip::zip;
 
     let mut merged: Option<ArrayRef> = None;
     for (batch_index, batch) in batches.iter().enumerate() {
@@ -269,7 +269,6 @@ pub(crate) fn shape_logical_rows(
     }
     sink.finish()
 }
-
 
 fn materialization_error(message: impl Into<String>) -> AlgorithmError {
     AlgorithmError::Execution {
@@ -680,7 +679,8 @@ mod tests {
                 if field.data_type == AlgorithmFieldType::Utf8 {
                     wrong_type[index] = AlgorithmValue::Boolean(false);
                 }
-                let error = try_shape_row(algorithm, wrong_type).expect_err("logical output type mismatch");
+                let error =
+                    try_shape_row(algorithm, wrong_type).expect_err("logical output type mismatch");
                 assert!(error.to_string().contains(field.name));
 
                 let mut null = canonical.clone();
@@ -744,7 +744,10 @@ mod tests {
             .collect();
         let small = shape_logical_rows(algorithm, rows.clone(), 4, u64::MAX).unwrap();
         let large = shape_logical_rows(algorithm, rows, 64, u64::MAX).unwrap();
-        assert!(small.internal_batch_count > 1, "small batch size must roll over");
+        assert!(
+            small.internal_batch_count > 1,
+            "small batch size must roll over"
+        );
         assert_eq!(large.internal_batch_count, 1);
         assert!(
             small.peak_builder_rows <= 4,
@@ -762,8 +765,16 @@ mod tests {
         let one = [1; 16];
         let two = [2; 16];
         let input = node_result(&[two, one]);
-        let first = property_batch(&[two], "name", Arc::new(StringArray::from(vec![Some("Bob")])));
-        let second = property_batch(&[one], "name", Arc::new(StringArray::from(vec![Some("Ada")])));
+        let first = property_batch(
+            &[two],
+            "name",
+            Arc::new(StringArray::from(vec![Some("Bob")])),
+        );
+        let second = property_batch(
+            &[one],
+            "name",
+            Arc::new(StringArray::from(vec![Some("Ada")])),
+        );
         let result = materialize_node_properties_with(&input, &["Person".into()], |_| {
             Ok(vec![first.clone(), second.clone()])
         })

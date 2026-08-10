@@ -128,7 +128,11 @@ impl RustAlgorithm for DeltaStepping {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::DeltaStepping), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::DeltaStepping),
+            control,
+            rows,
+        )
     }
 }
 
@@ -628,7 +632,11 @@ impl RustAlgorithm for TransitiveClosure {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::TransitiveClosure), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::TransitiveClosure),
+            control,
+            rows,
+        )
     }
 }
 
@@ -716,7 +724,11 @@ impl RustAlgorithm for FloydWarshall {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::FloydWarshall), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::FloydWarshall),
+            control,
+            rows,
+        )
     }
 }
 
@@ -789,23 +801,24 @@ impl RustAlgorithm for AStar {
         let target = graph
             .node_id(&target_uuid)
             .ok_or_else(|| execution("astar target UUID is not in the selected graph"))?;
-        let rows: Vec<Vec<AlgorithmValue>> = exact_astar(graph, source, target, self.heuristic.as_ref(), control)?
-            .into_iter()
-            .map(|result| {
-                Ok(vec![
-                    AlgorithmValue::Uuid(self.source),
-                    AlgorithmValue::Uuid(target_uuid),
-                    AlgorithmValue::Float64(result.cost),
-                    AlgorithmValue::UuidList(
-                        result
-                            .nodes
-                            .into_iter()
-                            .map(|node| node_uuid(graph, node))
-                            .collect::<Result<_, _>>()?,
-                    ),
-                ])
-            })
-            .collect::<Result<Vec<_>, AlgorithmError>>()?;
+        let rows: Vec<Vec<AlgorithmValue>> =
+            exact_astar(graph, source, target, self.heuristic.as_ref(), control)?
+                .into_iter()
+                .map(|result| {
+                    Ok(vec![
+                        AlgorithmValue::Uuid(self.source),
+                        AlgorithmValue::Uuid(target_uuid),
+                        AlgorithmValue::Float64(result.cost),
+                        AlgorithmValue::UuidList(
+                            result
+                                .nodes
+                                .into_iter()
+                                .map(|node| node_uuid(graph, node))
+                                .collect::<Result<_, _>>()?,
+                        ),
+                    ])
+                })
+                .collect::<Result<Vec<_>, AlgorithmError>>()?;
         AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::AStar), control, rows)
     }
 }
@@ -846,7 +859,11 @@ impl RustAlgorithm for DijkstraAllPairs {
                 ])
             })
             .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(Algorithm::Paths(PathAlgorithm::DijkstraAllPairs), control, rows)
+        AlgorithmOutput::from_rows(
+            Algorithm::Paths(PathAlgorithm::DijkstraAllPairs),
+            control,
+            rows,
+        )
     }
 }
 
@@ -2143,7 +2160,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             scalar,
-            crate::algorithm_output::shape_logical_rows(Algorithm::Paths(PathAlgorithm::MaxFlow), vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]], 8192, u64::MAX)
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MaxFlow),
+                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
+                8192,
+                u64::MAX
+            )
         );
         assert_eq!(
             edges.rows().iter().map(|row| &row[3]).collect::<Vec<_>>(),
@@ -2199,12 +2221,24 @@ mod tests {
 
         assert_eq!(
             scalar,
-            crate::algorithm_output::shape_logical_rows(Algorithm::Paths(PathAlgorithm::MinCut), vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]], 8192, u64::MAX)
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MinCut),
+                vec![vec![value(0), value(3), AlgorithmValue::Float64(5.0)]],
+                8192,
+                u64::MAX
+            )
         );
         assert_eq!(
             edges,
-            crate::algorithm_output::shape_logical_rows(Algorithm::Paths(PathAlgorithm::MinCutEdges), vec![
-                    vec![value(0), value(0), value(1), AlgorithmValue::Float64(3.0)], vec![value(1), value(0), value(2), AlgorithmValue::Float64(2.0)], ], 8192, u64::MAX)
+            crate::algorithm_output::shape_logical_rows(
+                Algorithm::Paths(PathAlgorithm::MinCutEdges),
+                vec![
+                    vec![value(0), value(0), value(1), AlgorithmValue::Float64(3.0)],
+                    vec![value(1), value(0), value(2), AlgorithmValue::Float64(2.0)],
+                ],
+                8192,
+                u64::MAX
+            )
         );
         assert_eq!(
             scalar.rows()[0][2],

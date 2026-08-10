@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use graphforge_core::GfError;
 use graphforge_core::algorithms::{Algorithm, AlgorithmResultSchema};
 
-use crate::algorithm_arrow_sink::{decode_logical_rows, AlgorithmArrowSink};
+use crate::algorithm_arrow_sink::{AlgorithmArrowSink, decode_logical_rows};
 use crate::algorithm_graph::AdjacencyGraph;
 
 /// Structured failures produced by Rust algorithm dispatch.
@@ -157,7 +157,7 @@ impl From<AlgorithmError> for GfError {
 
 /// Hard limits shared by every Rust algorithm handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AlgorithmLimits {
+pub struct AlgorithmLimits {
     /// Maximum selected nodes.
     pub nodes: u64,
     /// Maximum adjacency entries after direction and filtering.
@@ -182,6 +182,15 @@ impl Default for AlgorithmLimits {
             states: 10_000_000,
             batch_size: 8_192,
         }
+    }
+}
+
+impl AlgorithmLimits {
+    /// Override the internal Arrow shaping batch size (#337 / #341).
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.max(1);
+        self
     }
 }
 
