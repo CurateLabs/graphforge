@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #506 Degree; subsequent M4 polish kernels) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -68,12 +68,13 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Cosine dot products retain serial coordinate order,
-PageRank keeps canonical contribution order with serial dangling/delta
-reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
-the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and Degree
+(#506) may partition independent work across that pool above documented
+crossovers; work never uses Rayon's process-global pool. Cosine dot products
+retain serial coordinate order, PageRank keeps canonical contribution order with
+serial dangling/delta reductions, Degree merges node chunks in dense ordinal
+order, and Node2Vec skip-gram training stays serial, so fingerprints match the
+one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -112,6 +113,21 @@ range and applies inbound contributions in the same canonical source/edge order
 as serial scatter. Dangling-mass and L1 convergence reductions stay serial so
 IEEE accumulation order matches the accepted oracle. Schemas, row order,
 scores, iteration counts, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel Degree (#506)
+
+Normalized degree scores partition **independent dense node ordinals** across
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected node count is at least
+  `DEGREE_PARALLEL_CROSSOVER_NODES` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
+for contiguous ordinal ranges; the sink merges them in ascending node order so
+schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Parallel Node2Vec walk generation (#344)
