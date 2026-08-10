@@ -6996,11 +6996,6 @@ mod tests {
                     AlgorithmValue::Uuid(3_u128.to_be_bytes()),
                 ],
                 vec![
-                    AlgorithmValue::Uuid(17_u128.to_be_bytes()),
-                    AlgorithmValue::Uuid(5_u128.to_be_bytes()),
-                    AlgorithmValue::Uuid(6_u128.to_be_bytes()),
-                ],
-                vec![
                     AlgorithmValue::Uuid(21_u128.to_be_bytes()),
                     AlgorithmValue::Uuid(8_u128.to_be_bytes()),
                     AlgorithmValue::Uuid(9_u128.to_be_bytes()),
