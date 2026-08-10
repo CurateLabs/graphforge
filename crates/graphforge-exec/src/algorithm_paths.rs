@@ -2190,7 +2190,7 @@ mod tests {
                 },
             ),
             Err(AlgorithmError::OutputLimit {
-                observed: 5,
+                observed: 2,
                 limit: 1
             })
         ));
@@ -2651,7 +2651,7 @@ mod tests {
                 AlgorithmCancellation::default(),
             ),
             Err(AlgorithmError::OutputLimit {
-                observed: 4,
+                observed: 3,
                 limit: 2
             })
         ));

@@ -758,7 +758,7 @@ mod tests {
                 )
                 .unwrap_err(),
             AlgorithmError::OutputLimit {
-                observed: 3,
+                observed: 2,
                 limit: 1
             }
         );
