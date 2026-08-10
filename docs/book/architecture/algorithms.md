@@ -2159,6 +2159,10 @@ normalized seed, resolved-source ordinal, and walk ordinal. Changing SplitMix64,
 the integer-to-draw conversion, or canonical choice ordering requires a new named contract
 version; it must not silently alter `splitmix64-v1`. For the same graph projection, normalized
 options, contract version, and seed, the Arrow output is byte-identical across repeated calls.
+Above `RANDOM_WALK_PARALLEL_CROSSOVER` (`256`) estimated transitions and with more than one
+configured compute thread, independent walks may run on the instance-owned private compute pool;
+smaller workloads and one-thread policies stay serial. Parallel workers merge by resolved-source
+ordinal and walk ordinal, so this does not change schemas, row ordering, metadata, or fingerprints.
 
 Rows are ordered by resolved-source order and then zero-based walk ordinal. The exact non-null
 schema is `start_uuid: FixedSizeBinary(16), walk: List<FixedSizeBinary(16) not null>`, with

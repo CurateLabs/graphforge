@@ -1638,7 +1638,10 @@ UUID, then each walk uses a stream deterministically derived from the normalized
 start ordinal, and walk ordinal. Changing the RNG, seed derivation, draw conversion, or choice
 ordering requires a new named contract version. Given the same resolved graph projection,
 normalized options, contract version, and seed, repeated calls return byte-identical Arrow
-output.
+output. Above `RANDOM_WALK_PARALLEL_CROSSOVER` (`256`) estimated transitions and with more than
+one configured compute thread, independent walks may run on the instance-owned private compute
+pool; smaller workloads and one-thread policies stay serial. Parallel workers merge by resolved
+start ordinal and walk ordinal, preserving schemas, row ordering, metadata, and fingerprints.
 
 Rows sort by resolved-start order and then walk ordinal. The exact non-null result is
 `start_uuid: FixedSizeBinary(16), walk: List<FixedSizeBinary(16) not null>`. Each list includes

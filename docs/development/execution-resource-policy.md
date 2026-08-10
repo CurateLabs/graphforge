@@ -835,6 +835,22 @@ deriving the closed-form null count. Schemas, row order, category counts,
 structured errors, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`
 / automatic configurations.
 
+## Parallel random_walk path generation (#553)
+
+`paths(by="random_walk")` partitions **independent `(resolved-source ordinal,
+walk ordinal)` tasks** across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated transitions (`resolved starts × k × walk_length`) are at least
+  `RANDOM_WALK_PARALLEL_CROSSOVER` (`256`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Each task derives the same
+`splitmix64-v1` stream as the one-thread path and still sorts choices by
+neighbor UUID then edge UUID before sampling. Worker outputs merge by contiguous
+source/walk task range, so schemas, row order, metadata, cancellation/limit
+outcomes, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
