@@ -300,8 +300,12 @@ are at most `1e-7` or after 20 rounds. Directed mode sends over outgoing selecte
 edges; undirected mode exports both endpoint directions. `via`, parallel edges,
 self-loops, dangling/disconnected/edgeless/empty behavior, stable UUID-only
 schema/order, shared Rust limits/cancellation/errors, and atomic opt-in
-write-back follow the documented architecture contract. Python and Node contain
-no separate ArticleRank implementation or fallback.
+write-back follow the documented architecture contract. Above
+`ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`4_096`) selected adjacency entries,
+ArticleRank may compute destination-owned message sums on the instance-owned
+private compute pool; inbound messages still apply in canonical source/edge
+order and serial score updates preserve one-thread fingerprints. Python and Node
+contain no separate ArticleRank implementation or fallback.
 
 Eigenvector centrality is unweighted and uses deterministic shifted power
 iteration over `Aᵀ + I`. Every selected node starts at `1 / N`; each iteration

@@ -172,8 +172,8 @@ pub struct AlgorithmLimits {
     pub batch_size: usize,
     /// Declared compute-thread budget from the instance resource policy (#337 / #342).
     ///
-    /// `1` forces the serial cosine path; larger values may activate the private
-    /// pool when work exceeds the documented crossover.
+    /// `1` forces serial CPU-kernel paths; larger values may activate the
+    /// private pool when work exceeds each documented crossover.
     pub compute_threads: usize,
 }
 
