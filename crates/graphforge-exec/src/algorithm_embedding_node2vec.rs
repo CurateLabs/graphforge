@@ -467,9 +467,12 @@ pub(crate) fn select_walk_corpus_path(
 }
 
 fn estimated_walk_transitions(starts: usize, walks_per_node: usize, walk_length: usize) -> u64 {
-    (starts as u64)
-        .saturating_mul(walks_per_node as u64)
-        .saturating_mul(walk_length as u64)
+    let starts = u64::try_from(starts).unwrap_or(u64::MAX);
+    let walks_per_node = u64::try_from(walks_per_node).unwrap_or(u64::MAX);
+    let walk_length = u64::try_from(walk_length).unwrap_or(u64::MAX);
+    starts
+        .saturating_mul(walks_per_node)
+        .saturating_mul(walk_length)
 }
 
 fn walk_task_chunks(total_walks: usize, threads: usize) -> Vec<(usize, usize)> {
@@ -663,16 +666,17 @@ mod tests {
     }
 
     fn adversarial_graph(nodes: usize) -> AdjacencyGraph {
-        let edges = (0..nodes)
+        let nodes_u64 = u64::try_from(nodes).expect("test node count fits u64");
+        let edges = (0..nodes_u64)
             .flat_map(|source| {
                 [
-                    (source, (source + 1) % nodes),
-                    (source, (source + 3) % nodes),
-                    (source, (source * 5 + 7) % nodes),
+                    (source, (source + 1) % nodes_u64),
+                    (source, (source + 3) % nodes_u64),
+                    (source, (source * 5 + 7) % nodes_u64),
                 ]
             })
             .collect::<Vec<_>>();
-        AdjacencyGraph::with_test_directed_edges(nodes, &edges)
+        AdjacencyGraph::with_test_directed_edges(nodes_u64, &edges)
     }
 
     #[test]
