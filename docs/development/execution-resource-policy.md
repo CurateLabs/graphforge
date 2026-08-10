@@ -895,6 +895,25 @@ hardware-specific timing) and verifies fingerprint parity against the
 one-thread oracle for every supported resource-policy cell. Timing remains
 evidence only, not a CI threshold.
 
+
+## Serial Node2Vec SGNS training (#562)
+
+`analyze_embedding(by="node2vec")` has no parallel crossover for the skip-gram
+with negative sampling (SGNS) training phase. The accepted public embedding is
+the result of replaying the canonical walk corpus in `(epoch, walk, center,
+context, negative ordinal)` order. Each sample reads a center vector, mutates one
+or more output vectors, accumulates a center delta, then writes that delta back
+to the input vector. Reordering or sharding those updates would require a new
+conflict-resolution contract and could change Float32 bits, row fingerprints,
+and tie behavior.
+
+The #562 polish therefore keeps SGNS serial while removing avoidable
+per-negative-sample allocation. The trainer now builds a canonical negative-mass
+table once from corpus token counts and excludes the current context at draw
+time; RNG derivation, cumulative mass order, update arithmetic, schemas, row
+order, cancellation, work/output limits, and bounded Arrow shaping remain the
+one-thread oracle at `1`/`2`/`4`/`8`/automatic configurations. Walk generation
+continues to use the #344 private-pool crossover above.
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

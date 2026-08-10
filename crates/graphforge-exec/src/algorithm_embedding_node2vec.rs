@@ -5,7 +5,9 @@
 //! documented crossover. Seed derivation, candidate ordering, transition-mass
 //! accumulation, sampling, and every generated walk remain identical to the
 //! serial path. Skip-gram / negative-sampling training stays serial and
-//! unchanged so embedding fingerprints are preserved.
+//! preserves embedding fingerprints; #562 precomputes canonical negative
+//! sampling masses once per corpus so the serial trainer avoids per-sample mass
+//! vector allocation without changing RNG keys or draw order.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -68,6 +70,7 @@ pub(crate) fn train_node2vec(
         .enumerate()
         .map(|(index, &(_, node_id))| (node_id, index))
         .collect::<HashMap<_, _>>();
+    let negative_table = NegativeSamplingTable::new(&nodes, &corpus.token_counts)?;
     let mut input = initialize_input(&nodes, options);
     let mut output = vec![vec![0.0_f32; options.dimensions]; nodes.len()];
     let learning_rate = f64_to_f32(options.learning_rate);
@@ -108,8 +111,7 @@ pub(crate) fn train_node2vec(
 
                     for negative_ordinal in 0..options.negative_samples {
                         let Some(negative_id) = sample_negative(
-                            &nodes,
-                            &corpus.token_counts,
+                            &negative_table,
                             context_id,
                             options.seed,
                             epoch,
@@ -183,10 +185,42 @@ fn initialize_input(nodes: &[([u8; 16], u64)], options: &Node2VecOptions) -> Vec
         .collect()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct NegativeSamplingTable {
+    masses: Vec<(u64, f64)>,
+    total: f64,
+}
+
+impl NegativeSamplingTable {
+    fn new(
+        nodes: &[([u8; 16], u64)],
+        token_counts: &HashMap<u64, u64>,
+    ) -> Result<Self, Node2VecWalkError> {
+        let masses = nodes
+            .iter()
+            .map(|&(_, node_id)| {
+                let count = token_counts.get(&node_id).copied().unwrap_or(0);
+                (node_id, u64_to_f64(count).powf(0.75))
+            })
+            .collect::<Vec<_>>();
+        let total = masses.iter().map(|(_, mass)| mass).sum::<f64>();
+        if !total.is_finite() {
+            return Err(Node2VecWalkError::InvalidTransitionMass);
+        }
+        Ok(Self { masses, total })
+    }
+
+    fn context_mass(&self, context_id: u64) -> f64 {
+        self.masses
+            .iter()
+            .find_map(|&(node_id, mass)| (node_id == context_id).then_some(mass))
+            .unwrap_or(0.0)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sample_negative(
-    nodes: &[([u8; 16], u64)],
-    token_counts: &HashMap<u64, u64>,
+    table: &NegativeSamplingTable,
     context_id: u64,
     seed: u64,
     epoch: u64,
@@ -196,19 +230,7 @@ fn sample_negative(
     context_position: u64,
     negative_ordinal: u64,
 ) -> Result<Option<u64>, Node2VecWalkError> {
-    let masses = nodes
-        .iter()
-        .map(|&(_, node_id)| {
-            let count = token_counts.get(&node_id).copied().unwrap_or(0);
-            let mass = if node_id == context_id {
-                0.0
-            } else {
-                u64_to_f64(count).powf(0.75)
-            };
-            (node_id, mass)
-        })
-        .collect::<Vec<_>>();
-    let total = masses.iter().map(|(_, mass)| mass).sum::<f64>();
+    let total = table.total - table.context_mass(context_id);
     if total == 0.0 {
         return Ok(None);
     }
@@ -230,7 +252,10 @@ fn sample_negative(
     );
     let draw = rng.unit_f64() * total;
     let mut cumulative = 0.0;
-    Ok(masses.into_iter().find_map(|(node_id, mass)| {
+    Ok(table.masses.iter().find_map(|&(node_id, mass)| {
+        if node_id == context_id {
+            return None;
+        }
         cumulative += mass;
         (draw < cumulative).then_some(node_id)
     }))
@@ -931,26 +956,46 @@ mod tests {
         let graph = AdjacencyGraph::with_test_directed_edges(2, &[]);
         let nodes = canonical_nodes(&graph);
         let only_context = HashMap::from([(0, 4)]);
+        let only_context = NegativeSamplingTable::new(&nodes, &only_context).unwrap();
         assert_eq!(
-            sample_negative(
-                &nodes,
-                &only_context,
-                0,
-                0,
-                0,
-                0_u128.to_be_bytes(),
-                0,
-                0,
-                1,
-                0,
-            )
-            .unwrap(),
+            sample_negative(&only_context, 0, 0, 0, 0_u128.to_be_bytes(), 0, 0, 1, 0,).unwrap(),
             None
         );
         let both = HashMap::from([(0, 4), (1, 1)]);
+        let both = NegativeSamplingTable::new(&nodes, &both).unwrap();
         assert_eq!(
-            sample_negative(&nodes, &both, 0, 0, 0, 0_u128.to_be_bytes(), 0, 0, 1, 0).unwrap(),
+            sample_negative(&both, 0, 0, 0, 0_u128.to_be_bytes(), 0, 0, 1, 0).unwrap(),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn negative_sampling_table_reuses_canonical_masses_without_context() {
+        let graph = AdjacencyGraph::with_test_directed_edges_and_uuids(
+            &[
+                3_u128.to_be_bytes(),
+                1_u128.to_be_bytes(),
+                2_u128.to_be_bytes(),
+            ],
+            &[],
+        );
+        let nodes = canonical_nodes(&graph);
+        let table =
+            NegativeSamplingTable::new(&nodes, &HashMap::from([(0, 8), (1, 1), (2, 27)])).unwrap();
+        assert_eq!(
+            table
+                .masses
+                .iter()
+                .map(|(node, _)| *node)
+                .collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        assert!(table.context_mass(2) > 0.0);
+        assert_eq!(table.context_mass(99), 0.0);
+        assert!(
+            sample_negative(&table, 1, 7, 0, 3_u128.to_be_bytes(), 0, 0, 1, 0)
+                .unwrap()
+                .is_some()
         );
     }
 
