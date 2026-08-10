@@ -2391,7 +2391,7 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        let batch = graphforge_exec::cluster_algorithm_with_limits(
+        let batch = graphforge_exec::cluster_algorithm_with_compute(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
@@ -2399,7 +2399,9 @@ impl GraphForge {
             std::slice::from_ref(&stem),
             &dispatch_options,
             graphforge_exec::AlgorithmLimits::default()
-                .with_batch_size(self.resource_policy.batch_size),
+                .with_batch_size(self.resource_policy.batch_size)
+                .with_compute_threads(self.resource_policy.compute_threads),
+            Some(self.compute_pool.clone()),
         )?;
         self.write_algorithm_property(
             label,

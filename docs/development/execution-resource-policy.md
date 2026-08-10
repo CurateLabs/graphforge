@@ -68,12 +68,13 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
-independent work across that pool above documented crossovers; work never uses
-Rayon's process-global pool. Cosine dot products retain serial coordinate order,
-PageRank keeps canonical contribution order with serial dangling/delta
-reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
-the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and connected
+components (#518) may partition independent work across that pool above
+documented crossovers; work never uses Rayon's process-global pool. Cosine dot
+products retain serial coordinate order, PageRank keeps canonical contribution
+order with serial dangling/delta reductions, Node2Vec skip-gram training stays
+serial, and components assigns final community IDs in canonical node order, so
+fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -128,6 +129,23 @@ serial path runs with no pool scheduling tax. Worker-local token counts merge
 by canonical node ordinal with checked addition. Training order and arithmetic
 are unchanged, so schemas, row order, metadata, and fingerprints match the
 one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel components (#518)
+
+`cluster(by="components")` partitions independent source-node adjacency scans
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `COMPONENTS_PARALLEL_CROSSOVER_EDGES` (`16_384`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the serial
+union-find path runs with no pool scheduling tax. Parallel workers build
+worker-local union-find parents over deterministic source chunks; the kernel then
+merges those local parents into one global union-find and assigns public
+community IDs serially in canonical node order. Schemas, row order, community ID
+assignment, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 

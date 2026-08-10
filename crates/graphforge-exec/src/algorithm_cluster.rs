@@ -1,13 +1,16 @@
 //! Rust-owned cluster handlers registered under the shared M18 dispatch contract.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, ClusterAlgorithm};
 use graphforge_core::{ClusterOptions, GfError, OntologyMode, TypeId};
 use graphforge_ir::Direction;
+use rayon::prelude::*;
 
 use crate::AdjacencyProvider;
 use crate::algorithm_cluster_biconnected::biconnected_labels;
@@ -41,6 +44,9 @@ const BUILTIN_REVIEW: DependencyReview = DependencyReview {
 type WeightedAdjacency = Vec<BTreeMap<usize, f64>>;
 type CommunityMembers = Vec<Vec<usize>>;
 type SimpleAdjacency = Vec<BTreeSet<usize>>;
+
+const COMPONENTS_PARALLEL_CROSSOVER_EDGES: u64 = 16_384;
+const COMPONENTS_CHECKPOINT_EDGES: usize = 16_384;
 
 struct Components;
 
@@ -493,59 +499,190 @@ impl RustAlgorithm for Components {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let mut parents: Vec<usize> = (0..graph.node_ids().len()).collect();
-        let indices: HashMap<u64, usize> = graph
-            .node_ids()
-            .iter()
-            .enumerate()
-            .map(|(index, &node_id)| (node_id, index))
-            .collect();
-        let mut visited_edges = 0_usize;
-
-        for (source_index, &source_id) in graph.node_ids().iter().enumerate() {
-            for edge in graph.neighbors(source_id) {
-                if visited_edges.is_multiple_of(16_384) {
-                    control.checkpoint()?;
-                }
-                visited_edges += 1;
-                let target_index = indices.get(&edge.neighbor_id).copied().ok_or_else(|| {
-                    AlgorithmError::Execution {
-                        message: "adjacency references an unselected node".into(),
-                    }
-                })?;
-                union(&mut parents, source_index, target_index);
-            }
-        }
-
-        let mut ids = HashMap::new();
-        let algorithm = Algorithm::Cluster(ClusterAlgorithm::Components);
-        let mut sink = control.output_sink(algorithm)?;
-        for (index, &node_id) in graph.node_ids().iter().enumerate() {
-            if index.is_multiple_of(16_384) {
-                control.checkpoint()?;
-            }
-            let root = find(&mut parents, index);
-            let community_id = if let Some(&id) = ids.get(&root) {
-                id
-            } else {
-                let id = i64::try_from(ids.len()).map_err(|_| AlgorithmError::Execution {
-                    message: "component count exceeds Int64 result range".into(),
-                })?;
-                ids.insert(root, id);
-                id
-            };
-            let uuid = graph
-                .node_uuid(node_id)
-                .ok_or_else(|| AlgorithmError::Execution {
-                    message: "selected node has no UUID identity".into(),
-                })?;
-            sink.append_row(&[
-                AlgorithmValue::Uuid(uuid),
-                AlgorithmValue::Int64(community_id),
-            ])?;
-        }
-        sink.finish()
+        let communities = component_labels(graph, control)?;
+        community_output(graph, &communities, ClusterAlgorithm::Components, control)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComponentsExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+fn component_labels(
+    graph: &AdjacencyGraph,
+    control: &AlgorithmControl,
+) -> Result<Vec<usize>, AlgorithmError> {
+    let node_count = graph.node_ids().len();
+    let indices: HashMap<u64, usize> = graph
+        .node_ids()
+        .iter()
+        .enumerate()
+        .map(|(index, &node_id)| (node_id, index))
+        .collect();
+    let mut parents = match select_components_path(control, node_count, graph.edge_entry_count()) {
+        ComponentsExecutionPath::Serial => component_parents_serial(graph, &indices, control)?,
+        ComponentsExecutionPath::Parallel { .. } => {
+            component_parents_parallel(graph, &indices, control)?
+        }
+    };
+    component_ids_from_parents(&mut parents)
+}
+
+fn select_components_path(
+    control: &AlgorithmControl,
+    node_count: usize,
+    edge_entries: u64,
+) -> ComponentsExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || node_count <= 1
+        || edge_entries < COMPONENTS_PARALLEL_CROSSOVER_EDGES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return ComponentsExecutionPath::Serial;
+    }
+    let chunks = components_source_chunks(node_count, threads).len();
+    if chunks <= 1 {
+        return ComponentsExecutionPath::Serial;
+    }
+    ComponentsExecutionPath::Parallel { threads, chunks }
+}
+
+fn component_parents_serial(
+    graph: &AdjacencyGraph,
+    indices: &HashMap<u64, usize>,
+    control: &AlgorithmControl,
+) -> Result<Vec<usize>, AlgorithmError> {
+    let mut parents: Vec<usize> = (0..graph.node_ids().len()).collect();
+    let mut visited_edges = 0_usize;
+
+    for (source_index, &source_id) in graph.node_ids().iter().enumerate() {
+        for edge in graph.neighbors(source_id) {
+            checkpoint_components_edge(control, &mut visited_edges)?;
+            let target_index = indices
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            union(&mut parents, source_index, target_index);
+        }
+    }
+    Ok(parents)
+}
+
+fn component_parents_parallel(
+    graph: &AdjacencyGraph,
+    indices: &HashMap<u64, usize>,
+    control: &AlgorithmControl,
+) -> Result<Vec<usize>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel components requires an instance-owned compute pool"))?;
+    let node_count = graph.node_ids().len();
+    let ranges = components_source_chunks(node_count, control.compute_threads());
+    let visited_edges = AtomicUsize::new(0);
+    let local_parents = run_components_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut parents: Vec<usize> = (0..node_count).collect();
+                for source_index in start..end {
+                    control.check_cancelled()?;
+                    let source_id = graph.node_ids()[source_index];
+                    for edge in graph.neighbors(source_id) {
+                        let observed = visited_edges.fetch_add(1, Ordering::Relaxed);
+                        if observed.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
+                            control.checkpoint()?;
+                        }
+                        let target_index = indices
+                            .get(&edge.neighbor_id)
+                            .copied()
+                            .ok_or_else(|| execution("adjacency references an unselected node"))?;
+                        union(&mut parents, source_index, target_index);
+                    }
+                }
+                Ok(parents)
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+
+    let mut parents: Vec<usize> = (0..node_count).collect();
+    for mut local in local_parents {
+        for index in 0..node_count {
+            let root = find(&mut local, index);
+            if root != index {
+                union(&mut parents, index, root);
+            }
+        }
+    }
+    Ok(parents)
+}
+
+fn component_ids_from_parents(parents: &mut [usize]) -> Result<Vec<usize>, AlgorithmError> {
+    let mut ids = HashMap::new();
+    let mut labels = Vec::with_capacity(parents.len());
+    for index in 0..parents.len() {
+        let root = find(parents, index);
+        let id = if let Some(&id) = ids.get(&root) {
+            id
+        } else {
+            let id = ids.len();
+            i64::try_from(id)
+                .map_err(|_| execution("component count exceeds Int64 result range"))?;
+            ids.insert(root, id);
+            id
+        };
+        labels.push(id);
+    }
+    Ok(labels)
+}
+
+fn components_source_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+    if nodes == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, nodes);
+    let base = nodes / workers;
+    let rem = nodes % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
+}
+
+fn run_components_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("components worker panicked")),
+    }
+}
+
+fn checkpoint_components_edge(
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<(), AlgorithmError> {
+    if work.is_multiple_of(COMPONENTS_CHECKPOINT_EDGES) {
+        control.checkpoint()?;
+    }
+    *work = work.saturating_add(1);
+    Ok(())
 }
 
 pub(crate) fn register_cluster_algorithms(
@@ -606,9 +743,36 @@ pub fn cluster_algorithm_with_limits(
     options: &ClusterOptions,
     limits: AlgorithmLimits,
 ) -> Result<RecordBatch, GfError> {
+    cluster_algorithm_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        property_stems,
+        options,
+        limits,
+        None,
+    )
+}
+
+/// Execute clustering with shaping limits and an optional private compute pool (#518).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors cluster_algorithm_with_limits plus the instance compute pool handle"
+)]
+pub fn cluster_algorithm_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: TypeId,
+    property_stems: &[String],
+    options: &ClusterOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<RecordBatch, GfError> {
     let graph = cluster_projection(provider, dir, mode, label, property_stems, options)?;
     let algorithm = Algorithm::Cluster(options.by);
-    let output = execute_cluster(&graph, algorithm, limits)?;
+    let output = execute_cluster_with_compute(&graph, algorithm, limits, compute)?;
     let batch = shape_algorithm_output(algorithm, &output)?;
     crate::algorithm_output::materialize_node_properties_with_batch_size(
         dir,
@@ -727,13 +891,22 @@ fn execute_cluster(
     algorithm: Algorithm,
     limits: AlgorithmLimits,
 ) -> Result<AlgorithmOutput, AlgorithmError> {
+    execute_cluster_with_compute(graph, algorithm, limits, None)
+}
+
+fn execute_cluster_with_compute(
+    graph: &AdjacencyGraph,
+    algorithm: Algorithm,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<AlgorithmOutput, AlgorithmError> {
     let mut registry = AlgorithmRegistry::default();
     register_cluster_algorithms(&mut registry)?;
-    registry.execute(
-        algorithm,
-        graph,
-        &AlgorithmControl::new(limits, AlgorithmCancellation::default()),
-    )
+    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
+    registry.execute(algorithm, graph, &control)
 }
 
 fn find(parents: &mut [usize], index: usize) -> usize {
@@ -2047,6 +2220,19 @@ mod tests {
             graph,
             Algorithm::Cluster(ClusterAlgorithm::Components),
             limits,
+        )
+    }
+
+    fn execute_components_with_threads(
+        graph: &AdjacencyGraph,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        execute_cluster_with_compute(
+            graph,
+            Algorithm::Cluster(ClusterAlgorithm::Components),
+            AlgorithmLimits::default().with_compute_threads(threads),
+            Some(pool),
         )
     }
 
@@ -3467,6 +3653,72 @@ mod tests {
         let mut registry = AlgorithmRegistry::default();
         register_cluster_algorithms(&mut registry).unwrap();
         assert_eq!(registry.capabilities()[0].dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn components_parallel_path_preserves_serial_output_across_thread_matrix() {
+        let mut edges = Vec::new();
+        for start in [0_u64, 5_000] {
+            for node in start..start + 4_999 {
+                edges.push((node, node + 1));
+                edges.push((node + 1, node));
+            }
+        }
+        let graph = AdjacencyGraph::with_test_edges(10_000, &edges);
+        let serial = execute_components(&graph, AlgorithmLimits::default()).unwrap();
+        let mut expected = vec![0_i64; 5_000];
+        expected.extend(vec![1_i64; 5_000]);
+        assert_eq!(community_ids(&serial), expected);
+
+        for threads in [2, 4, 8] {
+            let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+            let control = AlgorithmControl::new(
+                AlgorithmLimits::default().with_compute_threads(threads),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(pool);
+            assert!(matches!(
+                select_components_path(&control, graph.node_ids().len(), graph.edge_entry_count()),
+                ComponentsExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(
+                execute_components_with_threads(&graph, threads).unwrap(),
+                serial
+            );
+        }
+    }
+
+    #[test]
+    fn components_parallel_selector_uses_private_pool_and_canonical_chunks() {
+        assert_eq!(components_source_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(components_source_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(components_source_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(
+            components_source_chunks(8, 4),
+            vec![(0, 2), (2, 4), (4, 6), (6, 8)]
+        );
+        assert_eq!(components_source_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+
+        let graph = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
+        let serial = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_components_path(&serial, graph.node_ids().len(), graph.edge_entry_count()),
+            ComponentsExecutionPath::Serial
+        );
+
+        let pool = Arc::new(crate::ComputePool::new(4).unwrap());
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool);
+        assert_eq!(
+            select_components_path(&parallel, graph.node_ids().len(), graph.edge_entry_count()),
+            ComponentsExecutionPath::Serial
+        );
     }
 
     #[test]

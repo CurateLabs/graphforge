@@ -199,7 +199,8 @@ pub use algorithm_analyze::{
     prepare_embedding_invocation_descriptor, prepare_embedding_invocation_descriptor_with_compute,
 };
 pub use algorithm_cluster::{
-    cluster_algorithm, cluster_algorithm_with_limits, cluster_projection_fingerprint,
+    cluster_algorithm, cluster_algorithm_with_compute, cluster_algorithm_with_limits,
+    cluster_projection_fingerprint,
 };
 pub use algorithm_dispatch::AlgorithmLimits;
 mod compute_pool;
