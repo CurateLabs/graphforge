@@ -377,9 +377,9 @@ fn initial_projection_parallel(
             .par_iter()
             .map(|&(start, end)| {
                 let mut rows = Vec::with_capacity(end - start);
-                for node_index in start..end {
+                for (node_index, node) in nodes.iter().enumerate().take(end).skip(start) {
                     rows.push(initial_projection_row(
-                        &nodes[node_index],
+                        node,
                         node_index,
                         strengths,
                         total_strength,
@@ -486,9 +486,9 @@ fn mix_features(
                     .par_iter()
                     .map(|&(start, end)| {
                         let mut rows = Vec::with_capacity(end - start);
-                        for index in start..end {
-                            let mut row = current[index].clone();
-                            mix_feature_row(&mut row, &nodes[index], &projection, options);
+                        for (row, node) in current.iter().zip(nodes).take(end).skip(start) {
+                            let mut row = row.clone();
+                            mix_feature_row(&mut row, node, &projection, options);
                             rows.push(row);
                         }
                         Ok((start, rows))
@@ -574,10 +574,10 @@ fn propagate_serial(
     control: &EmbeddingControl<'_>,
 ) -> Result<Vec<Vec<f64>>, FastRpError> {
     let mut next = Vec::with_capacity(adjacency.len());
-    for source in 0..adjacency.len() {
+    for (neighbors, &strength) in adjacency.iter().zip(strengths) {
         next.push(propagate_row(
-            &adjacency[source],
-            strengths[source],
+            neighbors,
+            strength,
             current,
             dimensions,
             dimensions_u64,
@@ -602,9 +602,9 @@ fn propagate_parallel(
             .par_iter()
             .map(|&(start, end)| {
                 let mut rows = Vec::with_capacity(end - start);
-                for source in start..end {
+                for (source, neighbors) in adjacency.iter().enumerate().take(end).skip(start) {
                     rows.push(propagate_row(
-                        &adjacency[source],
+                        neighbors,
                         strengths[source],
                         current,
                         dimensions,
