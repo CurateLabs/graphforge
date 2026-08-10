@@ -572,16 +572,19 @@ mod tests {
         );
 
         for threads in [2_usize, 4, 8] {
-            let control = control_with_threads(threads);
+            let threaded_control = control_with_threads(threads);
             assert!(matches!(
                 select_triangle_count_path(
-                    &control,
+                    &threaded_control,
                     nodes.len(),
                     candidate_probe_count(&neighbors, &control()).unwrap()
                 ),
                 TriangleCountExecutionPath::Parallel { threads: selected, .. } if selected == threads
             ));
-            assert_eq!(triangle_count(&nodes, &edges, &control).unwrap(), oracle);
+            assert_eq!(
+                triangle_count(&nodes, &edges, &threaded_control).unwrap(),
+                oracle
+            );
         }
     }
 
