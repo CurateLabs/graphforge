@@ -720,8 +720,15 @@ selections, and empty selections retain deterministic zero/boundary behavior.
 Stable topology and neighbor order drive exact union counts. Pair counts and
 node aggregates use checked integer arithmetic and convert to `Float64` only
 when exactly representable at or below `2^53`; larger results return a
-structured execution error. Shared selected-node, adjacency-entry, output-row,
-iteration, and cancellation limits apply with batched checkpoints.
+structured execution error. Above the documented
+`TOTAL_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) estimate and with more
+than one compute thread, independent source ordinals may run on the
+instance-owned private compute pool. Each source retains the serial candidate,
+missing-link, two-pointer union, checked-addition, and conversion order, and
+worker chunks merge by canonical source ordinal, so schemas, row order, scores,
+and fingerprints match the one-thread oracle. Smaller workloads remain serial
+to avoid pool scheduling tax. Shared selected-node, adjacency-entry,
+output-row, iteration, and cancellation limits apply with batched checkpoints.
 
 The public schema remains non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties with Arrow NULLs for missing

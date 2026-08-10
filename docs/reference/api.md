@@ -529,7 +529,12 @@ zero/boundary behavior.
 
 Union counts and aggregates use checked integer arithmetic and become `Float64`
 only when exactly representable at or below `2^53`; larger results produce a
-structured execution error. Results expose only
+structured execution error. Above the documented
+`TOTAL_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) estimate and with a
+multi-thread compute policy, independent source ordinals may run on the
+instance-owned private compute pool; each source retains serial candidate and
+union order, and worker chunks merge in canonical source order. Smaller
+workloads remain serial to avoid pool scheduling tax. Results expose only
 `node_uuid: FixedSizeBinary(16)`, `score: Float64`, then materialized node
 properties. Shared Rust limits and cancellation apply, and `write_property`
 atomically persists every score only after successful execution. Python and
