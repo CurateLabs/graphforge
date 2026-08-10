@@ -239,12 +239,14 @@ fn exact_filtered_cosine_knn_parallel(
             .par_iter()
             .map(|&(start, end)| {
                 let mut chunk_pairs = Vec::new();
-                for source_index in start..end {
+                for (source_index, source_candidates) in
+                    candidate_indices.iter().enumerate().take(end).skip(start)
+                {
                     let source_pairs = score_source_filtered(
                         vectors,
                         norms,
                         source_index,
-                        &candidate_indices[source_index],
+                        source_candidates,
                         k,
                         control,
                         &work,

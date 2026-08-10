@@ -371,6 +371,10 @@ pub fn similar_algorithm_with_limits(
 }
 
 /// Execute similarity with shaping limits and an optional private compute pool (#342).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors similar_algorithm_with_limits plus the instance compute pool handle"
+)]
 pub fn similar_algorithm_with_compute(
     provider: &dyn AdjacencyProvider,
     dir: &Path,
