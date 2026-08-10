@@ -6607,12 +6607,12 @@ mod tests {
             let mut parallel_ns = u128::MAX;
             for _ in 0..5 {
                 let t0 = Instant::now();
-                let serial = common_neighbor_scores(&graph, &serial_ctl).unwrap();
+                let serial = common_neighbor_scores_serial(&neighbors, &serial_ctl).unwrap();
                 serial_ns = serial_ns.min(t0.elapsed().as_nanos());
                 let serial_bits = serial.iter().copied().map(f64::to_bits).collect::<Vec<_>>();
 
                 let t1 = Instant::now();
-                let parallel = common_neighbor_scores(&graph, &parallel_ctl).unwrap();
+                let parallel = common_neighbor_scores_parallel(&neighbors, &parallel_ctl).unwrap();
                 parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
                 let parallel_bits = parallel
                     .iter()
