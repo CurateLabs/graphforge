@@ -940,6 +940,7 @@ fn cluster_projection(
     Ok(graph)
 }
 
+#[cfg(test)]
 fn execute_cluster(
     graph: &AdjacencyGraph,
     algorithm: Algorithm,
