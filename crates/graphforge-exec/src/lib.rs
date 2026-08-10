@@ -195,7 +195,8 @@ pub use adjacency::{
 };
 pub use algorithm_analyze::{
     analyze_algorithm, analyze_projection_fingerprint, embedding_algorithm,
-    embedding_algorithm_execution, prepare_embedding_invocation_descriptor,
+    embedding_algorithm_execution, embedding_algorithm_execution_with_compute,
+    prepare_embedding_invocation_descriptor, prepare_embedding_invocation_descriptor_with_compute,
 };
 pub use algorithm_cluster::{
     cluster_algorithm, cluster_algorithm_with_limits, cluster_projection_fingerprint,

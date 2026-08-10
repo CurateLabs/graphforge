@@ -1,13 +1,29 @@
-//! Deterministic Node2Vec walk-corpus generation.
+//! Deterministic Node2Vec walk-corpus generation and serial SGNS training.
+//!
+//! Walk-corpus construction (#344) may partition independent `(start ordinal,
+//! walk ordinal)` tasks across the instance-owned private compute pool above a
+//! documented crossover. Seed derivation, candidate ordering, transition-mass
+//! accumulation, sampling, and every generated walk remain identical to the
+//! serial path. Skip-gram / negative-sampling training stays serial and
+//! unchanged so embedding fingerprints are preserved.
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use graphforge_core::embedding_options::Node2VecOptions;
+use rayon::prelude::*;
 
 use crate::algorithm_embedding_control::{EmbeddingControl, EmbeddingResourceError};
 use crate::algorithm_embedding_output::EmbeddingOutputRow;
 use crate::algorithm_embedding_rng::{EmbeddingRng, EmbeddingRngField};
 use crate::algorithm_graph::{AdjacencyGraph, AlgorithmEdge};
+
+/// Estimated walk transitions below which corpus generation stays serial (#344).
+///
+/// Small fixtures and micro-invocations stay off the worker pool; above this,
+/// start/walk-parallel execution amortizes scheduling. Exact walks and token
+/// counts remain identical either way.
+pub const NODE2VEC_WALK_PARALLEL_CROSSOVER: u64 = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Node2VecCorpus {
@@ -16,6 +32,13 @@ pub(crate) struct Node2VecCorpus {
 }
 
 pub(crate) type Node2VecEmbeddingRow = EmbeddingOutputRow;
+
+/// Selected walk-corpus execution path for observability and crossover tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WalkCorpusPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
 
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
 pub(crate) enum Node2VecWalkError {
@@ -27,6 +50,8 @@ pub(crate) enum Node2VecWalkError {
     TokenCountOverflow,
     #[error("node2vec training produced a non-finite embedding")]
     NonFiniteEmbedding,
+    #[error("node2vec walk worker panicked")]
+    WorkerPanic,
     #[error(transparent)]
     Resource(#[from] EmbeddingResourceError),
 }
@@ -260,10 +285,29 @@ pub(crate) fn build_walk_corpus(
         .len()
         .checked_mul(options.walks_per_node)
         .ok_or(Node2VecWalkError::TokenCountOverflow)?;
+    let estimated =
+        estimated_walk_transitions(starts.len(), options.walks_per_node, options.walk_length);
+    match select_walk_corpus_path(control, capacity, estimated) {
+        WalkCorpusPath::Serial => {
+            build_walk_corpus_serial(graph, options, control, &starts, capacity)
+        }
+        WalkCorpusPath::Parallel { .. } => {
+            build_walk_corpus_parallel(graph, options, control, &starts, capacity)
+        }
+    }
+}
+
+fn build_walk_corpus_serial(
+    graph: &AdjacencyGraph,
+    options: &Node2VecOptions,
+    control: &EmbeddingControl<'_>,
+    starts: &[([u8; 16], u64)],
+    capacity: usize,
+) -> Result<Node2VecCorpus, Node2VecWalkError> {
     let mut walks = Vec::with_capacity(capacity);
     let mut token_counts = HashMap::with_capacity(starts.len());
 
-    for &(start_uuid, start_id) in &starts {
+    for &(start_uuid, start_id) in starts {
         for walk_ordinal in 0..options.walks_per_node {
             control.checkpoint(1)?;
             let walk = build_walk(
@@ -274,12 +318,7 @@ pub(crate) fn build_walk_corpus(
                 start_id,
                 u64::try_from(walk_ordinal).map_err(|_| Node2VecWalkError::TokenCountOverflow)?,
             )?;
-            for &node_id in &walk {
-                let count = token_counts.entry(node_id).or_insert(0_u64);
-                *count = count
-                    .checked_add(1)
-                    .ok_or(Node2VecWalkError::TokenCountOverflow)?;
-            }
+            accumulate_tokens(&mut token_counts, &walk)?;
             walks.push(walk);
         }
     }
@@ -288,6 +327,179 @@ pub(crate) fn build_walk_corpus(
         walks,
         token_counts,
     })
+}
+
+fn build_walk_corpus_parallel(
+    graph: &AdjacencyGraph,
+    options: &Node2VecOptions,
+    control: &EmbeddingControl<'_>,
+    starts: &[([u8; 16], u64)],
+    capacity: usize,
+) -> Result<Node2VecCorpus, Node2VecWalkError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        Node2VecWalkError::Resource(EmbeddingResourceError::Algorithm(
+            crate::algorithm_dispatch::AlgorithmError::Execution {
+                message: "parallel node2vec walk corpus requires an instance-owned compute pool"
+                    .into(),
+            },
+        ))
+    })?;
+    let walks_per_node = options.walks_per_node;
+    let ranges = walk_task_chunks(capacity, control.compute_threads());
+    let chunk_results = run_on_pool(pool, || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut walks = Vec::with_capacity(end.saturating_sub(start));
+                let mut token_counts = HashMap::new();
+                for task in start..end {
+                    let start_ordinal = task / walks_per_node;
+                    let walk_ordinal = task % walks_per_node;
+                    let (start_uuid, start_id) = starts[start_ordinal];
+                    control.checkpoint(1)?;
+                    let walk = build_walk(
+                        graph,
+                        options,
+                        control,
+                        start_uuid,
+                        start_id,
+                        u64::try_from(walk_ordinal)
+                            .map_err(|_| Node2VecWalkError::TokenCountOverflow)?,
+                    )?;
+                    accumulate_tokens(&mut token_counts, &walk)?;
+                    walks.push(walk);
+                }
+                Ok(WalkChunk {
+                    walks,
+                    token_counts,
+                })
+            })
+            .collect::<Result<Vec<_>, Node2VecWalkError>>()
+    })?;
+    merge_walk_chunks(chunk_results, starts.len())
+}
+
+#[derive(Debug)]
+struct WalkChunk {
+    walks: Vec<Vec<u64>>,
+    token_counts: HashMap<u64, u64>,
+}
+
+fn merge_walk_chunks(
+    chunks: Vec<WalkChunk>,
+    start_capacity: usize,
+) -> Result<Node2VecCorpus, Node2VecWalkError> {
+    let mut walks = Vec::new();
+    let mut token_counts = HashMap::with_capacity(start_capacity);
+    for chunk in chunks {
+        walks.extend(chunk.walks);
+        merge_token_counts(&mut token_counts, chunk.token_counts)?;
+    }
+    Ok(Node2VecCorpus {
+        walks,
+        token_counts,
+    })
+}
+
+fn accumulate_tokens(
+    token_counts: &mut HashMap<u64, u64>,
+    walk: &[u64],
+) -> Result<(), Node2VecWalkError> {
+    for &node_id in walk {
+        let count = token_counts.entry(node_id).or_insert(0_u64);
+        *count = count
+            .checked_add(1)
+            .ok_or(Node2VecWalkError::TokenCountOverflow)?;
+    }
+    Ok(())
+}
+
+fn merge_token_counts(
+    into: &mut HashMap<u64, u64>,
+    from: HashMap<u64, u64>,
+) -> Result<(), Node2VecWalkError> {
+    let mut entries = from.into_iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|(node_id, _)| *node_id);
+    for (node_id, count) in entries {
+        let entry = into.entry(node_id).or_insert(0_u64);
+        *entry = entry
+            .checked_add(count)
+            .ok_or(Node2VecWalkError::TokenCountOverflow)?;
+    }
+    Ok(())
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, Node2VecWalkError> + Send,
+) -> Result<R, Node2VecWalkError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(Node2VecWalkError::WorkerPanic),
+    }
+}
+
+/// Choose serial vs private-pool parallel walk-corpus generation.
+pub(crate) fn select_walk_corpus_path(
+    control: &EmbeddingControl<'_>,
+    total_walks: usize,
+    estimated_transitions: u64,
+) -> WalkCorpusPath {
+    let threads = control.compute_threads();
+    if threads <= 1 || total_walks <= 1 || estimated_transitions < NODE2VEC_WALK_PARALLEL_CROSSOVER
+    {
+        return WalkCorpusPath::Serial;
+    }
+    if control
+        .compute_pool()
+        .is_none_or(|pool| !pool.is_parallel())
+    {
+        return WalkCorpusPath::Serial;
+    }
+    let chunks = walk_task_chunks(total_walks, threads).len();
+    if chunks <= 1 {
+        return WalkCorpusPath::Serial;
+    }
+    WalkCorpusPath::Parallel { threads, chunks }
+}
+
+fn estimated_walk_transitions(starts: usize, walks_per_node: usize, walk_length: usize) -> u64 {
+    let starts = u64::try_from(starts).unwrap_or(u64::MAX);
+    let walks_per_node = u64::try_from(walks_per_node).unwrap_or(u64::MAX);
+    let walk_length = u64::try_from(walk_length).unwrap_or(u64::MAX);
+    starts
+        .saturating_mul(walks_per_node)
+        .saturating_mul(walk_length)
+}
+
+fn walk_task_chunks(total_walks: usize, threads: usize) -> Vec<(usize, usize)> {
+    if total_walks == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, total_walks);
+    let base = total_walks / workers;
+    let rem = total_walks % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
+}
+
+fn walk_task_ordinal(start_ordinal: usize, walk_ordinal: usize, walks_per_node: usize) -> usize {
+    start_ordinal
+        .checked_mul(walks_per_node)
+        .and_then(|value| value.checked_add(walk_ordinal))
+        .expect("validated walk task ordinals fit usize")
 }
 
 fn build_walk(
@@ -408,6 +620,8 @@ mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmControl, AlgorithmLimits};
     use crate::algorithm_embedding_control::EmbeddingResourceLimits;
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn controls(
         cancellation: AlgorithmCancellation,
@@ -422,12 +636,47 @@ mod tests {
         )
     }
 
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        let pool = Arc::new(ComputePool::new(threads).unwrap());
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool)
+    }
+
+    fn embedding_control(algorithm: &AlgorithmControl) -> EmbeddingControl<'_> {
+        EmbeddingControl::new(algorithm, EmbeddingResourceLimits::default())
+    }
+
     fn corpus(
         graph: &AdjacencyGraph,
         options: &Node2VecOptions,
     ) -> Result<Node2VecCorpus, Node2VecWalkError> {
         let (algorithm, limits) = controls(AlgorithmCancellation::default(), u64::MAX);
         build_walk_corpus(graph, options, &EmbeddingControl::new(&algorithm, limits))
+    }
+
+    fn corpus_with_control(
+        graph: &AdjacencyGraph,
+        options: &Node2VecOptions,
+        algorithm: &AlgorithmControl,
+    ) -> Result<Node2VecCorpus, Node2VecWalkError> {
+        build_walk_corpus(graph, options, &embedding_control(algorithm))
+    }
+
+    fn adversarial_graph(nodes: usize) -> AdjacencyGraph {
+        let nodes_u64 = u64::try_from(nodes).expect("test node count fits u64");
+        let edges = (0..nodes_u64)
+            .flat_map(|source| {
+                [
+                    (source, (source + 1) % nodes_u64),
+                    (source, (source + 3) % nodes_u64),
+                    (source, (source * 5 + 7) % nodes_u64),
+                ]
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_directed_edges(nodes_u64, &edges)
     }
 
     #[test]
@@ -703,6 +952,178 @@ mod tests {
             sample_negative(&nodes, &both, 0, 0, 0, 0_u128.to_be_bytes(), 0, 0, 1, 0).unwrap(),
             Some(1)
         );
+    }
+
+    #[test]
+    fn walk_task_ordinal_mapping_and_chunks_are_stable() {
+        assert_eq!(walk_task_ordinal(0, 0, 4), 0);
+        assert_eq!(walk_task_ordinal(2, 3, 4), 11);
+        assert_eq!(walk_task_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(walk_task_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(walk_task_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(walk_task_chunks(8, 4), vec![(0, 2), (2, 4), (4, 6), (6, 8)]);
+        assert_eq!(walk_task_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    fn token_count_merge_is_canonical_and_overflow_checked() {
+        let mut into = HashMap::from([(2, 3_u64), (1, 1)]);
+        merge_token_counts(&mut into, HashMap::from([(1, 4), (3, 2)])).unwrap();
+        assert_eq!(into, HashMap::from([(1, 5), (2, 3), (3, 2)]));
+        let err = merge_token_counts(&mut into, HashMap::from([(1, u64::MAX)]));
+        assert_eq!(err, Err(Node2VecWalkError::TokenCountOverflow));
+    }
+
+    #[test]
+    fn small_work_and_one_thread_select_serial_walk_path() {
+        let small = select_walk_corpus_path(&embedding_control(&control_with_threads(4)), 8, 64);
+        assert_eq!(small, WalkCorpusPath::Serial);
+        let one = select_walk_corpus_path(
+            &embedding_control(&control_with_threads(1)),
+            64,
+            NODE2VEC_WALK_PARALLEL_CROSSOVER,
+        );
+        assert_eq!(one, WalkCorpusPath::Serial);
+        let large = select_walk_corpus_path(
+            &embedding_control(&control_with_threads(4)),
+            64,
+            NODE2VEC_WALK_PARALLEL_CROSSOVER,
+        );
+        assert!(matches!(
+            large,
+            WalkCorpusPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn thread_matrix_preserves_walk_corpus_and_embedding_fingerprints() {
+        let graph = adversarial_graph(24);
+        let options = Node2VecOptions {
+            dimensions: 4,
+            walk_length: 6,
+            walks_per_node: 4,
+            window_size: 2,
+            negative_samples: 2,
+            epochs: 1,
+            seed: 11,
+            ..Node2VecOptions::default()
+        };
+        let serial = control_with_threads(1);
+        let serial_corpus = corpus_with_control(&graph, &options, &serial).unwrap();
+        let serial_embedding =
+            train_node2vec(&graph, &options, &embedding_control(&serial)).unwrap();
+        let estimated = estimated_walk_transitions(24, options.walks_per_node, options.walk_length);
+        assert!(estimated >= NODE2VEC_WALK_PARALLEL_CROSSOVER);
+        for threads in [2_usize, 4, 8] {
+            let parallel = control_with_threads(threads);
+            assert!(matches!(
+                select_walk_corpus_path(
+                    &embedding_control(&parallel),
+                    24 * options.walks_per_node,
+                    estimated
+                ),
+                WalkCorpusPath::Parallel { .. }
+            ));
+            assert_eq!(
+                corpus_with_control(&graph, &options, &parallel).unwrap(),
+                serial_corpus
+            );
+            assert_eq!(
+                train_node2vec(&graph, &options, &embedding_control(&parallel)).unwrap(),
+                serial_embedding
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_cancellation_and_work_limits_leave_no_partial_corpus() {
+        let graph = adversarial_graph(32);
+        let options = Node2VecOptions {
+            walk_length: 4,
+            walks_per_node: 4,
+            seed: 9,
+            ..Node2VecOptions::default()
+        };
+        let pool = Arc::new(ComputePool::new(4).unwrap());
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        let cancelled = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            cancellation,
+        )
+        .with_compute_pool(pool.clone());
+        assert!(matches!(
+            corpus_with_control(&graph, &options, &cancelled),
+            Err(Node2VecWalkError::Resource(
+                EmbeddingResourceError::Algorithm(_)
+            ))
+        ));
+
+        let limited = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool);
+        let control = EmbeddingControl::new(
+            &limited,
+            EmbeddingResourceLimits {
+                work: 3,
+                ..EmbeddingResourceLimits::default()
+            },
+        );
+        assert!(matches!(
+            build_walk_corpus(&graph, &options, &control),
+            Err(Node2VecWalkError::Resource(
+                EmbeddingResourceError::WorkLimit { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn weighted_and_parallel_edge_fixtures_match_across_thread_counts() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            6,
+            &[
+                (0, 1),
+                (0, 1),
+                (1, 2),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (5, 0),
+                (1, 0),
+            ],
+        )
+        .with_test_edge_weights(&[1.0, 2.5, 0.5, 3.0, 1.25, 0.75, 4.0, 1.5]);
+        let options = Node2VecOptions {
+            walk_length: 8,
+            walks_per_node: 8,
+            p: 0.5,
+            q: 2.0,
+            seed: 13,
+            ..Node2VecOptions::default()
+        };
+        let estimated = estimated_walk_transitions(6, options.walks_per_node, options.walk_length);
+        assert!(estimated >= NODE2VEC_WALK_PARALLEL_CROSSOVER);
+        let serial = corpus_with_control(&graph, &options, &control_with_threads(1)).unwrap();
+        for threads in [2_usize, 4, 8] {
+            let parallel = control_with_threads(threads);
+            assert!(matches!(
+                select_walk_corpus_path(
+                    &embedding_control(&parallel),
+                    6 * options.walks_per_node,
+                    estimated
+                ),
+                WalkCorpusPath::Parallel { .. }
+            ));
+            assert_eq!(
+                corpus_with_control(&graph, &options, &parallel).unwrap(),
+                serial
+            );
+        }
     }
 
     fn corpus_training(

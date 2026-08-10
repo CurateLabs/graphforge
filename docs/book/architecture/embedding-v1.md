@@ -163,7 +163,12 @@ mass in that order using `walk`
 terminates the walk; an isolate therefore contributes its start token only.
 
 The fixed corpus is generated once, independently of `epochs`, in start UUID,
-walk ordinal, then token-position order and replayed for every epoch. For every
+walk ordinal, then token-position order and replayed for every epoch.
+When `compute_threads > 1` and estimated walk transitions are at least
+`NODE2VEC_WALK_PARALLEL_CROSSOVER` (`256`), independent `(start ordinal, walk
+ordinal)` tasks may run on the instance-owned private CPU pool and merge in
+that same canonical order; seed derivation and every walk remain identical to
+the one-thread path. Skip-gram / negative-sampling training stays serial. For every
 center, contexts are positions in ascending order from
 `max(0,i-window_size)` to `min(length,i+window_size)`, excluding `i`; the window
 is not randomized. Token counts over that fixed corpus define
