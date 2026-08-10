@@ -17,24 +17,24 @@
     "strategy": "PrivateMaterialize"
   },
   "publication": {
-    "generation_uuid": "019fe8b7-97a4-73a3-b3a8-f12f681e2cb4",
+    "generation_uuid": "019fe9b5-3dee-7cb1-81f8-ccb7e8146cf5",
     "path": "stage_project_generation_with_graph_tree + publish (same path as GraphForge)"
   },
   "query": {
     "cypher": "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS from, b.name AS to",
     "rows_produced": 1
   },
-  "recorded_at_unix_secs": 1786316053,
+  "recorded_at_unix_secs": 1786332669,
   "resources": {
     "honest_limits": [
       "Padding is sparse on supporting filesystems; validated/copied byte lengths are logical sizes.",
       "Writable GraphForge::new materializes file-by-file (PrivateMaterialize); checkpoint/RO uses PinnedInPlace.",
       "This proves public persistence beyond the 2 GiB snapshot envelope; full 8M/128M (~15 GiB) remains optional measured evidence under local resource stops."
     ],
-    "peak_rss_bytes_after_query": 99725312,
-    "peak_rss_bytes_before_open": 98304000
+    "peak_rss_bytes_after_query": 98455552,
+    "peak_rss_bytes_before_open": 97193984
   },
   "schema": "graphforge-file-backed-oversize-evidence/1",
-  "source_sha": "7a36f549abeb5a630a151aaf2383a8b2dbc693ae",
+  "source_sha": "2b1bfda8145c7f9fe125a75faf695792fc6bbfcb",
   "strategy": "sparse_padding_beside_queryable_graph"
 }

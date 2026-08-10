@@ -19,7 +19,8 @@
       "id": "threads-1",
       "requested_workers": 1,
       "status": "supported",
-      "owner_issue": 337
+      "owner_issue": 337,
+      "notes": "Field name is historical (#334); #337 made every listed cell executable. Hosts may still record a cell unavailable when the request exceeds the machine-relative concurrency budget."
     },
     {
       "id": "threads-2",
@@ -38,7 +39,8 @@
       "id": "threads-8",
       "requested_workers": 8,
       "status": "supported",
-      "owner_issue": 337
+      "owner_issue": 337,
+      "notes": "Supported by policy; on hosts where workers+partitions exceed the machine budget the harness records unavailable rather than fabricating results."
     },
     {
       "id": "threads-automatic",
@@ -234,10 +236,12 @@
     ]
   },
   "known_limitations": [
-    "CSR-to-hash-map expansion remains on analyst/traversal paths (#340).",
-    "Algorithm kernels remain serial (#342-#344).",
+    "Fresh CSR index hits no longer expand the base CSR into an O(E) HashMap (#340); scan-build / missing / stale / corrupt paths may still use the historical hash-map oracle.",
+    "Exact cosine KNN, PageRank, and Node2Vec walk generation may use the instance-owned private compute pool above documented crossovers (#342-#344); one-thread fingerprints remain authoritative.",
     "Portable interchange does not yet encode file-backed graph/files trees (structured GF_UNSUPPORTED_PROJECT_FORMAT); copy the project directory instead (#338).",
+    "Full 8M-node/128M-edge densified public-facade reruns and >200M-edge adjacency RSS remain optional scale-host evidence under local resource stops (#345); do not treat them as a universal product ceiling.",
     "Wall-clock numbers are hardware-specific and never CI pass/fail gates.",
-    "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results."
+    "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results.",
+    "GPU / accelerator backends are intentionally out of scope for M4."
   ]
 }

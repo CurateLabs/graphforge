@@ -1,0 +1,349 @@
+{
+  "build_profile": "debug",
+  "contract_schema": "graphforge-m4-entry-matrix/1",
+  "dataset": {
+    "edges": 5,
+    "fixture_id": "synthetic-small",
+    "nodes": 5,
+    "opt_in": false
+  },
+  "deferred_configurations": [
+    {
+      "cancellation_outcome": "token_cancelled",
+      "executed": true,
+      "fingerprints": {
+        "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
+        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
+        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
+        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
+      },
+      "id": "threads-1",
+      "normalized": {
+        "mode": "Explicit",
+        "observed_logical_cpus": 4,
+        "target_partitions": 1,
+        "tokio_worker_threads": 1
+      },
+      "owner_issue": 337,
+      "parity_assertions": [
+        "canonical_arrow_schema",
+        "row_ordering",
+        "result_fingerprint",
+        "structured_errors",
+        "cancellation_outcome",
+        "resource_limit_behavior"
+      ],
+      "requested_workers": 1,
+      "resource_limit_rows": 3,
+      "status": "supported",
+      "structured_error_code": "GF_VALIDATION"
+    },
+    {
+      "cancellation_outcome": "token_cancelled",
+      "executed": true,
+      "fingerprints": {
+        "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
+        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
+        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
+        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
+      },
+      "id": "threads-2",
+      "normalized": {
+        "mode": "Explicit",
+        "observed_logical_cpus": 4,
+        "target_partitions": 2,
+        "tokio_worker_threads": 2
+      },
+      "owner_issue": 337,
+      "parity_assertions": [
+        "canonical_arrow_schema",
+        "row_ordering",
+        "result_fingerprint",
+        "structured_errors",
+        "cancellation_outcome",
+        "resource_limit_behavior"
+      ],
+      "requested_workers": 2,
+      "resource_limit_rows": 3,
+      "status": "supported",
+      "structured_error_code": "GF_VALIDATION"
+    },
+    {
+      "cancellation_outcome": "token_cancelled",
+      "executed": true,
+      "fingerprints": {
+        "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
+        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
+        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
+        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
+      },
+      "id": "threads-4",
+      "normalized": {
+        "mode": "Explicit",
+        "observed_logical_cpus": 4,
+        "target_partitions": 4,
+        "tokio_worker_threads": 4
+      },
+      "owner_issue": 337,
+      "parity_assertions": [
+        "canonical_arrow_schema",
+        "row_ordering",
+        "result_fingerprint",
+        "structured_errors",
+        "cancellation_outcome",
+        "resource_limit_behavior"
+      ],
+      "requested_workers": 4,
+      "resource_limit_rows": 3,
+      "status": "supported",
+      "structured_error_code": "GF_VALIDATION"
+    },
+    {
+      "executed": false,
+      "id": "threads-8",
+      "owner_issue": 337,
+      "parity_assertions": [
+        "canonical_arrow_schema",
+        "row_ordering",
+        "result_fingerprint",
+        "structured_errors",
+        "cancellation_outcome",
+        "resource_limit_behavior"
+      ],
+      "reason": "validation error: combined tokio/partition concurrency 16 exceeds instance budget 8",
+      "requested_workers": 8,
+      "status": "unavailable"
+    },
+    {
+      "cancellation_outcome": "token_cancelled",
+      "executed": true,
+      "fingerprints": {
+        "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
+        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
+        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
+        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
+      },
+      "id": "threads-automatic",
+      "normalized": {
+        "mode": "Automatic",
+        "observed_logical_cpus": 4,
+        "target_partitions": 2,
+        "tokio_worker_threads": 2
+      },
+      "owner_issue": 337,
+      "parity_assertions": [
+        "canonical_arrow_schema",
+        "row_ordering",
+        "result_fingerprint",
+        "structured_errors",
+        "cancellation_outcome",
+        "resource_limit_behavior"
+      ],
+      "requested_workers": "automatic",
+      "resource_limit_rows": 3,
+      "status": "supported",
+      "structured_error_code": "GF_VALIDATION"
+    }
+  ],
+  "discovery_evidence": [
+    {
+      "approx_edges": 128000000,
+      "approx_nodes": 8000000,
+      "classification": "discovery_not_public_facade_baseline",
+      "id": "lower-level-8m-128m",
+      "notes": "Retain as qualified discovery evidence. Public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed graph/files (#338 oversize evidence). Full 8M/128M public-facade reruns remain optional measured evidence under local resource stops for #345.",
+      "path": "lower-level Rust construction/execution (not GraphForge::new public snapshot path)",
+      "public_facade_owner_issue": 338
+    },
+    {
+      "classification": "public_facade_persistence_proof",
+      "evidence_artifact": "docs/development/file-backed-oversize-evidence.json",
+      "id": "file-backed-oversize-beyond-snapshot-envelope",
+      "notes": "Deterministic sparse multi-file generation whose validated bytes exceed 2 GiB; published and reopened through the public GraphForge path without Arrow snapshot hydrate. CI keeps the small fixture only; regenerate via the ignored oversize test into build/.",
+      "owner_issue": 338,
+      "path": "crates/graphforge-api/tests/file_backed_graph_generation.rs::oversize_file_backed_generation_exceeds_legacy_snapshot_envelope"
+    }
+  ],
+  "hardware": {
+    "accelerator_identity": null,
+    "arch": "x86_64",
+    "cpu_model": ": Intel(R) Xeon(R) Processor",
+    "logical_cpus": 4,
+    "memory_bytes": 16791945216,
+    "os": "linux",
+    "peak_rss_bytes_process": 104755200
+  },
+  "known_limitations": [
+    "Fresh CSR index hits no longer expand the base CSR into an O(E) HashMap (#340); scan-build / missing / stale / corrupt paths may still use the historical hash-map oracle.",
+    "Exact cosine KNN, PageRank, and Node2Vec walk generation may use the instance-owned private compute pool above documented crossovers (#342-#344); one-thread fingerprints remain authoritative.",
+    "Portable interchange does not yet encode file-backed graph/files trees (structured GF_UNSUPPORTED_PROJECT_FORMAT); copy the project directory instead (#338).",
+    "Full 8M-node/128M-edge densified public-facade reruns and >200M-edge adjacency RSS remain optional scale-host evidence under local resource stops (#345); do not treat them as a universal product ceiling.",
+    "Wall-clock numbers are hardware-specific and never CI pass/fail gates.",
+    "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results.",
+    "GPU / accelerator backends are intentionally out of scope for M4."
+  ],
+  "matrix": "large_manual",
+  "opt_in_fixtures": [
+    {
+      "command": "make bench-fixed-hop-limit",
+      "downloaded_by_ci": false,
+      "id": "synthetic-1m-edges"
+    },
+    {
+      "command": "make bench-fixed-hop-limit",
+      "downloaded_by_ci": false,
+      "id": "synthetic-10m-edges"
+    },
+    {
+      "command": "GF_LIVEJOURNAL_PROJECT=/path/to/project make bench-fixed-hop-livejournal",
+      "downloaded_by_ci": false,
+      "env": "GF_LIVEJOURNAL_PROJECT",
+      "id": "livejournal-cached"
+    }
+  ],
+  "reproduction": {
+    "contract_validate": "make m4-entry-matrix-check",
+    "large_manual": "make bench-m4-entry",
+    "short_ci": "cargo test -p graphforge-api --test m4_entry_baseline -- --nocapture",
+    "thread_parity": "cargo test -p graphforge-api --test m4_entry_baseline thread_parity_matrix_executes_under_resource_policy -- --nocapture"
+  },
+  "runtime_configuration": {
+    "datafusion_partitions": 2,
+    "id": "policy-default-two-worker",
+    "notes": "Default Explicit ExecutionResourcePolicy preserves pre-#337 two-worker / two-partition semantics.",
+    "public_resource_policy": true,
+    "status": "supported",
+    "tokio_worker_threads": 2
+  },
+  "schema": "graphforge-m4-entry-evidence/1",
+  "source_sha": "2b1bfda8145c7f9fe125a75faf695792fc6bbfcb",
+  "spill_bytes": null,
+  "workloads": [
+    {
+      "id": "fixed-hop-limit",
+      "structural_gates": {
+        "details": {
+          "limit": 3,
+          "surface": "GraphForge::execute"
+        },
+        "output_rows": 3,
+        "result_fingerprint": "e22a3c912008994478ce05204cd8c6a2e9df7e35e67d9e16a5cba75625255fd0",
+        "schema_fields": [
+          "id"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 99954688,
+        "wall_time_ms": 29.499494000000002
+      }
+    },
+    {
+      "id": "scan-count",
+      "structural_gates": {
+        "details": {
+          "expected_count": 5,
+          "surface": "GraphForge::execute"
+        },
+        "output_rows": 1,
+        "result_fingerprint": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc",
+        "schema_fields": [
+          "total"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 102318080,
+        "wall_time_ms": 20.526748
+      }
+    },
+    {
+      "id": "aggregate-top-n",
+      "structural_gates": {
+        "details": {
+          "surface": "GraphForge::execute"
+        },
+        "output_rows": 3,
+        "result_fingerprint": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "schema_fields": [
+          "name",
+          "age"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 102850560,
+        "wall_time_ms": 20.620441
+      }
+    },
+    {
+      "id": "pagerank",
+      "structural_gates": {
+        "details": {
+          "surface": "GraphForge::rank"
+        },
+        "output_rows": 5,
+        "result_fingerprint": "eb80085f870e7505865f4ef1f63d76915ca11506f6d0852c85dcf495601e6b3a",
+        "schema_fields": [
+          "node_uuid",
+          "score",
+          "age",
+          "embedding",
+          "name"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 103190528,
+        "wall_time_ms": 3.564849
+      }
+    },
+    {
+      "id": "exact-cosine-knn",
+      "structural_gates": {
+        "details": {
+          "surface": "GraphForge::similar"
+        },
+        "output_rows": 9,
+        "result_fingerprint": "974bd515cffe9bfec2ff1bf3f22c40ae4bcce49d559a03b467e243af84d2d816",
+        "schema_fields": [
+          "node1_uuid",
+          "node2_uuid",
+          "similarity"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 103530496,
+        "wall_time_ms": 1.818031
+      }
+    },
+    {
+      "id": "node2vec",
+      "structural_gates": {
+        "details": {
+          "surface": "GraphForge::analyze_embedding"
+        },
+        "output_rows": 5,
+        "result_fingerprint": "f5b1d3d52ed75ef0a44057d553c4e526dbadf8ea5a3117711b9da2c7b5d9d220",
+        "schema_fields": [
+          "node_uuid",
+          "embedding"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": 103530496,
+        "wall_time_ms": 2.87057
+      }
+    }
+  ]
+}

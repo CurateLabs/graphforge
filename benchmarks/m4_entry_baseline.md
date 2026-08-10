@@ -18,11 +18,16 @@ make bench-m4-entry
 
 ## Accepted entry posture
 
-- **Supported runtime:** fixed two-worker Tokio facade; DataFusion default partitions as observed.
-- **Deferred runtime matrix:** `1` / `2` / `4` / `8` / `automatic` → owned by **#337** with parity assertions named in `tests/contracts/m4-entry-matrix.json`.
+- **Supported runtime:** Explicit `ExecutionResourcePolicy` default remains fixed
+  two-worker / two-partition; callers may request `1` / `2` / `4` / `8` /
+  `automatic` (#337).
+- **Thread-parity matrix:** every cell in `deferred_runtime_configurations` is
+  policy-supported; hosts may still record a cell `unavailable` when the request
+  exceeds the machine-relative concurrency budget (no fabricated results).
 - **CI gates:** schema, row counts, determinism / fingerprint stability, fixed-hop demand integrity (no eager `RoundRobinBatch` side effect).
 - **Not CI gates:** absolute wall-clock thresholds.
-- **8M/128M:** discovery-class measured fixture; public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed `graph`/`files` (#338 oversize evidence). Full 8M/128M public-facade reruns remain optional for #345 under local resource stops.
+- **8M/128M:** discovery-class measured fixture; public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed `graph`/`files` (#338 oversize evidence). Full densified 8M/128M public-facade reruns remain optional scale-host evidence under local resource stops (#345).
+- **Exit ledger:** [`docs/development/m4-exit-evidence.md`](../docs/development/m4-exit-evidence.md).
 
 ## Workload classes
 
