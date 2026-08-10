@@ -160,6 +160,23 @@
       ]
     },
     {
+      "id": "analyze-maximum-spanning-tree",
+      "class": "serial-spanning-tree-graph-algorithm",
+      "surface": "GraphForge::analyze",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_kruskal_descending_union_find",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
+    },
+    {
       "id": "paths-min-steiner-tree",
       "class": "serial-steiner-graph-algorithm",
       "surface": "GraphForge::paths",

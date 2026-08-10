@@ -1,6 +1,9 @@
-//! Spanning-forest analysis remains serial for minimum spanning trees (#582).
-//! Stable edge order and union-find acceptance define public ties, and each
-//! accepted edge mutates component state consumed by later candidates.
+//! Spanning-forest analysis remains serial for minimum spanning trees (#582) and
+//! maximum spanning trees (#580). Stable edge order and union-find acceptance
+//! define public ties; each accepted edge mutates component state consumed by
+//! later candidates, so there is no independent edge frontier for private-pool
+//! execution without changing ties.
+
 
 use std::cmp::Ordering;
 
