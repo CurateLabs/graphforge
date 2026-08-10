@@ -366,8 +366,9 @@ iteration. It is CPU-only; no GPU or universal scaling claim is made.
 
 The threshold is the first measured win on the M4 agent host using the ignored
 release harness (`measure_article_rank_parallel_crossover`) with a shared
-four-worker private pool: 32k selected entries still carried scheduling overhead,
-while 131k and 262k selected entries were faster than the one-thread path.
+four-worker private pool: sizes through 32k selected entries stayed near parity
+within timing noise, while 131k and 262k selected entries were clear wins over
+the one-thread path.
 
 ## Parallel Node2Vec walk generation (#344)
 
