@@ -1,4 +1,4 @@
-"""Native M18/M19 composition example.
+"""Native algorithm/search composition example.
 
 This example builds a local graph, executes a Rust-owned analyst verb, performs
 text/vector/hybrid search, publishes complete embedding spaces, inspects
@@ -207,7 +207,7 @@ def _configured_provider_workflow(forge: g.GraphForge) -> dict[str, bool]:
 
 
 def run() -> dict[str, Any]:
-    """Execute the installed-wheel M18/M19 workflow and return evidence."""
+    """Execute the installed-wheel algorithm/search workflow and return evidence."""
     module_path = Path(g.__file__).resolve()
     repository = Path(__file__).resolve().parents[1]
     source_package = repository / "crates/graphforge-bindings-py/python/graphforge"
@@ -296,8 +296,8 @@ def run() -> dict[str, Any]:
     return {
         "consumer": "examples/basic_usage.py",
         "installed_wheel": True,
-        "m18_verbs": ["rank"],
-        "m19_modes": ["hybrid", "text", "vector"],
+        "algorithm_verbs": ["rank"],
+        "search_modes": ["hybrid", "text", "vector"],
         "explicit_index": True,
         "lazy_text_index": True,
         "atomic_embedding_publication": True,
@@ -318,7 +318,7 @@ def main() -> None:
     if args.json:
         print(f"{RESULT_PREFIX}{json.dumps(result, sort_keys=True)}")
         return
-    print("Native M18/M19 workflow completed")
+    print("Native algorithm/search workflow completed")
     print("  analyst verb: rank")
     print("  search modes: text, vector, hybrid")
     print("  provider plan, semantic query, advisory, and reranking: verified")

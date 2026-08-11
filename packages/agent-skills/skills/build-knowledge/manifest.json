@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "build-knowledge",
   "title": "Build GraphForge graph and knowledge records",
-  "description": "Append UUID-backed graph records and required M20 provenance, assertion, confidence, and evidence records, with optional additional M21 status and reasoning, without inference or overwrite.",
+  "description": "Append UUID-backed graph records and required knowledge provenance, assertion, confidence, and evidence records, with optional additional epistemic status and reasoning, without inference or overwrite.",
   "input_schema": "graphforge-agent-skill-input/v1",
   "output_schema": "graphforge-agent-skill-output/v1",
   "required_capabilities": {

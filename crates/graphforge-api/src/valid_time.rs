@@ -36,7 +36,7 @@ pub struct RecordAssertionValidityRequest {
     pub valid_from_micros: Option<i64>,
     /// Exclusive upper valid-time bound.
     pub valid_to_micros: Option<i64>,
-    /// Optional existing M21 reasoning.
+    /// Optional existing epistemic reasoning.
     pub reasoning_uuid: Option<Uuid>,
     /// Existing producing provenance event.
     pub provenance_uuid: Uuid,

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "gate": "M20",
+  "gate": "knowledge",
   "command_groups": {
     "rust": [
       "cargo test -p graphforge-storage --no-fail-fast",
@@ -10,11 +10,11 @@
       "cargo test -p graphforge-api --test knowledge_isolation --no-fail-fast"
     ],
     "python": [
-      "uvx maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --profile dev --out dist/m20",
-      "uv venv /tmp/gf-m20-python --python 3.13",
-      "uv pip install --python /tmp/gf-m20-python/bin/python dist/m20/*.whl pyarrow",
-      "/tmp/gf-m20-python/bin/python crates/graphforge-bindings-py/tests/smoke.py",
-      "/tmp/gf-m20-python/bin/python -c \"import runpy; m=runpy.run_path('crates/graphforge-bindings-py/tests/test_invocation_descriptor.py'); m['test_rank_descriptor_golden_and_dispatch']()\""
+      "uvx maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --profile dev --out dist/knowledge",
+      "uv venv /tmp/gf-knowledge-python --python 3.13",
+      "uv pip install --python /tmp/gf-knowledge-python/bin/python dist/knowledge/*.whl pyarrow",
+      "/tmp/gf-knowledge-python/bin/python crates/graphforge-bindings-py/tests/smoke.py",
+      "/tmp/gf-knowledge-python/bin/python -c \"import runpy; m=runpy.run_path('crates/graphforge-bindings-py/tests/test_invocation_descriptor.py'); m['test_rank_descriptor_golden_and_dispatch']()\""
     ],
     "node": [
       "pnpm install --frozen-lockfile",
@@ -64,7 +64,7 @@
     },
     {
       "id": "corrupt-knowledge",
-      "criterion": "Corrupt knowledge bytes fail closed only when requested and cannot contaminate graph, M18, or M19 reads.",
+      "criterion": "Corrupt knowledge bytes fail closed only when requested and cannot contaminate graph, algorithm, or search reads.",
       "command_groups": ["rust"],
       "surfaces": ["rust"],
       "tests": [
@@ -148,8 +148,8 @@
       ]
     },
     {
-      "id": "m18-exhaustive-isolation",
-      "criterion": "Every canonical M18 registry entry is classified exactly once and executable handlers return identical Arrow results without knowledge.",
+      "id": "algorithm-exhaustive-isolation",
+      "criterion": "Every canonical algorithm registry entry is classified exactly once and executable handlers return identical Arrow results without knowledge.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node", "rank", "cluster", "paths", "analyze", "similar"],
       "tests": [
@@ -160,7 +160,7 @@
       ]
     },
     {
-      "id": "m19-find-knowledge-states",
+      "id": "search-find-knowledge-states",
       "criterion": "Public find returns identical Arrow rows for absent, populated, corrupt, and future knowledge states without opening knowledge.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node", "find"],

@@ -6,7 +6,7 @@ only the policy, language, and binding jobs relevant to the pull request.
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
 not required for their objective. PR CI does **not** run full `llvm-cov`.
 Frequent publishing uses the **publish-track** (Binding RC → tag →
-`publish.yaml` on retained bytes). M1 load, checkpoint, and m20/m21 remain
+`publish.yaml` on retained bytes). release-load, checkpoint, and knowledge/epistemic remain
 **human-close / milestone** evidence and are not publish-track blockers.
 Wall-clock targets and the dual-track table live in
 [`docs/engineering/TESTING.md`](../../docs/engineering/TESTING.md).
@@ -19,7 +19,7 @@ Bazel CI Gate cutover (#4), Test Suite no longer mounts job-isolated Cargo
 `target/` sticky disks; authoritative Rust compile/test is Bazel under
 `Bazel Bootstrap` (`//:ci_rust_tests`). Registry and pnpm dependencies still use
 the colocated cache through upstream `actions/cache@v6` and `actions/setup-node`.
-Binding RC and the M1 host-native release load matrix retain sticky `target/`
+Binding RC and the release-certification host-native release load matrix retain sticky `target/`
 volumes so maturin, Cargo, and napi share one build volume for packaging lanes
 (see storage policy tests); put `target/` on sticky disks there, not in
 `actions/cache` blobs.
@@ -187,7 +187,7 @@ reports without rebuilding the same surfaces on every pull request. Green runs
 are not close criteria for child or construction issues that already met their
 acceptance criteria on ordinary CI.
 
-### `m1-release-certification.yml`
+### `release-certification.yml`
 
 A maintainer manually dispatches this **release-certification** workflow with
 the exact current `main` SHA and the successful Rust-surface and Binding RC run
@@ -197,7 +197,7 @@ duplicate, or expired component artifacts before any native build. One Linux
 release-machine job then builds one same-SHA Rust probe, Python wheel, and Node
 addon and executes the existing 144-case XS-XL matrix. The final job revalidates
 the Rust, binding, and load ledgers and uploads one
-`M1-Release-Certification-<sha>` artifact. The workflow is manual-only,
+`release-certification-Release-Certification-<sha>` artifact. The workflow is manual-only,
 non-publishing, and cancels an obsolete duplicate dispatch for the same SHA.
 
 The required Rust + Binding RC run IDs are an input contract for this workflow
@@ -215,8 +215,8 @@ retained candidate; ordinary PRs do not repeat that certification.
 same-SHA Binding RC → tag / release identity → `publish.yaml` writes retained
 bytes only. Skip re-RC when a complete unexpired candidate for the current
 `main` tip already exists. Target wall-clock: Binding RC ≤20m p50 warm /
-≤35m cold; publish-track ≤35m p50 / ≤50m cold (see TESTING.md). M1,
-checkpoint, and m20/m21 are **not** required on this path.
+≤35m cold; publish-track ≤35m p50 / ≤50m cold (see TESTING.md). release-certification,
+checkpoint, and knowledge/epistemic are **not** required on this path.
 
 `publish-track.yml` schedules exact-main Binding RC dispatch every six hours.
 It reassembles and validates every retained partition before deciding a

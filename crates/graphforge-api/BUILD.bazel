@@ -226,8 +226,8 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
-    name = "m22_m18_public_surface",
-    srcs = ["tests/m22_m18_public_surface.rs"],
+    name = "algorithm_public_surface",
+    srcs = ["tests/algorithm_public_surface.rs"],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "medium",
@@ -235,8 +235,8 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
-    name = "m22_m19_public_surface",
-    srcs = ["tests/m22_m19_public_surface.rs"],
+    name = "search_public_surface",
+    srcs = ["tests/search_public_surface.rs"],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "medium",
@@ -244,8 +244,8 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
-    name = "m22_provider_public_surface",
-    srcs = ["tests/m22_provider_public_surface.rs"],
+    name = "provider_public_surface",
+    srcs = ["tests/provider_public_surface.rs"],
     crate = ":graphforge_api",
     data = _API_TEST_DATA,
     size = "medium",
@@ -457,9 +457,9 @@ test_suite(
         ":inference_provenance",
         ":knowledge_isolation",
         ":list_semantics",
-        ":m22_m18_public_surface",
-        ":m22_m19_public_surface",
-        ":m22_provider_public_surface",
+        ":algorithm_public_surface",
+        ":search_public_surface",
+        ":provider_public_surface",
         ":max_bipartite_matching",
         ":max_cardinality_matching",
         ":max_weight_matching",
@@ -495,7 +495,7 @@ test_suite(
     ],
 )
 
-# API example binaries (#6). Release load probe is required for M1 certification;
+# API example binaries (#6). Release load probe is required for release certification;
 # remaining examples are opt-in workflow evidence mapped for ledger completeness.
 _EXAMPLE_RUSTC_ENV = {
     "CARGO_MANIFEST_DIR": "crates/graphforge-api",

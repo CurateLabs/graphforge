@@ -1,4 +1,4 @@
-//! Direct provider-backed M19 facade evidence with in-process deterministic fakes.
+//! Direct provider-backed search facade evidence with in-process deterministic fakes.
 
 use std::collections::HashMap;
 use std::time::Duration;

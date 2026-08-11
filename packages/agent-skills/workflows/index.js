@@ -542,8 +542,8 @@ export async function narrateBeliefRecords({
 }
 
 /**
- * Optionally dispatch one caller-prepared neutral M18 analysis on a resolved
- * belief projection, preserving completed M20 runs when M21 attachment fails.
+ * Optionally dispatch one caller-prepared neutral algorithm analysis on a resolved
+ * belief projection, preserving completed knowledge runs when epistemic attachment fails.
  */
 export async function dispatchRecordedNeutralAnalysis({
   GraphForge,
@@ -810,7 +810,7 @@ const RETRIEVE_SURFACES = new Set(["find", "rank", "cluster", "paths", "analyze"
 const MAX_RETRIEVE_RESULT_LIMIT = 10_000;
 
 /**
- * Bounded retrieve/analyze over public M19 find and live M18 descriptor families.
+ * Bounded retrieve/analyze over public search find and live algorithm descriptor families.
  *
  * Caller-selected modes and descriptor fields pass through unchanged. Rust owns
  * algorithm/search semantics; this workflow only enforces finite bounds and
@@ -922,7 +922,7 @@ function validateRetrieveInput(input) {
   if (typeof input.algorithm !== "string" || input.algorithm.length === 0) {
     throw new AgentAdapterError(
       "GF_AGENT_RETRIEVE_ALGORITHM_REQUIRED",
-      "M18 surfaces require an explicit algorithm catalog value",
+      "algorithm surfaces require an explicit algorithm catalog value",
     );
   }
   if (surface !== "analyze" && (typeof input.label !== "string" || input.label.length === 0)) {
@@ -935,7 +935,7 @@ function validateRetrieveInput(input) {
   }
   return {
     echo: {
-      m18: {
+      algorithm: {
         algorithm: input.algorithm,
         directed: input.directed === undefined ? null : Boolean(input.directed),
         label: input.label ?? null,
@@ -945,7 +945,7 @@ function validateRetrieveInput(input) {
         via: input.via ?? null,
       },
     },
-    m18: {
+    algorithm: {
       algorithm: input.algorithm,
       directed: input.directed,
       label: input.label,
@@ -973,57 +973,91 @@ function invokeRetrieve(graph, request) {
       request.find.forceStale,
     );
   }
-  const { m18, surface } = request;
+  const { algorithm, surface } = request;
   if (surface === "rank") {
     if (typeof graph.prepareRankInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.prepareRankInvocation(m18.label, m18.algorithm, m18.via, m18.directed),
+        graph.prepareRankInvocation(
+          algorithm.label,
+          algorithm.algorithm,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
-    return graph.rank(m18.label, m18.algorithm, m18.via, m18.directed);
+    return graph.rank(algorithm.label, algorithm.algorithm, algorithm.via, algorithm.directed);
   }
   if (surface === "cluster") {
     if (typeof graph.prepareClusterInvocation === "function") {
       return graph.invokeDescriptor(
         graph.prepareClusterInvocation(
-          m18.label,
-          m18.algorithm,
-          m18.via,
-          m18.directed,
-          m18.vectorProperty,
+          algorithm.label,
+          algorithm.algorithm,
+          algorithm.via,
+          algorithm.directed,
+          algorithm.vectorProperty,
         ),
       );
     }
-    return graph.cluster(m18.label, m18.algorithm, m18.via, m18.directed, m18.vectorProperty);
+    return graph.cluster(
+      algorithm.label,
+      algorithm.algorithm,
+      algorithm.via,
+      algorithm.directed,
+      algorithm.vectorProperty,
+    );
   }
   if (surface === "paths") {
     if (typeof graph.preparePathsInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.preparePathsInvocation(m18.source, m18.target, m18.algorithm, m18.via, m18.directed),
+        graph.preparePathsInvocation(
+          algorithm.source,
+          algorithm.target,
+          algorithm.algorithm,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
-    return graph.paths(m18.source, m18.target, m18.algorithm, m18.via, m18.directed);
+    return graph.paths(
+      algorithm.source,
+      algorithm.target,
+      algorithm.algorithm,
+      algorithm.via,
+      algorithm.directed,
+    );
   }
   if (surface === "analyze") {
     if (typeof graph.prepareAnalyzeInvocation === "function") {
       return graph.invokeDescriptor(
-        graph.prepareAnalyzeInvocation(m18.algorithm, m18.label, m18.via, m18.directed),
+        graph.prepareAnalyzeInvocation(
+          algorithm.algorithm,
+          algorithm.label,
+          algorithm.via,
+          algorithm.directed,
+        ),
       );
     }
-    return graph.analyze(m18.algorithm, m18.label, m18.via, m18.directed);
+    return graph.analyze(algorithm.algorithm, algorithm.label, algorithm.via, algorithm.directed);
   }
   if (typeof graph.prepareSimilarInvocation === "function") {
     return graph.invokeDescriptor(
       graph.prepareSimilarInvocation(
-        m18.label,
-        m18.algorithm,
+        algorithm.label,
+        algorithm.algorithm,
         request.resultLimit,
-        m18.vectorProperty,
-        m18.via,
+        algorithm.vectorProperty,
+        algorithm.via,
       ),
     );
   }
-  return graph.similar(m18.label, m18.algorithm, request.resultLimit, m18.vectorProperty, m18.via);
+  return graph.similar(
+    algorithm.label,
+    algorithm.algorithm,
+    request.resultLimit,
+    algorithm.vectorProperty,
+    algorithm.via,
+  );
 }
 
 function configuredSurfaces(GraphForge, tableFromIPC) {

@@ -7,9 +7,9 @@ exports_files(glob(["*"]))
 filegroup(
     name = "schema_inventory_fixtures",
     srcs = [
-        "m20-schema-inventory.json",
-        "m20-schema-inventory.sha256",
-        "m21-schema-inventory.json",
-        "m21-schema-inventory.sha256",
+        "knowledge-schema-inventory.json",
+        "knowledge-schema-inventory.sha256",
+        "epistemic-schema-inventory.json",
+        "epistemic-schema-inventory.sha256",
     ],
 )

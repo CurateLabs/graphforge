@@ -33,7 +33,7 @@
   },
   "cycles": [
     {
-      "id": "graph-m20",
+      "id": "graph-knowledge",
       "participants": [
         "provenance",
         "assertion",
@@ -42,7 +42,7 @@
       ]
     },
     {
-      "id": "graph-m20-m21",
+      "id": "graph-knowledge-epistemic",
       "participants": [
         "provenance",
         "assertion",

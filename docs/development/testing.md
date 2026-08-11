@@ -71,8 +71,8 @@ python3 scripts/ci/non-cypher-surface-gate.py
 python3 scripts/ci/test-non-cypher-surface-gate.py
 cargo test -p graphforge-api \
   --test public_lifecycle_conformance \
-  --test m22_m18_public_surface \
-  --test m22_m19_public_surface
+  --test algorithm_public_surface \
+  --test search_public_surface
 ```
 
 The `Rust Non-Cypher Surface Gate` workflow runs the inventory validator,

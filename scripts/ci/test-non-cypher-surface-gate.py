@@ -30,7 +30,7 @@ class SurfaceGateTests(unittest.TestCase):
     def test_checked_in_inventory_is_complete(self) -> None:
         self.assertEqual(GATE.validate(), [])
         self.assertEqual(len(GATE.public_methods()), 273)
-        self.assertEqual(len(GATE.m18_registry()), 94)
+        self.assertEqual(len(GATE.algorithm_registry()), 94)
 
     def test_new_or_removed_public_method_fails_frozen_digest(self) -> None:
         manifest = self.manifest()
@@ -48,32 +48,32 @@ class SurfaceGateTests(unittest.TestCase):
 
     def test_missing_registry_entries_fail(self) -> None:
         manifest = self.manifest()
-        manifest["m18_registry"]["release-tested"]["ids"].pop()
-        manifest["m19_contracts"]["release-tested"]["ids"].pop()
+        manifest["algorithm_registry"]["release-tested"]["ids"].pop()
+        manifest["search_contracts"]["release-tested"]["ids"].pop()
         errors = self.validate(manifest)
-        self.assertTrue(any("unclassified M18 entries" in error for error in errors))
-        self.assertTrue(any("missing required M19 contracts" in error for error in errors))
+        self.assertTrue(any("unclassified algorithm entries" in error for error in errors))
+        self.assertTrue(any("missing required search contracts" in error for error in errors))
 
-    def test_missing_and_duplicate_m19_evidence_fail(self) -> None:
+    def test_missing_and_duplicate_search_evidence_fail(self) -> None:
         manifest = self.manifest()
-        moved = manifest["m19_evidence_groups"]["find-modes"]["ids"].pop()
+        moved = manifest["search_evidence_groups"]["find-modes"]["ids"].pop()
         errors = self.validate(manifest)
-        self.assertTrue(any("M19 contracts without evidence group" in error for error in errors))
-        manifest["m19_evidence_groups"]["find-modes"]["ids"].append(moved)
-        manifest["m19_evidence_groups"]["freshness"]["ids"].append(moved)
+        self.assertTrue(any("search contracts without evidence group" in error for error in errors))
+        manifest["search_evidence_groups"]["find-modes"]["ids"].append(moved)
+        manifest["search_evidence_groups"]["freshness"]["ids"].append(moved)
         errors = self.validate(manifest)
         self.assertTrue(any("multiple evidence groups" in error for error in errors))
 
     def test_stale_test_reference_fails(self) -> None:
         manifest = self.manifest()
-        manifest["m18_registry"]["release-tested"]["test_refs"] = [
+        manifest["algorithm_registry"]["release-tested"]["test_refs"] = [
             {"path": "missing.rs", "symbol": "never"}
         ]
         self.assertTrue(any("stale test path" in error for error in self.validate(manifest)))
 
     def test_skipped_test_reference_fails(self) -> None:
         manifest = self.manifest()
-        manifest["m19_contracts"]["release-tested"]["test_refs"] = [
+        manifest["search_contracts"]["release-tested"]["test_refs"] = [
             {
                 "path": "crates/graphforge-api/tests/fixed_hop_limit.rs",
                 "symbol": "release_livejournal_fixed_hop_limits",
@@ -85,27 +85,27 @@ class SurfaceGateTests(unittest.TestCase):
 
     def test_unassigned_and_duplicate_method_evidence_fail(self) -> None:
         manifest = self.manifest()
-        moved = manifest["method_evidence_groups"]["m18"]["ids"].pop()
+        moved = manifest["method_evidence_groups"]["algorithm"]["ids"].pop()
         errors = self.validate(manifest)
         self.assertTrue(any("without evidence group" in error for error in errors))
 
-        manifest["method_evidence_groups"]["m18"]["ids"].append(moved)
-        manifest["method_evidence_groups"]["m20"]["ids"].append(moved)
+        manifest["method_evidence_groups"]["algorithm"]["ids"].append(moved)
+        manifest["method_evidence_groups"]["knowledge"]["ids"].append(moved)
         errors = self.validate(manifest)
         self.assertTrue(any("multiple evidence groups" in error for error in errors))
 
     def test_broad_non_symbol_reference_fails(self) -> None:
         manifest = self.manifest()
-        manifest["method_evidence_groups"]["m18"]["test_refs"] = [
+        manifest["method_evidence_groups"]["algorithm"]["test_refs"] = [
             {"path": "crates/graphforge-api/src/lib.rs", "pattern": "#\\[cfg\\(test\\)\\]"}
         ]
         self.assertTrue(any("malformed or broad" in error for error in self.validate(manifest)))
 
     def test_exact_non_test_symbol_fails(self) -> None:
         manifest = self.manifest()
-        manifest["method_evidence_groups"]["m19-provider-rerank"]["test_refs"] = [
+        manifest["method_evidence_groups"]["search-provider-rerank"]["test_refs"] = [
             {
-                "path": "crates/graphforge-api/tests/m22_m19_public_surface.rs",
+                "path": "crates/graphforge-api/tests/search_public_surface.rs",
                 "symbol": "add_paper",
             }
         ]
@@ -115,7 +115,7 @@ class SurfaceGateTests(unittest.TestCase):
         manifest = self.manifest()
         manifest["method_evidence_groups"]["checkpoint-view"]["test_refs"] = [
             {
-                "path": "crates/graphforge-api/tests/m22_m18_public_surface.rs",
+                "path": "crates/graphforge-api/tests/algorithm_public_surface.rs",
                 "symbol": (
                     "persisted_public_rank_is_exact_after_repeat_and_reopen_"
                     "and_unavailable_is_stable"

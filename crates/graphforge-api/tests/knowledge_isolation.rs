@@ -705,7 +705,7 @@ fn populate_find_knowledge(root: &Path) {
                 capability_id,
                 capability_version: 1,
             })
-            .expect("enable M20 capability");
+            .expect("enable knowledge capability");
     }
     let found = graph
         .find(FindOptions {
@@ -1504,7 +1504,7 @@ fn fixture_named_uuids(graph: &GraphForge, names: &[&str]) -> Vec<[u8; 16]> {
 
 #[test]
 fn min_cost_views_exclude_knowledge_and_run_metadata_on_synthetic_enriched_clone() {
-    // The enriched clone is only an isolation sentinel, not an M20/M21 read contract.
+    // The enriched clone is only an isolation sentinel, not a Bazel-migration0/epistemic read contract.
     let fixture = IsolationFixture::new();
     for reserved_root in ["knowledge", "provenance"] {
         assert!(

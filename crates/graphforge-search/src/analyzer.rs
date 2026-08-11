@@ -1,4 +1,4 @@
-//! Canonical M19 text analysis and plain-query validation.
+//! Canonical search text analysis and plain-query validation.
 
 use std::collections::BTreeSet;
 

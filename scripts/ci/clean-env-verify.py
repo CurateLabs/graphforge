@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-publication clean-environment verification (#167 / M1 #192).
+"""Post-publication clean-environment verification (#167 / release-certification #192).
 
 Fails closed when public registry artifacts for the requested version are
 missing. Never treats unpublished packages as success.

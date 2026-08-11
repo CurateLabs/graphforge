@@ -1,6 +1,6 @@
 //! UUID-keyed primary vector snapshots and deterministic exact cosine search.
 //!
-//! This module owns the backend-neutral vector data contract for M19.  It does
+//! This module owns the backend-neutral vector data contract for search.  It does
 //! not resolve public selectors or graph labels: callers supply already
 //! resolved UUID membership and publish the resulting `vectors.parquet` file
 //! through the shared search-publication foundation.

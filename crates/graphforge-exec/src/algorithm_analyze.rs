@@ -1,4 +1,4 @@
-//! Rust-owned graph analysis handlers registered under the shared M18 dispatch contract.
+//! Rust-owned graph analysis handlers registered under the shared algorithm dispatch contract.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;

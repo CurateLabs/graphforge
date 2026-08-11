@@ -51,8 +51,8 @@ fn hr_fixture() -> std::path::PathBuf {
 /// Advisory mode: formal ontology is present so label/relation-type IDs are
 /// stable integers (deterministic JSON); property resolution falls back to the
 /// RuntimeCatalog for properties whose owner TypeId is not yet resolved at bind
-/// time (deferred to M13 type-inference).  This gives the best determinism
-/// currently achievable without M13.
+/// time (deferred to physical execution type-inference).  This gives the best determinism
+/// currently achievable without physical execution.
 fn hr_binder() -> Binder {
     let doc = OntologyLoader::load_file(&hr_fixture()).expect("failed to load hr.yaml");
     let runtime = OntologyCompiler::compile(&doc).expect("failed to compile HR ontology");

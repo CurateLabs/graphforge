@@ -1,7 +1,7 @@
 //! Deterministic mutual-reachability tree for Rust-owned HDBSCAN clustering.
 #![allow(
     dead_code,
-    reason = "HDBSCAN hierarchy and dispatch land in the dependent M18 leaves"
+    reason = "HDBSCAN hierarchy and dispatch land in the dependent algorithm leaves"
 )]
 
 use std::cmp::Ordering;

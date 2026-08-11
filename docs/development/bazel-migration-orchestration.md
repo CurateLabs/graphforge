@@ -1,7 +1,7 @@
-# Bazel migration sub-agent orchestration (M2 / #1)
+# Bazel migration sub-agent orchestration (Bazel migration / #1)
 
 Durable contract for implementing canonical issue
-[#1](https://github.com/CurateLabs/graphforge/issues/1) through M2 child issues
+[#1](https://github.com/CurateLabs/graphforge/issues/1) through Bazel-migration child issues
 [#13](https://github.com/CurateLabs/graphforge/issues/13)–[#3](https://github.com/CurateLabs/graphforge/issues/3)
 and gate [#2](https://github.com/CurateLabs/graphforge/issues/2).
 
@@ -9,11 +9,11 @@ and gate [#2](https://github.com/CurateLabs/graphforge/issues/2).
 criteria, implementation sequence, observability, security, documentation).
 Child issues are execution slices only. Do not invent a second build contract.
 
-**Milestone:** [M2: Implement #1 Bazel Migration via Sub-Agents](https://github.com/CurateLabs/graphforge/milestone/2).
+**Milestone:** [Bazel migration: Implement #1 Bazel Migration via Sub-Agents](https://github.com/CurateLabs/graphforge/milestone/2).
 
 ## Purpose
 
-Issue #1 is large enough that M2 delivers it via coordinated sub-agents. This
+Issue #1 is large enough that Bazel-migration delivers it via coordinated sub-agents. This
 document defines roles, inputs/outputs, handoffs, conflict rules, and ownership
 so parallel work does not drift from #1's build-system contract.
 
@@ -30,10 +30,10 @@ so parallel work does not drift from #1's build-system contract.
   → #5 Blacksmith remote-cache enablement + cold/warm perf gates
   → #4 CI Gate cutover + Cargo sticky-disk retirement
   → #3 docs/observability/#1 close-readiness evidence
-  → #2 M2 gate close (requires #13-#3)
+  → #2 Bazel-migration gate close (requires #13-#3)
 ```
 
-Housekeeping issues on M2 (post-release verify / legal / docs tidy) are **not**
+Housekeeping issues on Bazel-migration (post-release verify / legal / docs tidy) are **not**
 on this DAG. They must not block or reorder #1 sequence work.
 
 ## Global conflict rules
@@ -57,8 +57,8 @@ with wrappers or silent drift.
 6. **Cache absence changes performance only.** Cold builds without remote cache
    must remain correct without repository or credential changes.
 7. **Mobile bindings are out of scope for all roles.** Swift, Kotlin, UniFFI,
-   XCFramework, and JVM JAR/AAR work is abandoned for M2. Do not inventory,
-   model, document, or CI those surfaces as M2 deliverables. Python (PyO3) and
+   XCFramework, and JVM JAR/AAR work is abandoned for Bazel migration. Do not inventory,
+   model, document, or CI those surfaces as Bazel-migration deliverables. Python (PyO3) and
    Node (napi-rs) packaging in #7 are existing bindings — not mobile.
 
 ## Role catalog and #1 sequence ownership
@@ -87,12 +87,12 @@ a narrow upstream fix (then return ownership to the owning role).
 
 ### R0-orchestrator — #13
 
-- **Inputs:** Issue #1 body; M2 child issue set; this repository's Cargo/CI layout.
+- **Inputs:** Issue #1 body; Bazel-migration child issue set; this repository's Cargo/CI layout.
 - **Outputs:** This orchestration note (checked in); role↔issue↔sequence map;
   named handoff artifacts for later slices.
 - **Non-goals:** Bazel targets, ledger rows, performance measurement, CI cutover,
   mobile bindings.
-- **Owns:** Pre-sequence coordination for M2.
+- **Owns:** Pre-sequence coordination for Bazel migration.
 
 ### R1-inventory — #12 (sequence step 1)
 
@@ -191,8 +191,8 @@ a narrow upstream fix (then return ownership to the owning role).
 - **Outputs:** Developer/architecture/build/release/troubleshooting/cache-observability
   docs current per #1 Documentation; per-run Bazel summary and benchmark paths
   documented; security/supply-chain constraints confirmed; checked-in #1 AC →
-  child evidence map; mobile bindings not documented as M2 deliverables.
-- **Non-goals:** Further target modeling; M3/M4 epics; Swift/Kotlin/UniFFI as M2
+  child evidence map; mobile bindings not documented as Bazel-migration deliverables.
+- **Non-goals:** Further target modeling; peer-extension/embedded-performance epics; Swift/Kotlin/UniFFI as Bazel-migration
   requirements.
 - **Owns:** #1 documentation AC and close-readiness evidence consolidation for #2/#1.
 
@@ -204,7 +204,7 @@ canonical path).
 
 | Artifact | Owning role / issue | Path (canonical) | Consumers |
 | --- | --- | --- | --- |
-| Orchestration contract | R0 / #13 | `docs/development/bazel-migration-orchestration.md` | All M2 Bazel children |
+| Orchestration contract | R0 / #13 | `docs/development/bazel-migration-orchestration.md` | All Bazel-migration children |
 | Migration ledger | R1 / #12 | `docs/development/bazel-migration-ledger.md` | #11–#6 (label/status updates each slice) |
 | Cargo/Blacksmith baseline | R1 / #12 | `docs/development/bazel-migration-baseline.md` | #5 (perf comparison) |
 | Retained-tool exceptions | R1 / #12 (updated by later roles) | Section in migration ledger | #6 parity (fail unmapped / unjustified) |
@@ -252,13 +252,13 @@ slice's issue; do not expand the downstream issue's scope.
 - Removing Cargo manifests / `Cargo.lock` or breaking Rust ecosystem tooling.
 - A second explicit remote-cache provider; Blacksmith remote execution (caching
   only for this migration).
-- M3 peer-extension and M4 embedded-performance epics.
+- peer-extension and embedded-performance epics.
 - Claiming success before same-SHA parity and #1 performance gates pass.
 
 ## Evidence for closing #13
 
 - This document is checked into the repository and linked from engineering docs.
-- Role table maps every M2 Bazel child (#12–#3) to a named role and #1 sequence
+- Role table maps every Bazel-migration child (#12–#3) to a named role and #1 sequence
   step (or post-sequence docs close for #3).
 - Mobile bindings are excluded in global rules and every role charter non-goals.
 - Handoff artifacts required by later slices are named with canonical paths.

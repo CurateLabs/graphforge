@@ -118,10 +118,10 @@ def check_native_call_inventory() -> None:
         "add_node",  # construction
         "checkpoint",  # checkpoint
         "list_provenance_history",  # history
-        "rank",  # M18
-        "find_with_diagnostics",  # M19
-        "create_assertion",  # M20
-        "resolve_belief_projection",  # M21
+        "rank",  # algorithm
+        "find_with_diagnostics",  # search
+        "create_assertion",  # knowledge
+        "resolve_belief_projection",  # epistemic
         "project_capabilities",  # release capability contract
         "inspect_runtime_catalog",  # ontology runtime-catalog inspection
         "suggest_ontology",  # ontology draft suggestion

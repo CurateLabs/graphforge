@@ -141,7 +141,7 @@ inferred by scanning folders. Graph-only readers validate the mandatory
 workspace control records and graph participants but never open provenance,
 knowledge, or epistemic tables. Semantic table ownership remains with the
 domain crates defined by
-[ADR 0012](../../adr/0012-m20-domain-ownership.md).
+[ADR 0012](../../adr/0012-knowledge-domain-ownership.md).
 
 Unless a root is shown explicitly, graph paths in the sections below are
 relative to the pinned generation's `participants/graph/`; primary workbench
@@ -375,7 +375,7 @@ Property access is a join: `topology/nodes JOIN properties/PERSON ON node_uuid`.
 
 `provenance/` and `knowledge/` belong to the knowledge layer, but generic
 storage does not own their records or schemas. Under
-[ADR 0012](../../adr/0012-m20-domain-ownership.md):
+[ADR 0012](../../adr/0012-knowledge-domain-ownership.md):
 
 - `graphforge-provenance` owns provenance events and lineage;
 - `graphforge-knowledge` owns knowledge assertions, assertion graph references, confidence
@@ -388,7 +388,7 @@ storage does not own their records or schemas. Under
   and recovery.
 
 The exact knowledge schemas are frozen and are generated from the two owning Rust registries in the checked
-[Knowledge schema inventory](../../reference/m20-schema-inventory.json). The epistemic layer adds separate
+[Knowledge schema inventory](../../reference/knowledge-schema-inventory.json). The epistemic layer adds separate
 append-only status, amendment, reasoning, supersession, hypothesis, selection,
 and valid-time record families; it does not add mutable fields to
 knowledge assertions.

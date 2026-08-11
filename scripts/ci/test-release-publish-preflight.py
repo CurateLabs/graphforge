@@ -57,7 +57,7 @@ assert "waive_unreleased" not in workflow
 assert "allow-unreleased-entries" not in workflow
 assert "CHANGELOG" not in workflow
 for group in ("manifest", "python", "npm", "crates", "evidence"):
-    assert f"M1-Release-Candidate-{group}-" in workflow
+    assert f"Release-Candidate-{group}-" in workflow
 
 preflight_source = SCRIPT.read_text(encoding="utf-8")
 assert "CHANGELOG" not in preflight_source
@@ -176,7 +176,7 @@ for job in (
 ):
     assert f"- {job}" in summary
 assert "release_rehearsal.py reconcile" in summary
-assert "M1-Release-Reconciliation-${{ github.run_id }}" in summary
+assert "Release-Reconciliation-${{ github.run_id }}" in summary
 assert ".complete == true and (.nodes | length) == 24" in summary
 
 assert "sleep" not in workflow

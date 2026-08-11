@@ -1,9 +1,9 @@
 # Immutable knowledge ledger public API v1
 
 **Status:** Shipped and frozen for v0.5.0
-**Contract:** `graphforge-m20-api/1`
+**Contract:** `graphforge-knowledge-api/1`
 
-**Machine-readable shape:** [`m20-public-api-v1.json`](../../contracts/m20-public-api-v1.json)
+**Machine-readable shape:** [`knowledge-public-api-v1.json`](../../contracts/knowledge-public-api-v1.json)
 
 This contract fixes the shipped public Rust facade and its thin Python and Node
 projections. It exposes immutable
@@ -29,7 +29,7 @@ execution.
 The implementation exports these types from `graphforge-api`:
 
 ```rust
-pub const M20_API_VERSION: u32 = 1;
+pub const KNOWLEDGE_API_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationId(pub uuid::Uuid);

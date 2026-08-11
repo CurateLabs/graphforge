@@ -2,13 +2,13 @@
 //!
 //! # Milestone status
 //!
-//! - M10 #557 — Serde types (`ontology` module) ✓
-//! - M10 #558 — YAML/JSON loader (`loader` module) ✓
-//! - M10 #559 — Load-time validator (`validator` module) ✓
-//! - M10 #560 — Arrow compiler (`compiler` module) ✓
-//! - M10 #561 — `OntologyHandle` / `OntologyRegistry` ✓
-//! - M10 #562 — Parquet persistence (`persistence` module) ✓
-//! - M10 #563 — Migration engine (`migration` module) ← **this issue**
+//! - phase-10 #557 — Serde types (`ontology` module) ✓
+//! - phase-10 #558 — YAML/JSON loader (`loader` module) ✓
+//! - phase-10 #559 — Load-time validator (`validator` module) ✓
+//! - phase-10 #560 — Arrow compiler (`compiler` module) ✓
+//! - phase-10 #561 — `OntologyHandle` / `OntologyRegistry` ✓
+//! - phase-10 #562 — Parquet persistence (`persistence` module) ✓
+//! - phase-10 #563 — Migration engine (`migration` module) ← **this issue**
 #![forbid(unsafe_code)]
 
 pub mod compiler;

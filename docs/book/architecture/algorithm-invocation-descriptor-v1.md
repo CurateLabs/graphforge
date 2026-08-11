@@ -1,7 +1,7 @@
 # Neutral algorithm invocation descriptor v1
 
 **Status:** Frozen for v0.5.0  
-**Contract:** `graphforge-m18-invocation/1`  
+**Contract:** `graphforge-algorithm-invocation/1`  
 **Canonical encoding:** [`graphforge-canonical/1`](canonical-fingerprints-v1.md)  
 
 This contract gives every live `rank`, `cluster`, `paths`, `analyze`, and

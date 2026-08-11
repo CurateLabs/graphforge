@@ -1,4 +1,4 @@
-//! Explicit M21 policy resolution before knowledge-neutral M18 dispatch.
+//! Explicit epistemic policy resolution before knowledge-neutral algorithm dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -67,7 +67,7 @@ pub enum HypothesisSelectionPolicyV1 {
     IncludeAllCurrentMembers,
 }
 
-/// Complete, versioned policy used to resolve one M21 view.
+/// Complete, versioned policy used to resolve one epistemic view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BeliefProjectionPolicyV1 {
     /// Status values eligible for projection.
@@ -129,7 +129,7 @@ impl BeliefProjectionPolicyV1 {
 /// Resolve one transaction snapshot and optional valid-time intersection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolveBeliefProjectionRequest {
-    /// Mandatory M21 transaction-time cutoff.
+    /// Mandatory epistemic transaction-time cutoff.
     pub transaction_cutoff_micros: i64,
     /// Optional valid time. When present, only explicitly valid assertions remain.
     pub valid_time_micros: Option<i64>,
@@ -164,38 +164,38 @@ pub struct ResolvedBeliefSubject {
     pub evidence: graphforge_exec::ExecutionResult,
 }
 
-/// Execute a resolved neutral descriptor and append its M21 attachment.
+/// Execute a resolved neutral descriptor and append its epistemic attachment.
 #[derive(Clone, Debug)]
 pub struct ResolvedRecordedAlgorithmRequest {
-    /// Existing M20 durable-run request.
+    /// Existing knowledge durable-run request.
     pub recorded: RecordedAlgorithmRequest,
     /// Caller-supplied UUIDv7 attachment identity and retry key.
     pub attachment_uuid: Uuid,
 }
 
-/// Retry only the M21 attachment for an already-completed M20 run.
+/// Retry only the epistemic attachment for an already-completed knowledge run.
 #[derive(Clone, Debug)]
 pub struct AttachResolvedRunRequest {
     /// Idempotency context; no algorithm is dispatched by this operation.
     pub context: WriteContext,
     /// Stable attachment UUID from the original attempt.
     pub attachment_uuid: Uuid,
-    /// Existing completed M20 run.
+    /// Existing completed knowledge run.
     pub run_uuid: Uuid,
     /// Exact neutral descriptor used by the completed run.
     pub descriptor: InvocationDescriptor,
 }
 
-/// M21 attachment outcome after a successful M20 execution.
+/// epistemic attachment outcome after a successful knowledge execution.
 #[derive(Debug)]
 pub enum ResolvedAttachmentOutcome {
     /// Attachment is durably present; exact retries return the same row.
     Attached(graphforge_exec::ExecutionResult),
-    /// M20 completed, but the later M21 publication failed.
+    /// knowledge completed, but the later epistemic publication failed.
     Failed {
         /// Stable attachment retry identity.
         attachment_uuid: Uuid,
-        /// Stable completed M20 run identity.
+        /// Stable completed knowledge run identity.
         run_uuid: Uuid,
         /// Stable public failure code.
         error_code: String,
@@ -205,13 +205,13 @@ pub enum ResolvedAttachmentOutcome {
 /// Successful resolved execution, independent of later attachment publication.
 #[derive(Debug)]
 pub struct ResolvedRecordedAlgorithmResult {
-    /// Completed M20 run and canonical Arrow result.
+    /// Completed knowledge run and canonical Arrow result.
     pub recorded: RecordedAlgorithmResult,
-    /// Separate M21 attachment outcome.
+    /// Separate epistemic attachment outcome.
     pub attachment: ResolvedAttachmentOutcome,
 }
 
-/// Opaque graph-only projection and its deterministic M21 evidence.
+/// Opaque graph-only projection and its deterministic epistemic evidence.
 #[derive(Debug)]
 pub struct ResolvedBeliefProjection {
     pub(crate) graph: Box<GraphForge>,
@@ -275,7 +275,7 @@ impl ResolvedBeliefProjection {
         self.valid_time_fingerprint
     }
 
-    /// Sorted, deduplicated M21 records that participated in resolution.
+    /// Sorted, deduplicated epistemic records that participated in resolution.
     #[must_use]
     pub fn source_record_uuids(&self) -> &[Uuid] {
         &self.source_record_uuids
@@ -329,7 +329,7 @@ impl ResolvedBeliefProjection {
 }
 
 impl GraphForge {
-    /// Resolve M21 interpretation into an isolated graph-only projection.
+    /// Resolve epistemic interpretation into an isolated graph-only projection.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "graphforge-belief-projection/1 freezes an owned request"
@@ -460,7 +460,7 @@ impl GraphForge {
         ))
     }
 
-    /// Complete one M20 run on a graph-only projection, then append M21 context.
+    /// Complete one knowledge run on a graph-only projection, then append epistemic context.
     pub fn invoke_resolved_recorded(
         &self,
         projection: &ResolvedBeliefProjection,
@@ -487,7 +487,7 @@ impl GraphForge {
         })
     }
 
-    /// Append or replay only the M21 attachment; never redispatch an algorithm.
+    /// Append or replay only the epistemic attachment; never redispatch an algorithm.
     #[allow(
         clippy::needless_pass_by_value,
         reason = "graphforge-belief-projection/1 freezes an owned request"

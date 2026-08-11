@@ -55,8 +55,8 @@ def public_methods() -> set[str]:
     return found
 
 
-def m18_registry() -> set[str]:
-    """Expand the macro-owned closed M18 registry to all 94 wire identities."""
+def algorithm_registry() -> set[str]:
+    """Expand the macro-owned closed algorithm registry to all 94 wire identities."""
     text = ALGORITHMS.read_text()
     result: set[str] = set()
     pattern = re.compile(
@@ -186,8 +186,8 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
         errors.append("contract_version must be 1")
     try:
         methods = classified_methods(manifest)
-        m18 = _entries(manifest, "m18_registry")
-        m19 = _entries(manifest, "m19_contracts")
+        algorithm = _entries(manifest, "algorithm_registry")
+        search = _entries(manifest, "search_contracts")
     except ValueError as error:
         return [str(error)]
 
@@ -244,50 +244,55 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
     if duplicates:
         errors.append("methods assigned to multiple evidence groups: " + ", ".join(duplicates))
 
-    actual_m18 = m18_registry()
-    if len(actual_m18) != 94:
+    actual_algorithm = algorithm_registry()
+    if len(actual_algorithm) != 94:
         errors.append(
-            f"source M18 registry must contain exactly 94 entries, found {len(actual_m18)}"
+            "source algorithm registry must contain exactly 94 entries, "
+            f"found {len(actual_algorithm)}"
         )
-    if missing := sorted(actual_m18 - m18.keys()):
-        errors.append("unclassified M18 entries: " + ", ".join(missing))
-    if stale := sorted(m18.keys() - actual_m18):
-        errors.append("stale M18 entries: " + ", ".join(stale))
+    if missing := sorted(actual_algorithm - algorithm.keys()):
+        errors.append("unclassified algorithm entries: " + ", ".join(missing))
+    if stale := sorted(algorithm.keys() - actual_algorithm):
+        errors.append("stale algorithm entries: " + ", ".join(stale))
 
-    required_m19 = set(manifest.get("required_m19_contracts", []))
-    if missing := sorted(required_m19 - m19.keys()):
-        errors.append("missing required M19 contracts: " + ", ".join(missing))
-    if stale := sorted(m19.keys() - required_m19):
-        errors.append("undeclared M19 contracts: " + ", ".join(stale))
+    required_search = set(manifest.get("required_search_contracts", []))
+    if missing := sorted(required_search - search.keys()):
+        errors.append("missing required search contracts: " + ", ".join(missing))
+    if stale := sorted(search.keys() - required_search):
+        errors.append("undeclared search contracts: " + ", ".join(stale))
 
-    m19_assignments: dict[str, list[str]] = {}
-    m19_evidence = manifest.get("m19_evidence_groups")
-    if not isinstance(m19_evidence, dict):
-        errors.append("m19_evidence_groups must be an object")
+    search_assignments: dict[str, list[str]] = {}
+    search_evidence = manifest.get("search_evidence_groups")
+    if not isinstance(search_evidence, dict):
+        errors.append("search_evidence_groups must be an object")
     else:
-        for group_name, group in m19_evidence.items():
+        for group_name, group in search_evidence.items():
             if not isinstance(group, dict) or not isinstance(group.get("ids"), list):
-                errors.append(f"M19 evidence group {group_name}: malformed ids")
+                errors.append(f"search evidence group {group_name}: malformed ids")
                 continue
             ref_errors, _ = validate_test_refs(
-                f"M19 evidence group {group_name}", group.get("test_refs")
+                f"search evidence group {group_name}", group.get("test_refs")
             )
             errors.extend(ref_errors)
             for contract in group["ids"]:
-                m19_assignments.setdefault(contract, []).append(group_name)
-    if missing := sorted(required_m19 - m19_assignments.keys()):
-        errors.append("M19 contracts without evidence group: " + ", ".join(missing))
-    if extra := sorted(m19_assignments.keys() - required_m19):
-        errors.append("stale M19 contracts in evidence groups: " + ", ".join(extra))
+                search_assignments.setdefault(contract, []).append(group_name)
+    if missing := sorted(required_search - search_assignments.keys()):
+        errors.append("search contracts without evidence group: " + ", ".join(missing))
+    if extra := sorted(search_assignments.keys() - required_search):
+        errors.append("stale search contracts in evidence groups: " + ", ".join(extra))
     duplicates = sorted(
-        contract for contract, groups in m19_assignments.items() if len(groups) != 1
+        contract for contract, groups in search_assignments.items() if len(groups) != 1
     )
     if duplicates:
         errors.append(
-            "M19 contracts assigned to multiple evidence groups: " + ", ".join(duplicates)
+            "search contracts assigned to multiple evidence groups: " + ", ".join(duplicates)
         )
 
-    for group, entries in (("methods", methods), ("m18_registry", m18), ("m19_contracts", m19)):
+    for group, entries in (
+        ("methods", methods),
+        ("algorithm_registry", algorithm),
+        ("search_contracts", search),
+    ):
         for entry_id, entry in entries.items():
             classification = entry.get("classification")
             if classification not in ALLOWED_CLASSIFICATIONS:
@@ -342,17 +347,17 @@ def main() -> int:
             entry["classification"] != "release-tested"
             for entry in classified_methods(manifest).values()
         ),
-        "m18_registry_entries": len(_entries(manifest, "m18_registry")),
-        "m19_contracts": len(_entries(manifest, "m19_contracts")),
-        "m19_evidence_groups": len(manifest["m19_evidence_groups"]),
+        "algorithm_registry_entries": len(_entries(manifest, "algorithm_registry")),
+        "search_contracts": len(_entries(manifest, "search_contracts")),
+        "search_evidence_groups": len(manifest["search_evidence_groups"]),
         "outcome": "passed",
     }
     if args.report:
         args.report.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(
         "non-Cypher surface gate passed: "
-        f"{report['methods']} methods, {report['m18_registry_entries']} M18 entries, "
-        f"{report['m19_contracts']} M19 contracts, sha={report['git_sha']}"
+        f"{report['methods']} methods, {report['algorithm_registry_entries']} algorithm entries, "
+        f"{report['search_contracts']} search contracts, sha={report['git_sha']}"
     )
     return 0
 

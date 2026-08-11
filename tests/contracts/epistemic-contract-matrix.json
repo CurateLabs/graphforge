@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "gate": "M21",
-  "m20_baseline_sha": "8101c2c52246b903a39ff502dc325915974e4d69",
+  "gate": "epistemic",
+  "knowledge_baseline_sha": "8101c2c52246b903a39ff502dc325915974e4d69",
   "command_groups": {
     "rust": [
       "cargo test -p graphforge-knowledge --no-fail-fast",
@@ -10,10 +10,10 @@
       "cargo test -p graphforge-api --test knowledge_isolation --no-fail-fast"
     ],
     "python": [
-      "uvx maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --profile dev --out dist/m21",
-      "uv venv /tmp/gf-m21-python --python 3.13",
-      "uv pip install --python /tmp/gf-m21-python/bin/python dist/m21/*.whl pyarrow",
-      "/tmp/gf-m21-python/bin/python crates/graphforge-bindings-py/tests/smoke.py"
+      "uvx maturin build --manifest-path crates/graphforge-bindings-py/Cargo.toml --profile dev --out dist/epistemic",
+      "uv venv /tmp/gf-epistemic-python --python 3.13",
+      "uv pip install --python /tmp/gf-epistemic-python/bin/python dist/epistemic/*.whl pyarrow",
+      "/tmp/gf-epistemic-python/bin/python crates/graphforge-bindings-py/tests/smoke.py"
     ],
     "node": [
       "pnpm install --frozen-lockfile",
@@ -23,13 +23,13 @@
   },
   "cases": [
     {
-      "id": "m20-frozen-baseline",
-      "criterion": "The closed M20 schema inventory is byte-identical to verified gate SHA 8101c2c and both generated inventories match their checked digests.",
+      "id": "knowledge-frozen-baseline",
+      "criterion": "The closed knowledge schema inventory is byte-identical to verified gate SHA 8101c2c and both generated inventories match their checked digests.",
       "command_groups": ["rust"],
       "surfaces": ["rust", "schema"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m20_schema_inventory_matches_checked_contract"},
-        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"}
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "knowledge_schema_inventory_matches_checked_contract"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "epistemic_schema_inventory_matches_checked_contract"}
       ]
     },
     {
@@ -122,7 +122,7 @@
     },
     {
       "id": "capability-fail-closed",
-      "criterion": "Absent, disabled, corrupt, and future-version M21 capabilities fail closed when requested while neutral graph and find paths remain usable.",
+      "criterion": "Absent, disabled, corrupt, and future-version epistemic capabilities fail closed when requested while neutral graph and find paths remain usable.",
       "command_groups": ["rust"],
       "surfaces": ["rust", "find"],
       "tests": [
@@ -148,7 +148,7 @@
       ]
     },
     {
-      "id": "m18-resolved-equivalence",
+      "id": "algorithm-resolved-equivalence",
       "criterion": "The Rust-owned resolved graph projection and equivalent direct graph execution return exact results for rank, cluster, similar, paths, and analyze.",
       "command_groups": ["rust"],
       "surfaces": ["rust", "rank", "cluster", "similar", "paths", "analyze"],
@@ -171,22 +171,22 @@
     },
     {
       "id": "attachment-failure-preserves-run",
-      "criterion": "A completed durable M20 run survives M21 attachment failure and the exact attachment retries idempotently without redispatch.",
+      "criterion": "A completed durable knowledge run survives epistemic attachment failure and the exact attachment retries idempotently without redispatch.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
         {"kind": "rust", "path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_resolved_belief_projection"},
-        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/belief-projection.test.mjs", "symbol": "resolved rank records M20 output and exactly retries its M21 attachment"}
+        {"kind": "node", "path": "crates/graphforge-bindings-node/tests/belief-projection.test.mjs", "symbol": "resolved rank records knowledge output and exactly retries its epistemic attachment"}
       ]
     },
     {
       "id": "cross-binding-contract",
-      "criterion": "Rust, Python, and Node expose equivalent M21 schemas, policies, UUIDs, Arrow data, states, errors, and attachment retry behavior from one SHA.",
+      "criterion": "Rust, Python, and Node expose equivalent epistemic schemas, policies, UUIDs, Arrow data, states, errors, and attachment retry behavior from one SHA.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "m21_schema_inventory_matches_checked_contract"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/schema_inventory.rs", "symbol": "epistemic_schema_inventory_matches_checked_contract"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_reasoning"},
         {"kind": "python-call", "path": "crates/graphforge-bindings-py/tests/smoke.py", "symbol": "check_assertion_validity"},
         {"kind": "node", "path": "crates/graphforge-bindings-node/tests/assertion-status.test.mjs", "symbol": "assertion status is explicit, atomic, append-only, and Arrow-only"},
@@ -194,8 +194,8 @@
       ]
     },
     {
-      "id": "graph-and-m20-preservation",
-      "criterion": "Graph-only and populated M20 projects remain valid without M21, and neutral readers never open epistemic participants.",
+      "id": "graph-and-knowledge-preservation",
+      "criterion": "Graph-only and populated knowledge projects remain valid without epistemic, and neutral readers never open epistemic participants.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node"],
       "tests": [
@@ -207,8 +207,8 @@
       ]
     },
     {
-      "id": "m19-knowledge-isolation",
-      "criterion": "Public M19 find returns identical Arrow rows across absent, populated, corrupt, and future knowledge states without opening M21 tables.",
+      "id": "search-knowledge-isolation",
+      "criterion": "Public search find returns identical Arrow rows across absent, populated, corrupt, and future knowledge states without opening epistemic tables.",
       "command_groups": ["rust", "python", "node"],
       "surfaces": ["rust", "python", "node", "find"],
       "tests": [

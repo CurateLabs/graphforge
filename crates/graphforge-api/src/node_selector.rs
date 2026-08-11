@@ -1,5 +1,8 @@
 //! Rust-owned path node-selector resolution.
-#![allow(dead_code, reason = "consumed by the ordered M18 path vertical slices")]
+#![allow(
+    dead_code,
+    reason = "consumed by the ordered algorithm path vertical slices"
+)]
 
 use std::collections::{HashMap, HashSet};
 

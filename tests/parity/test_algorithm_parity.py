@@ -1,4 +1,4 @@
-"""Development-only parity checks for the five M18 analyst verbs."""
+"""Development-only parity checks for the five algorithm analyst verbs."""
 
 from collections import defaultdict
 

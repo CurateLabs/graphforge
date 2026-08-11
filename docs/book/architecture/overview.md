@@ -260,7 +260,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [ADR 0004: Adjacency Index](../../adr/0004-adjacency-index.md) — graph-layer derived traversal accelerator
 - [ADR 0005: Layered Architecture](../../adr/0005-layered-architecture.md) — graph / knowledge / workbench boundaries
 - [ADR 0006: Epistemic Model](../../adr/0006-epistemic-model.md) — preserving the evolution of understanding
-- [ADR 0012: knowledge/epistemic Domain Ownership](../../adr/0012-m20-domain-ownership.md) —
+- [ADR 0012: knowledge/epistemic Domain Ownership](../../adr/0012-knowledge-domain-ownership.md) —
   crate dependency boundaries, table ownership, schema evolution, and
   cross-domain validation
 - [ADR 0013: Project Generations](../../adr/0013-project-generation-protocol.md) — durable project-generation protocol

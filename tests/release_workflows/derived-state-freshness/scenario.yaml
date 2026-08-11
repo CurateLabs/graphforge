@@ -14,7 +14,7 @@
   "domain": "continuously-curated-analytical-projects",
   "owning_issue": 2470,
   "implementation": "crates/graphforge-api/examples/derived_state_freshness_workflow.rs",
-  "analytical_question": "Can every public M18/M19 derived-state contract detect, reject, or atomically replace stale state across independent source mutations?",
+  "analytical_question": "Can every public algorithm/search derived-state contract detect, reject, or atomically replace stale state across independent source mutations?",
   "observable_outcome": "Topology, indexed text, non-indexed properties, and caller vectors change in separate generations while public metadata, errors, reanalysis, reopen, and bindings identify only the current authoritative source.",
   "generator": {"identity": "derived-state-freshness-generator-v1", "seed": 2470001, "fixture_fingerprint": "sha256:515c23171e235124e0426393b59de08d4f4b3c8104b213a5cfe60ecb9678a4e3"},
   "ontology": {"mode": "strict", "path": "ontologies/strict-v1.yaml", "phase_manifest": "ontologies/phase-manifest.json", "constant_across_phases": true},
