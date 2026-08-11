@@ -419,6 +419,26 @@ limits. A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
 configured compute threads and requires identical schemas, bridge ordering, and
 rows.
 
+## Serial paths(by="dijkstra") (#541)
+
+`paths(by="dijkstra")` for one source, with or without one target, has no
+parallel crossover. Its disposition is **serial non-negative shortest-path
+relaxation** for every `compute_threads` setting. The all-pairs variant is
+tracked independently by #542.
+
+The Rust kernel validates non-negative finite weights, then repeatedly pops one
+canonical heap entry, compares it with the current best-path map, and relaxes
+stable outgoing edges. The public target early exit and equal-cost path-vector
+and edge-UUID ties depend on that exact pop order. Parallel relaxations would
+need to arbitrate competing predecessors and could alter paths, row order, or
+fingerprints.
+
+The path still uses CSR-native selected adjacency, bounded Arrow shaping,
+structured cancellation and limit checks, and no process-global Rayon pool.
+Costs, selected node sequences, unreachable-target behavior, structured errors,
+and cancellation behavior match the one-thread oracle across supported
+resource-policy cells.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
