@@ -93,6 +93,14 @@ keeps per-destination incoming contribution order with serial norm/convergence
 reductions, and Node2Vec skip-gram training stays serial, so fingerprints match
 the one-thread path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and triad census
+source-range enumeration (#587) may partition independent work across that pool
+above documented crossovers; work never uses Rayon's process-global pool. Cosine
+dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Node2Vec skip-gram
+training stays serial, and triad census merges integer class counts in canonical
+source-range order, so fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -329,6 +337,26 @@ per-source breadth-first traversal runs with no pool scheduling tax. Parallel
 workers preserve the serial traversal inside each source, sort reachable targets
 by public UUID, and merge worker outputs by ascending canonical source range.
 Schemas, row order, reachable-pair sets, and fingerprints match the one-thread
+result at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel triad census source ranges (#587)
+
+`analyze(by="triad_census")` keeps UUID indexing and directed-neighbor
+normalization serial so duplicate-edge validation, self-loop elision, and
+canonical node ordering remain unchanged. The Batagelj-Mrvar enumeration then
+partitions independent source-ordinal ranges across the instance-owned private
+compute pool when:
+
+- `compute_threads > 1`, and
+- normalized weak dyads are at least
+  `TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, triad
+census stays serial. Each worker builds the same per-dyad union sets as the
+serial path for its source range and returns worker-local `u64` counts for the 16
+MAN classes. Chunk results merge in ascending source-range order before deriving
+the closed-form `003` count and validating the `V choose 3` invariant. Schemas,
+row order, class counts, structured errors, and fingerprints match the one-thread
 result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability

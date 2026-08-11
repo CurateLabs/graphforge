@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
 const CHECKPOINT_INTERVAL: usize = 4_096;
+/// Weak dyads below this count stay serial to avoid private-pool scheduling tax.
+pub(crate) const TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS: usize = 4_096;
 
 pub(crate) const TRIAD_NAMES: [&str; 16] = [
     "003", "012", "102", "021D", "021U", "021C", "111D", "111U", "030T", "030C", "201", "120D",
@@ -23,6 +28,12 @@ pub(crate) struct TriadEdge {
     pub target: [u8; 16],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TriadCensusExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
 /// Count the sixteen MAN triad classes in a directed simple projection.
 pub(crate) fn triad_census(
     nodes: &[[u8; 16]],
@@ -35,35 +46,20 @@ pub(crate) fn triad_census(
     let index = index_nodes(nodes, control, &mut work)?;
     let successors = directed_neighbors(edges, &index, control, &mut work)?;
     let neighbors = weak_neighbors(&successors);
-    let mut counts = [0_u64; 16];
-
-    // Batagelj-Mrvar: visit only triads incident to a dyad, then derive 003.
-    for v in 0..neighbors.len() {
-        checkpoint(control, &mut work)?;
-        for &u in neighbors[v].range(v.saturating_add(1)..) {
-            checkpoint(control, &mut work)?;
-            let union = neighbors[v]
-                .union(&neighbors[u])
-                .copied()
-                .filter(|&w| w != v && w != u)
-                .collect::<BTreeSet<_>>();
-            for &w in &union {
-                checkpoint(control, &mut work)?;
-                if u < w || (v < w && w < u && !neighbors[w].contains(&v)) {
-                    let class = TRIAD_INDEX[triad_code(v, u, w, &successors)];
-                    counts[class] = increment(counts[class])?;
-                }
-            }
-            let dyadic = u64::try_from(neighbors.len() - union.len() - 2)
-                .map_err(|_| execution("triad_census exceeds supported range"))?;
-            let class = if successors[v].contains(&u) && successors[u].contains(&v) {
-                2
-            } else {
-                1
-            };
-            counts[class] = add(counts[class], dyadic)?;
+    let weak_dyads = count_ordered_weak_dyads(&neighbors);
+    let mut counts = match select_triad_census_path(control, neighbors.len(), weak_dyads) {
+        TriadCensusExecutionPath::Serial => count_source_range(
+            0,
+            neighbors.len(),
+            &neighbors,
+            &successors,
+            control,
+            &mut work,
+        )?,
+        TriadCensusExecutionPath::Parallel { .. } => {
+            count_connected_triads_parallel(&neighbors, &successors, control)?
         }
-    }
+    };
 
     let total = choose_three(neighbors.len())?;
     let connected = counts[1..]
@@ -82,6 +78,136 @@ pub(crate) fn triad_census(
         ));
     }
     Ok(counts)
+}
+
+pub(crate) fn select_triad_census_path(
+    control: &AlgorithmControl,
+    nodes: usize,
+    weak_dyads: usize,
+) -> TriadCensusExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes < 3
+        || weak_dyads < TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return TriadCensusExecutionPath::Serial;
+    }
+    TriadCensusExecutionPath::Parallel {
+        threads,
+        chunks: source_chunks(nodes, threads).len(),
+    }
+}
+
+fn count_connected_triads_parallel(
+    neighbors: &[BTreeSet<usize>],
+    successors: &[BTreeSet<usize>],
+    control: &AlgorithmControl,
+) -> Result<[u64; 16], AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel triad_census requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(neighbors.len(), control.compute_threads());
+    let mut chunk_results = run_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut work = 0_usize;
+                (
+                    start,
+                    count_source_range(start, end, neighbors, successors, control, &mut work),
+                )
+            })
+            .collect::<Vec<_>>())
+    })?;
+    chunk_results.sort_unstable_by_key(|(start, _)| *start);
+    let mut counts = [0_u64; 16];
+    for (_, chunk) in chunk_results {
+        merge_counts(&mut counts, chunk?)?;
+    }
+    Ok(counts)
+}
+
+fn count_source_range(
+    start: usize,
+    end: usize,
+    neighbors: &[BTreeSet<usize>],
+    successors: &[BTreeSet<usize>],
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<[u64; 16], AlgorithmError> {
+    let mut counts = [0_u64; 16];
+    // Batagelj-Mrvar: visit only triads incident to a dyad, then derive 003.
+    for v in start..end {
+        checkpoint(control, work)?;
+        for &u in neighbors[v].range(v.saturating_add(1)..) {
+            checkpoint(control, work)?;
+            let union = neighbors[v]
+                .union(&neighbors[u])
+                .copied()
+                .filter(|&w| w != v && w != u)
+                .collect::<BTreeSet<_>>();
+            for &w in &union {
+                checkpoint(control, work)?;
+                if u < w || (v < w && w < u && !neighbors[w].contains(&v)) {
+                    let class = TRIAD_INDEX[triad_code(v, u, w, successors)];
+                    counts[class] = increment(counts[class])?;
+                }
+            }
+            let dyadic = u64::try_from(neighbors.len() - union.len() - 2)
+                .map_err(|_| execution("triad_census exceeds supported range"))?;
+            let class = if successors[v].contains(&u) && successors[u].contains(&v) {
+                2
+            } else {
+                1
+            };
+            counts[class] = add(counts[class], dyadic)?;
+        }
+    }
+    Ok(counts)
+}
+
+fn count_ordered_weak_dyads(neighbors: &[BTreeSet<usize>]) -> usize {
+    neighbors
+        .iter()
+        .enumerate()
+        .map(|(source, adjacent)| adjacent.range(source.saturating_add(1)..).count())
+        .fold(0_usize, usize::saturating_add)
+}
+
+fn source_chunks(len: usize, threads: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, len);
+    let base = len / workers;
+    let rem = len % workers;
+    let mut chunks = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let chunk_len = base + usize::from(index < rem);
+        let end = start + chunk_len;
+        if start < end {
+            chunks.push((start, end));
+        }
+        start = end;
+    }
+    chunks
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("triad_census worker panicked")),
+    }
 }
 
 fn index_nodes(
@@ -179,6 +305,13 @@ fn increment(value: u64) -> Result<u64, AlgorithmError> {
     add(value, 1)
 }
 
+fn merge_counts(left: &mut [u64; 16], right: [u64; 16]) -> Result<(), AlgorithmError> {
+    for (left, right) in left.iter_mut().zip(right) {
+        *left = add(*left, right)?;
+    }
+    Ok(())
+}
+
 fn add(left: u64, right: u64) -> Result<u64, AlgorithmError> {
     left.checked_add(right)
         .ok_or_else(|| execution("triad_census exceeds supported range"))
@@ -203,9 +336,15 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
+    }
+
+    fn wide_uuid(value: u128) -> [u8; 16] {
+        value.to_be_bytes()
     }
 
     fn edge(id: u8, source: u8, target: u8) -> TriadEdge {
@@ -218,6 +357,36 @@ mod tests {
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
+    }
+
+    fn complete_reciprocal_fixture(nodes: usize) -> (Vec<[u8; 16]>, Vec<TriadEdge>) {
+        let nodes = (0..nodes)
+            .map(|node| wide_uuid(node as u128))
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        let mut edge_id = 1_u128;
+        for source in 0..nodes.len() {
+            for target in 0..nodes.len() {
+                if source == target {
+                    continue;
+                }
+                edges.push(TriadEdge {
+                    edge: wide_uuid(edge_id),
+                    source: nodes[source],
+                    target: nodes[target],
+                });
+                edge_id += 1;
+            }
+        }
+        (nodes, edges)
     }
 
     #[test]
@@ -260,6 +429,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(normalized[2], 1);
+    }
+
+    #[test]
+    fn path_selection_respects_crossover_and_private_pool() {
+        let serial = control_with_threads(1);
+        assert_eq!(
+            select_triad_census_path(&serial, 96, TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS),
+            TriadCensusExecutionPath::Serial
+        );
+        let below = control_with_threads(4);
+        assert_eq!(
+            select_triad_census_path(&below, 96, TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS - 1),
+            TriadCensusExecutionPath::Serial
+        );
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_triad_census_path(&no_pool, 96, TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS),
+            TriadCensusExecutionPath::Serial
+        );
+        assert_eq!(
+            select_triad_census_path(
+                &control_with_threads(4),
+                96,
+                TRIAD_CENSUS_PARALLEL_CROSSOVER_DYADS
+            ),
+            TriadCensusExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_complete_triad_counts() {
+        let (nodes, edges) = complete_reciprocal_fixture(96);
+        let serial = triad_census(&nodes, &edges, &control_with_threads(1)).unwrap();
+        let mut expected = [0_u64; 16];
+        expected[15] = 142_880;
+        assert_eq!(serial, expected);
+        for threads in [2_usize, 4, 8] {
+            let control = control_with_threads(threads);
+            assert!(matches!(
+                select_triad_census_path(&control, nodes.len(), 4_560),
+                TriadCensusExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(triad_census(&nodes, &edges, &control).unwrap(), serial);
+        }
     }
 
     #[test]
