@@ -2451,6 +2451,24 @@ mod tests {
         )
     }
 
+    fn execute_k_core_decomposition_with_compute_threads(
+        graph: &AdjacencyGraph,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_cluster_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(
+            Algorithm::Cluster(ClusterAlgorithm::KCoreDecomposition),
+            graph,
+            &control,
+        )
+    }
+
     fn community_ids(output: &AlgorithmOutput) -> Vec<i64> {
         output
             .rows()
@@ -2487,6 +2505,10 @@ mod tests {
             }
         }
         AdjacencyGraph::with_test_edges(nodes, &edges)
+    }
+
+    fn output_fingerprint(output: &AlgorithmOutput) -> String {
+        format!("{:?}|{:?}", output.schema, output.rows())
     }
 
     #[test]
@@ -3717,6 +3739,42 @@ mod tests {
             ),
             Err(AlgorithmError::Cancelled)
         );
+    }
+
+    #[test]
+    fn k_core_decomposition_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_edges(
+            12,
+            &[
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (1, 2),
+                (1, 3),
+                (2, 3),
+                (3, 4),
+                (4, 5),
+                (5, 6),
+                (6, 4),
+                (7, 8),
+                (8, 9),
+                (9, 10),
+                (10, 7),
+                (10, 11),
+                (0, 1),
+                (2, 2),
+            ],
+        );
+        let serial = execute_k_core_decomposition_with_compute_threads(&graph, 1).unwrap();
+        assert_eq!(community_ids(&serial), [3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 1]);
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output =
+                execute_k_core_decomposition_with_compute_threads(&graph, threads).unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
+        }
     }
 
     #[test]
