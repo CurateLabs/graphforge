@@ -1,9 +1,9 @@
 //! Rust-owned rank handlers registered under the shared algorithm dispatch contract.
 //!
-//! PageRank (#343), clustering coefficient (#504), and triangles (#515) may
-//! partition independent score updates across the instance-owned private compute
-//! pool while preserving serial contribution order, ordered merges, reductions,
-//! and bit-identical fingerprints.
+//! PageRank (#343), clustering coefficient (#504), triangles (#515), and Degree
+//! (#506) may partition independent score updates across the instance-owned
+//! private compute pool while preserving serial contribution order, ordered
+//! merges, reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -97,6 +97,14 @@ const CLUSTERING_COEFFICIENT_CHECKPOINT_WORK: usize = 1_024;
 /// hosts. Exact triangle counts remain identical either way.
 pub const TRIANGLES_PARALLEL_CROSSOVER_NODES: usize = 256;
 const TRIANGLES_CHECKPOINT_PAIRS: usize = 1_024;
+/// Selected nodes below which Degree stays on the serial path (#506).
+///
+/// Degree work is O(1) per node (neighbor-length lookup + normalize). Parallel
+/// scheduling only amortizes once node count clears this threshold on typical
+/// embedded hosts; smaller fixtures stay serial with no pool tax. Numeric
+/// results remain identical either way.
+pub const DEGREE_PARALLEL_CROSSOVER_NODES: usize = 4_096;
+const DEGREE_CHECKPOINT_NODES: usize = 1_024;
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 const ARTICLE_RANK_DAMPING: f64 = 0.85;
@@ -121,27 +129,101 @@ impl RustAlgorithm for Degree {
         graph: &AdjacencyGraph,
         control: &AlgorithmControl,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let denominator = exact_u32(
-            graph.node_ids().len().saturating_sub(1).max(1),
-            "node count",
-        )?;
+        let node_ids = graph.node_ids();
+        let denominator = exact_u32(node_ids.len().saturating_sub(1).max(1), "node count")?;
         let algorithm = Algorithm::Rank(RankAlgorithm::Degree);
         let mut sink = control.output_sink(algorithm)?;
-        for (index, &node_id) in graph.node_ids().iter().enumerate() {
-            if index % 1024 == 0 {
-                control.checkpoint()?;
+        let path = select_degree_path(control, node_ids.len());
+        match path {
+            DegreeExecutionPath::Serial => {
+                for (index, &node_id) in node_ids.iter().enumerate() {
+                    if index.is_multiple_of(DEGREE_CHECKPOINT_NODES) {
+                        control.checkpoint()?;
+                    }
+                    let uuid = graph
+                        .node_uuid(node_id)
+                        .ok_or_else(|| execution("selected node has no UUID identity"))?;
+                    let degree = exact_u32(graph.neighbors(node_id).len(), "node degree")?;
+                    sink.append_row(&[
+                        AlgorithmValue::Uuid(uuid),
+                        AlgorithmValue::Float64(f64::from(degree) / f64::from(denominator)),
+                    ])?;
+                }
             }
-            let uuid = graph
-                .node_uuid(node_id)
-                .ok_or_else(|| execution("selected node has no UUID identity"))?;
-            let degree = exact_u32(graph.neighbors(node_id).len(), "node degree")?;
-            sink.append_row(&[
-                AlgorithmValue::Uuid(uuid),
-                AlgorithmValue::Float64(f64::from(degree) / f64::from(denominator)),
-            ])?;
+            DegreeExecutionPath::Parallel { .. } => {
+                let rows = degree_scores_parallel(graph, denominator, control)?;
+                for (uuid, score) in rows {
+                    sink.append_row(&[AlgorithmValue::Uuid(uuid), AlgorithmValue::Float64(score)])?;
+                }
+            }
         }
         sink.finish()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DegreeExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+/// Choose serial vs private-pool parallel execution for a Degree workload (#506).
+pub(crate) fn select_degree_path(control: &AlgorithmControl, nodes: usize) -> DegreeExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes < DEGREE_PARALLEL_CROSSOVER_NODES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return DegreeExecutionPath::Serial;
+    }
+    let chunks = destination_chunks(nodes, threads).len();
+    if chunks <= 1 {
+        return DegreeExecutionPath::Serial;
+    }
+    DegreeExecutionPath::Parallel { threads, chunks }
+}
+
+fn degree_scores_parallel(
+    graph: &AdjacencyGraph,
+    denominator: u32,
+    control: &AlgorithmControl,
+) -> Result<Vec<([u8; 16], f64)>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel Degree requires an instance-owned compute pool"))?;
+    let node_ids = graph.node_ids();
+    let ranges = destination_chunks(node_ids.len(), control.compute_threads());
+    let work = AtomicUsize::new(0);
+    let chunk_results = run_rank_on_pool(pool, "Degree", || {
+        ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut local = Vec::with_capacity(end - start);
+                for &node_id in &node_ids[start..end] {
+                    let observed = work.fetch_add(1, Ordering::Relaxed) + 1;
+                    if observed.is_multiple_of(DEGREE_CHECKPOINT_NODES) {
+                        control.check_cancelled()?;
+                    }
+                    let uuid = graph
+                        .node_uuid(node_id)
+                        .ok_or_else(|| execution("selected node has no UUID identity"))?;
+                    let degree = exact_u32(graph.neighbors(node_id).len(), "node degree")?;
+                    local.push((uuid, f64::from(degree) / f64::from(denominator)));
+                }
+                Ok((start, local))
+            })
+            .collect::<Result<Vec<_>, AlgorithmError>>()
+    })?;
+    // Merge chunk outputs in ascending node-ordinal order (canonical).
+    let mut rows = Vec::with_capacity(node_ids.len());
+    for (start, local) in chunk_results {
+        debug_assert_eq!(start, rows.len());
+        rows.extend(local);
+    }
+    Ok(rows)
 }
 
 impl RustAlgorithm for PageRank {
@@ -444,9 +526,20 @@ fn run_pagerank_on_pool<R>(
 where
     R: Send,
 {
+    run_rank_on_pool(pool, "PageRank", op)
+}
+
+fn run_rank_on_pool<R>(
+    pool: &crate::ComputePool,
+    kernel: &str,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
     match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
         Ok(result) => result,
-        Err(_) => Err(execution("PageRank worker panicked")),
+        Err(_) => Err(execution(format!("{kernel} worker panicked"))),
     }
 }
 
@@ -2287,6 +2380,40 @@ mod tests {
         execute_rank_with_compute(graph, Algorithm::Rank(RankAlgorithm::Degree), limits, None)
     }
 
+    fn execute_degree_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            cancellation,
+        )
+        .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::Degree), graph, &control)
+    }
+
+    fn degree_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        output
+            .rows()
+            .iter()
+            .map(|row| match row[1] {
+                AlgorithmValue::Float64(score) => score.to_bits(),
+                _ => panic!("degree score must be Float64"),
+            })
+            .collect()
+    }
+
+    fn degree_parallel_graph(nodes: usize) -> AdjacencyGraph {
+        let edges = (0..nodes)
+            .map(|node| (node as u64, ((node + 1) % nodes) as u64))
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+
     fn execute_pagerank(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
@@ -2841,6 +2968,63 @@ mod tests {
                 limit: 2,
             })
         );
+    }
+
+    #[test]
+    fn degree_path_selection_respects_threads_crossover_and_pool() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_degree_path(&serial_control, DEGREE_PARALLEL_CROSSOVER_NODES - 1),
+            DegreeExecutionPath::Serial
+        );
+
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_degree_path(&one, DEGREE_PARALLEL_CROSSOVER_NODES),
+            DegreeExecutionPath::Serial
+        );
+
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert!(matches!(
+            select_degree_path(&parallel, DEGREE_PARALLEL_CROSSOVER_NODES),
+            DegreeExecutionPath::Parallel { threads: 4, chunks }
+            if chunks > 1
+        ));
+    }
+
+    #[test]
+    fn degree_parallel_matches_one_thread_bits_at_supported_thread_counts() {
+        let graph = degree_parallel_graph(DEGREE_PARALLEL_CROSSOVER_NODES);
+        let oracle = degree_bits(
+            &execute_degree_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap(),
+        );
+        for threads in [2_usize, 4, 8] {
+            let actual = degree_bits(
+                &execute_degree_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap(),
+            );
+            assert_eq!(actual, oracle, "threads={threads}");
+        }
+    }
+
+    #[test]
+    fn degree_parallel_path_honors_cancellation() {
+        let graph = degree_parallel_graph(DEGREE_PARALLEL_CROSSOVER_NODES);
+        let cancel = AlgorithmCancellation::default();
+        cancel.cancel();
+        let err = execute_degree_with_pool(&graph, 4, cancel).unwrap_err();
+        assert_eq!(err, AlgorithmError::Cancelled);
     }
 
     #[test]
