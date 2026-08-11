@@ -2887,6 +2887,14 @@ A deterministic blossom/primal-dual implementation runs in `O(V^3)` time and
 weight validation, blossom search, optimum tie resolution, output shaping,
 limit failures, and cancellation abort atomically without partial output.
 
+M4 #558 disposition: maximum-weight matching remains serial. The exact weighted
+blossom/primal-dual core mutates labels, root queues, exact-weight dual state,
+blossom contractions, and augmenting paths in one alternating forest, so
+GraphForge does not claim a parallel crossover for
+`analyze(by="max_weight_matching")`. Thread policies at `1`/`2`/`4`/`8`/automatic
+preserve the one-thread selected edge set, weights, canonical tuple tie order,
+structured errors, and bounded Arrow shaping.
+
 Typed, dependency-free Rust in `graphforge-exec` owns projection, validation,
 blossom/primal-dual execution, deterministic choices, controls, and Arrow
 shaping. Python and Node only adapt arguments and native Arrow/Arrow IPC.

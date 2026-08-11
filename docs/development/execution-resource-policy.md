@@ -110,6 +110,17 @@ coordinate order, PageRank keeps canonical contribution order with serial
 dangling/delta reductions, Node2Vec skip-gram training stays serial, and Leiden
 keeps one-thread refinement order, so fingerprints match the one-thread path.
 
+(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
+independent work across that pool above documented crossovers; work never uses
+Rayon's process-global pool. Maximum-weight matching (#558) is explicitly
+dispositioned serial because exact weighted blossom labels, dual arithmetic,
+contractions, expansions, and augmenting-path commits mutate one shared
+alternating forest. Cosine dot products retain serial coordinate order,
+PageRank keeps canonical contribution order with serial dangling/delta
+reductions, Node2Vec skip-gram training stays serial, and max-weight matching
+keeps one-thread weighted blossom state order, so fingerprints match the
+one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -438,6 +449,28 @@ structured cancellation and limit checks, and no process-global Rayon pool.
 Costs, selected node sequences, unreachable-target behavior, structured errors,
 and cancellation behavior match the one-thread oracle across supported
 resource-policy cells.
+
+## Serial maximum-weight matching (#558)
+
+`analyze(by="max_weight_matching")` has no parallel crossover. Its performance
+disposition is **serial exact weighted blossom search** for every
+`compute_threads` setting.
+
+The weighted handler normalizes the selected undirected multigraph, validates
+finite weights, and uses the shared exact blossom/primal-dual core with summed
+Float64 weights as the primary objective, cardinality as a secondary objective,
+and canonical edge tuples for ties. Labels, root queues, exact-weight dual
+steps, blossom contractions/expansions, and augmenting-path commits all update
+one alternating forest. Parallel speculation would need conflict resolution
+across shared vertices/blossoms and could change the selected maximum-weight
+edge set or tie objective.
+
+The #558 disposition preserves CSR-native selected adjacency access before
+normalization, shared cancellation/checkpoint controls, structured resource
+errors, and bounded Arrow shaping. Schemas, row order, selected edge UUIDs and
+weights, projection fingerprints, cancellation, and limit behavior match the
+one-thread oracle at supported thread configurations. No GPU, distributed,
+approximate, or foreign-engine fallback is implied.
 
 ## Observability
 

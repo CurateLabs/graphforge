@@ -2083,6 +2083,11 @@ columns. Empty and no-match selections return the same typed zero-row table.
 Limit failures, cancellation, invalid selectors or weights, storage failures,
 and Arrow-shaping failures are atomic structured errors.
 
+`max_weight_matching` has an explicit serial performance disposition (#558):
+exact weighted blossom labels, dual updates, contractions, and augmenting paths
+mutate one alternating forest and canonical tuple tie objective. No parallel
+crossover, GPU, or foreign-engine fallback is claimed.
+
 For `by="max_cardinality_matching"`, pass `directed=False` to compute an exact
 maximum-cardinality matching of a general graph. The result contains as many
 stored edges as possible without using any selected node more than once.
