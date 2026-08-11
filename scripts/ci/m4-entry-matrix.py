@@ -18,6 +18,7 @@ REQUIRED_WORKLOAD_IDS = {
     "scan-count",
     "aggregate-top-n",
     "pagerank",
+    "paths-gomory-hu-tree",
     "exact-cosine-knn",
     "node2vec",
 }
