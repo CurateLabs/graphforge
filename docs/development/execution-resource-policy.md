@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -70,14 +70,16 @@ Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
 Jaccard node similarity (#535), local clustering coefficient (#504), triangle
-ranking (#515), and Degree (#506) may partition independent work across that
-pool above documented crossovers; work never uses Rayon's process-global pool.
-Cosine dot products retain serial coordinate order, PageRank keeps canonical
-contribution order with serial dangling/delta reductions, Jaccard retains
-serial candidate order per source, clustering coefficient merges node-range
-scores in canonical dense-ordinal order, triangles merge node-owned counts by
-ascending dense ordinal, Degree merges node chunks in dense ordinal order, and
-Node2Vec skip-gram training stays serial, so fingerprints match the
+ranking (#515), Degree (#506), and betweenness Brandes source searches (#501)
+may partition independent work across that pool above documented crossovers;
+work never uses Rayon's process-global pool. Cosine dot products retain serial
+coordinate order, PageRank keeps canonical contribution order with serial
+dangling/delta reductions, Jaccard retains serial candidate order per source,
+clustering coefficient merges node-range scores in canonical dense-ordinal
+order, triangles merge node-owned counts by ascending dense ordinal, Degree
+merges node chunks in dense ordinal order, betweenness reduces per-source
+dependency arrays in canonical source order, and Node2Vec skip-gram training
+stays serial, so fingerprints match the
 one-thread path.
 
 ## Parallel cosine KNN (#342)
@@ -208,6 +210,33 @@ serial path runs with no pool scheduling tax. Worker-local token counts merge
 by canonical node ordinal with checked addition. Training order and arithmetic
 are unchanged, so schemas, row order, metadata, and fingerprints match the
 one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel betweenness Brandes BFS (#501)
+
+`rank(by="betweenness")` partitions independent Brandes **source** searches
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated source-search work
+  (`selected_nodes × (selected_nodes + selected_adjacency_entries)`) is at least
+  `BETWEENNESS_PARALLEL_CROSSOVER_WORK` (`65_536`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial source loop runs with no pool scheduling tax. The crossover is the
+smallest power-of-two work estimate at/above the measured win boundary on the
+M4 agent host (4 vCPU, directed chord fixture, 4 private workers, release
+build): sub-32k source-search work remains noise dominated, while fixtures above
+64k first amortize pool scheduling.
+
+Each worker runs a complete serial Brandes BFS/dependency pass for every source
+it owns; no individual BFS frontier, predecessor list, or dependency array is
+parallelized. Worker outputs carry one dependency contribution array per source.
+The caller replays cooperative checkpoints and accumulates those arrays in
+ascending source ordinal order, matching the one-thread floating-point addition
+order. Worker loops use cancellation checks rather than shared checkpoint
+mutation; cancellation and limit failures remain structured. Schemas, row order,
+scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 
