@@ -75,7 +75,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Testing
 insta = "1"
-cucumber = "0.21"
+cucumber = "0.23"
 
 # --------------------------------------------------------------
 # Workspace-wide lint policy
