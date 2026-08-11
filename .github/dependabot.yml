@@ -84,6 +84,12 @@ updates:
       prefix: "chore"
       include: "scope"
       # Reminder: Cargo bumps need Bazel crate-universe repin before merge.
+    # parquet majors pull Arrow majors; DataFusion must move in the same
+    # change set (see closed #686). Ignore isolated parquet major bumps until
+    # a coordinated DataFusion + Arrow + Parquet upgrade is ready.
+    ignore:
+      - dependency-name: "parquet"
+        update-types: ["version-update:semver-major"]
     groups:
       cargo-minor-patch:
         patterns:
@@ -91,6 +97,15 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      # Keep Arrow / Parquet / DataFusion majors together when Dependabot
+      # sees updates for more than one; parquet majors remain ignored above.
+      arrow-datafusion-stack:
+        patterns:
+          - "arrow*"
+          - "parquet*"
+          - "datafusion*"
+        update-types:
+          - "major"
 
   # Root npm / pnpm workspace
   - package-ecosystem: "npm"
