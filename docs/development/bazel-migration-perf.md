@@ -38,9 +38,9 @@ hits regress:
 | Affected-input isolation probe | `--mode affected-inputs` |
 | Gate evaluator (≥10 pairs, #1 thresholds) | `--mode evaluate` |
 | CI wiring | Required: `Bazel Bootstrap` (policy + harness unit tests). Diagnostics: `Bazel Diagnostics` (observe/collect; **not** in `CI Gate` `needs`) |
-| Checked-in sample status | `perf-sample.json` → `complete` (10 pairs; **one-shot M2 evidence**) |
+| Checked-in sample status | `perf-sample.json` → `complete` (10 pairs; **one-shot Bazel-migration evidence**) |
 
-`perf-sample.json` is **one-shot M2 close evidence**, not a live PR regression
+`perf-sample.json` is **one-shot Bazel-migration close evidence**, not a live PR regression
 gate. Required bootstrap runs `--mode policy` and harness unit tests only.
 `Bazel Diagnostics` may still observe/collect and roll up `evaluate` for
 dashboards; failures there do not fail `CI Gate`.

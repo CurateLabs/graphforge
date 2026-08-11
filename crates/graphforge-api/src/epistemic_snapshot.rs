@@ -1,4 +1,4 @@
-//! Deterministic transaction-time composition of append-only M21 records.
+//! Deterministic transaction-time composition of append-only epistemic records.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -73,7 +73,7 @@ struct SnapshotRow {
 }
 
 impl GraphForge {
-    /// Reconstruct one deterministic M21 view at transaction-time `cutoff_micros`.
+    /// Reconstruct one deterministic epistemic view at transaction-time `cutoff_micros`.
     ///
     /// The result contains one row per visible assertion followed by one row per
     /// visible hypothesis group. Statusless assertions and unselected/empty

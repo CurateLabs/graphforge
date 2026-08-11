@@ -1,4 +1,4 @@
-//! Append-only M21 assertion supersession relations.
+//! Append-only epistemic assertion supersession relations.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};

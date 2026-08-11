@@ -26,14 +26,14 @@
         "analyze",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank.degree",
         "cluster.components",
         "paths.bfs",
         "analyze.is_dag"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "reasoning",
@@ -80,12 +80,12 @@
         "paths",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank.degree",
         "paths.bfs"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "reasoning",
@@ -133,14 +133,14 @@
         "similar",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.hybrid",
         "rank",
         "cluster",
         "paths",
         "similar"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "confidence",
@@ -217,14 +217,14 @@
         "list_algorithm_runs",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank",
         "cluster",
         "paths",
         "similar"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "confidence",
@@ -271,10 +271,10 @@
         "open_checkpoint",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "rank.degree"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "reasoning",
@@ -322,12 +322,12 @@
         "paths",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank.degree",
         "paths.bfs"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "confidence",
@@ -395,12 +395,12 @@
         "inspect_embedding_space_freshness",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "find.vector",
         "rank.degree"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "reasoning",
         "hypothesis_membership"
@@ -471,13 +471,13 @@
         "adopt_ontology",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank.degree",
         "cluster.components",
         "analyze.is_dag"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "reasoning",
@@ -542,11 +542,11 @@
         "epistemic_snapshot",
         "reopen"
       ],
-      "m18_m19": [
+      "algorithm_search": [
         "find.text",
         "rank.degree"
       ],
-      "m20_m21": [
+      "knowledge_epistemic": [
         "assertion",
         "evidence_link",
         "reasoning",

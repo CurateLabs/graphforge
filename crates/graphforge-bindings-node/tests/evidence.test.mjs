@@ -1,4 +1,4 @@
-// Fresh-native M20 immutable evidence acceptance (#775).
+// Fresh-native knowledge immutable evidence acceptance (#775).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

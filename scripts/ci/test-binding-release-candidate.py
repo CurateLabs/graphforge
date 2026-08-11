@@ -634,7 +634,7 @@ def main() -> None:
 
     assert "Save tested wheel for release-candidate assembly" in rc_workflow_text
     assert "Save tested addon for release-candidate assembly" in rc_workflow_text
-    assert "Assemble immutable M1 release candidate" in rc_workflow_text
+    assert "Assemble immutable release candidate" in rc_workflow_text
     release_candidate_job = rc_workflow_text.split("  release_candidate:\n", 1)[1]
     assert 'node-version: "22"' in release_candidate_job
     assert validator_from_workspace in release_candidate_job
@@ -676,11 +676,11 @@ def main() -> None:
     )
     for group in ("manifest", "python", "npm", "crates", "evidence"):
         assert (
-            f"M1-Release-Candidate-{group}-${{{{ needs.validate_source.outputs.evidence_sha }}}}"
+            f"Release-Candidate-{group}-${{{{ needs.validate_source.outputs.evidence_sha }}}}"
         ) in rc_workflow_text
 
     publish_workflow_text = PUBLISH_WORKFLOW.read_text()
-    assert "M1-Release-Candidate-manifest-$RELEASE_SHA" in publish_workflow_text
+    assert "Release-Candidate-manifest-$RELEASE_SHA" in publish_workflow_text
     assert "PyO3/maturin-action" not in publish_workflow_text
     assert "napi build" not in publish_workflow_text
     assert "candidate/release-artifacts/python/*" in publish_workflow_text
@@ -838,7 +838,7 @@ def main() -> None:
     publish_text = PUBLISH_WORKFLOW.read_text()
     assert "exec napi build --platform --release" not in publish_text
     assert ARTIFACT_COMMAND not in publish_text
-    assert "M1-Release-Candidate-manifest-$RELEASE_SHA" in publish_text
+    assert "Release-Candidate-manifest-$RELEASE_SHA" in publish_text
 
     pnpm = shutil.which("pnpm")
     assert pnpm is not None, "pnpm is required for napi CLI contract validation"

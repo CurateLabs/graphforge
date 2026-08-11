@@ -25,7 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly as of 2026-08-05
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly as of 2026-08-05
         with:
           components: clippy, rustfmt
           # Pin glibc: the prebuilt cargo-fuzz binary is musl-static, whose libc

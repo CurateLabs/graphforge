@@ -189,7 +189,7 @@ mod tests {
         Uuid::from_bytes(bytes)
     }
 
-    /// Aligned request with non-empty M20 participant families and empty M21 sets.
+    /// Aligned request with non-empty knowledge participant families and empty epistemic sets.
     fn aligned_request() -> CompositeTransactionRequest {
         let mut subject = CompositeTransactionRequest {
             contract_version: COMPOSITE_TRANSACTION_CONTRACT_VERSION,

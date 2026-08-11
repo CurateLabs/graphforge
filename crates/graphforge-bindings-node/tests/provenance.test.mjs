@@ -1,4 +1,4 @@
-// Fresh-native M20 provenance and construction acceptance (#773).
+// Fresh-native knowledge provenance and construction acceptance (#773).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

@@ -1,4 +1,4 @@
-//! Canonical, knowledge-neutral descriptors for the complete M18 catalog.
+//! Canonical, knowledge-neutral descriptors for the complete algorithm catalog.
 
 use std::collections::BTreeMap;
 
@@ -98,7 +98,7 @@ impl InvocationParameter {
     }
 }
 
-/// Stable metadata required for every public M18 catalog entry.
+/// Stable metadata required for every public algorithm catalog entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AlgorithmDescriptorContract {
     /// Typed public algorithm.

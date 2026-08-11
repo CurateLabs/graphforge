@@ -41,19 +41,19 @@
     {
       "id": "complete-workspace-shapes",
       "layer": "rust-api",
-      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "m20", "m21"],
+      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "knowledge", "epistemic"],
       "criterion": "Revert restores real domain records for every supported workspace shape rather than proving capability toggles alone.",
       "expected_columns": ["operation"],
       "expected_errors": [],
       "tests": [
-        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "revert_accepts_graph_m20_and_full_m21_checkpoint_shapes_after_reopen"},
+        {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "revert_accepts_graph_knowledge_and_full_epistemic_checkpoint_shapes_after_reopen"},
         {"kind": "rust", "path": "crates/graphforge-api/src/checkpoints.rs", "symbol": "populated_checkpoint_shapes_restore_real_domain_records"}
       ]
     },
     {
       "id": "pinned-view-current-advance",
       "layer": "rust-api",
-      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "workspace_shapes": ["graph-only", "knowledge", "epistemic"],
       "criterion": "An open read-only view remains pinned while current advances and after its named reference is deleted.",
       "expected_columns": [],
       "expected_errors": ["GF_READ_ONLY_VIEW", "GF_CHECKPOINT_NOT_FOUND"],
@@ -64,7 +64,7 @@
     {
       "id": "diff-pagination-cancellation-bounds",
       "layer": "rust-api",
-      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "workspace_shapes": ["graph-only", "knowledge", "epistemic"],
       "criterion": "Summary and logical-record diffs are canonically ordered, page-bound, selector-safe, and cancellable.",
       "expected_columns": ["scope", "change", "record_uuid"],
       "expected_errors": ["GF_CANCELLED", "GF_PAGE_SNAPSHOT_GONE", "GF_VALIDATION"],
@@ -78,7 +78,7 @@
     {
       "id": "revert-publication-failpoints",
       "layer": "rust-storage",
-      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "workspace_shapes": ["graph-only", "knowledge", "epistemic"],
       "criterion": "Validation, fsync, CURRENT replacement, and root-sync interruptions expose exactly the previous or new complete authority.",
       "expected_columns": ["result_generation_uuid"],
       "expected_errors": ["GF_VALIDATION"],
@@ -103,8 +103,8 @@
     {
       "id": "corrupt-future-dangling-rejection",
       "layer": "rust-api",
-      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "m20", "m21"],
-      "criterion": "Invalid digest, missing generation, corrupt participant, future schema, invalid ontology/config, and dangling M20/M21 references fail closed without moving current.",
+      "workspace_shapes": ["graph-only", "ontology-free", "emergent", "advisory", "strict", "knowledge", "epistemic"],
+      "criterion": "Invalid digest, missing generation, corrupt participant, future schema, invalid ontology/config, and dangling knowledge/epistemic references fail closed without moving current.",
       "expected_columns": [],
       "expected_errors": ["GF_CHECKPOINT_REGISTRY_CORRUPT", "GF_PROJECT_CORRUPT", "GF_VALIDATION"],
       "tests": [
@@ -166,7 +166,7 @@
     {
       "id": "same-sha-artifact-evidence",
       "layer": "rust-api",
-      "workspace_shapes": ["graph-only", "m20", "m21"],
+      "workspace_shapes": ["graph-only", "knowledge", "epistemic"],
       "criterion": "One PR-head SHA binds the Rust tests, produced Python wheel, Node addon/package, and CLI binary to successful exact manifest commands.",
       "expected_columns": [],
       "expected_errors": [],

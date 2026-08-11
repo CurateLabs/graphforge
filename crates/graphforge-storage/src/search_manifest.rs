@@ -1,4 +1,4 @@
-//! Canonical identity, manifests, and freshness for M19 search artifacts.
+//! Canonical identity, manifests, and freshness for search artifacts.
 //!
 //! Text indexes and caller-supplied vector stores share this metadata contract.
 //! Raw selectors never become path components: normalized UTF-8 bytes are

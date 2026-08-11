@@ -2,8 +2,8 @@
 
 Checked-in map from canonical issue
 [#1](https://github.com/CurateLabs/graphforge/issues/1) acceptance criteria to
-M2 child-issue evidence (PR / merge SHA / artifact). Produced by
-[#3](https://github.com/CurateLabs/graphforge/issues/3) so M2 gate
+Bazel-migration child-issue evidence (PR / merge SHA / artifact). Produced by
+[#3](https://github.com/CurateLabs/graphforge/issues/3) so Bazel-migration gate
 [#2](https://github.com/CurateLabs/graphforge/issues/2) can close when children
 are complete.
 
@@ -44,7 +44,7 @@ Developer guide: [bazel.md](bazel.md).
 | Across ≥10 paired runs: warm PR p50 ≥30% faster and compute ≥25% lower than Cargo baseline; cold p50 regression ≤10% | Met | #5 (#12 baseline) | [bazel-migration-baseline.md](bazel-migration-baseline.md); `perf-sample.json` `status=complete` + strict `evaluate` |
 | No secret, token, signing material, publish credential, or user data in a cacheable Bazel action or build log | Met | #7, #5, #3 | See [Security and supply chain](#security-and-supply-chain) below; publish OIDC/credentials stay in release workflows outside `Bazel Bootstrap` |
 | Required check context remains `CI Gate`; path-classified skips remain neutral | Met | #6, #4 | [bazel-migration-cutover.md](bazel-migration-cutover.md); `scripts/ci/require-gates.sh` |
-| Cargo CI compilation and sticky build disks removed only after same-SHA parity and performance gates | Met | #4 (after #6/#5) | PR sticky `target/` keys retired; Cargo `rust-test` removed; Binding RC / fuzz / M1 retained as justified |
+| Cargo CI compilation and sticky build disks removed only after same-SHA parity and performance gates | Met | #4 (after #6/#5) | PR sticky `target/` keys retired; Cargo `rust-test` removed; Binding RC / fuzz / release-certification retained as justified |
 | Developer, architecture, build, release, troubleshooting, and cache-observability documentation is current | Met | #3 | [bazel.md](bazel.md) + companions listed there; this evidence map |
 
 ## #1 Documentation checklist
@@ -68,7 +68,7 @@ Developer guide: [bazel.md](bazel.md).
 | Warm observation | `dist/bazel-warm-observation.json` |
 | Affected-input probe | `dist/bazel-affected-inputs.json` |
 | CI observation rollup | `dist/bazel-cache-perf-ci-observation.json` |
-| Checked-in ≥10-pair sample (one-shot M2 evidence) | [bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json) |
+| Checked-in ≥10-pair sample (one-shot Bazel-migration evidence) | [bazel-migration-evidence/perf-sample.json](bazel-migration-evidence/perf-sample.json) |
 | Diagnostic dual-build parity (one release cycle; non-required) | `dist/cargo-bazel-parity-evidence.json` via `Bazel Diagnostics` |
 | Blacksmith Cache dashboard | https://app.blacksmith.sh/cache |
 | Authoritative Rust test log | `dist/bazel-ci-rust-tests.log` |
@@ -89,12 +89,12 @@ Confirmed against the post-#4 tree (cutover SHA above):
 | Cross-branch cache reuse only via action key + declared inputs | Bazel remote-cache semantics; documented in [bazel-migration-perf.md](bazel-migration-perf.md) |
 | No user data / sensitive fixtures uploaded as cache payloads | Test fixtures are hermetic source inputs; CI logs use `--test_output=errors` |
 
-## Explicit non-deliverables (M2)
+## Explicit non-deliverables (Bazel-migration)
 
 - **Mobile bindings** (Swift, Kotlin, UniFFI, XCFramework, JVM JAR/AAR) are
-  **abandoned for M2** — ledger row `RT-mobile` is `excluded`. Do not treat
-  product roadmap “planned UniFFI” notes as M2 Bazel migration deliverables.
-- M3 peer-extension and M4 embedded-performance epics are out of scope.
+  **abandoned for Bazel migration** — ledger row `RT-mobile` is `excluded`. Do not treat
+  product roadmap “planned UniFFI” notes as Bazel migration deliverables.
+- peer-extension and embedded-performance epics are out of scope.
 
 ## Gate close notes
 

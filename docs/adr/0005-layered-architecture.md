@@ -171,5 +171,5 @@ embedded performance.
 - [ADR 0001: Rust Core](0001-rust-core.md) — crate layout
 - [ADR 0004: Adjacency Index](0004-adjacency-index.md) — a graph-layer derived accelerator
 - [ADR 0006: Epistemic Model](0006-epistemic-model.md) — the knowledge-layer epistemic extension
-- [ADR 0012: knowledge/epistemic Domain Ownership](0012-m20-domain-ownership.md) — crate DAG,
+- [ADR 0012: knowledge/epistemic Domain Ownership](0012-knowledge-domain-ownership.md) — crate DAG,
   table ownership, schema registries, evolution, and reference validation

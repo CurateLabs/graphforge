@@ -1,6 +1,6 @@
 //! Immutable GraphForge provenance events and UUID-referenced lineage.
 //!
-//! This crate is the semantic owner of the M20 provenance capability. It owns
+//! This crate is the semantic owner of the knowledge provenance capability. It owns
 //! record validation, closed value registries, canonical bytes and identities,
 //! deterministic ordering, and authoritative Arrow schemas. It does not open
 //! project files or depend on graph execution/storage crates.
@@ -87,7 +87,7 @@ fn uuid_field(name: &str, nullable: bool) -> Field {
     Field::new(name, DataType::FixedSizeBinary(16), nullable)
 }
 
-/// Closed M20 provenance-event registry.
+/// Closed knowledge provenance-event registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
@@ -121,7 +121,7 @@ pub enum EventKind {
     RecordEvidence,
     /// An immutable algorithm-run lifecycle transition was recorded.
     RecordAlgorithmRun,
-    /// An M21 interpretation attachment was appended to a completed run.
+    /// An epistemic interpretation attachment was appended to a completed run.
     RecordBeliefProjectionAttachment,
 }
 
@@ -188,7 +188,7 @@ pub enum SubjectKind {
     ConfidenceAssessment,
     /// Algorithm-run UUID.
     AlgorithmRun,
-    /// M21 interpretation attachment UUID.
+    /// epistemic interpretation attachment UUID.
     BeliefProjectionAttachment,
 }
 

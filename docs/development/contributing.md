@@ -115,7 +115,7 @@ graphforge/
 │   ├── graphforge-knowledge/            # knowledge + epistemic record domains
 │   ├── graphforge-bindings-py/          # PyO3 Python binding
 │   ├── graphforge-bindings-node/        # napi-rs Node binding
-│   └── …                                # (Swift/Kotlin UniFFI not an M2 deliverable)
+│   └── …                                # (Swift/Kotlin UniFFI not a Bazel-migration deliverable)
 ├── packages/                    # Node packaging and agent skills
 ├── docs/                        # Markdown sources (Starlight syncs an allowlist)
 ├── docs-site/                   # Astro Starlight site
@@ -262,7 +262,7 @@ When adding features, update:
 - `docs/book/architecture/` — if the change affects the compiler pipeline, storage, or execution model
 - `docs/reference/` — if the public API changes
 
-M2 Bazel migration work follows the sub-agent contracts in
+Bazel migration work follows the sub-agent contracts in
 [bazel-migration-orchestration.md](bazel-migration-orchestration.md)
 (canonical issue [#1](https://github.com/CurateLabs/graphforge/issues/1)).
 Start with the developer guide [bazel.md](bazel.md). The frozen inventory,
@@ -270,7 +270,7 @@ baseline, and #1 close-readiness evidence map live in
 [bazel-migration-ledger.md](bazel-migration-ledger.md),
 [bazel-migration-baseline.md](bazel-migration-baseline.md), and
 [bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
-Mobile (Swift/Kotlin/UniFFI) bindings are not an M2 Bazel deliverable.
+Mobile (Swift/Kotlin/UniFFI) bindings are not a Bazel-migration deliverable.
 
 ---
 

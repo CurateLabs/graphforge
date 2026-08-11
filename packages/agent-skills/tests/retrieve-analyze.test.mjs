@@ -102,7 +102,7 @@ function project(handlers = {}) {
   return { GraphForge, path };
 }
 
-test("find and every M18 family are reachable without knowledge opens", async () => {
+test("find and every algorithm family are reachable without knowledge opens", async () => {
   const { GraphForge, path } = project();
   const find = await retrieveAnalyze({
     GraphForge,
@@ -144,7 +144,7 @@ test("find and every M18 family are reachable without knowledge opens", async ()
       },
     });
     assert.equal(result.surface, surface);
-    assert.equal(result.m18.algorithm, algorithm);
+    assert.equal(result.algorithm.algorithm, algorithm);
   }
   assert.ok(
     GraphForge.instance.calls.every(([name]) => name !== "listAssertions"),

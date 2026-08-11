@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (313)
+- Apache License 2.0 (311)
 - MIT License (72)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -5559,7 +5559,6 @@ Used by:
 - block-buffer 0.10.4
 - block-buffer 0.12.1
 - const-oid 0.10.2
-- cpufeatures 0.2.17
 - cpufeatures 0.3.0
 - crypto-common 0.1.7
 - crypto-common 0.2.2
@@ -5567,7 +5566,6 @@ Used by:
 - digest 0.11.3
 - hybrid-array 0.4.14
 - md-5 0.11.0
-- sha2 0.10.9
 - sha2 0.11.0
 
 ```
@@ -8472,7 +8470,7 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.11.0
+- napi 3.12.0
 - napi-build 2.4.0
 - napi-derive 3.6.2
 - napi-derive-backend 6.1.1

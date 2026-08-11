@@ -1,4 +1,4 @@
-"""GraphForge Bazel module (M2 / #10–#6 libs/tests/bindings/release/parity).
+"""GraphForge Bazel module (Bazel migration / #10–#6 libs/tests/bindings/release/parity).
 
 Canonical build-system contract: GitHub issue #1.
 Activates crate_universe `from_cargo` against the frozen Cargo workspace and

@@ -7,7 +7,7 @@
 //! - [`staging`] — temp-file + atomic-rename Parquet commit ([`RewriteBatch`]) (#790)
 //! - [`adjacency`] — on-disk CSR format for the derived adjacency index (#758, ADR 0005)
 //! - [`generation`] — `topology_generation` counter, the staleness signal for derived indexes (#759)
-//! - [`search_manifest`] / [`search_publication`] — shared M19 search freshness and atomic publication
+//! - [`search_manifest`] / [`search_publication`] — shared search search freshness and atomic publication
 #![forbid(unsafe_code)]
 
 mod file_lock;

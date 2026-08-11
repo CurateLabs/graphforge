@@ -1,4 +1,4 @@
-//! Validated graph-layer partition mappings for M18 algorithms.
+//! Validated graph-layer partition mappings for analyst-verb algorithms.
 //!
 //! Property storage and knowledge-layer projection happen above this boundary.
 //! Kernels receive only the immutable, normalized UUID mapping produced here.

@@ -1,4 +1,4 @@
-// Fresh-native M20 immutable assertion acceptance (#2411).
+// Fresh-native knowledge immutable assertion acceptance (#2411).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

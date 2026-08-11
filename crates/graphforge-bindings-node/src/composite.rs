@@ -37,7 +37,7 @@ pub struct CompositeTransactionInput {
     pub actor_uuid: Option<String>,
     /// Explicit graph mutations in caller order.
     pub graph_mutations: Vec<CompositeGraphMutationInput>,
-    /// Explicit M20/M21 participants; omitted families are empty.
+    /// Explicit knowledge/epistemic participants; omitted families are empty.
     pub knowledge: Option<CompositeKnowledgeInput>,
 }
 

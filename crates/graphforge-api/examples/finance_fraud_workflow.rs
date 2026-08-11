@@ -165,7 +165,7 @@ fn rank_options() -> RankOptions {
 
 fn fingerprint(batch: &arrow::record_batch::RecordBatch) -> String {
     let value = format!("{:?}|{batch:?}", batch.schema());
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    hex_sha256(value.as_bytes())
 }
 
 fn uuid_set(batch: &arrow::record_batch::RecordBatch, column: &str) -> BTreeSet<Uuid> {
@@ -182,6 +182,14 @@ fn uuid_set(batch: &arrow::record_batch::RecordBatch, column: &str) -> BTreeSet<
 }
 
 #[allow(clippy::too_many_lines, reason = "one auditable release workflow")]
+
+fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+    Sha256::digest(bytes.as_ref())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn main() {
     let project = TempDir::new().unwrap();
     let advisory_path = fixture("ontologies/advisory-v1.yaml");

@@ -48,7 +48,7 @@ pub enum CanonicalDomain {
     ProvenanceEvent,
     /// Lineage record/table.
     Lineage,
-    /// Neutral M18 invocation descriptor.
+    /// Neutral algorithm invocation descriptor.
     InvocationDescriptor,
     /// Resolved graph projection.
     GraphProjection,

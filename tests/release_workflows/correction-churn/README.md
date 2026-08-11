@@ -3,7 +3,7 @@
 This deterministic synthetic workflow proves that repeated curation mistakes are
 corrected through public compensating operations rather than hidden undo or
 mutable audit history. It exercises a graph correction, an ontology/data
-validation correction, and append-only M20/M21 corrections across separate
+validation correction, and append-only knowledge/epistemic corrections across separate
 committed generations. The prior graph view is pinned by a public checkpoint;
 assertion supersession, reasoning amendment, and hypothesis-member removal stay
 inspectable after reopen.

@@ -22,8 +22,8 @@
       ]
     },
     {
-      "id": "m18-closed-algorithm-registry",
-      "inventory_selectors": ["m18-registry"],
+      "id": "algorithm-closed-algorithm-registry",
+      "inventory_selectors": ["algorithm-registry"],
       "dataset_classes": ["XS", "S", "M", "L", "XL"],
       "operations": ["direct-dispatch"],
       "assertions": [
@@ -35,8 +35,8 @@
       ]
     },
     {
-      "id": "m19-search-index-embedding-provider",
-      "inventory_selectors": ["m19-contracts"],
+      "id": "search-search-index-embedding-provider",
+      "inventory_selectors": ["search-contracts"],
       "dataset_classes": ["XS", "S", "M", "L", "XL"],
       "operations": ["index", "text-find"],
       "assertions": [

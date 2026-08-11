@@ -293,7 +293,7 @@ The shipped typed edge schema contains neither engine-owned `confidence` nor
 `provenance_uuid`. A domain property named `confidence` remains an ordinary
 graph property with no special execution semantics. Provenance and knowledge
 records use the independent `graphforge-provenance`/`graphforge-knowledge` ledgers owned by
-[ADR 0012](../../adr/0012-m20-domain-ownership.md); no historical project is
+[ADR 0012](../../adr/0012-knowledge-domain-ownership.md); no historical project is
 imported or converted.
 
 ---
@@ -328,7 +328,7 @@ knowledge-independent.
 
 Schema registries, version compatibility, same-transaction reference
 validation, and forbidden dependency directions are normative in
-[ADR 0012](../../adr/0012-m20-domain-ownership.md).
+[ADR 0012](../../adr/0012-knowledge-domain-ownership.md).
 
 ---
 

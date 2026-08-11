@@ -1,4 +1,4 @@
-//! Append-only M21 hypothesis groups, membership, and explicit selection.
+//! Append-only epistemic hypothesis groups, membership, and explicit selection.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};

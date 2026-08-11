@@ -1,4 +1,4 @@
-//! Immutable M21 reasoning records and explicit amendment chains.
+//! Immutable epistemic reasoning records and explicit amendment chains.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -19,7 +19,7 @@ use crate::{KnowledgeError, MAX_KNOWLEDGE_ROWS, SchemaRegistryEntry};
 
 /// Immutable reasoning record contract.
 pub const REASONING_CONTRACT_VERSION: u32 = 1;
-/// M21 epistemic capability contract.
+/// epistemic capability contract.
 pub const EPISTEMIC_CAPABILITY_VERSION: u32 = 1;
 /// Closed reasoning-kind registry.
 pub const REASONING_KIND_REGISTRY_VERSION: u32 = 1;
@@ -132,7 +132,7 @@ impl ReasoningContentFormat {
 pub struct ReasoningRecord {
     /// Caller-supplied UUIDv7 identity/idempotency key.
     pub reasoning_uuid: Uuid,
-    /// Existing immutable M20 assertion.
+    /// Existing immutable knowledge assertion.
     pub assertion_uuid: Uuid,
     /// Closed reasoning purpose.
     pub kind: ReasoningKind,

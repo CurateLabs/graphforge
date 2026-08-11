@@ -1,4 +1,4 @@
-//! Append-only M21 assertion-status events.
+//! Append-only epistemic assertion-status events.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
@@ -105,13 +105,13 @@ impl AssertionStatus {
 pub struct AssertionStatusEvent {
     /// Caller-supplied UUIDv7 identity/idempotency key.
     pub status_event_uuid: Uuid,
-    /// Existing immutable M20 assertion.
+    /// Existing immutable knowledge assertion.
     pub assertion_uuid: Uuid,
     /// Closed status value.
     pub status: AssertionStatus,
-    /// Optional existing immutable M20 confidence assessment.
+    /// Optional existing immutable knowledge confidence assessment.
     pub confidence_uuid: Option<Uuid>,
-    /// Optional existing immutable M21 reasoning record.
+    /// Optional existing immutable epistemic reasoning record.
     pub reasoning_uuid: Option<Uuid>,
     /// Existing producing provenance event.
     pub provenance_uuid: Uuid,
