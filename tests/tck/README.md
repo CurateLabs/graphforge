@@ -12,7 +12,7 @@ Vendored snapshot of the openCypher Technology Compatibility Kit (TCK) Gherkin f
 
 Every feature is tagged **`@skip-rust @skip-node`** at the feature level so the Rust
 (`crates/graphforge-api/tests/bdd/`) and Node (`tests/features/node/`) BDD suites treat all TCK scenarios as
-skipped until conformance tiers land (M17: #597–#601, #608). Tags are removed tier-by-tier as
+skipped until conformance tiers land (TCK conformance: #597–#601, #608). Tags are removed tier-by-tier as
 scenarios start passing. Files are otherwise upstream, except **line endings** normalized to LF
 (9 upstream files shipped as CRLF).
 

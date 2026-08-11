@@ -114,6 +114,6 @@ override.
 ### Compatibility and follow-up
 
 The incomplete v0.5.0 npm package and other partial v0.5.0 artifacts remain
-historical registry facts. M1 targets a coordinated v0.5.1 release. Issue #288
+historical registry facts. release-certification targets a coordinated v0.5.1 release. Issue #288
 owns the manifest, observation, recovery, and orchestration changes needed to
 apply this decision without replaying already verified work.

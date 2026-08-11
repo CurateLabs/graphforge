@@ -207,7 +207,7 @@ impl PartialEq for CancellationToken {
 
 impl Eq for CancellationToken {}
 
-/// Shared exact page request shape for M20/M21 list methods.
+/// Shared exact page request shape for Bazel migration0/epistemic list methods.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PageRequest {
     /// Requested row bound in `1..=10_000`.

@@ -28,15 +28,15 @@ flowchart LR
 | --- | --- |
 | [`../book/architecture/`](../book/architecture/overview.md) | Deep architecture notes, pipeline, storage, embedding contracts |
 | [`../development/`](../development/contributing.md) | Contributor workflow, testing detail, release process |
-| [`../development/bazel.md`](../development/bazel.md) | M2 / #1 Bazel developer guide (install, extend, cache, CI/release) |
-| [`../development/bazel-migration-ac-evidence.md`](../development/bazel-migration-ac-evidence.md) | M2 / #1 close-readiness AC → child evidence map |
-| [`../development/bazel-migration-orchestration.md`](../development/bazel-migration-orchestration.md) | M2 / #1 Bazel migration sub-agent roles, contracts, and handoffs |
-| [`../development/bazel-migration-ledger.md`](../development/bazel-migration-ledger.md) | M2 / #1 Cargo target + CI command migration ledger (freeze) |
-| [`../development/bazel-migration-baseline.md`](../development/bazel-migration-baseline.md) | M2 / #1 accepted Blacksmith/Cargo CI performance baseline |
-| [`../development/bazel-bootstrap.md`](../development/bazel-bootstrap.md) | M2 / #11 Bazelisk/Bzlmod bootstrap and Cargo drift check |
-| [`../development/bazel-migration-parity.md`](../development/bazel-migration-parity.md) | M2 / #6 same-SHA Cargo/Bazel parity |
-| [`../development/bazel-migration-perf.md`](../development/bazel-migration-perf.md) | M2 / #5 Blacksmith cache + performance gates |
-| [`../development/bazel-migration-cutover.md`](../development/bazel-migration-cutover.md) | M2 / #4 CI Gate cutover + Cargo rollback |
+| [`../development/bazel.md`](../development/bazel.md) | Bazel migration / #1 Bazel developer guide (install, extend, cache, CI/release) |
+| [`../development/bazel-migration-ac-evidence.md`](../development/bazel-migration-ac-evidence.md) | Bazel migration / #1 close-readiness AC → child evidence map |
+| [`../development/bazel-migration-orchestration.md`](../development/bazel-migration-orchestration.md) | Bazel migration / #1 Bazel migration sub-agent roles, contracts, and handoffs |
+| [`../development/bazel-migration-ledger.md`](../development/bazel-migration-ledger.md) | Bazel migration / #1 Cargo target + CI command migration ledger (freeze) |
+| [`../development/bazel-migration-baseline.md`](../development/bazel-migration-baseline.md) | Bazel migration / #1 accepted Blacksmith/Cargo CI performance baseline |
+| [`../development/bazel-bootstrap.md`](../development/bazel-bootstrap.md) | Bazel migration / #11 Bazelisk/Bzlmod bootstrap and Cargo drift check |
+| [`../development/bazel-migration-parity.md`](../development/bazel-migration-parity.md) | Bazel-migration / #6 same-SHA Cargo/Bazel parity |
+| [`../development/bazel-migration-perf.md`](../development/bazel-migration-perf.md) | Bazel-migration / #5 Blacksmith cache + performance gates |
+| [`../development/bazel-migration-cutover.md`](../development/bazel-migration-cutover.md) | Bazel-migration / #4 CI Gate cutover + Cargo rollback |
 | [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) | Frozen public API / fingerprint JSON contracts |
 | [`../reference/`](../reference/api.md) | Compatibility, TCK, scale limits, column naming |
 | Root `AGENTS.md` | Agent workflow and validation gates |

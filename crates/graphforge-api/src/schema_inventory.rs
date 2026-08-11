@@ -1,4 +1,4 @@
-//! Generated cross-domain M20 schema inventory.
+//! Generated cross-domain knowledge schema inventory.
 
 use std::collections::BTreeMap;
 
@@ -6,7 +6,7 @@ use arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const INVENTORY_FORMAT: &str = "graphforge-m20-schema-inventory/1";
+const INVENTORY_FORMAT: &str = "graphforge-knowledge-schema-inventory/1";
 
 #[derive(Debug)]
 struct InventoryEntry {
@@ -82,7 +82,7 @@ fn inventory_json() -> Vec<u8> {
     bytes
 }
 
-fn m21_inventory_json() -> Vec<u8> {
+fn epistemic_inventory_json() -> Vec<u8> {
     let mut entries = graphforge_knowledge::schema_registry()
         .into_iter()
         .filter(|entry| matches!(entry.capability_id, "epistemic" | "valid_time"))
@@ -103,8 +103,8 @@ fn m21_inventory_json() -> Vec<u8> {
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| (entry.record_family, entry.record_version));
     let document = json!({
-        "inventory_format": "graphforge-m21-schema-inventory/1",
-        "m20_baseline": "docs/reference/m20-schema-inventory.sha256",
+        "inventory_format": "graphforge-epistemic-schema-inventory/1",
+        "knowledge_baseline": "docs/reference/knowledge-schema-inventory.sha256",
         "records": entries.iter().map(entry_json).collect::<Vec<_>>(),
     });
     let mut bytes = serde_json::to_vec_pretty(&document).expect("inventory is JSON-serializable");
@@ -225,7 +225,7 @@ fn data_type_name(data_type: &DataType) -> String {
             let timezone = timezone.as_deref().unwrap_or("");
             format!("Timestamp({unit},{timezone})")
         }
-        other => panic!("unclassified M20 inventory data type: {other:?}"),
+        other => panic!("unclassified knowledge inventory data type: {other:?}"),
     }
 }
 
@@ -248,7 +248,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{inventory_json, inventory_sha256, m21_inventory_json};
+    use super::{epistemic_inventory_json, inventory_json, inventory_sha256};
 
     fn repository_path(relative: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -257,60 +257,60 @@ mod tests {
     }
 
     #[test]
-    fn m20_schema_inventory_matches_checked_contract() {
+    fn knowledge_schema_inventory_matches_checked_contract() {
         let inventory = inventory_json();
         let digest = format!(
-            "{}  m20-schema-inventory.json\n",
+            "{}  knowledge-schema-inventory.json\n",
             inventory_sha256(&inventory)
         );
-        let inventory_path = repository_path("docs/reference/m20-schema-inventory.json");
-        let digest_path = repository_path("docs/reference/m20-schema-inventory.sha256");
+        let inventory_path = repository_path("docs/reference/knowledge-schema-inventory.json");
+        let digest_path = repository_path("docs/reference/knowledge-schema-inventory.sha256");
 
-        if std::env::var_os("UPDATE_M20_SCHEMA_INVENTORY").is_some() {
-            fs::write(&inventory_path, &inventory).expect("write generated M20 inventory");
-            fs::write(&digest_path, &digest).expect("write generated M20 inventory digest");
+        if std::env::var_os("UPDATE_KNOWLEDGE_SCHEMA_INVENTORY").is_some() {
+            fs::write(&inventory_path, &inventory).expect("write generated knowledge inventory");
+            fs::write(&digest_path, &digest).expect("write generated knowledge inventory digest");
         }
 
         assert_eq!(
-            fs::read(&inventory_path).expect("checked M20 inventory"),
+            fs::read(&inventory_path).expect("checked knowledge inventory"),
             inventory,
-            "M20 schema registry drifted; review it, then run \
-             UPDATE_M20_SCHEMA_INVENTORY=1 cargo test -p graphforge-api \
-             m20_schema_inventory_matches_checked_contract"
+            "knowledge schema registry drifted; review it, then run \
+             UPDATE_KNOWLEDGE_SCHEMA_INVENTORY=1 cargo test -p graphforge-api \
+             knowledge_schema_inventory_matches_checked_contract"
         );
         assert_eq!(
-            fs::read_to_string(&digest_path).expect("checked M20 inventory digest"),
+            fs::read_to_string(&digest_path).expect("checked knowledge inventory digest"),
             digest,
-            "M20 schema inventory digest is stale"
+            "knowledge schema inventory digest is stale"
         );
     }
 
     #[test]
-    fn m21_schema_inventory_matches_checked_contract() {
-        let inventory = m21_inventory_json();
+    fn epistemic_schema_inventory_matches_checked_contract() {
+        let inventory = epistemic_inventory_json();
         let digest = format!(
-            "{}  m21-schema-inventory.json\n",
+            "{}  epistemic-schema-inventory.json\n",
             inventory_sha256(&inventory)
         );
-        let inventory_path = repository_path("docs/reference/m21-schema-inventory.json");
-        let digest_path = repository_path("docs/reference/m21-schema-inventory.sha256");
+        let inventory_path = repository_path("docs/reference/epistemic-schema-inventory.json");
+        let digest_path = repository_path("docs/reference/epistemic-schema-inventory.sha256");
 
-        if std::env::var_os("UPDATE_M21_SCHEMA_INVENTORY").is_some() {
-            fs::write(&inventory_path, &inventory).expect("write generated M21 inventory");
-            fs::write(&digest_path, &digest).expect("write generated M21 inventory digest");
+        if std::env::var_os("UPDATE_EPISTEMIC_SCHEMA_INVENTORY").is_some() {
+            fs::write(&inventory_path, &inventory).expect("write generated epistemic inventory");
+            fs::write(&digest_path, &digest).expect("write generated epistemic inventory digest");
         }
 
         assert_eq!(
-            fs::read(&inventory_path).expect("checked M21 inventory"),
+            fs::read(&inventory_path).expect("checked epistemic inventory"),
             inventory,
-            "M21 schema registry drifted; review it, then run \
-             UPDATE_M21_SCHEMA_INVENTORY=1 cargo test -p graphforge-api \
-             m21_schema_inventory_matches_checked_contract"
+            "epistemic schema registry drifted; review it, then run \
+             UPDATE_EPISTEMIC_SCHEMA_INVENTORY=1 cargo test -p graphforge-api \
+             epistemic_schema_inventory_matches_checked_contract"
         );
         assert_eq!(
-            fs::read_to_string(&digest_path).expect("checked M21 inventory digest"),
+            fs::read_to_string(&digest_path).expect("checked epistemic inventory digest"),
             digest,
-            "M21 schema inventory digest is stale"
+            "epistemic schema inventory digest is stale"
         );
     }
 }

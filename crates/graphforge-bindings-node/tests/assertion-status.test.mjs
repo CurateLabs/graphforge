@@ -1,4 +1,4 @@
-// Fresh-native M21 explicit assertion-status acceptance (#777).
+// Fresh-native epistemic explicit assertion-status acceptance (#777).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

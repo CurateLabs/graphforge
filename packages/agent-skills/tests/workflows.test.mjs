@@ -229,7 +229,7 @@ test("bootstrap reports structured ontology conflicts without adding a marker", 
   assert.equal(projects.get(path).nodes.length, 0);
 });
 
-function buildInput({ m21 = false } = {}) {
+function buildInput({ epistemic = false } = {}) {
   return {
     actor_uuid: uuids[1],
     assertion: {
@@ -278,7 +278,7 @@ function buildInput({ m21 = false } = {}) {
       },
       { key: "grace", label: "Person", properties: { name: "Grace" } },
     ],
-    reasoning: m21
+    reasoning: epistemic
       ? {
           content: "explicit evidence interpretation",
           content_format: "text/plain",
@@ -287,7 +287,7 @@ function buildInput({ m21 = false } = {}) {
           reasoning_uuid: uuids[11],
         }
       : undefined,
-    status: m21
+    status: epistemic
       ? {
           operation_uuid: uuids[12],
           status: "hypothesis",
@@ -297,7 +297,7 @@ function buildInput({ m21 = false } = {}) {
   };
 }
 
-test("build knowledge preserves domain confidence and leaves M20 statusless", async () => {
+test("build knowledge preserves domain confidence and leaves knowledge statusless", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "gf-agent-build-")));
   const path = join(root, "project");
   await bootstrapProject({ GraphForge, path, tableFromIPC });
@@ -362,7 +362,7 @@ test("build knowledge preserves domain confidence and leaves M20 statusless", as
   assert.equal(confidence.operationUuid, input.confidence.operation_uuid);
 });
 
-test("build knowledge rejects missing baseline M20 records", async () => {
+test("build knowledge rejects missing baseline knowledge records", async () => {
   for (const mutate of [
     (input) => {
       input.evidence = [];
@@ -405,13 +405,13 @@ test("build knowledge rejects duplicate node keys before opening the project", a
   );
 });
 
-test("build knowledge appends required confidence and only explicit M21 records", async () => {
+test("build knowledge appends required confidence and only explicit epistemic records", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "gf-agent-build-")));
   const path = join(root, "project");
   await bootstrapProject({ GraphForge, path, tableFromIPC });
   const result = await buildKnowledge({
     GraphForge,
-    input: buildInput({ m21: true }),
+    input: buildInput({ epistemic: true }),
     path,
     tableFromIPC,
   });
@@ -434,7 +434,7 @@ test("build knowledge forwards conservative-min confidence inputs", async () => 
   const root = await realpath(await mkdtemp(join(tmpdir(), "gf-agent-build-")));
   const path = join(root, "project");
   await bootstrapProject({ GraphForge, path, tableFromIPC });
-  const input = buildInput({ m21: true });
+  const input = buildInput({ epistemic: true });
   input.confidence = {
     confidence_uuid: uuids[7],
     input_confidence_uuids: [uuids[14]],

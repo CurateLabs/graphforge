@@ -9,7 +9,7 @@
 
 This roadmap describes **product surfaces and versions**, not internal delivery
 milestones. Where a GitHub milestone name appears elsewhere in operator docs
-(for example **M1** for the coordinated v0.5.x publication), it is paired with
+(for example **release-certification** for the coordinated v0.5.x publication), it is paired with
 plain-language purpose there; this page stays version- and outcome-oriented.
 
 ---

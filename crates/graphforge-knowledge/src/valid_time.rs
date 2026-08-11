@@ -1,4 +1,4 @@
-//! Optional append-only M21 assertion valid-time events.
+//! Optional append-only epistemic assertion valid-time events.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};

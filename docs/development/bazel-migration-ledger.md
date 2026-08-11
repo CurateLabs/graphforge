@@ -1,6 +1,6 @@
 # Bazel migration ledger (freeze)
 
-Checked-in inventory for M2 issue [#12](https://github.com/CurateLabs/graphforge/issues/12) / canonical [#1](https://github.com/CurateLabs/graphforge/issues/1) step 1.
+Checked-in inventory for Bazel-migration issue [#12](https://github.com/CurateLabs/graphforge/issues/12) / canonical [#1](https://github.com/CurateLabs/graphforge/issues/1) step 1.
 
 Orchestration contract: [bazel-migration-orchestration.md](bazel-migration-orchestration.md).
 Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md).
@@ -64,7 +64,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `knowledge_evolution_workflow` | `example` | `crates/graphforge-api/examples/knowledge_evolution_workflow.rs` | `//crates/graphforge-api:knowledge_evolution_workflow` | `mapped` | #6 |
 | `graphforge-api` | `ontology_emergence_strict_handoff` | `example` | `crates/graphforge-api/examples/ontology_emergence_strict_handoff.rs` | `//crates/graphforge-api:ontology_emergence_strict_handoff` | `mapped` | #6 |
 | `graphforge-api` | `probate_genealogy_workflow` | `example` | `crates/graphforge-api/examples/probate_genealogy_workflow.rs` | `//crates/graphforge-api:probate_genealogy_workflow` | `mapped` | #6 |
-| `graphforge-api` | `release_load_probe` | `example` | `crates/graphforge-api/examples/release_load_probe.rs` | `//crates/graphforge-api:release_load_probe` | `mapped` | #6; M1 release certification probe |
+| `graphforge-api` | `release_load_probe` | `example` | `crates/graphforge-api/examples/release_load_probe.rs` | `//crates/graphforge-api:release_load_probe` | `mapped` | #6; release certification probe |
 | `graphforge-api` | `sna_intelligence_workflow` | `example` | `crates/graphforge-api/examples/sna_intelligence_workflow.rs` | `//crates/graphforge-api:sna_intelligence_workflow` | `mapped` | #6 |
 | `graphforge-api` | `strict_add_node_fixture` | `example` | `crates/graphforge-api/examples/strict_add_node_fixture.rs` | `//crates/graphforge-api:strict_add_node_fixture` | `mapped` | #6 |
 | `graphforge-api` | `bdd` | `integration-test` | `crates/graphforge-api/tests/bdd/main.rs` | `//crates/graphforge-api:bdd` | `mapped` | #8 |
@@ -82,9 +82,9 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `inference_provenance` | `integration-test` | `crates/graphforge-api/tests/inference_provenance.rs` | `//crates/graphforge-api:inference_provenance` | `mapped` | #8 |
 | `graphforge-api` | `knowledge_isolation` | `integration-test` | `crates/graphforge-api/tests/knowledge_isolation.rs` | `//crates/graphforge-api:knowledge_isolation` | `mapped` | #8 |
 | `graphforge-api` | `list_semantics` | `integration-test` | `crates/graphforge-api/tests/list_semantics.rs` | `//crates/graphforge-api:list_semantics` | `mapped` | #8 |
-| `graphforge-api` | `m22_m18_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m18_public_surface.rs` | `//crates/graphforge-api:m22_m18_public_surface` | `mapped` | #8 |
-| `graphforge-api` | `m22_m19_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_m19_public_surface.rs` | `//crates/graphforge-api:m22_m19_public_surface` | `mapped` | #8 |
-| `graphforge-api` | `m22_provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/m22_provider_public_surface.rs` | `//crates/graphforge-api:m22_provider_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `algorithm_public_surface` | `integration-test` | `crates/graphforge-api/tests/algorithm_public_surface.rs` | `//crates/graphforge-api:algorithm_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `search_public_surface` | `integration-test` | `crates/graphforge-api/tests/search_public_surface.rs` | `//crates/graphforge-api:search_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/provider_public_surface.rs` | `//crates/graphforge-api:provider_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m4_entry_baseline` | `integration-test` | `crates/graphforge-api/tests/m4_entry_baseline.rs` | `//crates/graphforge-api:m4_entry_baseline` | `mapped` | #8 |
 | `graphforge-api` | `file_backed_graph_generation` | `integration-test` | `crates/graphforge-api/tests/file_backed_graph_generation.rs` | `//crates/graphforge-api:file_backed_graph_generation` | `mapped` | #338 |
 | `graphforge-api` | `max_bipartite_matching` | `integration-test` | `crates/graphforge-api/tests/max_bipartite_matching.rs` | `//crates/graphforge-api:max_bipartite_matching` | `mapped` | #8 |
@@ -163,7 +163,7 @@ ledger check fails closed on `stub` or missing justification.
 | RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Mapped via `cargo_build_script` + `//:project_skills_bundle`; bin/tests mapped | #8 complete | closed |
 | RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | Mapped as `rust_shared_library` cdylibs + packaging smoke targets | #7 | mapped |
 | RT-examples | `graphforge-api` examples (11) | All 11 example binaries mapped under `//crates/graphforge-api:*` | #6 | closed |
-| RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for M2** — not a deliverable; do not inventory as required targets | excluded | excluded |
+| RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for Bazel migration** — not a deliverable; do not inventory as required targets | excluded | excluded |
 
 ## Cross-platform release platforms (#6)
 
@@ -186,7 +186,7 @@ After [#4](https://github.com/CurateLabs/graphforge/issues/4), Test Suite
 (`.github/workflows/test.yml`) no longer mounts PR job-isolated Cargo sticky
 disks. Retained sticky workflows (packaging / retained tools):
 - `.github/workflows/binding-release-candidate.yml`
-- `.github/workflows/m1-release-certification.yml`
+- `.github/workflows/release-certification.yml`
 - `.github/workflows/fuzz.yml`
 
 Retired PR sticky key pattern (do not reintroduce without rollback docs):
@@ -200,21 +200,21 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `.github/workflows/checkpoint-recovery-gate.yml` | 6 | Checkpoint recovery gate |
 | `.github/workflows/concurrency-stress-gate.yml` | 1 | Concurrency stress |
 | `.github/workflows/fuzz.yml` | 6 | cargo-fuzz (retained-tool candidate) |
-| `.github/workflows/m1-release-certification.yml` | 4 | Release load certification |
+| `.github/workflows/release-certification.yml` | 4 | Release load certification |
 | `.github/workflows/non-cypher-surface-gate.yml` | 4 | Non-Cypher surface gate |
 | `.github/workflows/test.yml` | 6 | Required CI Gate (Bazel authority + Cargo lint/bindings; #4 cutover) |
 | `.github/workflows/visualization-limits-stress.yml` | 1 | Visualization stress |
 | `Makefile` | 17 | Developer/CI mirrors |
 | `scripts/ci/clean-env-verify.py` | 1 | Build/test/package command site |
 | `scripts/ci/crate-publish-plan.py` | 4 | Build/test/package command site |
-| `scripts/ci/m1-release-certification.py` | 2 | Build/test/package command site |
+| `scripts/ci/release-certification.py` | 2 | Build/test/package command site |
 | `scripts/ci/test-binding-release-candidate.py` | 19 | Build/test/package command site |
 | `scripts/ci/test-checkpoint-recovery-gate.py` | 1 | Build/test/package command site |
 | `scripts/ci/test-ci-storage-policy.py` | 3 | Build/test/package command site |
 | `scripts/ci/test-crate-publish-plan.py` | 2 | Build/test/package command site |
-| `scripts/ci/test-m1-release-certification.py` | 10 | Build/test/package command site |
-| `scripts/ci/test-m20-contract-gate.py` | 1 | Build/test/package command site |
-| `scripts/ci/test-m21-contract-gate.py` | 1 | Build/test/package command site |
+| `scripts/ci/test-release-certification.py` | 10 | Build/test/package command site |
+| `scripts/ci/test-knowledge-contract-gate.py` | 1 | Build/test/package command site |
+| `scripts/ci/test-epistemic-contract-gate.py` | 1 | Build/test/package command site |
 | `scripts/ci/test-pre-push-validation.py` | 1 | Build/test/package command site |
 | `scripts/ci/test-publish-track.py` | 3 | Build/test/package command site |
 | `scripts/ci/test-release-publish-preflight.py` | 1 | Build/test/package command site |
@@ -232,7 +232,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `.github/workflows/non-cypher-surface-gate.yml` | 41 | `cargo test -p graphforge-api --lib --no-fail-fast` |
 | `.github/workflows/non-cypher-surface-gate.yml` | 42 | `cargo test -p graphforge-api \` |
 | `.github/workflows/non-cypher-surface-gate.yml` | 135 | `"cargo test -p graphforge-api --lib --no-fail-fast",` |
-| `.github/workflows/non-cypher-surface-gate.yml` | 136 | `"cargo test -p graphforge-api --test knowledge_isolation --test public_lifecycle_conformance --test public_facade_remaining_conformance --test m22_m18_public_su` |
+| `.github/workflows/non-cypher-surface-gate.yml` | 136 | `cargo test -p graphforge-api --test knowledge_isolation --test public_lifecycle_conformance --test public_facade_remaining_conformance --test algorithm_public_surface --test search_public_surface --test provider_public_surface --test provider_session --no-fail-fast` |
 | `.github/workflows/binding-release-candidate.yml` | 93 | `uses: PyO3/maturin-action@v1` |
 | `.github/workflows/binding-release-candidate.yml` | 102 | `- name: Reclaim sticky-disk ownership after maturin` |
 | `.github/workflows/binding-release-candidate.yml` | 324 | `pnpm --filter @curatelabs/graphforge exec napi build --platform --release` |
@@ -250,10 +250,10 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `.github/workflows/test.yml` | 529 | `uvx maturin build` |
 | `.github/workflows/test.yml` | 682 | `run: pnpm --filter @curatelabs/graphforge exec napi build --platform` |
 | `.github/workflows/test.yml` | 851 | `cargo test -p graphforge-storage project_generation::tests:: --lib` |
-| `.github/workflows/m1-release-certification.yml` | 137 | `uses: PyO3/maturin-action@v1` |
-| `.github/workflows/m1-release-certification.yml` | 145 | `- name: Reclaim sticky-disk ownership after maturin` |
-| `.github/workflows/m1-release-certification.yml` | 166 | `cargo build --release -p graphforge-api --example release_load_probe` |
-| `.github/workflows/m1-release-certification.yml` | 171 | `pnpm --filter @curatelabs/graphforge exec napi build --platform --release \` |
+| `.github/workflows/release-certification.yml` | 137 | `uses: PyO3/maturin-action@v1` |
+| `.github/workflows/release-certification.yml` | 145 | `- name: Reclaim sticky-disk ownership after maturin` |
+| `.github/workflows/release-certification.yml` | 166 | `cargo build --release -p graphforge-api --example release_load_probe` |
+| `.github/workflows/release-certification.yml` | 171 | `pnpm --filter @curatelabs/graphforge exec napi build --platform --release \` |
 | `.github/workflows/visualization-limits-stress.yml` | 59 | `uvx maturin build \` |
 | `.github/workflows/fuzz.yml` | 60 | `cargo fmt --check` |
 | `.github/workflows/fuzz.yml` | 61 | `cargo clippy --all-targets -- -D warnings` |
@@ -284,23 +284,23 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `scripts/publish_dry_run.py` | 206 | `"maturin",` |
 | `scripts/publish_dry_run.py` | 227 | `help="When surface=all, skip heavy cargo publish --dry-run",` |
 | `scripts/ci/test-checkpoint-recovery-gate.py` | 63 | `skipped["command_groups"]["rust-storage"] = "cargo test -- --ignored"` |
-| `scripts/ci/m1-release-certification.py` | 176 | `"cargo test -p graphforge-api --lib --no-fail-fast",` |
-| `scripts/ci/m1-release-certification.py` | 177 | `"cargo test -p graphforge-api --test knowledge_isolation "` |
+| `scripts/ci/release-certification.py` | 176 | `"cargo test -p graphforge-api --lib --no-fail-fast",` |
+| `scripts/ci/release-certification.py` | 177 | `"cargo test -p graphforge-api --test knowledge_isolation "` |
 | `scripts/ci/test-crate-publish-plan.py` | 81 | `assert commands[0].startswith("cargo publish -p graphforge-core ")` |
 | `scripts/ci/test-crate-publish-plan.py` | 82 | `assert commands[-1].startswith("cargo publish -p graphforge-cli ")` |
-| `scripts/ci/test-m1-release-certification.py` | 112 | `self.assertNotIn("cargo build", validation_job)` |
-| `scripts/ci/test-m1-release-certification.py` | 113 | `self.assertNotIn("maturin-action", validation_job)` |
-| `scripts/ci/test-m1-release-certification.py` | 129 | `self.assertIn("Reclaim sticky-disk ownership after maturin", load_job)` |
-| `scripts/ci/test-m1-release-certification.py` | 138 | `reclaim_step = load_job.index("- name: Reclaim sticky-disk ownership after maturin")` |
-| `scripts/ci/test-m1-release-certification.py` | 147 | `self.assertNotIn("cargo build", load_job[wrapper_step:artifact_step])` |
-| `scripts/ci/test-m1-release-certification.py` | 151 | `rust_build = artifact_build.index("cargo build")` |
-| `scripts/ci/test-m1-release-certification.py` | 152 | `node_build = artifact_build.index("napi build")` |
-| `scripts/ci/test-m1-release-certification.py` | 219 | `"cargo test -p graphforge-api --lib --no-fail-fast",` |
-| `scripts/ci/test-m1-release-certification.py` | 220 | `"cargo test -p graphforge-api --test knowledge_isolation --test "` |
-| `scripts/ci/test-m1-release-certification.py` | 320 | `bad_rust_commands["commands"][0] = "cargo test --workspace"` |
+| `scripts/ci/test-release-certification.py` | 112 | `self.assertNotIn("cargo build", validation_job)` |
+| `scripts/ci/test-release-certification.py` | 113 | `self.assertNotIn("maturin-action", validation_job)` |
+| `scripts/ci/test-release-certification.py` | 129 | `self.assertIn("Reclaim sticky-disk ownership after maturin", load_job)` |
+| `scripts/ci/test-release-certification.py` | 138 | `reclaim_step = load_job.index("- name: Reclaim sticky-disk ownership after maturin")` |
+| `scripts/ci/test-release-certification.py` | 147 | `self.assertNotIn("cargo build", load_job[wrapper_step:artifact_step])` |
+| `scripts/ci/test-release-certification.py` | 151 | `rust_build = artifact_build.index("cargo build")` |
+| `scripts/ci/test-release-certification.py` | 152 | `node_build = artifact_build.index("napi build")` |
+| `scripts/ci/test-release-certification.py` | 219 | `"cargo test -p graphforge-api --lib --no-fail-fast",` |
+| `scripts/ci/test-release-certification.py` | 220 | `"cargo test -p graphforge-api --test knowledge_isolation --test "` |
+| `scripts/ci/test-release-certification.py` | 320 | `bad_rust_commands["commands"][0] = "cargo test --workspace"` |
 | `scripts/ci/test-pre-push-validation.py` | 324 | `self.assertFalse(any(command[0] == "uv" and "maturin" in command for command in commands))` |
 | `scripts/ci/clean-env-verify.py` | 540 | `result.commands.append("cargo check")` |
-| `scripts/ci/test-m21-contract-gate.py` | 60 | `forbidden["command_groups"]["rust"][0] = "cargo test -- --ignored"` |
+| `scripts/ci/test-epistemic-contract-gate.py` | 60 | `forbidden["command_groups"]["rust"][0] = "cargo test -- --ignored"` |
 | `scripts/ci/test-ci-storage-policy.py` | 14 | `cache without GitHub-backed maturin sccache).` |
 | `scripts/ci/test-ci-storage-policy.py` | 373 | `for step in action_steps(text, "PyO3/maturin-action@"):` |
 | `scripts/ci/test-ci-storage-policy.py` | 374 | `assert field(step, "uses") == "PyO3/maturin-action@v1", "unapproved Maturin action"` |
@@ -312,7 +312,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `scripts/ci/test-publish-track.py` | 81 | `"cargo publish",` |
 | `scripts/ci/test-publish-track.py` | 92 | `assert "PyO3/maturin-action" not in publish` |
 | `scripts/ci/test-publish-track.py` | 93 | `assert "napi build" not in publish` |
-| `scripts/ci/test-m20-contract-gate.py` | 51 | `forbidden_command["command_groups"]["rust"][0] = "cargo test -- --ignored"` |
+| `scripts/ci/test-knowledge-contract-gate.py` | 51 | `forbidden_command["command_groups"]["rust"][0] = "cargo test -- --ignored"` |
 | `scripts/ci/test-binding-release-candidate.py` | 27 | `ARTIFACT_COMMAND = "pnpm exec napi artifacts --output-dir artifacts --npm-dir npm"` |
 | `scripts/ci/test-binding-release-candidate.py` | 142 | `_, maturin_found, post_maturin = python_job.partition("uses: PyO3/maturin-action@v1")` |
 | `scripts/ci/test-binding-release-candidate.py` | 143 | `assert maturin_found, "missing maturin build marker"` |
@@ -370,7 +370,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 2. New Cargo targets require a new map/ledger row; unmapped rows fail
    `scripts/ci/bazel-migration-ledger-check.py`.
 3. Unjustified retained exceptions (`stub` or empty justification) fail the ledger.
-4. Mobile bindings stay `excluded` — never promote to required M2 targets.
+4. Mobile bindings stay `excluded` — never promote to required Bazel-migration targets.
 5. Release platform additions must update `release_platforms.json` and
    `//platforms:*` together with the Binding RC contract.
 

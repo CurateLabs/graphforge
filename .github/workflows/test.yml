@@ -83,13 +83,13 @@ jobs:
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 
-      - name: Test M20 contract ledger
+      - name: Test knowledge contract ledger
         if: steps.policy-suites.outputs.contracts == 'true'
-        run: python3 scripts/ci/test-m20-contract-gate.py
+        run: python3 scripts/ci/test-knowledge-contract-gate.py
 
-      - name: Test M21 contract ledger
+      - name: Test epistemic contract ledger
         if: steps.policy-suites.outputs.contracts == 'true'
-        run: python3 scripts/ci/test-m21-contract-gate.py
+        run: python3 scripts/ci/test-epistemic-contract-gate.py
 
       - name: Test checkpoint recovery ledger
         if: steps.policy-suites.outputs.contracts == 'true'
@@ -165,9 +165,9 @@ jobs:
           python3 scripts/ci/test-release-load-matrix.py
           python3 scripts/ci/test-release-load-executor.py
 
-      - name: Test final M1 release certification gate
+      - name: Test final release certification gate
         if: steps.policy-suites.outputs.release == 'true'
-        run: python3 scripts/ci/test-m1-release-certification.py
+        run: python3 scripts/ci/test-release-certification.py
 
       - name: Test clean-environment verification harness
         if: steps.policy-suites.outputs.clean_env == 'true'
@@ -613,7 +613,7 @@ jobs:
             --case check_surface_projection \
             --case check_native_artifact_and_no_fallback \
             --case check_lifecycle_checkpoint_errors_and_reopen \
-            --case check_m20_m21_native_projection \
+            --case check_knowledge_epistemic_native_projection \
             --output dist/python-binding-parity-evidence.json
 
       - name: Upload same-SHA wheel for concurrency matrix
@@ -874,7 +874,7 @@ jobs:
       - name: Blacksmith remote-cache policy + harness unit tests
         run: |
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          # Strict evaluate of checked-in perf-sample.json is one-shot M2
+          # Strict evaluate of checked-in perf-sample.json is one-shot Bazel-migration
           # evidence (see bazel-migration-perf.md), not a live regression gate;
           # observation/collect lives in bazel-diagnostics.
           python3 scripts/ci/bazel-cache-perf.py --mode policy
@@ -966,7 +966,7 @@ jobs:
           # Collect ≥10 cold/warm pairs only when remote hits are observed and
           # checked-in evidence is still incomplete. Skip the long loop when the
           # org-admin remote cache is still inactive. Checked-in perf-sample.json
-          # is one-shot M2 evidence, not a live regression gate.
+          # is one-shot Bazel-migration evidence, not a live regression gate.
           status="$(python3 - <<'PY'
           import json
           from pathlib import Path
@@ -1023,7 +1023,7 @@ jobs:
           mod = importlib.util.module_from_spec(spec)
           assert spec.loader is not None
           spec.loader.exec_module(mod)
-          # One-shot M2 evidence evaluation for observation rollup only; not a
+          # One-shot Bazel-migration evidence evaluation for observation rollup only; not a
           # required CI Gate regression gate.
           eval_payload = mod.evaluate_evidence(evidence)
           evidence["gates"] = {
@@ -1050,7 +1050,7 @@ jobs:
               "org_admin_blocker_likely": not hits,
               "evidence_status": evidence.get("status"),
               "evaluate": eval_payload,
-              "note": "perf-sample.json is one-shot M2 evidence; not a live CI Gate gate",
+              "note": "perf-sample.json is one-shot Bazel-migration evidence; not a live CI Gate gate",
           }
           (dist / "bazel-cache-perf-ci-observation.json").write_text(
               json.dumps(summary, indent=2, sort_keys=True) + "\n",

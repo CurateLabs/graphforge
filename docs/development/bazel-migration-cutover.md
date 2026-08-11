@@ -17,7 +17,7 @@ Companion artifacts:
 | Required check name | Exactly **`CI Gate`** (unchanged) |
 | Authoritative Rust compile/test | `Bazel Bootstrap` → `bazelisk test //:ci_rust_tests` (+ libs/CLI/resources/bindings builds) |
 | Retired | Cargo `rust-test` workspace job; PR job-isolated Cargo `target/` sticky disks |
-| Retained Cargo diagnostics | `Rust Quality` (fmt/clippy); Windows `graphforge-storage` lock unit tests; PR maturin/napi binding assembly (no sticky); Binding RC macOS/Windows/cross napi + fuzz / M1 sticky packaging lanes |
+| Retained Cargo diagnostics | `Rust Quality` (fmt/clippy); Windows `graphforge-storage` lock unit tests; PR maturin/napi binding assembly (no sticky); Binding RC macOS/Windows/cross napi + fuzz / release-certification sticky packaging lanes |
 | Path-classified skips | Remain neutral via `require-gates.sh` (`success` or `skipped`) |
 | Dual-build parity | Diagnostic under non-required `Bazel Diagnostics` for **one release cycle** |
 
@@ -73,7 +73,7 @@ consume Bazel `//:binding_cdylibs` via
 `assemble_bazel_binding_packages.py` — no maturin/napi native recompile and no
 Cargo `target/` sticky mount on those lanes. Remaining Binding RC platforms
 (macOS/Windows Python maturin; macOS/Windows Node napi; Linux aarch64
-napi-cross) and M1 release-load sticky `target/` volumes stay until follow-on
+napi-cross) and release-load sticky `target/` volumes stay until follow-on
 cutover. Fuzz retains its sticky disk as a justified retained tool.
 `release_candidate` emits gitignored `index.js` / `index.d.ts` from a retained
 Linux addon (`emit-node-loaders`) instead of `napi build` recompile.
@@ -84,7 +84,7 @@ Linux addon (`emit-node-loaders`) instead of `napi build` recompile.
 | --- | --- |
 | Bazel authoritative under `CI Gate` | `Bazel Bootstrap` runs `//:ci_rust_tests`; `rust-test` absent from Test Suite / gate |
 | Branch protection still requires exactly `CI Gate` | Job display name unchanged; no second required context |
-| Cargo sticky disks retired without weakening gates | PR sticky keys gone; Binding RC/fuzz/M1 retained; storage-policy tests updated |
+| Cargo sticky disks retired without weakening gates | PR sticky keys gone; Binding RC/fuzz/release-certification retained; storage-policy tests updated |
 | Documented Cargo rollback one release cycle | This document |
 | Path-classified skips remain neutral | `require-gates.sh` still accepts `skipped` |
 

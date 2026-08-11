@@ -369,7 +369,7 @@ impl OntologyHandle {
                 name: prop_name.clone(),
                 // Value type is not stored in the compiled runtime maps;
                 // use Utf8 as a safe default. Operator lowering doesn't
-                // depend on this type for M12.
+                // depend on this type for logical-plan lowering.
                 value_type: PropertyValueType::Utf8,
                 nullable: true,
                 multivalued: false,

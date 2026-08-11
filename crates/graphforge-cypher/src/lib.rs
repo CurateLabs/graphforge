@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn explain_stage_logical_plan_contains_table_scan() {
-        // Property/variable projection cannot lower in M12 (property tables are
+        // Property/variable projection cannot lower in logical-plan-lowering (property tables are
         // a later milestone), so project a literal — the node scan still
         // produces a TableScan, which is what the explain stage exposes.
         let result = explain_stage(

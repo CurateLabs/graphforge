@@ -1,4 +1,4 @@
-"""Small deterministic benchmarks for the native M18 analyst verbs.
+"""Small deterministic benchmarks for the native algorithm analyst verbs.
 
 The benchmark intentionally uses a synthetic graph and the installed native
 ``graphforge`` wheel. It is an executability benchmark, not a performance
@@ -18,7 +18,7 @@ import pyarrow as pa
 from graphforge import GraphForge
 
 RESULT_PREFIX = "GRAPHFORGE_CONSUMER_RESULT="
-M18_VERBS = {"rank", "cluster", "similar", "paths", "analyze"}
+ALGORITHM_VERBS = {"rank", "cluster", "similar", "paths", "analyze"}
 
 
 def _timed(operation: Callable[[], pa.Table]) -> tuple[float, pa.Table]:
@@ -30,7 +30,7 @@ def _timed(operation: Callable[[], pa.Table]) -> tuple[float, pa.Table]:
 
 
 def run() -> dict[str, Any]:
-    """Run every native M18 verb against one bounded local fixture."""
+    """Run every native algorithm verb against one bounded local fixture."""
     forge = GraphForge()
     try:
         return _run_benchmark(forge)
@@ -73,11 +73,11 @@ def _run_benchmark(forge: GraphForge) -> dict[str, Any]:
             "rows": table.num_rows,
         }
 
-    assert set(measurements) == M18_VERBS
+    assert set(measurements) == ALGORITHM_VERBS
     assert all(measurement["rows"] >= 1 for measurement in measurements.values())
     return {
         "consumer": "benchmarks/algorithms/bench_gds.py",
-        "m18_verbs": sorted(measurements),
+        "algorithm_verbs": sorted(measurements),
         "measurements": measurements,
         "nodes": len(nodes),
         "edges": 6,
@@ -93,7 +93,7 @@ def main() -> None:
     if args.json:
         print(f"{RESULT_PREFIX}{json.dumps(result, sort_keys=True)}")
         return
-    print("Native M18 microbenchmark")
+    print("Native algorithm microbenchmark")
     for verb, measurement in result["measurements"].items():
         print(f"  {verb:<8} {measurement['seconds']:.6f}s ({measurement['rows']} rows)")
 

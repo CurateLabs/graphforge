@@ -1,7 +1,7 @@
 //! Transactional opt-in property write-back for Rust analyst algorithms.
 #![allow(
     dead_code,
-    reason = "wired by the ordered M18 vertical algorithm slices"
+    reason = "wired by the ordered algorithm vertical algorithm slices"
 )]
 
 use std::collections::{HashMap, HashSet};

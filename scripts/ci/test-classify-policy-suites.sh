@@ -39,7 +39,8 @@ assert_classification() {
 }
 
 assert_classification "$none" docs/guide.md
-assert_classification "$contracts" tests/contracts/m20-contract-matrix.json
+assert_classification "$contracts" tests/contracts/knowledge-contract-matrix.json
+assert_classification "$contracts" tests/contracts/epistemic-contract-matrix.json
 assert_classification "$contracts" tests/contracts/m4-entry-matrix.json
 assert_classification "$coverage_ledger" scripts/coverage_rust_ledger.py
 assert_classification "$storage" .github/workflows/docs.yml

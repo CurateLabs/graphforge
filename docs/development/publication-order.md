@@ -15,10 +15,10 @@ or registry write.
 
 | Track | Path | Required before registry write | Deferred |
 | --- | --- | --- | --- |
-| **publish-track** | Binding RC → tag / release identity → `publish.yaml` | Same-SHA retained candidate + offline rehearsal; no rebuild-on-write | M1 load, checkpoint, m20/m21, full clean-env |
-| **Human release close** | publish-track **plus** milestone evidence | Whatever the active runbook requires (may include M1 / surface gates) | — |
+| **publish-track** | Binding RC → tag / release identity → `publish.yaml` | Same-SHA retained candidate + offline rehearsal; no rebuild-on-write | release-load, checkpoint, knowledge/epistemic, full clean-env |
+| **Human release close** | publish-track **plus** milestone evidence | Whatever the active runbook requires (may include release-certification / surface gates) | — |
 
-M1, checkpoint recovery, and m20/m21 assemble human-close / milestone confidence.
+release certification, checkpoint recovery, and knowledge/epistemic assemble human-close / milestone confidence.
 They are **not** registry-honesty inputs for `publish.yaml` and must not block
 every publish-track run. See [`../engineering/TESTING.md`](../engineering/TESTING.md)
 dual-track table and wall-clock targets.

@@ -1,7 +1,7 @@
-//! Typed Rust-only dispatch and cooperative execution controls for M18.
+//! Typed Rust-only dispatch and cooperative execution controls for algorithm.
 #![allow(
     dead_code,
-    reason = "M18 foundation consumed incrementally by algorithm leaf issues"
+    reason = "algorithm foundation consumed incrementally by algorithm leaf issues"
 )]
 
 use std::collections::HashMap;

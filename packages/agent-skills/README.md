@@ -102,8 +102,8 @@ conflicts.
 Build knowledge accepts caller-keyed nodes and edges plus caller-supplied UUIDv7
 operation and ledger identities. It enables the public provenance/knowledge
 capabilities, uses native UUID handles for graph references, and uses the atomic
-assertion-plus-nonempty-evidence API, then appends the required explicit M20
-confidence assessment. M21 reasoning and first status are appended only when
+assertion-plus-nonempty-evidence API, then appends the required explicit knowledge
+confidence assessment. epistemic reasoning and first status are appended only when
 their explicit input blocks are supplied. A domain property named `confidence`
 remains an ordinary graph property.
 
@@ -124,20 +124,20 @@ fingerprints. Native ambiguity remains a structured error; confidence is never
 used to choose an alternative. The returned opaque `projection` is reserved for
 later recorded dispatch through the native resolved-projection API.
 
-`narrateBeliefRecords` pages every public scoped M20/M21 history family for the
+`narrateBeliefRecords` pages every public scoped knowledge/epistemic history family for the
 resolved assertion set within an explicit `record_budget`, keeps competing and
 superseded records distinguishable, and returns project-level pagination
 descriptors rather than truncating broader collections.
 
 `dispatchRecordedNeutralAnalysis` forwards one caller-prepared descriptor to
 `invokeResolvedRecorded`, returns the Arrow result with independent run and
-attachment state, and leaves completed M20 runs queryable when attachment fails.
+attachment state, and leaves completed knowledge runs queryable when attachment fails.
 
 `exploreGraph` dispatches bounded neighborhood, traversal, path, and
 reachability requests through the public paths/descriptor facade, fails closed
 without finite bounds, and opens only the graph capability.
 
-`retrieveAnalyze` reaches public M19 find modes and every live M18 family with
+`retrieveAnalyze` reaches public search find modes and every live algorithm family with
 explicit caller-selected algorithms/inputs, finite `result_limit`, and
 graph-only capability opens.
 

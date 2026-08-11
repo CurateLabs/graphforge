@@ -1600,7 +1600,14 @@ fn verify_participant_file(path: &Path, expected: &StagedParticipant) -> Result<
     }
     let mut file = File::open(path).map_err(publication_io)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(publication_io)?;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer).map_err(publication_io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     let actual: [u8; 32] = hasher.finalize().into();
     if hex_digest(actual) != expected.content_sha256 {
         return Err(project_error(

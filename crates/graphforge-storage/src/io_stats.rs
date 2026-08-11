@@ -4,7 +4,7 @@
 //! [`read_nodes`](crate::catalog::read_nodes).
 //!
 //! # Why
-//! These prove the M15 T1 criterion (#767): with the adjacency index present,
+//! These prove the adjacency-IO T1 criterion (#767): with the adjacency index present,
 //! variable-length traversal must not scan the full edge file — it issues only
 //! an `edge_id`-filtered read whose materialized row count is proportional to
 //! the traversed neighborhood, independent of the total edge count. A scan

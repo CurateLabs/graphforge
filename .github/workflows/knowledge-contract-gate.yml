@@ -1,4 +1,4 @@
-name: M21 Contract Gate
+name: Knowledge Contract Gate
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
   rust:
     name: Rust contract rows
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -20,18 +20,18 @@ jobs:
         with:
           toolchain: "1.96.0"
       - name: Execute Rust matrix group
-        run: python3 scripts/ci/m21-contract-gate.py run-group --group rust --output gate-fragments
+        run: python3 scripts/ci/knowledge-contract-gate.py run-group --group rust --output gate-fragments
       - name: Save Rust evidence for report job
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments/
-          key: m21-transfer-${{ github.run_id }}-rust
+          key: knowledge-transfer-${{ github.run_id }}-rust
 
   python:
     name: Python contract rows
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -41,18 +41,18 @@ jobs:
         with:
           python-version: "3.13"
       - name: Execute Python matrix group
-        run: python3 scripts/ci/m21-contract-gate.py run-group --group python --output gate-fragments
+        run: python3 scripts/ci/knowledge-contract-gate.py run-group --group python --output gate-fragments
       - name: Save Python evidence for report job
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments/
-          key: m21-transfer-${{ github.run_id }}-python
+          key: knowledge-transfer-${{ github.run_id }}-python
 
   node:
     name: Node contract rows
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 35
+    timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -66,40 +66,39 @@ jobs:
         with:
           toolchain: "1.96.0"
       - name: Execute Node matrix group
-        run: python3 scripts/ci/m21-contract-gate.py run-group --group node --output gate-fragments
+        run: python3 scripts/ci/knowledge-contract-gate.py run-group --group node --output gate-fragments
       - name: Save Node evidence for report job
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments/
-          key: m21-transfer-${{ github.run_id }}-node
+          key: knowledge-transfer-${{ github.run_id }}-node
 
   report:
     name: SHA-bound closure report
     if: always()
     needs: [rust, python, node]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments
-          key: m21-transfer-${{ github.run_id }}-rust
+          key: knowledge-transfer-${{ github.run_id }}-rust
           fail-on-cache-miss: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments
-          key: m21-transfer-${{ github.run_id }}-python
+          key: knowledge-transfer-${{ github.run_id }}-python
           fail-on-cache-miss: true
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: gate-fragments
-          key: m21-transfer-${{ github.run_id }}-node
+          key: knowledge-transfer-${{ github.run_id }}-node
           fail-on-cache-miss: true
       - name: Build exact closure report
         run: >-
-          python3 scripts/ci/m21-contract-gate.py report
+          python3 scripts/ci/knowledge-contract-gate.py report
           --sha "${{ github.sha }}"
           --fragments gate-fragments
           --output gate-report

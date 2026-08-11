@@ -179,10 +179,18 @@ fn schema_fingerprint(batch: &arrow::record_batch::RecordBatch) -> String {
         .map(|field| format!("{}:{:?}", field.name(), field.data_type()))
         .collect::<Vec<_>>()
         .join("|");
-    format!("{:x}", Sha256::digest(schema.as_bytes()))
+    hex_sha256(schema.as_bytes())
 }
 
 #[allow(clippy::too_many_lines, reason = "one auditable release workflow")]
+
+fn hex_sha256(bytes: impl AsRef<[u8]>) -> String {
+    Sha256::digest(bytes.as_ref())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn main() {
     let project = TempDir::new().unwrap();
     let ontology_path = fixture("ontologies/strict-v1.yaml");

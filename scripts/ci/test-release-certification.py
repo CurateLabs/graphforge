@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation-sensitive tests for the final M1 release certification gate."""
+"""Mutation-sensitive tests for the final release certification gate."""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/ci/m1-release-certification.py"
+SCRIPT = ROOT / "scripts/ci/release-certification.py"
 LOAD_TEST = ROOT / "scripts/ci/test-release-load-matrix.py"
-WORKFLOW = ROOT / ".github/workflows/m1-release-certification.yml"
+WORKFLOW = ROOT / ".github/workflows/release-certification.yml"
 SHA = "a" * 40
 
 
@@ -25,11 +25,11 @@ def import_file(name: str, path: Path):
     return module
 
 
-GATE = import_file("m1_release_certification", SCRIPT)
-LOAD_TESTS = import_file("m1_release_load_test_helpers", LOAD_TEST)
+GATE = import_file("release_release_certification", SCRIPT)
+LOAD_TESTS = import_file("release_release_load_test_helpers", LOAD_TEST)
 
 
-class M1ReleaseCertificationTests(unittest.TestCase):
+class ReleaseCertificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.rust_run = {
             "id": 101,
@@ -71,7 +71,7 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         )
         self.assertEqual(
             result["components"]["rust"]["artifact_name"],
-            "M1-Rust-Non-Cypher-" + SHA,
+            "Rust-Non-Cypher-" + SHA,
         )
         for key, value, message in (
             ("status", "in_progress", "not completed"),
@@ -95,7 +95,7 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", header)
         for forbidden in ("push:", "pull_request:", "schedule:"):
             self.assertNotIn(forbidden, header)
-        self.assertIn("group: m1-release-certification-${{ inputs.commit_sha }}", header)
+        self.assertIn("group: release-certification-${{ inputs.commit_sha }}", header)
         self.assertIn("cancel-in-progress: true", header)
         self.assertNotIn("gh workflow run", text)
         validate = jobs.index("  validate_source:")
@@ -120,7 +120,7 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         self.assertIn("release-load-matrix.py run", load_job)
         self.assertIn("useblacksmith/stickydisk@", load_job)
         self.assertIn(
-            "${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3",
+            "${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3",
             load_job,
         )
         self.assertIn("useblacksmith/stickydisk-delete@", load_job)
@@ -132,8 +132,8 @@ class M1ReleaseCertificationTests(unittest.TestCase):
             load_job,
         )
         self.assertIn("Reclaim root-disk headroom before the matrix", load_job)
-        self.assertIn("TMPDIR: ${{ runner.temp }}/graphforge-m1-release-load-tmp", load_job)
-        self.assertNotIn("graphforge-m1-release-load-target", load_job)
+        self.assertIn("TMPDIR: ${{ runner.temp }}/graphforge-release-load-tmp", load_job)
+        self.assertNotIn("graphforge-release-load-target", load_job)
         maturin_step = load_job.index("- name: Build one exact-SHA Python wheel")
         reclaim_step = load_job.index("- name: Reclaim sticky-disk ownership after maturin")
         wrapper_step = load_job.index(
@@ -175,22 +175,22 @@ class M1ReleaseCertificationTests(unittest.TestCase):
                 }
                 for identity in group["ids"]
             )
-        m18 = inventory["m18_registry"]["release-tested"]
+        algorithm = inventory["algorithm_registry"]["release-tested"]
         evidence.extend(
             {
-                "kind": "m18_registry",
+                "kind": "algorithm_registry",
                 "identity": identity,
-                "test_ids": [ref["symbol"] for ref in m18["test_refs"]],
+                "test_ids": [ref["symbol"] for ref in algorithm["test_refs"]],
                 "outcome": "passed",
                 "error_code": None,
             }
-            for identity in m18["ids"]
+            for identity in algorithm["ids"]
         )
-        for group_name, group in inventory["m19_evidence_groups"].items():
+        for group_name, group in inventory["search_evidence_groups"].items():
             test_ids = [ref["symbol"] for ref in group["test_refs"]]
             evidence.extend(
                 {
-                    "kind": "m19_contracts",
+                    "kind": "search_contracts",
                     "identity": identity,
                     "evidence_group": group_name,
                     "test_ids": test_ids,
@@ -202,9 +202,9 @@ class M1ReleaseCertificationTests(unittest.TestCase):
         names = {
             "knowledge_isolation",
             "public_lifecycle_conformance",
-            "m22_m18_public_surface",
-            "m22_m19_public_surface",
-            "m22_provider_public_surface",
+            "algorithm_public_surface",
+            "search_public_surface",
+            "provider_public_surface",
             "provider_session",
             "public_facade_remaining_conformance",
         }
@@ -219,14 +219,14 @@ class M1ReleaseCertificationTests(unittest.TestCase):
                 "cargo test -p graphforge-api --lib --no-fail-fast",
                 "cargo test -p graphforge-api --test knowledge_isolation --test "
                 "public_lifecycle_conformance --test public_facade_remaining_conformance "
-                "--test m22_m18_public_surface --test m22_m19_public_surface --test "
-                "m22_provider_public_surface --test provider_session --no-fail-fast",
+                "--test algorithm_public_surface --test search_public_surface --test "
+                "provider_public_surface --test provider_session --no-fail-fast",
             ],
         }
 
     def binding_report(self) -> dict:
         validator = GATE.import_script(
-            "m1_test_binding", ROOT / "scripts/ci/validate-binding-release-candidate.py"
+            "release_test_binding", ROOT / "scripts/ci/validate-binding-release-candidate.py"
         )
         contract = GATE.load_json(GATE.BINDING_TARGETS)
         reports = []
