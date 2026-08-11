@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and execute the finite M20 contract-gate ledger."""
+"""Validate and execute the finite knowledge contract-gate ledger."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-MATRIX_PATH = ROOT / "tests/contracts/m20-contract-matrix.json"
-SCHEMA_INVENTORY = ROOT / "docs/reference/m20-schema-inventory.json"
+MATRIX_PATH = ROOT / "tests/contracts/knowledge-contract-matrix.json"
+SCHEMA_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
 REQUIRED_CASES = {
     "graph-only-no-knowledge",
@@ -29,8 +29,8 @@ REQUIRED_CASES = {
     "unsupported-pre-v1-rust",
     "unsupported-pre-v1-python",
     "unsupported-pre-v1-node",
-    "m18-exhaustive-isolation",
-    "m19-find-knowledge-states",
+    "algorithm-exhaustive-isolation",
+    "search-find-knowledge-states",
     "descriptor-direct-arrow-equivalence",
     "canonical-arrow-fingerprint",
     "cross-binding-contract",
@@ -57,9 +57,9 @@ def load_matrix() -> dict[str, Any]:
     try:
         value = json.loads(MATRIX_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise GateError(f"cannot read M20 matrix: {error}") from error
+        raise GateError(f"cannot read knowledge matrix: {error}") from error
     if not isinstance(value, dict):
-        raise GateError("M20 matrix root must be an object")
+        raise GateError("knowledge matrix root must be an object")
     return value
 
 
@@ -143,8 +143,8 @@ def validate_test(test: object, case_id: str) -> str:
 
 def validate_matrix() -> dict[str, Any]:
     matrix = load_matrix()
-    if matrix.get("schema_version") != 1 or matrix.get("gate") != "M20":
-        raise GateError("matrix must declare M20 schema_version 1")
+    if matrix.get("schema_version") != 1 or matrix.get("gate") != "knowledge":
+        raise GateError("matrix must declare knowledge schema_version 1")
     commands = matrix.get("command_groups")
     if not isinstance(commands, dict) or set(commands) != GROUPS:
         raise GateError("matrix command groups must be exactly rust, python, and node")
@@ -195,18 +195,20 @@ def validate_matrix() -> dict[str, Any]:
         fragment for fragment in CATALOG_FRAGMENTS if fragment not in isolation
     )
     if missing_catalog:
-        raise GateError(f"M18 catalog omission check is incomplete: {missing_catalog}")
+        raise GateError(f"algorithm catalog omission check is incomplete: {missing_catalog}")
     partition_test = "typed_catalog_partition_is_unique_exhaustive_and_probes_unavailable_handlers"
     if partition_test not in isolation:
-        raise GateError("M18 catalog partition test is absent")
+        raise GateError("algorithm catalog partition test is absent")
 
     if not SCHEMA_INVENTORY.is_file():
-        raise GateError("checked M20 schema inventory is absent")
+        raise GateError("checked knowledge schema inventory is absent")
     expected_digest = (
-        (ROOT / "docs/reference/m20-schema-inventory.sha256").read_text(encoding="utf-8").split()[0]
+        (ROOT / "docs/reference/knowledge-schema-inventory.sha256")
+        .read_text(encoding="utf-8")
+        .split()[0]
     )
     if sha256(SCHEMA_INVENTORY) != expected_digest:
-        raise GateError("checked M20 schema inventory digest does not match")
+        raise GateError("checked knowledge schema inventory digest does not match")
     return {"matrix": matrix, "test_ids": test_ids}
 
 
@@ -312,7 +314,7 @@ def build_report(sha: str, fragments: Path, output: Path) -> None:
             }
         )
     report = {
-        "gate": "M20 Contract Gate",
+        "gate": "Knowledge Contract Gate",
         "schema_version": 1,
         "commit_sha": sha,
         "matrix_sha256": sha256(MATRIX_PATH),
@@ -328,10 +330,10 @@ def build_report(sha: str, fragments: Path, output: Path) -> None:
         "summary": {"total": len(cases), "passed": len(cases), "failed": 0},
     }
     output.mkdir(parents=True, exist_ok=True)
-    report_path = output / "m20-contract-gate-report.json"
+    report_path = output / "knowledge-contract-gate-report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     digest = sha256(report_path)
-    (output / "m20-contract-gate-report.sha256").write_text(
+    (output / "knowledge-contract-gate-report.sha256").write_text(
         f"{digest}  {report_path.name}\n",
         encoding="utf-8",
     )
@@ -356,15 +358,15 @@ def main() -> int:
     try:
         if args.command == "validate":
             validated = validate_matrix()
-            print(f"M20 contract matrix valid: {len(validated['matrix']['cases'])} cases")
+            print(f"knowledge contract matrix valid: {len(validated['matrix']['cases'])} cases")
             return 0
         if args.command == "run-group":
             return run_group(args.group, args.output)
         build_report(args.sha, args.fragments, args.output)
-        print("M20 contract report generated")
+        print("knowledge contract report generated")
         return 0
     except (GateError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        print(f"M20 contract gate failed: {error}", file=sys.stderr)
+        print(f"knowledge contract gate failed: {error}", file=sys.stderr)
         return 1
 
 

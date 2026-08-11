@@ -196,7 +196,7 @@ function bulkEdgeTable(sourceUuid: string, targetUuid: string): Table {
 
 /**
  * Build graph state via `execute("CREATE …")` — the data-setup `Given` steps run
- * against the real engine (the `addNode`/`addEdge` write API is M18/M19). Each
+ * against the real engine (the `addNode`/`addEdge` write API is algorithm/search). Each
  * entry is a `:Person`/`:Paper`/… node's property map.
  */
 function createNode(world: GraphForgeWorld, label: string, props: Record<string, unknown>): void {

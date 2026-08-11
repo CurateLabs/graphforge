@@ -43,7 +43,7 @@ impl GraphForge {
     /// errors without opening graph or knowledge participants.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes an owned optional cancellation token"
+        reason = "graphforge-knowledge-api/1 freezes an owned optional cancellation token"
     )]
     pub fn provenance_event(
         &self,
@@ -85,7 +85,7 @@ impl GraphForge {
     /// validation failures.
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "graphforge-m20-api/1 freezes owned request structs"
+        reason = "graphforge-knowledge-api/1 freezes owned request structs"
     )]
     pub fn list_provenance_history(
         &self,

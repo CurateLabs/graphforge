@@ -1,6 +1,6 @@
 //! Graph-native search backend primitives.
 //!
-//! M19 keeps backend mechanics in this crate while `graphforge-api` owns selector
+//! search keeps backend mechanics in this crate while `graphforge-api` owns selector
 //! resolution and Arrow result shaping. Text indexes contain UUID identity and
 //! selected graph string properties only; no execution surrogate or knowledge
 //! field crosses this boundary.

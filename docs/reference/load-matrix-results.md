@@ -17,7 +17,7 @@ For what each size/density class proves against published limits, see
 Host-native evidence is green on `main` tip
 `ec81fd8f35eda9cd59247865c79e296875d3ebf9` (merge of #2779 binding-parity
 fix). Issue #2765 closed on outcome-based criteria (infra + local 144/144 +
-this page); a downloadable `M1-Release-Load-Matrix-<sha>` CI artifact is **not**
+this page); a downloadable `Release-Load-Matrix-<sha>` CI artifact is **not**
 required for that close.
 
 | Field | Value |
@@ -26,8 +26,8 @@ required for that close.
 | Date (UTC) | 2026-07-28 |
 | Evidence source | Local host-native run (worktree `graphforge-worktrees/load-matrix-main`) |
 | Evidence path | `build/release-load-evidence.json` (`schema`: `graphforge-load-evidence/1`, `status`: `passed`) |
-| CI run URL | Optional — M1 Release Certification Gate artifact upload not required for #2765 close |
-| Artifact name | Optional — `M1-Release-Load-Matrix-<sha>` when a publication run uploads one |
+| CI run URL | Optional — Release Certification Gate artifact upload not required for #2765 close |
+| Artifact name | Optional — `Release-Load-Matrix-<sha>` when a publication run uploads one |
 | Pass summary | 144/144 cases `passed` (48 Rust / 48 Python / 48 Node); same SHA; attempt=1 only; no retries, skips, parity diffs, or sanitized errors |
 
 ### Case-level summary
@@ -45,7 +45,7 @@ Languages: Rust, Python, Node (48 cases each).
 ## How to update this page
 
 1. Prefer a same-SHA green host-native or CI matrix run with case-level evidence.
-2. Optionally record a CI run URL and `M1-Release-Load-Matrix-<sha>` when a gate upload
+2. Optionally record a CI run URL and `Release-Load-Matrix-<sha>` when a gate upload
    exists (useful for release publication; not an ordinary issue-close blocker).
 3. Record SHA, UTC date, evidence source/path, and a short pass summary
    (accepted case count, binding languages, any diagnostic notes that are not

@@ -132,7 +132,7 @@
       "version": 1
     }
   ],
-  "inventory_format": "graphforge-m20-schema-inventory/1",
+  "inventory_format": "graphforge-knowledge-schema-inventory/1",
   "records": [
     {
       "capability_id": "knowledge",

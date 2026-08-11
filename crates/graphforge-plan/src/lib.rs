@@ -119,7 +119,7 @@ pub fn var_len_edge_list_field(prop_fields: &[Field]) -> Arc<Field> {
 ///
 /// Triggered when `Expand` has `max_hops != Some(1)` — patterns like
 /// `(a)-[:KNOWS*1..3]->(b)`.  These cannot be expressed as a finite join
-/// sequence, so the physical layer ([`VarLenExpandExec`](../graphforge_exec) in M13)
+/// sequence, so the physical layer ([`VarLenExpandExec`](../graphforge_exec) in physical execution)
 /// performs an iterative BFS over the Parquet edge table.
 ///
 /// # Baked execution context
@@ -540,7 +540,7 @@ impl UserDefinedLogicalNodeCore for ExpandNode {
 /// Physical node for `OPTIONAL MATCH` (LEFT OUTER semantics with openCypher
 /// null-shaping over a sub-plan).
 ///
-/// The physical layer ([`OptionalMatchExec`](../graphforge_exec) in M13) left-joins the
+/// The physical layer ([`OptionalMatchExec`](../graphforge_exec) in physical execution) left-joins the
 /// `outer` (mandatory) input against the `optional` sub-plan on the shared
 /// pattern variables ([`join_keys`](Self::join_keys)), preserving every outer
 /// row and setting the optional-side columns to **null** when there is no match
@@ -1721,7 +1721,7 @@ impl UserDefinedLogicalNodeCore for GraphRemoveNode {
 /// Physical node for `UNWIND` — explodes a list expression into one row per
 /// element, binding each element to an alias variable.
 ///
-/// The physical layer ([`UnwindExec`](../graphforge_exec) in M13) evaluates `list_expr`
+/// The physical layer ([`UnwindExec`](../graphforge_exec) in physical execution) evaluates `list_expr`
 /// per input row and emits one output row per list element (null/empty list →
 /// zero rows). The output extends the input schema with a single `alias`-named,
 /// `alias`-qualified column of the element type (nullable — elements may be

@@ -111,9 +111,9 @@ pub enum CheckpointDiffScope {
     Capabilities,
     /// Provenance and lineage records.
     Provenance,
-    /// M20 knowledge records.
+    /// knowledge knowledge records.
     Knowledge,
-    /// M21 epistemic and valid-time records.
+    /// epistemic and valid-time records.
     Epistemic,
     /// Every registered domain.
     All,
@@ -184,14 +184,14 @@ impl CheckpointView {
     ) -> Result<graphforge_storage::WorkspaceConfiguration, GfError> {
         self.graph.workspace_configuration()
     }
-    /// Run a pinned M18 ranking read. Write-back is rejected.
+    /// Run a pinned algorithm ranking read. Write-back is rejected.
     pub fn rank(&self, label: &str, options: crate::RankOptions) -> Result<RecordBatch, GfError> {
         if options.write_property.is_some() {
             return read_only();
         }
         self.graph.rank(label, options)
     }
-    /// Run a pinned M18 clustering read. Write-back is rejected.
+    /// Run a pinned algorithm clustering read. Write-back is rejected.
     pub fn cluster(
         &self,
         label: &str,
@@ -202,7 +202,7 @@ impl CheckpointView {
         }
         self.graph.cluster(label, options)
     }
-    /// Run a pinned M18 path read.
+    /// Run a pinned algorithm path read.
     pub fn paths<'a>(
         &self,
         source: impl Into<Option<&'a crate::NodeSelector>>,
@@ -211,7 +211,7 @@ impl CheckpointView {
     ) -> Result<RecordBatch, GfError> {
         self.graph.paths(source, target, options)
     }
-    /// Run a pinned M18 graph analysis.
+    /// Run a pinned algorithm graph analysis.
     pub fn analyze(
         &self,
         label: Option<&str>,
@@ -219,7 +219,7 @@ impl CheckpointView {
     ) -> Result<RecordBatch, GfError> {
         self.graph.analyze(label, options)
     }
-    /// Run a pinned M18 embedding analysis.
+    /// Run a pinned algorithm embedding analysis.
     pub fn analyze_embedding(
         &self,
         label: Option<&str>,
@@ -227,7 +227,7 @@ impl CheckpointView {
     ) -> Result<RecordBatch, GfError> {
         self.graph.analyze_embedding(label, options)
     }
-    /// Run a pinned M18 similarity read.
+    /// Run a pinned algorithm similarity read.
     pub fn similar(
         &self,
         label: &str,
@@ -235,7 +235,7 @@ impl CheckpointView {
     ) -> Result<RecordBatch, GfError> {
         self.graph.similar(label, options)
     }
-    /// Run pinned M19 search.
+    /// Run pinned search.
     pub fn find(&self, options: crate::FindOptions) -> Result<RecordBatch, GfError> {
         self.graph.find(options)
     }
@@ -399,7 +399,7 @@ impl CheckpointView {
     ) -> Result<ExecutionResult, GfError> {
         self.graph.algorithm_run_events(run_uuid, page)
     }
-    /// Reconstruct the pinned M21 epistemic snapshot.
+    /// Reconstruct the pinned epistemic snapshot.
     pub fn epistemic_snapshot(&self, cutoff_micros: i64) -> Result<ExecutionResult, GfError> {
         self.graph.epistemic_snapshot(cutoff_micros)
     }
@@ -2800,7 +2800,7 @@ mod tests {
     }
 
     #[test]
-    fn revert_accepts_graph_m20_and_full_m21_checkpoint_shapes_after_reopen() {
+    fn revert_accepts_graph_knowledge_and_full_epistemic_checkpoint_shapes_after_reopen() {
         for (index, capabilities) in [
             vec![],
             vec![
@@ -2870,8 +2870,8 @@ mod tests {
             "emergent",
             "advisory",
             "strict",
-            "m20",
-            "m21",
+            "knowledge",
+            "epistemic",
         ] {
             let directory = tempdir().unwrap();
             let mut graph = GraphForge::new(Some(directory.path().to_str().unwrap())).unwrap();
@@ -2896,10 +2896,10 @@ mod tests {
 
             let node_uuid = graph.add_node("Person", &HashMap::new()).unwrap().uuid;
 
-            if matches!(shape, "m20" | "m21") {
+            if matches!(shape, "knowledge" | "epistemic") {
                 enable(&graph, crate::CapabilityId::Provenance, 2_100);
                 enable(&graph, crate::CapabilityId::Knowledge, 2_101);
-                if shape == "m21" {
+                if shape == "epistemic" {
                     enable(&graph, crate::CapabilityId::Epistemic, 2_102);
                 }
                 let assertion = crate::CreateAssertionRequest {
@@ -2916,7 +2916,7 @@ mod tests {
                         ordinal: 0,
                     }],
                 };
-                if shape == "m21" {
+                if shape == "epistemic" {
                     let assertion_result = graph
                         .create_assertion_with_status(crate::CreateAssertionWithStatusRequest {
                             assertion,
@@ -3007,7 +3007,7 @@ mod tests {
                 .execute("MATCH (n:Person) RETURN count(n) AS total")
                 .unwrap();
             assert_eq!(restored.stats.rows_produced, 1, "{shape}");
-            if matches!(shape, "m20" | "m21") {
+            if matches!(shape, "knowledge" | "epistemic") {
                 assert_eq!(
                     reopened
                         .assertion(uuid7(110), None)
@@ -3017,7 +3017,7 @@ mod tests {
                     1
                 );
             }
-            if shape == "m21" {
+            if shape == "epistemic" {
                 assert_eq!(
                     reopened
                         .assertion_status(uuid7(110))

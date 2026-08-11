@@ -3,10 +3,10 @@ Feature: Recover atomic graph and knowledge cycles after interruption
   Scenario: Composite publication recovers one complete generation
     # AR-01 implementation=rust:seed-strict-s-graph
     Given [AR-01] a deterministic strict S-graph project under a deep-wide ontology
-    # AR-02 implementation=rust:graph-m20-composite-success
-    When [AR-02] a graph-plus-M20 composite analytical step publishes successfully
-    # AR-03 implementation=rust:graph-m20-m21-composite-success
-    And [AR-03] a graph-plus-M20-plus-M21 composite analytical step publishes successfully
+    # AR-02 implementation=rust:graph-knowledge-composite-success
+    When [AR-02] a graph-plus-knowledge composite analytical step publishes successfully
+    # AR-03 implementation=rust:graph-knowledge-epistemic-composite-success
+    And [AR-03] a graph-plus-knowledge-plus-epistemic composite analytical step publishes successfully
     # AR-04 implementation=rust:reject-invalid-before-publish
     Then [AR-04] invalid ontology or cross-reference input rejects before any participant publication
     # AR-05 implementation=rust:failpoint-pre-current-recover-previous

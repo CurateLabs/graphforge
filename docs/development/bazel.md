@@ -1,4 +1,4 @@
-# Bazel build system (M2 / #1)
+# Bazel build system (Bazel migration / #1)
 
 GraphForge uses **Bazel** (via **Bazelisk**) as the authoritative incremental
 build and test engine for CI Rust compilation and mapped tests. Cargo manifests
@@ -20,9 +20,9 @@ Close-readiness evidence map: [bazel-migration-ac-evidence.md](bazel-migration-a
 | Fmt / Clippy | Cargo (`Rust Quality`) | Workspace lint policy remains Cargo-owned for now |
 | Fuzz | `cargo-fuzz` (retained) | Justified exception `RT-fuzz` |
 | crates.io publish metadata | Cargo (retained) | Justified exception `RT-publish-crates` |
-| Binding RC / publish sticky disks | Packaging lanes | Not retired by M2 cutover |
+| Binding RC / publish sticky disks | Packaging lanes | Not retired by Bazel cutover |
 
-Mobile bindings (Swift / Kotlin / UniFFI / XCFramework / JVM) are **not** an M2
+Mobile bindings (Swift / Kotlin / UniFFI / XCFramework / JVM) are **not** a Bazel-migration
 Bazel deliverable. Product roadmap may still mention them as planned later work;
 they must not appear as required migration targets.
 
@@ -173,7 +173,7 @@ Short form:
 | `dist/bazel-warm-observation.json` | Warm identical-SHA observation |
 | `dist/bazel-affected-inputs.json` | Affected-input isolation probe |
 | `dist/bazel-cache-perf-ci-observation.json` | CI rollup for cache/perf |
-| `docs/development/bazel-migration-evidence/perf-sample.json` | One-shot M2 ≥10-pair evidence (not a live CI Gate regression gate) |
+| `docs/development/bazel-migration-evidence/perf-sample.json` | One-shot Bazel-migration ≥10-pair evidence (not a live CI Gate regression gate) |
 | `dist/cargo-bazel-parity-evidence.json` | Diagnostic dual-build parity (`Bazel Diagnostics`, not required) |
 
 `Bazel Diagnostics` uploads the cache/perf set as
@@ -221,7 +221,7 @@ Short form:
    clean-install on certified OS/arch matrices.
 2. Publish credentials and OIDC stay in release/publish workflows
    ([release-process.md](release-process.md), [PUBLISHING.md](../engineering/PUBLISHING.md)).
-3. Do not claim M2 mobile-binding release surfaces.
+3. Do not claim Bazel-migration mobile-binding release surfaces.
 
 ## Security summary
 

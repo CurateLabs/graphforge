@@ -92,7 +92,7 @@ export default defineConfig({
                 },
                 {
                   label: 'Knowledge Public API',
-                  slug: 'book/architecture/m20-public-api-v1',
+                  slug: 'book/architecture/knowledge-public-api-v1',
                 },
                 { label: 'AST & Planning', slug: 'book/architecture/ast-and-planning' },
                 { label: 'Execution Model', slug: 'book/architecture/execution-model' },
@@ -101,7 +101,7 @@ export default defineConfig({
                 { label: 'Embedding v1', slug: 'book/architecture/embedding-v1' },
                 {
                   label: 'Analyst Invocation Descriptor',
-                  slug: 'book/architecture/m18-invocation-descriptor-v1',
+                  slug: 'book/architecture/algorithm-invocation-descriptor-v1',
                 },
               ],
             },
@@ -235,7 +235,7 @@ export default defineConfig({
                 },
                 {
                   label: '0012 — Knowledge & Epistemic Domains',
-                  slug: 'adr/0012-m20-domain-ownership',
+                  slug: 'adr/0012-knowledge-domain-ownership',
                 },
                 {
                   label: '0013 — Project Generations',

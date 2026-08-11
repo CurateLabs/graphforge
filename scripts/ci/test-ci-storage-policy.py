@@ -25,7 +25,7 @@ Still forbidden
 
 Expected Binding RC Linux sticky keys use repository + lane + rustc +
 Cargo.lock hash + ``release-target-v1``. After #4 cutover, Test Suite no longer
-mounts PR job-isolated Cargo ``target/`` sticky disks; Binding RC / fuzz / M1
+mounts PR job-isolated Cargo ``target/`` sticky disks; Binding RC / fuzz / release-certification
 release-load retain sticky for packaging and retained-tool lanes.
 
 This module inventories workflow storage steps and fails closed on drift.
@@ -67,15 +67,15 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-${{ matrix.report_target }}": 1,
         "binding-rc-wheel-${{ github.run_id }}-${{ matrix.target }}": 1,
         "binding-rc-addon-${{ github.run_id }}-${{ matrix.target }}": 1,
-        "M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
-        "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Load-${{ github.run_id }}": 1,
-        "M1-Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Reconciliation-${{ github.run_id }}": 1,
+        "Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}": 1,
+        "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Load-${{ github.run_id }}": 1,
+        "Release-Candidate-manifest-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Candidate-python-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Candidate-npm-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Candidate-crates-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Candidate-evidence-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Reconciliation-${{ github.run_id }}": 1,
         "visualization-limits-stress-${{ github.sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
@@ -88,19 +88,19 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "binding-rc-report-${{ github.run_id }}-*": 1,
         "binding-rc-wheel-${{ github.run_id }}-*": 1,
         "binding-rc-addon-${{ github.run_id }}-*": 1,
-        "M1-Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
-        "M1-Release-Load-${{ github.run_id }}": 1,
-        "M1-Release-Candidate-manifest-${{ steps.source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-python-${{ steps.source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-npm-${{ steps.source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-crates-${{ steps.source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}": 1,
-        "M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "Rust-Non-Cypher-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Binding-Release-Candidate-${{ needs.validate_source.outputs.evidence_sha }}": 1,
+        "Release-Load-${{ github.run_id }}": 1,
+        "Release-Candidate-manifest-${{ steps.source.outputs.release_sha }}": 1,
+        "Release-Candidate-python-${{ steps.source.outputs.release_sha }}": 1,
+        "Release-Candidate-npm-${{ steps.source.outputs.release_sha }}": 1,
+        "Release-Candidate-crates-${{ steps.source.outputs.release_sha }}": 1,
+        "Release-Candidate-evidence-${{ steps.source.outputs.release_sha }}": 1,
+        "Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}": 1,
+        "Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
     }
@@ -117,7 +117,7 @@ EXPECTED_DEPENDENCY_KEYS = Counter(
 EXPECTED_STICKY_KEYS = Counter(
     {
         # PR job-isolated Cargo target/ sticky disks retired after #4.
-        # Binding RC / fuzz / M1 release-load retain sticky for packaging lanes.
+        # Binding RC / fuzz / release-certification / release-load retain sticky packaging.
         (
             "${{ github.repository }}-binding-rc-linux-rust-1.96.0-"
             "${{ hashFiles('Cargo.lock') }}-release-target-v1"
@@ -130,23 +130,23 @@ EXPECTED_STICKY_KEYS = Counter(
             "${{ github.repository }}-daily-fuzz-"
             "${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}-target-v1"
         ): 1,
-        "${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3": 1,
+        "${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3": 1,
     }
 )
 EXPECTED_STICKY_DELETES = Counter(
-    {"${{ github.repository }}-m1-release-load-${{ inputs.commit_sha }}-target-v3": 1}
+    {"${{ github.repository }}-release-load-${{ inputs.commit_sha }}-target-v3": 1}
 )
 EXPECTED_SAVES = Counter(
     {
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
-        "m20-transfer-${{ github.run_id }}-rust": 1,
-        "m20-transfer-${{ github.run_id }}-python": 1,
-        "m20-transfer-${{ github.run_id }}-node": 1,
-        "m21-transfer-${{ github.run_id }}-rust": 1,
-        "m21-transfer-${{ github.run_id }}-python": 1,
-        "m21-transfer-${{ github.run_id }}-node": 1,
+        "knowledge-transfer-${{ github.run_id }}-rust": 1,
+        "knowledge-transfer-${{ github.run_id }}-python": 1,
+        "knowledge-transfer-${{ github.run_id }}-node": 1,
+        "epistemic-transfer-${{ github.run_id }}-rust": 1,
+        "epistemic-transfer-${{ github.run_id }}-python": 1,
+        "epistemic-transfer-${{ github.run_id }}-node": 1,
     }
 )
 EXPECTED_RESTORES = Counter(
@@ -154,12 +154,12 @@ EXPECTED_RESTORES = Counter(
         "checkpoint-transfer-${{ github.run_id }}-rust": 1,
         "checkpoint-transfer-${{ github.run_id }}-python": 1,
         "checkpoint-transfer-${{ github.run_id }}-node": 1,
-        "m20-transfer-${{ github.run_id }}-rust": 1,
-        "m20-transfer-${{ github.run_id }}-python": 1,
-        "m20-transfer-${{ github.run_id }}-node": 1,
-        "m21-transfer-${{ github.run_id }}-rust": 1,
-        "m21-transfer-${{ github.run_id }}-python": 1,
-        "m21-transfer-${{ github.run_id }}-node": 1,
+        "knowledge-transfer-${{ github.run_id }}-rust": 1,
+        "knowledge-transfer-${{ github.run_id }}-python": 1,
+        "knowledge-transfer-${{ github.run_id }}-node": 1,
+        "epistemic-transfer-${{ github.run_id }}-rust": 1,
+        "epistemic-transfer-${{ github.run_id }}-python": 1,
+        "epistemic-transfer-${{ github.run_id }}-node": 1,
     }
 )
 
@@ -237,7 +237,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
         assert field(step, "if-no-files-found") == "error", (
             f"artifact upload is not fail-closed: {name}"
         )
-        publication = name.startswith("M1-")
+        publication = name.startswith(("Release-", "Binding-", "Rust-"))
         expected_retention = "30" if publication else "1"
         assert field(step, "retention-days") == expected_retention, (
             f"artifact retention drift: {name}"
@@ -255,7 +255,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             ),
             "non-cypher-evidence/",
             "binding-rc-aggregate/report.json",
-            "m1-release-load-evidence",
+            "release-load-evidence",
             "candidate/v${{ env.RELEASE_VERSION }}-artifacts.json",
             "candidate/release-artifacts/python/",
             "candidate/release-artifacts/npm/",
@@ -290,7 +290,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts/node-addons",
             "non-cypher-evidence",
             "binding-rc-aggregate",
-            "m1-release-load-evidence",
+            "release-load-evidence",
             "candidate",
             "candidate/release-artifacts/npm",
             "candidate/release-artifacts/crates",
@@ -309,9 +309,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            cross_run = name != "M1-Release-Load-${{ github.run_id }}" and not name.startswith(
-                "pr-"
-            )
+            cross_run = name != "Release-Load-${{ github.run_id }}" and not name.startswith("pr-")
             if cross_run:
                 assert field(step, "github-token") == "${{ github.token }}", (
                     f"cross-run artifact has no token: {name}"

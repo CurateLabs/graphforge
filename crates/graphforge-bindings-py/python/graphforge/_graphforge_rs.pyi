@@ -772,7 +772,7 @@ class GraphForge:
         normalization: Literal["none", "l2"] = "none",
         replace: bool = False,
     ) -> str: ...
-    def publish_m18_embeddings(
+    def publish_algorithm_embeddings(
         self,
         name: str,
         result: pyarrow.Table,

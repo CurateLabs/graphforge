@@ -160,7 +160,7 @@ pub enum GfError {
         message: String,
     },
 
-    /// A structured M20/M21 public API failure.
+    /// A structured knowledge/epistemic public API failure.
     #[error("{code}: {message}")]
     Api {
         /// Stable closed public error code.
@@ -201,7 +201,7 @@ impl GfError {
     }
 }
 
-/// Stable non-project M20/M21 API error codes.
+/// Stable non-project knowledge/epistemic API error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiErrorCode {
     /// Requested UUID does not exist in the selected capability snapshot.

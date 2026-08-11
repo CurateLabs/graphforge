@@ -466,7 +466,7 @@ fn main() {
             id(0x220),
             id(0x221),
         ],
-        "belief projection must cite every decision-relevant M21 record at the cutoff"
+        "belief projection must cite every decision-relevant epistemic record at the cutoff"
     );
     let valid = graph
         .apply_valid_time(graphforge_api::ApplyValidTimeRequest {

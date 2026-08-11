@@ -1,7 +1,7 @@
 # Bazel migration parity (#6)
 
 Same-SHA Cargo/Bazel dual-build parity and cross-platform release modeling for
-M2 issue [#6](https://github.com/CurateLabs/graphforge/issues/6) / canonical
+Bazel-migration issue [#6](https://github.com/CurateLabs/graphforge/issues/6) / canonical
 [#1](https://github.com/CurateLabs/graphforge/issues/1) step 7.
 
 Orchestration: [bazel-migration-orchestration.md](bazel-migration-orchestration.md).
@@ -69,7 +69,7 @@ bazelisk test //:parity_suite //:bazel_test_graph_smoke
 | RT-publish-crates | justified | crates.io publish/auth metadata |
 | RT-maturin-assemble / RT-napi-assemble | handoff | Assemble/sign/publish only; no silent native recompile |
 | RT-examples | closed | All 11 examples mapped as Bazel binaries |
-| RT-mobile | excluded | Abandoned for M2 |
+| RT-mobile | excluded | Abandoned for Bazel migration |
 
 ## Next
 

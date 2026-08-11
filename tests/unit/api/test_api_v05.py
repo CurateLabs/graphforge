@@ -438,7 +438,7 @@ class TestExplain:
 
 
 _MINIMAL_ONTOLOGY = """\
-ontology_id: m16_test
+ontology_id: binding_surface_test
 version: "v1"
 entity_types:
   - name: Person

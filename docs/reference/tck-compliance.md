@@ -1,6 +1,6 @@
 # GraphForge TCK Compliance — Rust v0.5 core
 
-**Status:** in progress (M17 Conformance Hardening). Authoritative per-feature status lives in
+**Status:** in progress (TCK conformance Hardening). Authoritative per-feature status lives in
 `tests/tck/coverage_matrix.json` (at the repo root, outside this docs tree) and is CI-enforced.
 
 ## The corpus and the target
@@ -140,7 +140,7 @@ quantifier-invariant scenarios (5.068–5.274 s). The absolute formula selects *
 aggregate warning boundary is **171.976 seconds** (1.25× the 137.581-second baseline; the relative
 allowance is larger than the +15-second floor). The Rust BDD job completed in 3m51s, comparable to
 the rejected concurrent run while producing attributable scenario timings. This measurement is the
-reviewed pre-fix reference; the post-M17 baseline below supersedes it for warnings.
+reviewed pre-fix reference; the post-TCK-conformance baseline below supersedes it for warnings.
 
 ### XOR chain correction
 
@@ -317,7 +317,7 @@ cargo test -p graphforge-api --test multi_label_scaling
 TCK_ONLY=Match3 cargo test -p graphforge-api --test bdd -- --no-fail-fast
 ```
 
-### Post-M17 v0.5.0 performance baseline
+### Post-TCK-conformance v0.5.0 performance baseline
 
 The committed baseline comes from the final complete `BDD — Rust` artifact for the independently
 merged multi-label correction. It reports `partial: false`, runner `ubuntu-latest`, fixture profile

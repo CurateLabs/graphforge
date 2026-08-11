@@ -49,7 +49,7 @@ export function scenarioUuids(count = 48) {
   );
 }
 
-export function buildKnowledgeInput(uuids, { m21 = true } = {}) {
+export function buildKnowledgeInput(uuids, { epistemic = true } = {}) {
   return {
     actor_uuid: uuids[1],
     assertion: {
@@ -102,7 +102,7 @@ export function buildKnowledgeInput(uuids, { m21 = true } = {}) {
         properties: { name: "Grace", summary: "native bindings" },
       },
     ],
-    reasoning: m21
+    reasoning: epistemic
       ? {
           content: "explicit evidence interpretation",
           content_format: "text/plain",
@@ -111,7 +111,7 @@ export function buildKnowledgeInput(uuids, { m21 = true } = {}) {
           reasoning_uuid: uuids[11],
         }
       : undefined,
-    status: m21
+    status: epistemic
       ? {
           operation_uuid: uuids[12],
           status: "hypothesis",
@@ -137,7 +137,7 @@ export function assertNoDesignedOnlyReferences() {
 }
 
 /**
- * Analyst-agent scenario: bootstrap → build → explore → find → M18 → beliefs → reopen.
+ * Analyst-agent scenario: bootstrap → build → explore → find → algorithm → beliefs → reopen.
  */
 export async function runAnalystScenario({
   GraphForge,

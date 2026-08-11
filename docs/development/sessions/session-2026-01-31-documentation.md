@@ -92,7 +92,7 @@ docs/
 └── ... (technical docs)
 
 examples/
-└── basic_usage.py ✅ Native M18/M19 composition
+└── basic_usage.py ✅ Native algorithm/search composition
 ```
 
 ### Commits Made

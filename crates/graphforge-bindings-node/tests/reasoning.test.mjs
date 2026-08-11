@@ -1,4 +1,4 @@
-// Fresh-native M21 immutable reasoning acceptance (#780).
+// Fresh-native epistemic immutable reasoning acceptance (#780).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

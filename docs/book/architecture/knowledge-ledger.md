@@ -91,9 +91,9 @@ sort keys and exact cursor semantics. Public tabular results are Arrow tables.
 
 The exact field order, Arrow type, nullability, schema fingerprint, enum
 registry version, sort key, row limit, owner, and implementation issue are in
-the generated [Knowledge schema inventory](../../reference/m20-schema-inventory.json).
+the generated [Knowledge schema inventory](../../reference/knowledge-schema-inventory.json).
 Its companion
-[`m20-schema-inventory.sha256`](../../reference/m20-schema-inventory.sha256)
+[`knowledge-schema-inventory.sha256`](../../reference/knowledge-schema-inventory.sha256)
 binds the bytes. The inventory is assembled directly from the two owning Rust
 registries; `graphforge-storage`, bindings, and documentation do not define duplicate
 schemas.
@@ -101,10 +101,10 @@ schemas.
 To review and accept an intentional registry change:
 
 ```bash
-UPDATE_M20_SCHEMA_INVENTORY=1 \
-  cargo test -p graphforge-api --lib m20_schema_inventory_matches_checked_contract
-git diff -- docs/reference/m20-schema-inventory.*
-cargo test -p graphforge-api --lib m20_schema_inventory_matches_checked_contract
+UPDATE_KNOWLEDGE_SCHEMA_INVENTORY=1 \
+  cargo test -p graphforge-api --lib knowledge_schema_inventory_matches_checked_contract
+git diff -- docs/reference/knowledge-schema-inventory.*
+cargo test -p graphforge-api --lib knowledge_schema_inventory_matches_checked_contract
 ```
 
 The test compares generated and checked bytes exactly. A new record family,
@@ -113,22 +113,22 @@ fingerprint therefore fails CI until its reviewed inventory is committed.
 
 ## Deterministic knowledge-layer contract gate
 
-`tests/contracts/m20-contract-matrix.json` is the finite acceptance ledger.
+`tests/contracts/knowledge-contract-matrix.json` is the finite acceptance ledger.
 Every row names its exact Rust, Python, or Node test IDs and the command group
 that executes them. The validator rejects missing rows, stale test symbols,
 ignored or skipped tests, binding omissions, an incomplete analyst-verb catalog
 partition, or schema-inventory drift:
 
 ```bash
-python3 scripts/ci/m20-contract-gate.py validate
-python3 scripts/ci/test-m20-contract-gate.py
+python3 scripts/ci/knowledge-contract-gate.py validate
+python3 scripts/ci/test-knowledge-contract-gate.py
 ```
 
-The **M20 Contract Gate** workflow is intentionally manual. It is used for
+The **Knowledge Contract Gate** workflow is intentionally manual. It is used for
 contract closure or explicit revalidation, not as another full build on every
 small pull request. One dispatch runs the checked Rust, clean-wheel Python, and
 fresh-addon Node command groups from the same commit. The final
-`M20-Contract-Gate-<sha>` artifact contains the commit SHA, toolchain versions,
+`knowledge-Contract-Gate-<sha>` artifact contains the commit SHA, toolchain versions,
 matrix and schema digests, exact commands, logs, test IDs, row outcomes, and a
 SHA-256-bound report. Any missing fragment or failed command prevents report
 generation.
@@ -141,7 +141,7 @@ import, or backward-compatibility path for unsupported layouts.
 
 Rust is authoritative. Python returns `pyarrow.Table`; Node returns Arrow IPC
 decoded as an Arrow table. The frozen request, output, pagination, and error
-contracts are specified in [Immutable knowledge public API v1](m20-public-api-v1.md).
+contracts are specified in [Immutable knowledge public API v1](knowledge-public-api-v1.md).
 
 A typical persistent flow is:
 
@@ -264,7 +264,7 @@ fingerprint, inject knowledge fields into graph results, or make neutral
 graph/analyst-verb/find paths open knowledge participants.
 
 The exact fields and versions are generated in the
-[Epistemic schema inventory](../../reference/m21-schema-inventory.json). Resolution
+[Epistemic schema inventory](../../reference/epistemic-schema-inventory.json). Resolution
 reconstructs mandatory transaction time first, uses `(recorded_at, event_uuid)`
 for current-event ties, then applies optional valid time. See
 [ADR 0006](../../adr/0006-epistemic-model.md) for the complete policy and

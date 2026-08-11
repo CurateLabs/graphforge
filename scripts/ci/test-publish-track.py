@@ -37,7 +37,7 @@ assert "publish-track requires a non-development version" in resolve
 
 locate = section(workflow, "  locate_candidate:\n", "  validate_candidate:\n")
 assert "status=success&head_sha=$RELEASE_SHA" in locate
-assert 'artifact_name="M1-Release-Candidate-$group-$RELEASE_SHA"' in locate
+assert 'artifact_name="Release-Candidate-$group-$RELEASE_SHA"' in locate
 assert ".expired == false" in locate
 assert 'if test "$count" != 1; then' in locate
 assert "candidate_state=incomplete" in locate
@@ -46,8 +46,7 @@ validate = section(workflow, "  validate_candidate:\n", "  dispatch_binding_rc:\
 assert "actions/download-artifact@" in validate
 for group in ("manifest", "python", "npm", "crates", "evidence"):
     assert (
-        f"M1-Release-Candidate-{group}-${{{{ needs.resolve_source.outputs.release_sha }}}}"
-        in validate
+        f"Release-Candidate-{group}-${{{{ needs.resolve_source.outputs.release_sha }}}}" in validate
     )
 assert "scripts/ci/release-candidate.py validate" in validate
 assert '--expected-sha "$RELEASE_SHA"' in validate
@@ -74,10 +73,10 @@ assert '--target "$RELEASE_SHA"' in release
 assert "publish.yaml" in release
 
 for forbidden in (
-    "m1-release-certification",
+    "release-certification",
     "checkpoint-recovery",
-    "m20-contract",
-    "m21-contract",
+    "knowledge-contract",
+    "epistemic-contract",
     "uv publish",
     "npm publish",
     "cargo publish",

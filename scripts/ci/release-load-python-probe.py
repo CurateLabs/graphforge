@@ -125,7 +125,7 @@ def main() -> None:
         find_rows = 0
         rank_result_sha256 = fingerprint([])
         find_result_sha256 = fingerprint([])
-        if workload.startswith("m18-"):
+        if workload.startswith("algorithm-"):
             rank = forge.rank("Entity", by="degree", via="LINK")
             rank_rows = rank.num_rows
             rank_result_sha256 = fingerprint(
@@ -137,7 +137,7 @@ def main() -> None:
                     )
                 )
             )
-        if workload.startswith("m19-"):
+        if workload.startswith("search-"):
             forge.index("Entity", properties=["name"])
             found = forge.find("n-00000001", label="Entity", limit=10)
             find_rows = found.num_rows
@@ -156,10 +156,10 @@ def main() -> None:
         reopened_nodes = reopened.execute("MATCH (n) RETURN n.name AS name ORDER BY name")
         reopen_node_rows = reopened_nodes.num_rows
         reopen_node_result_sha256 = fingerprint(reopened_nodes.column("name").to_pylist())
-        if workload.startswith("m18-"):
+        if workload.startswith("algorithm-"):
             if reopened.rank("Entity", by="degree", via="LINK").num_rows != rank_rows:
                 raise RuntimeError("rank result changed after reopen")
-        if workload.startswith("m19-"):
+        if workload.startswith("search-"):
             if reopened.find("n-00000001", label="Entity", limit=10).num_rows != find_rows:
                 raise RuntimeError("find result changed after reopen")
         temporary = max(0, directory_bytes(project) - persisted)

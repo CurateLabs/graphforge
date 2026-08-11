@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "466597ebafba730058500bec792bd055ce3588b173f47c0d3abcee870b08d9b8",
+  "public_method_digest": "b4f9e9cba9d75f8ae91cb47fc64b9e224b33d7629f6da4ff8c76328ce7f11979",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -180,7 +180,7 @@
         {"path": "crates/graphforge-api/src/valid_time.rs", "symbol": "correction_preserves_prior_cutoff_base_snapshot_and_reopen_fingerprint"}
       ]
     },
-    "m18": {
+    "algorithm": {
       "ids": [
         "GraphForge.analyze", "GraphForge.analyze_embedding", "GraphForge.cluster", "GraphForge.invoke_analyze_descriptor",
         "GraphForge.invoke_cluster_descriptor", "GraphForge.invoke_descriptor", "GraphForge.invoke_descriptor_bytes",
@@ -191,30 +191,30 @@
         "crate.algorithm_descriptor_contracts"
       ],
       "test_refs": [
-        {"path": "crates/graphforge-api/tests/m22_m18_public_surface.rs", "symbol": "all_94_public_algorithm_contracts_are_unique_typed_and_repeatable"},
-        {"path": "crates/graphforge-api/tests/m22_m18_public_surface.rs", "symbol": "descriptor_byte_and_embedding_dispatch_are_publicly_covered"},
+        {"path": "crates/graphforge-api/tests/algorithm_public_surface.rs", "symbol": "all_94_public_algorithm_contracts_are_unique_typed_and_repeatable"},
+        {"path": "crates/graphforge-api/tests/algorithm_public_surface.rs", "symbol": "descriptor_byte_and_embedding_dispatch_are_publicly_covered"},
         {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "every_verb_prepares_and_dispatches_through_the_direct_executor"},
         {"path": "crates/graphforge-api/src/belief_projection.rs", "symbol": "statusless_include_materializes_the_same_neutral_rank_projection"},
         {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "registry_is_exhaustive_for_all_94_catalog_entries"},
         {"path": "crates/graphforge-api/src/invocation_descriptor.rs", "symbol": "prepared_rank_dispatch_is_arrow_equivalent_and_detects_projection_change"}
       ]
     },
-    "m19-provider-rerank": {
+    "search-provider-rerank": {
       "ids": [
         "GraphForge.bind_embedding_space_alias", "GraphForge.configure_provider_find_runtime", "GraphForge.delete_embedding_space",
         "GraphForge.embedding_refresh_project_policy", "GraphForge.embedding_space", "GraphForge.embedding_spaces", "GraphForge.find",
         "GraphForge.find_with_diagnostics", "GraphForge.find_with_provider", "GraphForge.index_adjacency", "GraphForge.index_search", "GraphForge.inspect_adjacency",
         "GraphForge.inspect_embedding_refresh", "GraphForge.inspect_embedding_space_freshness", "GraphForge.inspect_provider_embedding_plan", "GraphForge.inspect_text_index",
-        "GraphForge.inspect_provider_rerank_plan", "GraphForge.publish_caller_embeddings", "GraphForge.publish_m18_embeddings",
+        "GraphForge.inspect_provider_rerank_plan", "GraphForge.publish_caller_embeddings", "GraphForge.publish_algorithm_embeddings",
         "GraphForge.publish_provider_embeddings", "GraphForge.refresh_provider_embeddings", "GraphForge.remove_embedding_space_alias",
         "GraphForge.rebuild_adjacency", "GraphForge.rerank_find_results", "GraphForge.set_default_embedding_space", "GraphForge.set_embedding_refresh_project_policy",
         "GraphForge.set_embedding_refresh_space_policy", "OpenRouterProviderSession.find", "OpenRouterProviderSession.inspect_embedding_plan",
         "OpenRouterProviderSession.publish_embeddings", "OpenRouterProviderSession.refresh_embeddings"
       ],
       "test_refs": [
-        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
-        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
-        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "openrouter_session_refresh_embeddings_rejects_drift_without_transport"},
+        {"path": "crates/graphforge-api/tests/search_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
+        {"path": "crates/graphforge-api/tests/provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/tests/provider_public_surface.rs", "symbol": "openrouter_session_refresh_embeddings_rejects_drift_without_transport"},
         {"path": "crates/graphforge-api/src/provider_rerank.rs", "symbol": "default_error_and_explicit_canonical_fallback_are_distinct"},
         {"path": "crates/graphforge-api/src/embedding_spaces.rs", "symbol": "aliases_defaults_replacement_removal_and_reopen_are_deterministic"},
         {"path": "crates/graphforge-api/src/embedding_refresh.rs", "symbol": "defaults_and_space_overrides_are_durable_and_content_free"},
@@ -224,7 +224,7 @@
         {"path": "crates/graphforge-api/src/embedding_freshness.rs", "symbol": "fresh_alias_and_default_survive_reopen"},
         {"path": "crates/graphforge-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
         {"path": "crates/graphforge-api/src/embedding_spaces.rs", "symbol": "explicit_deletion_removes_one_lineage_all_aliases_and_default"},
-        {"path": "crates/graphforge-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"},
+        {"path": "crates/graphforge-api/src/algorithm_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"},
         {"path": "crates/graphforge-api/src/provider_embedding.rs", "symbol": "inspection_is_order_independent_content_free_and_openrouter_explicit"},
         {"path": "crates/graphforge-api/src/provider_embedding_execution.rs", "symbol": "cancellation_is_structured_before_provider_or_alias_mutation"},
         {"path": "crates/graphforge-api/src/provider_find.rs", "symbol": "ordinary_find_resolves_and_replaces_exact_configured_runtime"},
@@ -234,7 +234,7 @@
         {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "text_receipt_tracks_stale_rebuild_incompatible_and_reopen_transitions"}
       ]
     },
-    "m20": {
+    "knowledge": {
       "ids": [
         "GraphForge.assertion", "GraphForge.assertion_graph_refs", "GraphForge.assertion_status", "GraphForge.assess_confidence",
         "GraphForge.attach_evidence", "GraphForge.confidence_assessment", "GraphForge.confidence_inputs", "GraphForge.create_assertion",
@@ -264,7 +264,7 @@
         {"path": "crates/graphforge-api/src/knowledge.rs", "symbol": "supersession_is_atomic_branch_preserving_idempotent_and_reopenable"}
       ]
     },
-    "m21": {
+    "epistemic": {
       "ids": [
         "GraphForge.algorithm_run", "GraphForge.algorithm_run_events", "GraphForge.apply_valid_time", "GraphForge.attach_resolved_run",
         "GraphForge.create_hypothesis_group", "GraphForge.epistemic_snapshot", "GraphForge.hypothesis_members",
@@ -308,11 +308,11 @@
       "ids": ["GraphForge.index", "GraphForge.load_ontology"],
       "test_refs": [
         {"path": "crates/graphforge-api/tests/facade_methods.rs", "symbol": "load_ontology_applies_and_promotes_mode"},
-        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"}
+        {"path": "crates/graphforge-api/tests/search_public_surface.rs", "symbol": "public_find_option_and_legacy_index_errors_are_exact_and_repeatable"}
       ]
     }
   },
-  "m18_registry": {
+  "algorithm_registry": {
     "release-tested": {
       "ids": [
         "rank.adamic_adar", "rank.article_rank", "rank.betweenness", "rank.celf", "rank.closeness", "rank.clustering_coefficient", "rank.common_neighbors", "rank.degree", "rank.eigenvector", "rank.harmonic_closeness", "rank.hits_authority", "rank.hits_hub", "rank.k_core", "rank.pagerank", "rank.preferential_attachment", "rank.resource_allocation", "rank.total_neighbors", "rank.triangles",
@@ -327,37 +327,37 @@
       ]
     }
   },
-  "required_m19_contracts": [
+  "required_search_contracts": [
     "find.mode.text", "find.mode.vector", "find.mode.hybrid",
     "find.freshness.default", "find.freshness.force_stale",
     "index.text.create", "index.vector.publish", "index.adjacency.create",
-    "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.m18",
+    "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.algorithm",
     "embedding.normalization.none", "embedding.normalization.l2",
     "embedding.distance.cosine",
     "provider.workflow.plan", "provider.workflow.publish", "provider.workflow.refresh", "provider.workflow.find",
     "rerank.failure.error", "rerank.failure.canonical_unreranked",
     "rerank.advisory.emit", "rerank.advisory.suppress"
   ],
-  "m19_contracts": {
+  "search_contracts": {
     "release-tested": {
       "ids": [
         "find.mode.text", "find.mode.vector", "find.mode.hybrid",
         "find.freshness.default", "find.freshness.force_stale",
         "index.text.create", "index.vector.publish", "index.adjacency.create",
-        "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.m18",
+        "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.algorithm",
         "embedding.normalization.none", "embedding.normalization.l2",
         "embedding.distance.cosine",
         "provider.workflow.plan", "provider.workflow.publish", "provider.workflow.refresh", "provider.workflow.find",
         "rerank.failure.error", "rerank.failure.canonical_unreranked",
         "rerank.advisory.emit", "rerank.advisory.suppress"
       ],
-      "test_refs": [{"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
+      "test_refs": [{"path": "crates/graphforge-api/tests/search_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
     }
   },
-  "m19_evidence_groups": {
+  "search_evidence_groups": {
     "find-modes": {
       "ids": ["find.mode.text", "find.mode.vector", "find.mode.hybrid"],
-      "test_refs": [{"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
+      "test_refs": [{"path": "crates/graphforge-api/tests/search_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"}]
     },
     "freshness": {
       "ids": ["find.freshness.default", "find.freshness.force_stale"],
@@ -369,25 +369,25 @@
     "indexes": {
       "ids": ["index.text.create", "index.vector.publish", "index.adjacency.create"],
       "test_refs": [
-        {"path": "crates/graphforge-api/tests/m22_m19_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
+        {"path": "crates/graphforge-api/tests/search_public_surface.rs", "symbol": "public_text_vector_hybrid_find_is_exact_repeatable_and_persistent"},
         {"path": "crates/graphforge-api/src/search_index.rs", "symbol": "adjacency_is_explicit_and_never_treats_a_search_label_as_magic"}
       ]
     },
     "embedding-contract": {
       "ids": [
-        "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.m18",
+        "embedding.producer.caller", "embedding.producer.provider", "embedding.producer.algorithm",
         "embedding.normalization.none", "embedding.normalization.l2", "embedding.distance.cosine"
       ],
       "test_refs": [
         {"path": "crates/graphforge-api/src/embedding_publication.rs", "symbol": "complete_batch_is_canonical_idempotent_replaceable_and_reopenable"},
-        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
-        {"path": "crates/graphforge-api/src/m18_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"}
+        {"path": "crates/graphforge-api/tests/provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/src/algorithm_embedding_publication.rs", "symbol": "canonical_result_is_idempotent_uuid_keyed_and_reopenable"}
       ]
     },
     "provider-workflows": {
       "ids": ["provider.workflow.plan", "provider.workflow.publish", "provider.workflow.refresh", "provider.workflow.find"],
       "test_refs": [
-        {"path": "crates/graphforge-api/tests/m22_provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
+        {"path": "crates/graphforge-api/tests/provider_public_surface.rs", "symbol": "provider_refresh_and_rerank_public_facades_are_covered"},
         {"path": "crates/graphforge-api/tests/provider_session.rs", "symbol": "configured_session_composes_embedding_query_rerank_and_advisory"}
       ]
     },

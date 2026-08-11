@@ -856,12 +856,12 @@ impl AlgorithmRunState {
     }
 }
 
-/// Immutable identity for one recorded M18 invocation.
+/// Immutable identity for one recorded algorithm invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlgorithmRun {
     /// Caller-supplied UUIDv7 run identity.
     pub run_uuid: Uuid,
-    /// Closed public M18 algorithm name.
+    /// Closed public algorithm name.
     pub algorithm: String,
     /// Algorithm contract version.
     pub algorithm_version: u32,
@@ -2706,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn m20_schema_registry_excludes_every_m21_field() {
+    fn knowledge_schema_registry_excludes_every_epistemic_field() {
         let fields = schema_registry()
             .into_iter()
             .filter(|entry| entry.capability_id == "knowledge")

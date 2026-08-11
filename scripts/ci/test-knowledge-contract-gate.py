@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the M20 closure-ledger validator."""
+"""Regression tests for the knowledge closure-ledger validator."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/ci/m20-contract-gate.py"
-SPEC = importlib.util.spec_from_file_location("m20_contract_gate", SCRIPT)
+SCRIPT = ROOT / "scripts/ci/knowledge-contract-gate.py"
+SPEC = importlib.util.spec_from_file_location("knowledge_contract_gate", SCRIPT)
 if SPEC is None or SPEC.loader is None:
-    raise SystemExit("cannot load M20 contract gate")
+    raise SystemExit("cannot load knowledge contract gate")
 GATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GATE)
 
@@ -80,7 +80,7 @@ def main() -> None:
             check=True,
         ).stdout.strip()
         GATE.build_report(sha, fragments, output)
-        report = json.loads((output / "m20-contract-gate-report.json").read_text())
+        report = json.loads((output / "knowledge-contract-gate-report.json").read_text())
         assert report["commit_sha"] == sha
         assert report["summary"] == {"total": 16, "passed": 16, "failed": 0}
         assert all(case["outcome"] == "success" for case in report["cases"])
@@ -95,7 +95,7 @@ def main() -> None:
         else:
             raise AssertionError("report accepted commands that differ from the checked matrix")
 
-    print("M20 contract gate tests passed")
+    print("knowledge contract gate tests passed")
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 
 The frozen, knowledge-neutral identity used for recorded algorithm execution is
 defined by the
-[neutral invocation descriptor v1](m18-invocation-descriptor-v1.md). Direct
+[neutral invocation descriptor v1](algorithm-invocation-descriptor-v1.md). Direct
 and descriptor dispatch share the same Rust executor; graph and algorithm
 crates never open knowledge tables.
 
