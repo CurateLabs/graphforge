@@ -2450,13 +2450,17 @@ impl GraphForge {
             .read()
             .expect("adjacency visibility lock poisoned");
         self.adjacency_provider.revalidate();
-        graphforge_exec::paths_algorithm(
+        graphforge_exec::paths_algorithm_with_compute(
             self.adjacency_provider.as_ref(),
             &self.dir,
             self.ontology_mode,
             source.map(|uuid| *uuid.as_bytes()),
             target.map(|uuid| *uuid.as_bytes()),
             options,
+            graphforge_exec::AlgorithmLimits::default()
+                .with_batch_size(self.resource_policy.batch_size)
+                .with_compute_threads(self.resource_policy.compute_threads),
+            Some(self.compute_pool.clone()),
         )
     }
 

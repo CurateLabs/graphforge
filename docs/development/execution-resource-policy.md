@@ -71,16 +71,17 @@ private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
 Jaccard node similarity (#535), local clustering coefficient (#504), triangle
 ranking (#515), Degree (#506), betweenness Brandes source searches (#501), and
-`cluster(by="components")` (#518) may partition independent work across that
-pool above documented crossovers; work never uses Rayon's process-global pool.
-Cosine dot products retain serial coordinate order, PageRank keeps canonical
-contribution order with serial dangling/delta reductions, Jaccard retains
-serial candidate order per source, clustering coefficient merges node-range
-scores in canonical dense-ordinal order, triangles merge node-owned counts by
-ascending dense ordinal, Degree merges node chunks in dense ordinal order,
-betweenness reduces per-source dependency arrays in canonical source order,
-Components merges worker-local forests in canonical source-range order, and
-Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
+`cluster(by="components")` (#518), and transitive closure (#554) may partition
+independent work across that pool above documented crossovers; work never uses
+Rayon's process-global pool. Cosine dot products retain serial coordinate order,
+PageRank keeps canonical contribution order with serial dangling/delta
+reductions, Jaccard retains serial candidate order per source, clustering
+coefficient merges node-range scores in canonical dense-ordinal order, triangles
+merge node-owned counts by ascending dense ordinal, Degree merges node chunks in
+dense ordinal order, betweenness reduces per-source dependency arrays in
+canonical source order, Components merges worker-local forests in canonical
+source-range order, Node2Vec skip-gram training stays serial, and transitive
+closure merges source ranges canonically, so fingerprints match the one-thread
 path.
 
 ## Parallel cosine KNN (#342)
@@ -261,6 +262,23 @@ IDs are still assigned by canonical node order, so schemas, row order, labels,
 and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations. Cancellation remains cooperative both before worker launch and
 inside chunk scans.
+
+## Parallel transitive closure (#554)
+
+`paths(by="transitive_closure")` partitions independent source-node traversals
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated traversal work (`sources × direction-expanded adjacency entries`) is
+  at least `TRANSITIVE_CLOSURE_PARALLEL_CROSSOVER_WORK` (`65_536`) in
+  `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the serial
+per-source breadth-first traversal runs with no pool scheduling tax. Parallel
+workers preserve the serial traversal inside each source, sort reachable targets
+by public UUID, and merge worker outputs by ascending canonical source range.
+Schemas, row order, reachable-pair sets, and fingerprints match the one-thread
+result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 

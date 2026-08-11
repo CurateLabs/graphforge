@@ -1859,6 +1859,13 @@ direction-expanded adjacency entries at 100,000,000, output rows at 10,000,000, 
 cooperative work checkpoints at 10,000. Cancellation and all failures abort without partial
 output.
 
+Above `TRANSITIVE_CLOSURE_PARALLEL_CROSSOVER_WORK` (`65,536` estimated
+`sources * direction-expanded adjacency entries` work units), multi-thread
+resource policies may run independent source traversals on the instance-owned
+private compute pool. Source ranges merge back in canonical UUID order before
+Arrow shaping, so schemas, row order, pairs, and fingerprints match the
+one-thread path. Small workloads and one-thread policies stay serial.
+
 Rust owns catalog dispatch, projection, validation, traversal, deduplication, ordering,
 limits, cancellation, and Arrow shaping. Python and Node only adapt arguments and the native
 Arrow result. Knowledge-layer presence cannot affect the topology-only result, preserving the topology-only knowledge isolation boundary. No external graph

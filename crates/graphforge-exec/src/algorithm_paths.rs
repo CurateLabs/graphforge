@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::AdjacencyProvider;
 use crate::algorithm_dispatch::{
-    AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmOutput, AlgorithmRegistry,
-    AlgorithmValue, DependencyReview, RustAlgorithm,
+    AlgorithmCancellation, AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmLimits,
+    AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
 use crate::algorithm_graph::{
     AdjacencyGraph, AdjacencySelection, export_adjacency, load_node_numeric_property,
@@ -1127,6 +1127,33 @@ pub fn paths_algorithm(
     target: Option<[u8; 16]>,
     options: PathsOptions,
 ) -> Result<RecordBatch, GfError> {
+    paths_algorithm_with_compute(
+        provider,
+        dir,
+        mode,
+        source,
+        target,
+        options,
+        AlgorithmLimits::default(),
+        None,
+    )
+}
+
+/// Execute path/flow algorithms with explicit limits and optional private compute pool (#554).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors paths_algorithm plus resource-policy compute handles"
+)]
+pub fn paths_algorithm_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    source: Option<[u8; 16]>,
+    target: Option<[u8; 16]>,
+    options: PathsOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<RecordBatch, GfError> {
     validate_path_options(source, target, &options)?;
     let via = options.via.as_deref().unwrap_or("*");
     let graph = export_adjacency(
@@ -1152,10 +1179,10 @@ pub fn paths_algorithm(
         },
     )?;
     let algorithm = Algorithm::Paths(options.by);
-    let control = AlgorithmControl::new(
-        crate::algorithm_dispatch::AlgorithmLimits::default(),
-        crate::algorithm_dispatch::AlgorithmCancellation::default(),
-    );
+    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
     if let Some(kind) = steiner_kind(options.by) {
         return execute_steiner(&graph, dir, source, target, &options, kind, &control);
     }
