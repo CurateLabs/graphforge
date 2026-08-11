@@ -1,8 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
 const CHECKPOINT_INTERVAL: usize = 4_096;
+/// Wedges below this count stay serial to avoid private-pool scheduling tax.
+pub(crate) const TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES: u64 = 32_768;
 
 /// One stored edge entry in the selected UUID projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +15,12 @@ pub(crate) struct TransitivityEdge {
     pub edge: [u8; 16],
     pub source: [u8; 16],
     pub target: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransitivityExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
 }
 
 impl TransitivityEdge {
@@ -36,8 +47,34 @@ pub(crate) fn transitivity(
     if wedges == 0 {
         return Ok(0.0);
     }
-    let triangles = count_triangles(&neighbors, control, &mut work)?;
+    let triangles = match select_transitivity_path(control, neighbors.len(), wedges) {
+        TransitivityExecutionPath::Serial => count_triangles(&neighbors, control, &mut work)?,
+        TransitivityExecutionPath::Parallel { .. } => {
+            count_triangles_parallel(&neighbors, control)?
+        }
+    };
     ratio(triangles, wedges)
+}
+
+pub(crate) fn select_transitivity_path(
+    control: &AlgorithmControl,
+    nodes: usize,
+    wedges: u64,
+) -> TransitivityExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || nodes < 3
+        || wedges < TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return TransitivityExecutionPath::Serial;
+    }
+    TransitivityExecutionPath::Parallel {
+        threads,
+        chunks: source_chunks(nodes, threads).len(),
+    }
 }
 
 fn ratio(triangles: u64, wedges: u64) -> Result<f64, AlgorithmError> {
@@ -132,8 +169,48 @@ fn count_triangles(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<u64, AlgorithmError> {
+    count_triangles_range(0, neighbors.len(), neighbors, control, work)
+}
+
+fn count_triangles_parallel(
+    neighbors: &[BTreeSet<usize>],
+    control: &AlgorithmControl,
+) -> Result<u64, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel transitivity requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(neighbors.len(), control.compute_threads());
+    let mut chunk_results = run_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut work = 0_usize;
+                (
+                    start,
+                    count_triangles_range(start, end, neighbors, control, &mut work),
+                )
+            })
+            .collect::<Vec<_>>())
+    })?;
+    chunk_results.sort_unstable_by_key(|(start, _)| *start);
     let mut triangles = 0_u64;
-    for source in 0..neighbors.len() {
+    for (_, chunk) in chunk_results {
+        triangles = triangles
+            .checked_add(chunk?)
+            .ok_or_else(|| execution("transitivity triangle count exceeds supported range"))?;
+    }
+    Ok(triangles)
+}
+
+fn count_triangles_range(
+    start: usize,
+    end: usize,
+    neighbors: &[BTreeSet<usize>],
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<u64, AlgorithmError> {
+    let mut triangles = 0_u64;
+    for source in start..end {
         checkpoint(control, work)?;
         for &middle in neighbors[source].range(source.saturating_add(1)..) {
             for &target in neighbors[middle].range(middle.saturating_add(1)..) {
@@ -147,6 +224,39 @@ fn count_triangles(
         }
     }
     Ok(triangles)
+}
+
+fn source_chunks(len: usize, threads: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, len);
+    let base = len / workers;
+    let rem = len % workers;
+    let mut chunks = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let chunk_len = base + usize::from(index < rem);
+        let end = start + chunk_len;
+        if start < end {
+            chunks.push((start, end));
+        }
+        start = end;
+    }
+    chunks
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("transitivity worker panicked")),
+    }
 }
 
 fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), AlgorithmError> {
@@ -169,9 +279,15 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
+    }
+
+    fn wide_uuid(value: u128) -> [u8; 16] {
+        value.to_be_bytes()
     }
 
     fn edge(id: u8, source: u8, target: u8) -> TransitivityEdge {
@@ -184,6 +300,33 @@ mod tests {
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
+    }
+
+    fn complete_graph_fixture(nodes: usize) -> (Vec<[u8; 16]>, Vec<TransitivityEdge>) {
+        let nodes = (0..nodes)
+            .map(|node| wide_uuid(node as u128))
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        let mut edge_id = 1_u128;
+        for source in 0..nodes.len() {
+            for target in source + 1..nodes.len() {
+                edges.push(TransitivityEdge {
+                    edge: wide_uuid(edge_id),
+                    source: nodes[source],
+                    target: nodes[target],
+                });
+                edge_id += 1;
+            }
+        }
+        (nodes, edges)
     }
 
     #[test]
@@ -235,6 +378,57 @@ mod tests {
             let value = transitivity(&nodes, &edges, &control()).unwrap();
             assert_eq!(value, 0.0);
             assert!(value.is_finite());
+        }
+    }
+
+    #[test]
+    fn path_selection_respects_crossover_and_private_pool() {
+        let serial = control_with_threads(1);
+        assert_eq!(
+            select_transitivity_path(&serial, 128, TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES),
+            TransitivityExecutionPath::Serial
+        );
+        let below = control_with_threads(4);
+        assert_eq!(
+            select_transitivity_path(&below, 128, TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES - 1),
+            TransitivityExecutionPath::Serial
+        );
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_transitivity_path(&no_pool, 128, TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES),
+            TransitivityExecutionPath::Serial
+        );
+        assert_eq!(
+            select_transitivity_path(
+                &control_with_threads(4),
+                128,
+                TRANSITIVITY_PARALLEL_CROSSOVER_WEDGES
+            ),
+            TransitivityExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_complete_graph_ratio_bits() {
+        let (nodes, edges) = complete_graph_fixture(128);
+        let serial = transitivity(&nodes, &edges, &control_with_threads(1)).unwrap();
+        assert_eq!(serial, 1.0);
+        for threads in [2_usize, 4, 8] {
+            let control = control_with_threads(threads);
+            assert!(matches!(
+                select_transitivity_path(&control, nodes.len(), 1_024_128),
+                TransitivityExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(
+                transitivity(&nodes, &edges, &control).unwrap().to_bits(),
+                serial.to_bits()
+            );
         }
     }
 
