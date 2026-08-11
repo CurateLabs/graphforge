@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -69,13 +69,15 @@ state.
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
-Jaccard node similarity (#535), and local clustering coefficient (#504) may
-partition independent work across that pool above documented crossovers; work
-never uses Rayon's process-global pool. Cosine dot products retain serial
-coordinate order, PageRank keeps canonical contribution order with serial
-dangling/delta reductions, Jaccard retains serial candidate order per source,
-clustering coefficient merges node-range scores in canonical dense-ordinal
-order, and Node2Vec skip-gram training stays serial, so fingerprints match the
+Jaccard node similarity (#535), local clustering coefficient (#504), and
+triangle ranking (#515) may partition independent work across that pool above
+documented crossovers; work never uses Rayon's process-global pool. Cosine
+dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Jaccard retains
+serial candidate order per source, clustering coefficient merges node-range
+scores in canonical dense-ordinal order, triangles merge node-owned counts by
+ascending dense ordinal, and Node2Vec skip-gram training stays serial, so
+fingerprints match the
 one-thread path.
 
 ## Parallel cosine KNN (#342)
@@ -159,6 +161,23 @@ scores, ties, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations. The crossover is a conservative
 structural cutoff for embedded CPU work; timing remains hardware-specific
 evidence, not a universal scale claim.
+
+## Parallel triangles (#515)
+
+`rank(by="triangles")` normalizes the selected graph to the same simple
+undirected neighbor lists as the serial path, then partitions **node-owned
+triangle counts** across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected node count is at least `TRIANGLES_PARALLEL_CROSSOVER_NODES` (`256`)
+  in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+original serial nested-neighbor path runs with no pool scheduling tax. Parallel
+workers own contiguous dense-ordinal node ranges, keep each node's neighbor-pair
+scan serial, and return worker-local score vectors. Results merge in ascending
+range order, so schemas, row order, counts, and fingerprints match the
+one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Parallel Node2Vec walk generation (#344)
 
