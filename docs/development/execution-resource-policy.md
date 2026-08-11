@@ -68,13 +68,14 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and exact
-Jaccard node similarity (#535), ranking (#515) may partition independent work across that pool above documented may partition independent work across that pool
-above documented crossovers; work never uses Rayon's process-global pool. Cosine
-dot products retain serial coordinate order, PageRank keeps canonical
-contribution order with serial dangling/delta reductions, Jaccard retains serial
-candidate order per source, and Node2Vec skip-gram training stays serial, so
-fingerprints match the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
+Jaccard node similarity (#535), and triangle ranking (#515) may partition independent work
+across that pool above documented crossovers; work never uses Rayon's
+process-global pool. Cosine dot products retain serial coordinate order,
+PageRank keeps canonical contribution order with serial dangling/delta
+reductions, Jaccard retains serial candidate order per source, triangles merge node-owned counts by ascending dense ordinal,
+and Node2Vec skip-gram training stays serial, so fingerprints match the
+one-thread path.
 
 ## Parallel cosine KNN (#342)
 
