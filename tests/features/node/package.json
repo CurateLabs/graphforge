@@ -10,7 +10,7 @@
     "@curatelabs/graphforge": "workspace:*"
   },
   "devDependencies": {
-    "@cucumber/cucumber": "^11.0.0",
+    "@cucumber/cucumber": "^13.2.1",
     "@types/node": "^26.2.0",
     "apache-arrow": "^21.2.0",
     "typescript": "^6.0.3",
