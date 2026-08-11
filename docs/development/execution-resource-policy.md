@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -70,17 +70,18 @@ Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), exact
 Jaccard node similarity (#535), local clustering coefficient (#504), triangle
-ranking (#515), Degree (#506), and betweenness Brandes source searches (#501)
-may partition independent work across that pool above documented crossovers;
-work never uses Rayon's process-global pool. Cosine dot products retain serial
-coordinate order, PageRank keeps canonical contribution order with serial
-dangling/delta reductions, Jaccard retains serial candidate order per source,
-clustering coefficient merges node-range scores in canonical dense-ordinal
-order, triangles merge node-owned counts by ascending dense ordinal, Degree
-merges node chunks in dense ordinal order, betweenness reduces per-source
-dependency arrays in canonical source order, and Node2Vec skip-gram training
-stays serial, so fingerprints match the
-one-thread path.
+ranking (#515), Degree (#506), betweenness Brandes source searches (#501), and
+`cluster(by="components")` (#518) may partition independent work across that
+pool above documented crossovers; work never uses Rayon's process-global pool.
+Cosine dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Jaccard retains
+serial candidate order per source, clustering coefficient merges node-range
+scores in canonical dense-ordinal order, triangles merge node-owned counts by
+ascending dense ordinal, Degree merges node chunks in dense ordinal order,
+betweenness reduces per-source dependency arrays in canonical source order,
+Components merges worker-local forests in canonical source-range order, and
+Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
+path.
 
 ## Parallel cosine KNN (#342)
 
@@ -237,6 +238,29 @@ order. Worker loops use cancellation checks rather than shared checkpoint
 mutation; cancellation and limit failures remain structured. Schemas, row order,
 scores, ties, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel Components (#518)
+
+`cluster(by="components")` partitions **independent source-node adjacency scans**
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected direction-expanded adjacency entries are at least
+  `COMPONENTS_PARALLEL_CROSSOVER_EDGES` (`16_384`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the serial
+union-find path runs with no pool scheduling or worker-local map setup cost. The
+crossover is the measured M4 boundary where chunk-local union-find begins to
+amortize Rayon scheduling and deterministic merge overhead on multi-component
+fixtures.
+
+Parallel work is source-range-owned: each worker builds a local min-root
+union-find forest for the edges whose source ordinal falls in its chunk, then the
+main thread merges those local links by ascending source range. Final component
+IDs are still assigned by canonical node order, so schemas, row order, labels,
+and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
+configurations. Cancellation remains cooperative both before worker launch and
+inside chunk scans.
 
 ## Observability
 
