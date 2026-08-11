@@ -148,7 +148,7 @@ These requirements remain the acceptance bar for the Rust core and its bindings:
 
 - Thin-binding rule: Rust owns semantics; bindings only translate requests and Arrow results
 - Shared corpus and TCK gates across facade and binding lanes
-- Explicit crate boundaries (see [ADR 0005](0005-layered-architecture.md) and [ADR 0012](0012-m20-domain-ownership.md))
+- Explicit crate boundaries (see [ADR 0005](0005-layered-architecture.md) and [ADR 0012](0012-knowledge-domain-ownership.md))
 
 ---
 

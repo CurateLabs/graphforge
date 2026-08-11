@@ -291,7 +291,7 @@ m4-entry-matrix-check:  ## Validate the versioned M4 entry baseline contract (#3
 bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
 	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 
-native-consumers:  ## Run audited M18/M19 consumers against the installed native wheel
+native-consumers:  ## Run audited algorithm/search consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py
 
 release-load-matrix-check:  ## Validate the versioned XS-XL release-load contracts
@@ -332,9 +332,9 @@ bulk-construction-conformance:  ## Run same-SHA Rust/Python/Node bulk constructi
 
 .PHONY: bulk-construction-conformance-check bulk-construction-conformance
 
-.PHONY: m1-release-certification-check
-m1-release-certification-check:  ## Validate the final M1 release certification aggregate gate
-	python3 scripts/ci/test-m1-release-certification.py
+.PHONY: release-certification-check
+release-certification-check:  ## Validate the final release certification aggregate gate
+	python3 scripts/ci/test-release-certification.py
 
 cargo-check:  ## Type-check all Rust workspace crates (fast)
 	cargo check --workspace

@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "4777d827830b434b34eca446567fa4c7790d230a5e91061363f28ea249b25780",
+  "sha256": "ef489279cf02089d6ca8fee48519987d4405376e8f5dac722c24c214a772a4c2",
   "entries": [
     {
       "name": "graphforge-api",
@@ -204,7 +204,7 @@
         },
         {
           "name": "sha2",
-          "req": "^0.10",
+          "req": "^0.11",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -587,7 +587,7 @@
         },
         {
           "name": "sha2",
-          "req": "^0.10",
+          "req": "^0.11",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -834,7 +834,7 @@
         },
         {
           "name": "sha2",
-          "req": "^0.10",
+          "req": "^0.11",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1161,7 +1161,7 @@
         },
         {
           "name": "sha2",
-          "req": "^0.10",
+          "req": "^0.11",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1670,7 +1670,7 @@
         },
         {
           "name": "sha2",
-          "req": "^0.10",
+          "req": "^0.11",
           "features": [],
           "optional": false,
           "uses_default_features": true,

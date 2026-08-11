@@ -26,13 +26,13 @@ in [`.github/workflows/README.md`](../../.github/workflows/README.md).
 | PR Test Suite + CI Gate | Changed-surface correctness | Every PR → `main` | ≤10m p50 / ≤12m p95 | Classifier, same-SHA Linux bindings, workspace tests, Gate | Multi-OS, load, llvm-cov, Binding RC |
 | `make coverage-rust` | Honest floors | Coverage-sensitive changes / floor claims | ≤20m p50 local | Hash/runtime/ledger; real acceptance | HTML by default; CI enforcement |
 | Binding RC | Multi-OS publish bytes + offline rehearsal | publish-track and human close | ≤20m p50 warm / ≤35m cold | Retained multi-OS artifacts, same-SHA, offline rehearsal | Full PR suite re-run; cold builds when sticky hits |
-| **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | M1, checkpoint, m20/m21, full clean-env |
-| **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** M1 / surface gates as documented | — |
+| **publish-track** | Registry-honest publish certification | Whenever we publish (scheduled or on-demand) | ≤35m p50 / ≤50m cold (RC + tag + publish) | Binding RC bytes + `publish.yaml` no-rebuild | release certification, checkpoint, knowledge/epistemic, full clean-env |
+| **Human release close** | Milestone / coordinated GA confidence | Human publication close | publish-track + optional gates | publish-track honesty **plus** release-certification / surface gates as documented | — |
 | Unchanged-SHA reuse | Skip redundant RC | Same `main` tip + unexpired candidate | RC ~0; publish-only ≤15m | Candidate completeness checks | Rebuilding identical bytes |
 | Fuzz / stress / viz | Diagnostic | Schedule/manual | N/A | Not merge or publish-track blockers | — |
 
 **publish-track** is Binding RC → tag / release identity → `publish.yaml` on
-retained bytes. M1 load, checkpoint recovery, and m20/m21 surface aggregates remain
+retained bytes. release-load, checkpoint recovery, and knowledge/epistemic surface aggregates remain
 **human-close / milestone** evidence — they are not registry-honesty inputs and
 must not block every publish.
 
@@ -169,8 +169,8 @@ docs surfaces; it does not prove runtime behavior.
 | Persistence / reopen | Facade lifecycle + kill-reopen / recovery suites | “Wrote Parquet files” without reopen readback |
 | Binding parity | Same-SHA clean-install wheel/addon; Arrow/IPC and error-code equality | Import smoke or stubbed natives |
 | Concurrency contract | Frozen short matrix in PR CI; stress lane is diagnostic | Stress retries used as the merge gate |
-| publish-track publication | Exact SHA + same-SHA Binding RC retained bytes + `publish.yaml` no-rebuild | Green PR CI on an unrelated SHA; M1/checkpoint alone |
-| Human release close | publish-track honesty **plus** documented M1 / surface gates when required | Treating every human-close gate as a publish-track blocker |
+| publish-track publication | Exact SHA + same-SHA Binding RC retained bytes + `publish.yaml` no-rebuild | Green PR CI on an unrelated SHA; release-certification/checkpoint alone |
+| Human release close | publish-track honesty **plus** documented release-certification / surface gates when required | Treating every human-close gate as a publish-track blocker |
 
 Failure handling for matrix or RC failures: let safe lanes finish, census
 symptoms, group by root cause, fix with earlier regression coverage, freeze a
@@ -283,8 +283,8 @@ python3 scripts/ci/non-cypher-surface-gate.py
 python3 scripts/ci/test-non-cypher-surface-gate.py
 cargo test -p graphforge-api \
   --test public_lifecycle_conformance \
-  --test m22_m18_public_surface \
-  --test m22_m19_public_surface
+  --test algorithm_public_surface \
+  --test search_public_surface
 
 # Agent skills
 pnpm test:agent-skills

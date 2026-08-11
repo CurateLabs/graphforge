@@ -16,8 +16,8 @@ use super::{GfError, GraphForge};
 /// Stable producer metadata exposed without payloads or credentials.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EmbeddingSpaceProducer {
-    /// Canonical M18 structural embedding result.
-    M18 {
+    /// Canonical algorithm structural embedding result.
+    Algorithm {
         /// Stable algorithm token.
         algorithm: String,
         /// Frozen algorithm contract version.
@@ -400,10 +400,10 @@ fn join_spaces(
 
 fn producer_info(identity: &EmbeddingProducerIdentity) -> EmbeddingSpaceProducer {
     match identity {
-        EmbeddingProducerIdentity::M18 {
+        EmbeddingProducerIdentity::Algorithm {
             algorithm,
             algorithm_version,
-        } => EmbeddingSpaceProducer::M18 {
+        } => EmbeddingSpaceProducer::Algorithm {
             algorithm: algorithm.clone(),
             algorithm_version: algorithm_version.clone(),
         },
@@ -566,7 +566,7 @@ mod tests {
         let first = descriptor(EmbeddingProducerIdentity::CallerSupplied {
             contract_version: "v1".to_owned(),
         });
-        let second = descriptor(EmbeddingProducerIdentity::M18 {
+        let second = descriptor(EmbeddingProducerIdentity::Algorithm {
             algorithm: "node2vec".to_owned(),
             algorithm_version: "embedding-v1".to_owned(),
         });
@@ -649,7 +649,7 @@ mod tests {
         let deleted = descriptor(EmbeddingProducerIdentity::CallerSupplied {
             contract_version: "delete-v1".to_owned(),
         });
-        let retained = descriptor(EmbeddingProducerIdentity::M18 {
+        let retained = descriptor(EmbeddingProducerIdentity::Algorithm {
             algorithm: "node2vec".to_owned(),
             algorithm_version: "retain-v1".to_owned(),
         });
@@ -735,7 +735,7 @@ mod tests {
     fn every_producer_is_typed_and_inspection_is_content_free() {
         let graph = GraphForge::new(None).unwrap();
         let producers = [
-            EmbeddingProducerIdentity::M18 {
+            EmbeddingProducerIdentity::Algorithm {
                 algorithm: "node2vec".into(),
                 algorithm_version: "v1".into(),
             },

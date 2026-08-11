@@ -22,7 +22,7 @@ RECEIVERS = {
     "PyResolvedRecordedAlgorithmResult": "ResolvedRecordedAlgorithmResult",
 }
 
-MISSING_M21_SHAPES = {
+MISSING_EPISTEMIC_SHAPES = {
     "apply_valid_time": "(*, transaction_cutoff, valid_time)",
     "assertion_status": "(assertion_uuid)",
     "create_assertion_with_status": (
@@ -154,7 +154,7 @@ def validate(source: str, stub: str) -> None:
 
     graphforge = classes["GraphForge"]
     methods = {node.name: node for node in graphforge.body if isinstance(node, ast.FunctionDef)}
-    for name, shape in MISSING_M21_SHAPES.items():
+    for name, shape in MISSING_EPISTEMIC_SHAPES.items():
         method = methods[name]
         assert _stub_shape(method) == shape, (
             f"GraphForge.{name} shape drift: {_stub_shape(method)} != {shape}"

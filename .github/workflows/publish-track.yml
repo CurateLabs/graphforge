@@ -2,7 +2,7 @@ name: Publish Track
 
 on:
   schedule:
-    # Certify the reviewed main tip without coupling frequent publication to M1.
+    # Certify the reviewed main tip without coupling frequent publication to human-close surface gates.
     - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
@@ -100,7 +100,7 @@ jobs:
             exit 0
           fi
           for group in manifest python npm crates evidence; do
-            artifact_name="M1-Release-Candidate-$group-$RELEASE_SHA"
+            artifact_name="Release-Candidate-$group-$RELEASE_SHA"
             count="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
               --jq "[.artifacts[] | select(.name == \"$artifact_name\" and .expired == false)] | length")"
             if test "$count" != 1; then
@@ -125,7 +125,7 @@ jobs:
       - name: Download candidate manifest
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: M1-Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}
+          name: Release-Candidate-manifest-${{ needs.resolve_source.outputs.release_sha }}
           path: candidate
           run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
           github-token: ${{ github.token }}
@@ -133,7 +133,7 @@ jobs:
       - name: Download Python partition
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: M1-Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}
+          name: Release-Candidate-python-${{ needs.resolve_source.outputs.release_sha }}
           path: candidate/release-artifacts/python
           run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
           github-token: ${{ github.token }}
@@ -141,7 +141,7 @@ jobs:
       - name: Download npm partition
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: M1-Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}
+          name: Release-Candidate-npm-${{ needs.resolve_source.outputs.release_sha }}
           path: candidate/release-artifacts/npm
           run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
           github-token: ${{ github.token }}
@@ -149,7 +149,7 @@ jobs:
       - name: Download crates partition
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: M1-Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}
+          name: Release-Candidate-crates-${{ needs.resolve_source.outputs.release_sha }}
           path: candidate/release-artifacts/crates
           run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
           github-token: ${{ github.token }}
@@ -157,7 +157,7 @@ jobs:
       - name: Download evidence partition
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: M1-Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}
+          name: Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}
           path: candidate/release-artifacts
           run-id: ${{ needs.locate_candidate.outputs.candidate_run_id }}
           github-token: ${{ github.token }}

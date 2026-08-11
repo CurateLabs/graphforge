@@ -1,4 +1,4 @@
-//! Atomic publication of a composite graph + M20/M21 transaction.
+//! Atomic publication of a composite graph + knowledge/epistemic transaction.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;

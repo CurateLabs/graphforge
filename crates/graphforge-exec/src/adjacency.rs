@@ -2,7 +2,7 @@
 //!
 //! Both adjacency consumers obtain their view through this trait: the Cypher
 //! variable-length traversal (`VarLenExpandExec`, #762) and the analyst-verb
-//! `export_adjacency` adapter (M18 #610). After #762 there is exactly **one**
+//! `export_adjacency` adapter (algorithm #610). After #762 there is exactly **one**
 //! adjacency implementation in the codebase.
 //!
 //! Two implementations exist:

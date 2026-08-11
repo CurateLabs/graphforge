@@ -2,11 +2,11 @@
 //!
 //! # Milestone status
 //!
-//! - M12 #574 — IR expression lowering to DataFusion `Expr`
-//! - M12 #573 — Wire SessionContext
-//! - M12 #575 — Lower simple GraphOps (Filter, Project, …)
-//! - M12 #576 — Lower NodeScan and Expand
-//! - M12 #578 — Graph-native Extension stubs + `explain_logical` ← **this issue**
+//! - logical-plan lowering #574 — IR expression lowering to DataFusion `Expr`
+//! - logical-plan lowering #573 — Wire SessionContext
+//! - logical-plan lowering #575 — Lower simple GraphOps (Filter, Project, …)
+//! - logical-plan lowering #576 — Lower NodeScan and Expand
+//! - logical-plan lowering #578 — Graph-native Extension stubs + `explain_logical` ← **this issue**
 #![forbid(unsafe_code)]
 
 pub mod expr;

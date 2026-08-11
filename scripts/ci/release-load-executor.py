@@ -124,8 +124,8 @@ def complete_inventory() -> list[str]:
         for group in surface["method_evidence_groups"].values()
         for identity in group["ids"]
     }
-    values.update(surface["m18_registry"]["release-tested"]["ids"])
-    values.update(surface["m19_contracts"]["release-tested"]["ids"])
+    values.update(surface["algorithm_registry"]["release-tested"]["ids"])
+    values.update(surface["search_contracts"]["release-tested"]["ids"])
     return sorted(values)
 
 
@@ -352,10 +352,10 @@ def main() -> int:
                 r"[0-9a-f]{64}", observed[field]
             ):
                 raise ValueError(f"native probe is missing actual {field}")
-        if request["workload"]["id"].startswith("m18-") and observed.get("rank_rows", 0) <= 0:
-            raise ValueError("native M18 probe returned no rows")
-        if request["workload"]["id"].startswith("m19-") and observed.get("find_rows", 0) <= 0:
-            raise ValueError("native M19 probe returned no rows")
+        if request["workload"]["id"].startswith("algorithm-") and observed.get("rank_rows", 0) <= 0:
+            raise ValueError("native algorithm probe returned no rows")
+        if request["workload"]["id"].startswith("search-") and observed.get("find_rows", 0) <= 0:
+            raise ValueError("native search probe returned no rows")
 
         result_payload = {
             "dataset_sha256": probe["dataset_sha256"],

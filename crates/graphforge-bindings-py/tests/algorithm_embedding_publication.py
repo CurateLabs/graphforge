@@ -1,4 +1,4 @@
-"""Fresh-wheel acceptance for canonical M18 embedding publication."""
+"""Fresh-wheel acceptance for canonical algorithm embedding publication."""
 
 import tempfile
 import uuid
@@ -63,14 +63,14 @@ def _batch(schema: pa.Schema, rows: list[tuple[str, list[float]]]) -> pa.RecordB
 
 
 def _publish(forge: g.GraphForge, name: str, result: pa.Table, **options) -> str:
-    return forge.publish_m18_embeddings(
+    return forge.publish_algorithm_embeddings(
         name,
         result,
         algorithm=options.pop("algorithm", "node2vec"),
         algorithm_version=options.pop("algorithm_version", "node2vec-v1"),
         dimensions=options.pop("dimensions", 2),
         hyperparameters=options.pop("hyperparameters", {"walks": 8, "nested": [True]}),
-        input_recipe=options.pop("input_recipe", {"recipe": "m18_nodes_v1"}),
+        input_recipe=options.pop("input_recipe", {"recipe": "algorithm_nodes_v1"}),
         source_projection=options.pop(
             "source_projection", {"label": "Person", "recipe": "all_people_v1"}
         ),
@@ -78,7 +78,7 @@ def _publish(forge: g.GraphForge, name: str, result: pa.Table, **options) -> str
     )
 
 
-def check_m18_embedding_publication() -> None:
+def check_algorithm_embedding_publication() -> None:
     with tempfile.TemporaryDirectory() as project:
         forge = g.GraphForge(project)
         alice = forge.add_node("Person", name="Alice")
@@ -97,7 +97,7 @@ def check_m18_embedding_publication() -> None:
         assert _publish(forge, "structural", result) == identity
         space = forge.embedding_space("structural")
         assert space["producer"] == {
-            "kind": "m18",
+            "kind": "algorithm",
             "algorithm": "node2vec",
             "algorithm_version": "node2vec-v1",
         }
@@ -243,7 +243,7 @@ def check_m18_embedding_publication() -> None:
             lambda: _publish(forge, "empty-recipe", result, input_recipe={}),
         )
         _expect(
-            "unknown M18 embedding normalization",
+            "unknown algorithm embedding normalization",
             lambda: _publish(forge, "normalization", result, normalization="unitish"),
         )
 
@@ -267,4 +267,4 @@ def check_m18_embedding_publication() -> None:
 
 
 if __name__ == "__main__":
-    check_m18_embedding_publication()
+    check_algorithm_embedding_publication()

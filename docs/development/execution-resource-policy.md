@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #515 triangles) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #515 triangles) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -68,13 +68,13 @@ state.
 
 Resources are **instance-owned**, not process-global. `compute_threads` sizes a
 private Rayon pool on each `GraphForge` instance. Exact cosine KNN / similarity
-(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and triangle
-ranking (#515) may partition independent work across that pool above documented
-crossovers; work never uses Rayon's process-global pool. Cosine dot products
-retain serial coordinate order, PageRank keeps canonical contribution order with
-serial dangling/delta reductions, Node2Vec skip-gram training stays serial, and
-triangles merge node-owned counts by ascending dense ordinal, so fingerprints
-match the one-thread path.
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and exact
+Jaccard node similarity (#535), ranking (#515) may partition independent work across that pool above documented may partition independent work across that pool
+above documented crossovers; work never uses Rayon's process-global pool. Cosine
+dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Jaccard retains serial
+candidate order per source, and Node2Vec skip-gram training stays serial, so
+fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -97,6 +97,29 @@ stay serial per source→target pair (no parallel dot products, no approximate
 similarity). Worker outputs merge in canonical source order so schemas, row
 order, scores, ties, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel Jaccard node similarity (#535)
+
+Exact and filtered `similar(by="node_similarity")` Jaccard partition
+**independent source rows** across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated source-degree candidate probes (source neighborhood size × candidate
+  count, summed over non-empty sources) are at least
+  `JACCARD_PARALLEL_CROSSOVER_OPS` (`16_384`) in `graphforge-exec`. That
+  threshold is the smallest power-of-two probe count below the first stable win
+  boundary on the M4 agent host (4 vCPU, adversarial set fixture, 4 private
+  workers, release build): ≤4.3k probes are noise-dominated, ~17k probes first
+  stable win (~0.65× serial), ≥48k probes ≥2×. Smaller workloads stay serial.
+  Worker-local checkpoint counters avoid shared atomic contention on the
+  candidate path.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Each worker preserves the existing
+serial behavior for candidate validation, duplicate suppression, set
+intersection, top-k ordering, and tie-breaking. Worker outputs merge in
+canonical source order so schemas, row order, scores, ties, and fingerprints
+match the one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Parallel PageRank (#343)
 

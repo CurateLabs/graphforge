@@ -1,4 +1,4 @@
-// Fresh-native M21 optional valid-time acceptance (#781).
+// Fresh-native epistemic optional valid-time acceptance (#781).
 
 import assert from "node:assert/strict";
 import { test } from "node:test";

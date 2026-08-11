@@ -1,6 +1,6 @@
 # Bazelisk / Bzlmod bootstrap (#11–#8, #7 bindings)
 
-Minimal Bazel workspace for M2 issues
+Minimal Bazel workspace for Bazel-migration issues
 [#11](https://github.com/CurateLabs/graphforge/issues/11)–[#7](https://github.com/CurateLabs/graphforge/issues/7).
 Canonical contract: [#1](https://github.com/CurateLabs/graphforge/issues/1).
 Orchestration: [bazel-migration-orchestration.md](bazel-migration-orchestration.md).

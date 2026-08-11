@@ -81,10 +81,10 @@ while IFS= read -r -d '' path; do
       scripts/ci/test-classify-policy-suites.sh)
       enable_all
       ;;
-    scripts/ci/m20-contract-gate.py | scripts/ci/test-m20-contract-gate.py | \
-      tests/contracts/m20-contract-matrix.json | \
-      scripts/ci/m21-contract-gate.py | scripts/ci/test-m21-contract-gate.py | \
-      tests/contracts/m21-contract-matrix.json | \
+    scripts/ci/knowledge-contract-gate.py | scripts/ci/test-knowledge-contract-gate.py | \
+      tests/contracts/knowledge-contract-matrix.json | \
+      scripts/ci/epistemic-contract-gate.py | scripts/ci/test-epistemic-contract-gate.py | \
+      tests/contracts/epistemic-contract-matrix.json | \
       scripts/ci/m4-entry-matrix.py | scripts/ci/test-m4-entry-matrix.py | \
       tests/contracts/m4-entry-matrix.json | \
       scripts/ci/checkpoint-recovery-gate.py | scripts/ci/test-checkpoint-recovery-gate.py | \
@@ -112,9 +112,9 @@ while IFS= read -r -d '' path; do
       ;;
     scripts/ci/test-binding-release-candidate.py | \
       scripts/ci/test-release-load-matrix.py | scripts/ci/test-release-load-executor.py | \
-      scripts/ci/test-m1-release-certification.py | \
+      scripts/ci/test-release-certification.py | \
       .github/workflows/binding-release-candidate.yml | \
-      .github/workflows/m1-release-certification.yml)
+      .github/workflows/release-certification.yml)
       release=true
       ;;
     scripts/ci/test-clean-env-verify.py | scripts/ci/clean-env-verify.py | \

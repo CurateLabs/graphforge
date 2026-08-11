@@ -23,7 +23,7 @@
     {"id":"KE-11","implementation":"rust:explicit-projections-cutoffs"},{"id":"KE-12","implementation":"rust-and-python:reopen"}
   ],
   "coverage_signature": {
-    "load_mode":"one-stable-graph-load","mutation_cadence":"m20-m21-append-only",
+    "load_mode":"one-stable-graph-load","mutation_cadence":"knowledge-epistemic-append-only",
     "graph_shape":"fixed-xs-sparse","topology_transition":"none",
     "ontology_mode":"strict","ontology_complexity":"small-shallow-stable",
     "runtime_catalog_drift":"none-after-baseline","property_characteristics":"stable-utf8-text",

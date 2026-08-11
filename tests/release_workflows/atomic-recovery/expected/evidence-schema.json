@@ -4,8 +4,8 @@
     "schema_version",
     "scenario_id",
     "commit_sha",
-    "graph_m20_committed",
-    "graph_m20_m21_committed",
+    "graph_knowledge_committed",
+    "graph_knowledge_epistemic_committed",
     "validation_rejection",
     "pre_current_recoveries",
     "post_current_recoveries",
@@ -17,8 +17,8 @@
   "fixed": {
     "schema_version": 1,
     "scenario_id": "atomic-recovery",
-    "graph_m20_committed": true,
-    "graph_m20_m21_committed": true,
+    "graph_knowledge_committed": true,
+    "graph_knowledge_epistemic_committed": true,
     "orphan_free": true,
     "reopen_equal": true
   }

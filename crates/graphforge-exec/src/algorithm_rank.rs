@@ -1,4 +1,4 @@
-//! Rust-owned rank handlers registered under the shared M18 dispatch contract.
+//! Rust-owned rank handlers registered under the shared algorithm dispatch contract.
 //!
 //! PageRank (#343) and triangles (#515) may partition destination-owned score
 //! updates across the instance-owned private compute pool while preserving the

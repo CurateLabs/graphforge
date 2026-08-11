@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and execute the finite SHA-bound M21 contract gate."""
+"""Validate and execute the finite SHA-bound epistemic contract gate."""
 
 from __future__ import annotations
 
@@ -14,14 +14,16 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-MATRIX_PATH = ROOT / "tests/contracts/m21-contract-matrix.json"
-M20_INVENTORY = ROOT / "docs/reference/m20-schema-inventory.json"
-M21_INVENTORY = ROOT / "docs/reference/m21-schema-inventory.json"
+MATRIX_PATH = ROOT / "tests/contracts/epistemic-contract-matrix.json"
+KNOWLEDGE_INVENTORY = ROOT / "docs/reference/knowledge-schema-inventory.json"
+EPISTEMIC_INVENTORY = ROOT / "docs/reference/epistemic-schema-inventory.json"
 GROUPS = {"rust", "python", "node"}
-M20_BASELINE_SHA = "8101c2c52246b903a39ff502dc325915974e4d69"
-M20_BASELINE_INVENTORY_SHA256 = "a231b688536609c107256f8578552d7ceedced8ef04d2dae9cd2aeef144f304c"
+KNOWLEDGE_BASELINE_SHA = "8101c2c52246b903a39ff502dc325915974e4d69"
+KNOWLEDGE_BASELINE_INVENTORY_SHA256 = (
+    "ac69d81108121f3510390d619904fa49cddf08b92d3a26afd65ab870f1ae30b2"
+)
 REQUIRED_CASES = {
-    "m20-frozen-baseline",
+    "knowledge-frozen-baseline",
     "status-events",
     "reasoning-amendments",
     "supersession",
@@ -31,12 +33,12 @@ REQUIRED_CASES = {
     "valid-time",
     "capability-fail-closed",
     "atomic-reopen-recovery",
-    "m18-resolved-equivalence",
+    "algorithm-resolved-equivalence",
     "projection-fingerprint",
     "attachment-failure-preserves-run",
     "cross-binding-contract",
-    "graph-and-m20-preservation",
-    "m19-knowledge-isolation",
+    "graph-and-knowledge-preservation",
+    "search-knowledge-isolation",
 }
 REQUIRED_FAMILIES = {
     "algorithm_interpretation_attachments",
@@ -48,12 +50,12 @@ REQUIRED_FAMILIES = {
     "hypothesis_selection_events",
     "reasoning",
 }
-REQUIRED_M18_SURFACES = {"rank", "cluster", "similar", "paths", "analyze"}
+REQUIRED_ALGORITHM_SURFACES = {"rank", "cluster", "similar", "paths", "analyze"}
 FORBIDDEN_WORDS = {"skip", "ignored", "ignore", "quarantine", "manual"}
 
 
 class GateError(RuntimeError):
-    """Deterministic M21 gate validation failure."""
+    """Deterministic epistemic gate validation failure."""
 
 
 def sha256(path: Path) -> str:
@@ -117,13 +119,13 @@ def validate_test(test: object, case_id: str) -> str:
 
 
 def validate_matrix() -> dict[str, Any]:
-    matrix = load_json(MATRIX_PATH, "M21 matrix")
+    matrix = load_json(MATRIX_PATH, "epistemic matrix")
     if not isinstance(matrix, dict):
-        raise GateError("M21 matrix root must be an object")
-    if matrix.get("schema_version") != 1 or matrix.get("gate") != "M21":
-        raise GateError("matrix must declare M21 schema_version 1")
-    if matrix.get("m20_baseline_sha") != M20_BASELINE_SHA:
-        raise GateError("matrix M20 baseline SHA drifted")
+        raise GateError("epistemic matrix root must be an object")
+    if matrix.get("schema_version") != 1 or matrix.get("gate") != "epistemic":
+        raise GateError("matrix must declare epistemic schema_version 1")
+    if matrix.get("knowledge_baseline_sha") != KNOWLEDGE_BASELINE_SHA:
+        raise GateError("matrix knowledge baseline SHA drifted")
     commands = matrix.get("command_groups")
     if not isinstance(commands, dict) or set(commands) != GROUPS:
         raise GateError("command groups must be exactly rust, python, and node")
@@ -169,23 +171,30 @@ def validate_matrix() -> dict[str, Any]:
         test_ids[case_id] = [validate_test(test, case_id) for test in tests]
     if not {"rust", "python", "node"} <= surfaces:
         raise GateError("matrix omits a public binding surface")
-    if not surfaces >= REQUIRED_M18_SURFACES:
-        raise GateError("matrix omits one or more public M18 families")
-    m18_case = next(case for case in cases if case["id"] == "m18-resolved-equivalence")
-    if not set(m18_case["surfaces"]) >= REQUIRED_M18_SURFACES:
-        raise GateError("m18-resolved-equivalence omits a public M18 family")
+    if not surfaces >= REQUIRED_ALGORITHM_SURFACES:
+        raise GateError("matrix omits one or more public algorithm families")
+    algorithm_case = next(case for case in cases if case["id"] == "algorithm-resolved-equivalence")
+    if not set(algorithm_case["surfaces"]) >= REQUIRED_ALGORITHM_SURFACES:
+        raise GateError("algorithm-resolved-equivalence omits a public algorithm family")
 
-    if sha256(M20_INVENTORY) != M20_BASELINE_INVENTORY_SHA256:
-        raise GateError("frozen M20 inventory differs from the closed M20 baseline")
-    checked_m20 = (ROOT / "docs/reference/m20-schema-inventory.sha256").read_text().split()[0]
-    checked_m21 = (ROOT / "docs/reference/m21-schema-inventory.sha256").read_text().split()[0]
-    if sha256(M20_INVENTORY) != checked_m20 or sha256(M21_INVENTORY) != checked_m21:
+    if sha256(KNOWLEDGE_INVENTORY) != KNOWLEDGE_BASELINE_INVENTORY_SHA256:
+        raise GateError("frozen knowledge inventory differs from the closed knowledge baseline")
+    checked_knowledge = (
+        (ROOT / "docs/reference/knowledge-schema-inventory.sha256").read_text().split()[0]
+    )
+    checked_epistemic = (
+        (ROOT / "docs/reference/epistemic-schema-inventory.sha256").read_text().split()[0]
+    )
+    if (
+        sha256(KNOWLEDGE_INVENTORY) != checked_knowledge
+        or sha256(EPISTEMIC_INVENTORY) != checked_epistemic
+    ):
         raise GateError("checked schema inventory digest mismatch")
-    inventory = load_json(M21_INVENTORY, "M21 inventory")
+    inventory = load_json(EPISTEMIC_INVENTORY, "epistemic inventory")
     families = {record.get("record_family") for record in inventory.get("records", [])}
     if families != REQUIRED_FAMILIES:
         raise GateError(
-            f"M21 family omission/drift: missing={sorted(REQUIRED_FAMILIES - families)}, "
+            f"epistemic family omission/drift: missing={sorted(REQUIRED_FAMILIES - families)}, "
             f"extra={sorted(families - REQUIRED_FAMILIES)}"
         )
     return {"matrix": matrix, "test_ids": test_ids}
@@ -258,8 +267,8 @@ def build_report(sha: str, fragments: Path, output: Path) -> None:
         reports[group] = fragment
 
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(M20_INVENTORY, output / "m20-baseline-schema-inventory.json")
-    shutil.copy2(M21_INVENTORY, output / "m21-schema-inventory.json")
+    shutil.copy2(KNOWLEDGE_INVENTORY, output / "knowledge-baseline-schema-inventory.json")
+    shutil.copy2(EPISTEMIC_INVENTORY, output / "epistemic-schema-inventory.json")
     cases = [
         {
             "id": case["id"],
@@ -272,13 +281,13 @@ def build_report(sha: str, fragments: Path, output: Path) -> None:
         for case in validated["matrix"]["cases"]
     ]
     report = {
-        "gate": "M21 Contract Gate",
+        "gate": "Epistemic Contract Gate",
         "schema_version": 1,
         "commit_sha": sha,
-        "m20_baseline_sha": M20_BASELINE_SHA,
+        "knowledge_baseline_sha": KNOWLEDGE_BASELINE_SHA,
         "matrix_sha256": sha256(MATRIX_PATH),
-        "m20_schema_inventory_sha256": sha256(M20_INVENTORY),
-        "m21_schema_inventory_sha256": sha256(M21_INVENTORY),
+        "knowledge_schema_inventory_sha256": sha256(KNOWLEDGE_INVENTORY),
+        "epistemic_schema_inventory_sha256": sha256(EPISTEMIC_INVENTORY),
         "toolchain": {
             "rust": tool_version(["rustc", "--version"]),
             "cargo": tool_version(["cargo", "--version"]),
@@ -289,9 +298,9 @@ def build_report(sha: str, fragments: Path, output: Path) -> None:
         "cases": cases,
         "summary": {"total": len(cases), "passed": len(cases), "failed": 0},
     }
-    report_path = output / "m21-contract-gate-report.json"
+    report_path = output / "epistemic-contract-gate-report.json"
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (output / "m21-contract-gate-report.sha256").write_text(
+    (output / "epistemic-contract-gate-report.sha256").write_text(
         f"{sha256(report_path)}  {report_path.name}\n", encoding="utf-8"
     )
 
@@ -311,15 +320,15 @@ def main() -> int:
     try:
         if args.command == "validate":
             validated = validate_matrix()
-            print(f"M21 contract matrix valid: {len(validated['matrix']['cases'])} cases")
+            print(f"epistemic contract matrix valid: {len(validated['matrix']['cases'])} cases")
             return 0
         if args.command == "run-group":
             return run_group(args.group, args.output)
         build_report(args.sha, args.fragments, args.output)
-        print("M21 contract report generated")
+        print("epistemic contract report generated")
         return 0
     except (GateError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        print(f"M21 contract gate failed: {error}", file=sys.stderr)
+        print(f"epistemic contract gate failed: {error}", file=sys.stderr)
         return 1
 
 

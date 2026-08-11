@@ -1,4 +1,4 @@
-//! Rust-owned path handlers registered under the shared M18 dispatch contract.
+//! Rust-owned path handlers registered under the shared algorithm dispatch contract.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;

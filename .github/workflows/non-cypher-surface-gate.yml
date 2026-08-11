@@ -42,9 +42,9 @@ jobs:
           cargo test -p graphforge-api \
             --test knowledge_isolation \
             --test public_lifecycle_conformance \
-            --test m22_m18_public_surface \
-            --test m22_m19_public_surface \
-            --test m22_provider_public_surface \
+            --test algorithm_public_surface \
+            --test search_public_surface \
+            --test provider_public_surface \
             --test provider_session \
             --test public_facade_remaining_conformance \
             --no-fail-fast
@@ -70,9 +70,9 @@ jobs:
           test_names = [
               "knowledge_isolation",
               "public_lifecycle_conformance",
-              "m22_m18_public_surface",
-              "m22_m19_public_surface",
-              "m22_provider_public_surface",
+              "algorithm_public_surface",
+              "search_public_surface",
+              "provider_public_surface",
               "provider_session",
               "public_facade_remaining_conformance",
           ]
@@ -99,22 +99,22 @@ jobs:
                       "duration_scope": "complete_required_suite",
                       "error_code": None,
                   })
-          m18 = manifest["m18_registry"]["release-tested"]
-          for identity in m18["ids"]:
+          algorithm = manifest["algorithm_registry"]["release-tested"]
+          for identity in algorithm["ids"]:
               evidence.append({
-                  "kind": "m18_registry",
+                  "kind": "algorithm_registry",
                   "identity": identity,
-                  "test_ids": [ref["symbol"] for ref in m18["test_refs"]],
+                  "test_ids": [ref["symbol"] for ref in algorithm["test_refs"]],
                   "outcome": "passed",
                   "duration_seconds": duration,
                   "duration_scope": "complete_required_suite",
                   "error_code": None,
               })
-          for group_name, group in manifest["m19_evidence_groups"].items():
+          for group_name, group in manifest["search_evidence_groups"].items():
               test_ids = [ref["symbol"] for ref in group["test_refs"]]
               for identity in group["ids"]:
                   evidence.append({
-                      "kind": "m19_contracts",
+                      "kind": "search_contracts",
                       "identity": identity,
                       "evidence_group": group_name,
                       "test_ids": test_ids,
@@ -133,7 +133,7 @@ jobs:
               "evidence": evidence,
               "commands": [
                   "cargo test -p graphforge-api --lib --no-fail-fast",
-                  "cargo test -p graphforge-api --test knowledge_isolation --test public_lifecycle_conformance --test public_facade_remaining_conformance --test m22_m18_public_surface --test m22_m19_public_surface --test m22_provider_public_surface --test provider_session --no-fail-fast",
+                  "cargo test -p graphforge-api --test knowledge_isolation --test public_lifecycle_conformance --test public_facade_remaining_conformance --test algorithm_public_surface --test search_public_surface --test provider_public_surface --test provider_session --no-fail-fast",
               ],
           }
           Path("non-cypher-evidence/report.json").write_text(
@@ -141,10 +141,10 @@ jobs:
           )
           PY
 
-      - name: Retain Rust report for M1 certification
+      - name: Retain Rust report for release certification
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: M1-Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
+          name: Rust-Non-Cypher-${{ env.EVIDENCE_SHA }}
           path: non-cypher-evidence/
           if-no-files-found: error
           retention-days: 30

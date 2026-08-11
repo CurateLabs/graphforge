@@ -245,7 +245,7 @@ fn parameter() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden scenarios — graph-native Extension stubs (graphforge-plan, physical exec M13)
+// Golden scenarios — graph-native Extension stubs (graphforge-plan, physical execution)
 // ---------------------------------------------------------------------------
 
 #[test]

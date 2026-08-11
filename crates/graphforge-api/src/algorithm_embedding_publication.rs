@@ -1,4 +1,4 @@
-//! Atomic publication of canonical M18 embedding Arrow results.
+//! Atomic publication of canonical algorithm embedding Arrow results.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -24,46 +24,46 @@ use super::{Algorithm, AnalyzeAlgorithm, EmbeddingSpaceInfo, GfError, GraphForge
 const ALGORITHM_SCHEMA_VERSION: &str = "1";
 const RNG_VERSION: &str = "splitmix64-v1";
 const RNG_DERIVATION: &str = "graphforge-embedding-substream-v1";
-const SOURCE_PART_NAME: &str = "m18_result_uuid_projection_v1";
+const SOURCE_PART_NAME: &str = "algorithm_result_uuid_projection_v1";
 
-/// Persisted normalization selected for a canonical M18 embedding result.
+/// Persisted normalization selected for a canonical algorithm embedding result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum M18EmbeddingNormalization {
-    /// Preserve validated M18 coordinates exactly.
+pub enum AlgorithmEmbeddingNormalization {
+    /// Preserve validated algorithm coordinates exactly.
     #[default]
     None,
     /// Normalize every row to unit L2 norm before persistence.
     L2,
 }
 
-/// Retrieval distance selected for a canonical M18 embedding result.
+/// Retrieval distance selected for a canonical algorithm embedding result.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum M18EmbeddingDistance {
+pub enum AlgorithmEmbeddingDistance {
     /// Exact cosine similarity.
     #[default]
     Cosine,
 }
 
-/// One complete canonical M18 embedding Arrow result to publish.
+/// One complete canonical algorithm embedding Arrow result to publish.
 ///
 /// The type deliberately omits `Debug`: the Arrow batch contains primary
 /// vector data and must not enter routine diagnostic output.
-pub struct M18EmbeddingPublicationRequest {
+pub struct AlgorithmEmbeddingPublicationRequest {
     /// Durable caller-facing alias bound after complete publication.
     pub display_name: String,
-    /// M18 embedding algorithm that produced `result`.
+    /// algorithm embedding algorithm that produced `result`.
     pub algorithm: AnalyzeAlgorithm,
-    /// Frozen M18 algorithm contract version.
+    /// Frozen analyst-verb algorithm contract version.
     pub algorithm_version: String,
     /// Fixed Float32 vector width, retained for an empty result.
     pub dimensions: u32,
     /// Persisted normalization contract.
-    pub normalization: M18EmbeddingNormalization,
+    pub normalization: AlgorithmEmbeddingNormalization,
     /// Persisted retrieval distance contract.
-    pub distance: M18EmbeddingDistance,
-    /// Normalized M18 algorithm hyperparameters participating in identity.
+    pub distance: AlgorithmEmbeddingDistance,
+    /// Normalized analyst-verb algorithm hyperparameters participating in identity.
     pub hyperparameters: BTreeMap<String, serde_json::Value>,
-    /// Non-empty versioned M18 input recipe participating in identity.
+    /// Non-empty versioned algorithm input recipe participating in identity.
     pub input_recipe: BTreeMap<String, serde_json::Value>,
     /// Non-empty graph-projection recipe participating in identity.
     pub source_projection_recipe: BTreeMap<String, serde_json::Value>,
@@ -73,7 +73,7 @@ pub struct M18EmbeddingPublicationRequest {
     pub replace_alias: bool,
 }
 
-struct PreparedM18Publication {
+struct PreparedAlgorithmPublication {
     display_name: String,
     replace_alias: bool,
     descriptor: EmbeddingCompatibilityDescriptor,
@@ -85,9 +85,9 @@ struct PreparedM18Publication {
 }
 
 impl GraphForge {
-    /// Validate and atomically publish one complete canonical M18 embedding result.
+    /// Validate and atomically publish one complete canonical algorithm embedding result.
     ///
-    /// The result schema and M18 metadata are exact, every UUID is revalidated
+    /// The result schema and algorithm metadata are exact, every UUID is revalidated
     /// against this graph on each bounded attempt, and the display alias is
     /// bound only after a complete generation is active. Exact replay reuses
     /// the immutable generation.
@@ -96,17 +96,17 @@ impl GraphForge {
     /// Returns structured validation, execution, lifecycle, storage,
     /// cancellation, corruption, locking, and resource-limit errors. Failed
     /// validation or publication never mutates the alias catalog.
-    pub fn publish_m18_embeddings(
+    pub fn publish_algorithm_embeddings(
         &self,
-        request: M18EmbeddingPublicationRequest,
+        request: AlgorithmEmbeddingPublicationRequest,
     ) -> Result<EmbeddingSpaceInfo, GfError> {
-        let prepared = self.prepare_m18_publication(request)?;
+        let prepared = self.prepare_algorithm_publication(request)?;
         let eligible_count = u64::try_from(prepared.rows.len()).map_err(|_| {
-            GfError::Execution("M18 embedding row count cannot be represented".to_owned())
+            GfError::Execution("algorithm embedding row count cannot be represented".to_owned())
         })?;
         let project_dir = self.dir.clone();
         let projection_bytes = prepared.projection_bytes.clone();
-        self.publish_prepared_m18_embeddings(
+        self.publish_prepared_algorithm_embeddings(
             &prepared,
             move || {
                 capture_embedding_source(
@@ -125,13 +125,13 @@ impl GraphForge {
         )
     }
 
-    fn prepare_m18_publication(
+    fn prepare_algorithm_publication(
         &self,
-        request: M18EmbeddingPublicationRequest,
-    ) -> Result<PreparedM18Publication, GfError> {
+        request: AlgorithmEmbeddingPublicationRequest,
+    ) -> Result<PreparedAlgorithmPublication, GfError> {
         EmbeddingDisplayName::new(&request.display_name)?;
-        require_m18_embedding_algorithm(request.algorithm)?;
-        validate_canonical_m18_schema(
+        require_algorithm_embedding_algorithm(request.algorithm)?;
+        validate_canonical_algorithm_schema(
             &request.result,
             request.algorithm,
             &request.algorithm_version,
@@ -140,14 +140,14 @@ impl GraphForge {
         )?;
 
         let dimensions = usize::try_from(request.dimensions)
-            .map_err(|_| validation("M18 embedding dimensions cannot be represented"))?;
+            .map_err(|_| validation("algorithm embedding dimensions cannot be represented"))?;
         let vector_limits = VectorStoreLimits::default();
         graphforge_storage::vector_schema(dimensions, vector_limits)?;
         let normalization = storage_normalization(request.normalization);
         let distance = storage_distance(request.distance);
-        let rows = decode_m18_rows(&request.result, dimensions, vector_limits)?;
+        let rows = decode_algorithm_rows(&request.result, dimensions, vector_limits)?;
         let validated =
-            self.validate_owned_m18_batch(&rows, dimensions, normalization, vector_limits)?;
+            self.validate_owned_algorithm_batch(&rows, dimensions, normalization, vector_limits)?;
         let projection_bytes = validated
             .rows()
             .iter()
@@ -155,7 +155,7 @@ impl GraphForge {
             .collect();
 
         let descriptor = EmbeddingCompatibilityDescriptor::new(EmbeddingCompatibilityInput {
-            producer: EmbeddingProducerIdentity::M18 {
+            producer: EmbeddingProducerIdentity::Algorithm {
                 algorithm: Algorithm::Analyze(request.algorithm).as_str().to_owned(),
                 algorithm_version: request.algorithm_version,
             },
@@ -169,12 +169,12 @@ impl GraphForge {
             input_recipe: request.input_recipe,
             source_projection_recipe: request.source_projection_recipe,
         })?;
-        self.preflight_m18_alias(
+        self.preflight_algorithm_alias(
             &request.display_name,
             descriptor.compatibility_id()?,
             request.replace_alias,
         )?;
-        Ok(PreparedM18Publication {
+        Ok(PreparedAlgorithmPublication {
             display_name: request.display_name,
             replace_alias: request.replace_alias,
             descriptor,
@@ -186,7 +186,7 @@ impl GraphForge {
         })
     }
 
-    fn validate_owned_m18_batch(
+    fn validate_owned_algorithm_batch(
         &self,
         rows: &[EmbeddingBatchRow],
         dimensions: usize,
@@ -209,7 +209,7 @@ impl GraphForge {
         .map_err(Into::into)
     }
 
-    fn preflight_m18_alias(
+    fn preflight_algorithm_alias(
         &self,
         display_name: &str,
         compatibility_id: EmbeddingCompatibilityId,
@@ -229,9 +229,9 @@ impl GraphForge {
         Ok(())
     }
 
-    fn publish_prepared_m18_embeddings<S, C>(
+    fn publish_prepared_algorithm_embeddings<S, C>(
         &self,
-        prepared: &PreparedM18Publication,
+        prepared: &PreparedAlgorithmPublication,
         capture_source: S,
         checkpoint: C,
     ) -> Result<EmbeddingSpaceInfo, GfError>
@@ -250,7 +250,7 @@ impl GraphForge {
             EmbeddingRefreshLimits::default(),
             capture_source,
             |_| {
-                self.validate_owned_m18_batch(
+                self.validate_owned_algorithm_batch(
                     &prepared.rows,
                     prepared.dimensions,
                     prepared.normalization,
@@ -268,7 +268,7 @@ impl GraphForge {
     }
 }
 
-fn require_m18_embedding_algorithm(algorithm: AnalyzeAlgorithm) -> Result<(), GfError> {
+fn require_algorithm_embedding_algorithm(algorithm: AnalyzeAlgorithm) -> Result<(), GfError> {
     if matches!(
         algorithm,
         AnalyzeAlgorithm::Node2Vec
@@ -279,12 +279,12 @@ fn require_m18_embedding_algorithm(algorithm: AnalyzeAlgorithm) -> Result<(), Gf
         Ok(())
     } else {
         Err(validation(
-            "M18 embedding publication requires an embedding analysis algorithm",
+            "algorithm embedding publication requires an embedding analysis algorithm",
         ))
     }
 }
 
-fn validate_canonical_m18_schema(
+fn validate_canonical_algorithm_schema(
     result: &RecordBatch,
     algorithm: AnalyzeAlgorithm,
     algorithm_version: &str,
@@ -292,7 +292,7 @@ fn validate_canonical_m18_schema(
     hyperparameters: &BTreeMap<String, serde_json::Value>,
 ) -> Result<(), GfError> {
     let dimensions_i32 = i32::try_from(dimensions)
-        .map_err(|_| validation("M18 embedding dimensions exceed the Arrow i32 range"))?;
+        .map_err(|_| validation("algorithm embedding dimensions exceed the Arrow i32 range"))?;
     let schema = result.schema();
     let expected = [
         Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
@@ -313,7 +313,7 @@ fn validate_canonical_m18_schema(
             .any(|(actual, expected)| actual.as_ref() != expected)
     {
         return Err(validation(
-            "M18 embedding result must have exact node_uuid and embedding fields",
+            "algorithm embedding result must have exact node_uuid and embedding fields",
         ));
     }
     let metadata = schema.metadata();
@@ -341,13 +341,13 @@ fn validate_canonical_m18_schema(
             .any(|(key, value)| metadata.get(*key).map(String::as_str) != Some(value.as_str()))
     {
         return Err(validation(
-            "M18 embedding result has non-canonical algorithm metadata",
+            "algorithm embedding result has non-canonical algorithm metadata",
         ));
     }
     Ok(())
 }
 
-fn decode_m18_rows(
+fn decode_algorithm_rows(
     result: &RecordBatch,
     dimensions: usize,
     limits: VectorStoreLimits,
@@ -376,14 +376,14 @@ fn decode_m18_rows(
         .column(0)
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
-        .ok_or_else(|| validation("M18 node_uuid column is malformed"))?;
+        .ok_or_else(|| validation("algorithm node_uuid column is malformed"))?;
     let embeddings = result
         .column(1)
         .as_any()
         .downcast_ref::<FixedSizeListArray>()
-        .ok_or_else(|| validation("M18 embedding column is malformed"))?;
+        .ok_or_else(|| validation("algorithm embedding column is malformed"))?;
     if uuids.null_count() != 0 || embeddings.null_count() != 0 {
-        return Err(validation("M18 embedding result contains null rows"));
+        return Err(validation("algorithm embedding result contains null rows"));
     }
 
     let mut rows = Vec::with_capacity(result.num_rows());
@@ -391,18 +391,20 @@ fn decode_m18_rows(
         let node_uuid = uuids
             .value(row)
             .try_into()
-            .map_err(|_| validation("M18 result contains malformed node_uuid bytes"))?;
+            .map_err(|_| validation("algorithm result contains malformed node_uuid bytes"))?;
         let values = embeddings.value(row);
         let values = values
             .as_any()
             .downcast_ref::<Float32Array>()
-            .ok_or_else(|| validation("M18 embedding row is not Float32"))?;
+            .ok_or_else(|| validation("algorithm embedding row is not Float32"))?;
         if values.null_count() != 0 {
-            return Err(validation("M18 embedding row contains null coordinates"));
+            return Err(validation(
+                "algorithm embedding row contains null coordinates",
+            ));
         }
         if values.len() != dimensions {
             return Err(validation(format!(
-                "M18 embedding row has dimension {}, expected {dimensions}",
+                "algorithm embedding row has dimension {}, expected {dimensions}",
                 values.len()
             )));
         }
@@ -416,15 +418,16 @@ fn decode_m18_rows(
 
 fn normalized_seed(hyperparameters: &BTreeMap<String, serde_json::Value>) -> Result<u64, GfError> {
     hyperparameters.get("seed").map_or(Ok(0), |seed| {
-        seed.as_u64()
-            .ok_or_else(|| validation("M18 embedding seed must be an unsigned 64-bit integer"))
+        seed.as_u64().ok_or_else(|| {
+            validation("algorithm embedding seed must be an unsigned 64-bit integer")
+        })
     })
 }
 
 fn search_producer_error(error: GfError) -> SearchArtifactError {
     match error {
         GfError::Validation(reason) => SearchArtifactError::InvalidSelector {
-            field: "M18 embedding result",
+            field: "algorithm embedding result",
             reason,
         },
         GfError::Storage(reason) => SearchArtifactError::SourceSnapshot { reason },
@@ -433,16 +436,16 @@ fn search_producer_error(error: GfError) -> SearchArtifactError {
     }
 }
 
-const fn storage_normalization(value: M18EmbeddingNormalization) -> EmbeddingNormalization {
+const fn storage_normalization(value: AlgorithmEmbeddingNormalization) -> EmbeddingNormalization {
     match value {
-        M18EmbeddingNormalization::None => EmbeddingNormalization::None,
-        M18EmbeddingNormalization::L2 => EmbeddingNormalization::L2,
+        AlgorithmEmbeddingNormalization::None => EmbeddingNormalization::None,
+        AlgorithmEmbeddingNormalization::L2 => EmbeddingNormalization::L2,
     }
 }
 
-const fn storage_distance(value: M18EmbeddingDistance) -> EmbeddingDistance {
+const fn storage_distance(value: AlgorithmEmbeddingDistance) -> EmbeddingDistance {
     match value {
-        M18EmbeddingDistance::Cosine => EmbeddingDistance::Cosine,
+        AlgorithmEmbeddingDistance::Cosine => EmbeddingDistance::Cosine,
     }
 }
 
@@ -559,14 +562,14 @@ mod tests {
         algorithm: AnalyzeAlgorithm,
         dimensions: u32,
         result: RecordBatch,
-    ) -> M18EmbeddingPublicationRequest {
-        M18EmbeddingPublicationRequest {
+    ) -> AlgorithmEmbeddingPublicationRequest {
+        AlgorithmEmbeddingPublicationRequest {
             display_name: display_name.to_owned(),
             algorithm,
             algorithm_version: algorithm_version(algorithm).to_owned(),
             dimensions,
-            normalization: M18EmbeddingNormalization::None,
-            distance: M18EmbeddingDistance::Cosine,
+            normalization: AlgorithmEmbeddingNormalization::None,
+            distance: AlgorithmEmbeddingDistance::Cosine,
             hyperparameters: BTreeMap::from([("seed".to_owned(), serde_json::json!(7))]),
             input_recipe: BTreeMap::from([("kind".to_owned(), serde_json::json!("structural"))]),
             source_projection_recipe: BTreeMap::from([(
@@ -601,7 +604,7 @@ mod tests {
             (*alice.uuid.as_bytes(), vec![1.0, 2.0]),
         ];
         let first = graph
-            .publish_m18_embeddings(request(
+            .publish_algorithm_embeddings(request(
                 "structural",
                 AnalyzeAlgorithm::Node2Vec,
                 2,
@@ -609,7 +612,7 @@ mod tests {
             ))
             .unwrap();
         let replay = graph
-            .publish_m18_embeddings(request(
+            .publish_algorithm_embeddings(request(
                 "structural",
                 AnalyzeAlgorithm::Node2Vec,
                 2,
@@ -619,7 +622,7 @@ mod tests {
         assert_eq!(first, replay);
         assert!(matches!(
             first.producer,
-            EmbeddingSpaceProducer::M18 {
+            EmbeddingSpaceProducer::Algorithm {
                 ref algorithm,
                 ref algorithm_version,
             } if algorithm == "node2vec" && algorithm_version == "node2vec-v1"
@@ -636,7 +639,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             discovered[0].descriptor().producer(),
-            EmbeddingProducerIdentity::M18 { .. }
+            EmbeddingProducerIdentity::Algorithm { .. }
         ));
         let active = discovered[0].active().unwrap();
         let stored =
@@ -658,7 +661,7 @@ mod tests {
     fn empty_result_preserves_declared_dimension() {
         let graph = GraphForge::new(None).unwrap();
         let info = graph
-            .publish_m18_embeddings(request(
+            .publish_algorithm_embeddings(request(
                 "empty",
                 AnalyzeAlgorithm::HashGnn,
                 7,
@@ -865,7 +868,7 @@ mod tests {
             null_row,
         ] {
             let alias = request.display_name.clone();
-            assert!(graph.publish_m18_embeddings(request).is_err());
+            assert!(graph.publish_algorithm_embeddings(request).is_err());
             assert_missing_alias(&graph, &alias);
         }
         assert!(graph.embedding_spaces().unwrap().is_empty());
@@ -876,7 +879,7 @@ mod tests {
         let graph = GraphForge::new(None).unwrap();
         let alice = node(&graph, "alice");
         let prepared = graph
-            .prepare_m18_publication(request(
+            .prepare_algorithm_publication(request(
                 "retry",
                 AnalyzeAlgorithm::FastRandomProjection,
                 2,
@@ -890,7 +893,7 @@ mod tests {
         let states = [source(1, 1), source(2, 1), source(2, 1), source(2, 1)];
         let index = Cell::new(0);
         let published = graph
-            .publish_prepared_m18_embeddings(
+            .publish_prepared_algorithm_embeddings(
                 &prepared,
                 || {
                     let current = index.get();
@@ -904,7 +907,7 @@ mod tests {
         assert_eq!(published.active.unwrap().source_graph_generation, 2);
 
         let unstable = graph
-            .prepare_m18_publication(request(
+            .prepare_algorithm_publication(request(
                 "unstable",
                 AnalyzeAlgorithm::FastRandomProjection,
                 2,
@@ -918,7 +921,7 @@ mod tests {
         let states = [source(3, 1), source(4, 1), source(4, 1), source(5, 1)];
         let index = Cell::new(0);
         let error = graph
-            .publish_prepared_m18_embeddings(
+            .publish_prepared_algorithm_embeddings(
                 &unstable,
                 || {
                     let current = index.get();
@@ -932,7 +935,7 @@ mod tests {
         assert_missing_alias(&graph, "unstable");
 
         let cancelled = graph
-            .prepare_m18_publication(request(
+            .prepare_algorithm_publication(request(
                 "cancelled",
                 AnalyzeAlgorithm::GraphSage,
                 2,
@@ -944,7 +947,7 @@ mod tests {
             ))
             .unwrap();
         let error = graph
-            .publish_prepared_m18_embeddings(
+            .publish_prepared_algorithm_embeddings(
                 &cancelled,
                 || Ok(source(3, 1)),
                 || Err(SearchArtifactError::Cancelled),
