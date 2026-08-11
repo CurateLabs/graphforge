@@ -101,6 +101,15 @@ contribution order with serial dangling/delta reductions, Node2Vec skip-gram
 training stays serial, and triad census merges integer class counts in canonical
 source-range order, so fingerprints match the one-thread path.
 
+(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
+independent work across that pool above documented crossovers; work never uses
+Rayon's process-global pool. Leiden (#527) is explicitly dispositioned serial
+because local moves, refinement, fixed random sampling, and aggregation consume
+the accepted state from the previous step. Cosine dot products retain serial
+coordinate order, PageRank keeps canonical contribution order with serial
+dangling/delta reductions, Node2Vec skip-gram training stays serial, and Leiden
+keeps one-thread refinement order, so fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -373,6 +382,27 @@ the Rayon global pool, and observes shared graph/output/iteration limits. A
 fingerprint test attaches private compute pools for `1`/`2`/`4`/`8` configured
 compute threads and requires identical schemas, row ordering, core labels, and
 rows.
+
+## Serial Leiden modularity optimization (#527)
+
+`cluster(by="leiden")` has no parallel crossover. Its performance disposition is
+**serial local-move/refinement/aggregation** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic resource policies.
+
+Each Leiden level first runs topology-ordered positive-gain local moves, then
+refines coarse communities through connected subcommunities using the fixed
+Rust random stream and accepted membership state, then aggregates the refined
+partition while seeding the next level from the coarse partition. Reordering
+candidate moves, random draws, or aggregation updates would require a new
+numeric and tie contract and could change connected-community guarantees,
+community IDs, row ordering, or fingerprints.
+
+The #527 disposition therefore preserves the serial contract, CSR-native
+selected adjacency access, shared cancellation/checkpoint controls, structured
+resource errors, and bounded Arrow shaping. Schemas, row order, community IDs,
+projection fingerprints, cancellation, and limit behavior match the one-thread
+oracle at supported thread configurations. No GPU, distributed, approximate, or
+foreign-engine fallback is implied.
 
 ## Observability
 

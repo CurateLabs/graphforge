@@ -789,6 +789,13 @@ is the sole production owner; Python and Node only translate arguments and
 Arrow IPC and provide no backend, fallback, packaging dependency, or recovery
 path.
 
+M4 #527 disposition: Leiden remains serial. Topology-ordered local moves,
+connected refinement, fixed-stream sampled refinement choices, and seeded
+aggregation each consume the accepted state from the previous step. GraphForge
+therefore does not claim a parallel crossover for `cluster(by="leiden")`;
+`1`/`2`/`4`/`8`/automatic thread policies preserve the one-thread schema, row
+order, connected community IDs, structured errors, and bounded Arrow shaping.
+
 ### Implemented label-propagation contract
 
 `by="label_propagation"` is the Rust-owned classic asynchronous algorithm of
