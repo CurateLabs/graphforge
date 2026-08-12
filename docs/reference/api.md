@@ -1719,8 +1719,13 @@ target topology/UUID. The non-null schema is `source_uuid: FixedSizeBinary(16)`,
 Unit-cost, strict named-weight, direction, relationship filtering, parallel-edge, and stable
 equal-cost tie semantics match `dijkstra`. `k` must be `1`. Empty or disconnected selections
 produce a valid empty Arrow table, and shared limits and cancellation apply to the whole
-invocation without partial output. Rust owns projection through Arrow shaping; Python and Node
-remain thin adapters, and knowledge-layer presence cannot change the result. The official
+invocation without partial output. Above the documented `8_192` source-edge
+inspection crossover and with a multi-thread resource policy, Rust may partition
+independent source nodes on the instance-owned private `ComputePool`; each source
+still runs serial Dijkstra and results merge in canonical source order. Smaller
+workloads and one-thread policies stay serial. Rust owns projection through Arrow
+shaping; Python and Node remain thin adapters, and knowledge-layer presence
+cannot change the result. The official
 [Neo4j GDS all-pairs shortest path documentation][gds-apsp] is a development reference only;
 there is no igraph, NetworkX, Neo4j, SciPy, external path service, fallback, packaging
 dependency, or recovery runtime.
