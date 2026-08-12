@@ -60,7 +60,10 @@ const CREATE_FIXTURE: &str = "CREATE \
          (bob)-[:KNOWS {capacity:2.0, cost:1.0}]->(carol), \
          (carol)-[:KNOWS {capacity:3.0, cost:2.0}]->(dave), \
          (alice)-[:KNOWS {capacity:2.0, cost:2.0}]->(carol), \
-         (dave)-[:LIKES {capacity:1.0, cost:1.0}]->(eve)";
+         (dave)-[:LIKES {capacity:1.0, cost:1.0}]->(eve), \
+         (alice)-[:PIPE {capacity:2.0, cost:1.0}]->(bob), \
+         (bob)-[:PIPE {capacity:2.0, cost:2.0}]->(dave), \
+         (alice)-[:PIPE {capacity:1.0, cost:5.0}]->(dave)";
 
 fn load_contract_json() -> serde_json::Value {
     serde_json::from_str(CONTRACT_JSON).expect("parse m4-entry-matrix.json")
@@ -427,6 +430,11 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_paths_min_cost_max_flow(gf);
+            assert_eq!(ev.output_rows, 1);
+            ev
+        },
+        {
             let ev = run_knn(gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -698,6 +706,59 @@ fn run_paths_bellman_ford(gf: &GraphForge) -> WorkloadEvidence {
     }
 }
 
+fn run_paths_min_cost_max_flow(gf: &GraphForge) -> WorkloadEvidence {
+    let source = person_selector("Alice");
+    let target = person_selector("Dave");
+    let options = PathsOptions {
+        by: PathAlgorithm::MinCostMaxFlow,
+        via: Some("PIPE".into()),
+        directed: true,
+        k: 1,
+        weight: None,
+        capacity_property: Some("capacity".into()),
+        cost_property: Some("cost".into()),
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: Vec::new(),
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(&source, Some(&target), options.clone())
+        .expect("min_cost_max_flow");
+    let second = gf
+        .paths(&source, Some(&target), options)
+        .expect("min_cost_max_flow repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "min_cost_max_flow must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-min-cost-max-flow",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("min_cost_max_flow")),
+            (
+                "disposition",
+                serde_json::json!("serial_bellman_ford_residual_augmentations"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("shortest_residual_augmentations_with_cost_updates"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
 fn run_knn(gf: &GraphForge) -> WorkloadEvidence {
     let options = SimilarOptions {
         by: SimilarAlgorithm::Knn,
@@ -842,6 +903,11 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_paths_min_cost_max_flow(&gf);
+            assert_eq!(ev.output_rows, 1);
+            ev
+        },
+        {
             let ev = run_knn(&gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -870,7 +936,7 @@ fn build_evidence(
         "dataset": {
             "fixture_id": "synthetic-small",
             "nodes": 5,
-            "edges": 5,
+            "edges": 8,
             "opt_in": false,
         },
         "workloads": workloads.iter().map(evidence_workload).collect::<Vec<_>>(),
@@ -890,7 +956,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 9);
+    assert_eq!(workloads.len(), 10);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -902,6 +968,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "paths-gomory-hu-tree",
             "paths-min-steiner-tree",
             "paths-bellman-ford",
+            "paths-min-cost-max-flow",
             "exact-cosine-knn",
             "node2vec"
         ]
