@@ -3207,7 +3207,6 @@ where
     }
 }
 
-
 fn k_core_scores(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
