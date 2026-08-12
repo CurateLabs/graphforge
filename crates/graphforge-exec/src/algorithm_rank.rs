@@ -95,7 +95,6 @@ const PAGERANK_TOLERANCE: f64 = 1.0e-10;
 /// embedded hosts. Numeric results remain identical either way.
 pub const PAGERANK_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
 const PAGERANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
-<<<<<<< HEAD
 /// Estimated local neighbor-pair probes below which clustering coefficient stays serial (#504).
 ///
 /// Keeps small fixtures and sparse public invocations off the worker pool; above this,
@@ -123,7 +122,6 @@ const DEGREE_CHECKPOINT_NODES: usize = 1_024;
 /// The crossover keeps small fixtures off the private pool; parallel workers
 /// still run each source's Brandes BFS serially and reduce in source order.
 pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
-=======
 /// Estimated pair/intersection work below which common-neighbors stays serial (#505).
 ///
 /// Chosen from manual serial-vs-parallel timings on this M4 agent host
@@ -140,7 +138,6 @@ pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
 /// exact counts remain identical on either path.
 pub const COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK: u64 = 1_048_576;
 const COMMON_NEIGHBORS_CHECKPOINT_INTERVAL: usize = 1_024;
->>>>>>> ecfa5e4 (perf(exec): parallelize common neighbors rank)
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 /// Selected adjacency entries below which eigenvector stays on the serial path (#507).
@@ -479,7 +476,6 @@ pub(crate) fn select_pagerank_path(
 }
 
 fn destination_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
-<<<<<<< HEAD
     ordinal_chunks(nodes, threads)
 }
 
@@ -488,12 +484,6 @@ fn source_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
 }
 
 fn ordinal_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
-=======
-    source_chunks(nodes, threads)
-}
-
-fn source_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
->>>>>>> ecfa5e4 (perf(exec): parallelize common neighbors rank)
     if nodes == 0 {
         return Vec::new();
     }
