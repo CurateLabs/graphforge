@@ -17,9 +17,9 @@ use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    AnalyzeOptions, CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions,
-    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector,
-    PathsOptions, PropValue, RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
+    CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions, ExecutionResourcePolicy,
+    GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector, PathsOptions, PropValue,
+    RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
@@ -662,6 +662,58 @@ fn run_paths_min_steiner_tree(gf: &GraphForge) -> WorkloadEvidence {
     }
 }
 
+fn run_paths_bellman_ford(gf: &GraphForge) -> WorkloadEvidence {
+    let source = person_selector("Alice");
+    let options = PathsOptions {
+        by: PathAlgorithm::BellmanFord,
+        via: None,
+        directed: true,
+        k: 1,
+        weight: Some("cost".into()),
+        capacity_property: None,
+        cost_property: None,
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: Vec::new(),
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(&source, None, options.clone())
+        .expect("bellman_ford");
+    let second = gf
+        .paths(&source, None, options)
+        .expect("bellman_ford repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "bellman_ford must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-bellman-ford",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("bellman_ford")),
+            (
+                "disposition",
+                serde_json::json!("serial_ordered_bellman_ford_relaxation"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("ordered_relaxation_rounds_and_negative_cycle_scan"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
 fn run_analyze_maximum_spanning_tree(gf: &GraphForge) -> WorkloadEvidence {
     let options = AnalyzeOptions {
         by: AnalyzeAlgorithm::MaximumSpanningTree,
@@ -694,17 +746,14 @@ fn run_analyze_maximum_spanning_tree(gf: &GraphForge) -> WorkloadEvidence {
         wall_time_ms,
         peak_rss_bytes: peak_rss_bytes().or(before_rss),
         structural: BTreeMap::from([
-            ("surface", serde_json::json!("GraphForge::paths")),
-            ("algorithm", serde_json::json!("bellman_ford")),
-            (
-                "disposition",
-                serde_json::json!("serial_ordered_bellman_ford_relaxation"),
-            ),
-                "work_units",
-                serde_json::json!("ordered_relaxation_rounds_and_negative_cycle_scan"),
             ("surface", serde_json::json!("GraphForge::analyze")),
             ("algorithm", serde_json::json!("maximum_spanning_tree")),
+            (
+                "disposition",
                 serde_json::json!("serial_kruskal_descending_union_find"),
+            ),
+            (
+                "work_units",
                 serde_json::json!("stable_edge_sort_and_union_find_acceptance"),
             ),
             ("threads_path", serde_json::json!("serial_for_all_policies")),
@@ -973,7 +1022,6 @@ fn build_evidence(
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
     assert_eq!(workloads.len(), 10);
-    assert_eq!(workloads.len(), 9);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
