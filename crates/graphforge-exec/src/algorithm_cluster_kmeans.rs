@@ -1,9 +1,32 @@
 //! Deterministic, dependency-free K-means kernel for vector clustering.
+//!
+//! Assignment (#524) may partition independent point-to-centroid searches across
+//! the instance-owned private compute pool above a documented crossover.
+//! Farthest-first initialization and centroid updates remain serial, preserving
+//! topology ties and floating-point accumulation order.
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use rayon::prelude::*;
+
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
 pub(crate) const CLUSTER_COUNT: usize = 10;
 const MAX_ITERATIONS: usize = 100;
 const CHECKPOINT_INTERVAL: usize = 64;
+
+/// Distance-coordinate evaluations below which assignment stays serial (#524).
+///
+/// The unit is `points * CLUSTER_COUNT * dimensions`; below this threshold,
+/// private-pool scheduling and merge overhead dominate the independent assign
+/// work. Distance coordinates remain serial for each point/centroid pair.
+pub const KMEANS_ASSIGN_PARALLEL_CROSSOVER_OPS: u64 = 32_768;
+
+/// Selected assignment execution path for observability and crossover tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KMeansAssignPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
 
 pub(crate) fn stable_labels(
     vectors: &[&[f64]],
@@ -103,6 +126,19 @@ fn assign(
     control: &AlgorithmControl,
     work: &mut usize,
 ) -> Result<Vec<usize>, AlgorithmError> {
+    let dimension = vectors.first().map_or(0, |vector| vector.len());
+    match select_kmeans_assign_path(control, vectors.len(), dimension) {
+        KMeansAssignPath::Serial => assign_serial(vectors, centroids, control, work),
+        KMeansAssignPath::Parallel { .. } => assign_parallel(vectors, centroids, control),
+    }
+}
+
+fn assign_serial(
+    vectors: &[&[f64]],
+    centroids: &[Vec<f64>],
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<Vec<usize>, AlgorithmError> {
     vectors
         .iter()
         .map(|vector| {
@@ -120,6 +156,51 @@ fn assign(
                 .ok_or_else(|| execution("K-means has no centroid"))
         })
         .collect()
+}
+
+fn assign_parallel(
+    vectors: &[&[f64]],
+    centroids: &[Vec<f64>],
+    control: &AlgorithmControl,
+) -> Result<Vec<usize>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel K-means assignment requires an instance-owned compute pool")
+    })?;
+    let ranges = point_chunks(vectors.len(), control.compute_threads());
+    let chunk_results = run_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut work = 0_usize;
+                let mut chunk = Vec::with_capacity(end.saturating_sub(start));
+                for vector in &vectors[start..end] {
+                    chunk.push(assign_one(vector, centroids, control, &mut work)?);
+                }
+                Ok(chunk)
+            })
+            .collect::<Vec<Result<Vec<usize>, AlgorithmError>>>();
+        first_chunk_error(results)
+    })?;
+    Ok(chunk_results.into_iter().flatten().collect())
+}
+
+fn assign_one(
+    vector: &[f64],
+    centroids: &[Vec<f64>],
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<usize, AlgorithmError> {
+    centroids
+        .iter()
+        .enumerate()
+        .map(|(index, centroid)| {
+            squared_distance(vector, centroid, control, work).map(|distance| (distance, index))
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)))
+        .map(|(_, index)| index)
+        .ok_or_else(|| execution("K-means has no centroid"))
 }
 
 fn update(
@@ -200,6 +281,76 @@ fn checkpoint(control: &AlgorithmControl, work: &mut usize) -> Result<(), Algori
     }
     Ok(())
 }
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("K-means assignment worker panicked")),
+    }
+}
+
+fn first_chunk_error<T>(results: Vec<Result<T, AlgorithmError>>) -> Result<Vec<T>, AlgorithmError> {
+    results.into_iter().collect()
+}
+
+/// Choose serial vs private-pool parallel assignment for a K-means workload.
+pub(crate) fn select_kmeans_assign_path(
+    control: &AlgorithmControl,
+    points: usize,
+    dimension: usize,
+) -> KMeansAssignPath {
+    let threads = control.compute_threads();
+    let estimated_ops = estimated_assign_ops(points, dimension);
+    if threads <= 1 || points <= 1 || estimated_ops < KMEANS_ASSIGN_PARALLEL_CROSSOVER_OPS {
+        return KMeansAssignPath::Serial;
+    }
+    if control
+        .compute_pool()
+        .is_none_or(|pool| !pool.is_parallel())
+    {
+        return KMeansAssignPath::Serial;
+    }
+    let chunks = point_chunks(points, threads).len();
+    if chunks <= 1 {
+        return KMeansAssignPath::Serial;
+    }
+    KMeansAssignPath::Parallel { threads, chunks }
+}
+
+fn estimated_assign_ops(points: usize, dimension: usize) -> u64 {
+    let points = u64::try_from(points).unwrap_or(u64::MAX);
+    let dimension = u64::try_from(dimension).unwrap_or(u64::MAX);
+    points
+        .saturating_mul(CLUSTER_COUNT as u64)
+        .saturating_mul(dimension)
+}
+
+fn point_chunks(points: usize, threads: usize) -> Vec<(usize, usize)> {
+    if points == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, points);
+    let base = points / workers;
+    let rem = points % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
+}
+
 fn numeric_error() -> AlgorithmError {
     execution("K-means numeric state is NaN or infinite")
 }
@@ -214,9 +365,43 @@ fn execution(message: &str) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        let pool = Arc::new(ComputePool::new(threads).unwrap());
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool)
+    }
+
+    fn broad_fixture() -> Vec<Vec<f64>> {
+        (0..300)
+            .map(|point| {
+                let group = point % CLUSTER_COUNT;
+                let member = point / CLUSTER_COUNT;
+                vec![
+                    group as f64 * 1_000.0 + member as f64 * 0.01,
+                    group as f64 * 10.0,
+                    member as f64,
+                    (group * group) as f64,
+                    (point % 7) as f64,
+                    (point % 11) as f64,
+                    (point % 13) as f64,
+                    (point % 17) as f64,
+                    (point % 19) as f64,
+                    (point % 23) as f64,
+                    (point % 29) as f64,
+                    (point % 31) as f64,
+                ]
+            })
+            .collect()
     }
 
     #[test]
@@ -230,6 +415,41 @@ mod tests {
             .collect::<Vec<i64>>();
         assert_eq!(fit(&vectors, &control(), MAX_ITERATIONS).unwrap(), expected);
         assert_eq!(fit(&vectors, &control(), MAX_ITERATIONS).unwrap(), expected);
+    }
+
+    #[test]
+    fn assign_path_respects_crossover_threads_and_pool() {
+        assert_eq!(
+            select_kmeans_assign_path(&control(), 512, 16),
+            KMeansAssignPath::Serial
+        );
+
+        let parallel = control_with_threads(4);
+        assert_eq!(
+            select_kmeans_assign_path(&parallel, 204, 16),
+            KMeansAssignPath::Serial
+        );
+        assert_eq!(
+            select_kmeans_assign_path(&parallel, 205, 16),
+            KMeansAssignPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_kmeans_assignment_fingerprint() {
+        let values = broad_fixture();
+        let vectors = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let serial = stable_labels(&vectors, &control_with_threads(1)).unwrap();
+        for threads in [2, 4, 8] {
+            assert_eq!(
+                stable_labels(&vectors, &control_with_threads(threads)).unwrap(),
+                serial,
+                "threads={threads}"
+            );
+        }
     }
 
     #[test]
