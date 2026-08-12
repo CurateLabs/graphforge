@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #514 total-neighbors aggregate; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -634,6 +634,31 @@ Schemas, row order, marginal scores, projection fingerprints, structured
 limit/cancellation errors, and write-back atomicity match the one-thread oracle
 at `1`/`2`/`4`/`8`/automatic configurations. No GPU, distributed, approximate, or
 foreign-engine fallback is implied.
+
+## Parallel total-neighbors aggregate (#514)
+
+`rank(by="total_neighbors")` partitions **independent source ordinals** across
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated pair/intersection work is at least
+  `TOTAL_NEIGHBORS_PARALLEL_CROSSOVER_WORK` (`1_048_576`) in
+  `graphforge-exec`.
+
+The estimate is `sources^2 + 2 * sources * selected_degree_sum`. Manual
+serial-vs-parallel timing on the M4 agent host (4x Xeon vCPU, directed
+ring-lattice fixtures, 4 private workers, debug test profile after a clean
+target-dir build; see ignored `measure_total_neighbors_parallel_crossover`)
+showed ~230k units still slower (~1.06x serial), ~540k still slower (~1.31x),
+~1.2M first clear win (~0.84x), and >=2.1M at least 1.4x faster.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel workers own only source
+ranges. Candidate order, missing-link checks, two-pointer neighborhood
+intersections, checked integer union arithmetic, and exact `Float64` conversion
+remain serial within each source; worker scores merge in canonical source
+order. Schemas, row order, scores, structured errors, and fingerprints match the
+one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Serial biconnected components (#517)
 
