@@ -1835,7 +1835,7 @@ pub fn analyze_algorithm(
 }
 
 /// Execute a typed graph analysis algorithm with caller-supplied resource limits
-/// and an optional instance-owned compute pool.
+/// and an optional instance-owned compute pool (#570).
 ///
 /// # Errors
 /// Returns structured validation/execution errors for malformed selection,
