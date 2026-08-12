@@ -3841,6 +3841,13 @@ That operation preserves the algorithm/version and graph projection in the
 space compatibility identity. Multiple spaces may contain the same UUID, and
 neither search freshness nor knowledge/epistemic run state changes the algorithm result.
 
+M4 #560 disposition: GraphSAGE-v1 training remains serial. Positive-pair replay,
+sampled role-path computation graphs, gradient accumulation, Adam updates, and
+full-neighborhood inference are an order-sensitive state stream, so GraphForge
+does not claim a parallel crossover for `analyze_embedding(by="graphsage")`.
+Thread policies at `1`/`2`/`4`/`8`/automatic preserve the one-thread schema, row
+order, embeddings, structured errors, and bounded Arrow shaping.
+
 ---
 
 ## `forge.similar()` — Pairwise Similarity

@@ -18,7 +18,6 @@ Tokio runtime or any DataFusion execution session.
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #507 eigenvector) |
 
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #499 Adamic-Adar) |
 
@@ -85,6 +84,27 @@ dense ordinal order, betweenness reduces per-source dependency arrays in
 canonical source order, Components merges worker-local forests in canonical
 source-range order, Node2Vec skip-gram training stays serial, and transitive
 closure merges source ranges canonically, so fingerprints match the one-thread
+
+`cluster(by="components")` (#518) may partition independent work across that
+pool above documented crossovers; work never uses Rayon's process-global pool.
+Cosine dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Jaccard retains
+serial candidate order per source, clustering coefficient merges node-range
+scores in canonical dense-ordinal order, triangles merge node-owned counts by
+ascending dense ordinal, Degree merges node chunks in dense ordinal order,
+betweenness reduces per-source dependency arrays in canonical source order,
+Components merges worker-local forests in canonical source-range order, and
+Node2Vec skip-gram training stays serial, so fingerprints match the one-thread
+
+(#342), PageRank (#343), and Node2Vec walk-corpus generation (#344) may partition
+independent work across that pool above documented crossovers; work never uses
+Rayon's process-global pool. GraphSAGE training (#560) is explicitly
+dispositioned serial because positive-pair replay, sampled computation graphs,
+gradient accumulation, Adam moment updates, and final full-neighborhood
+inference are one accepted state stream. Cosine dot products retain serial
+coordinate order, PageRank keeps canonical contribution order with serial
+dangling/delta reductions, Node2Vec skip-gram training stays serial, and
+GraphSAGE keeps one-thread training order, so fingerprints match the one-thread
 path.
 (#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
 eigenvector destination updates (#507) may partition independent work across
@@ -643,6 +663,27 @@ does not use Rayon's global pool, and preserves shared cancellation and
 resource-limit behavior. A fingerprint test attaches private compute pools for
 `1`/`2`/`4`/`8` configured compute threads and requires identical schemas,
 cut-vertex ordering, and rows.
+
+## Serial GraphSAGE training (#560)
+
+`analyze_embedding(by="graphsage")` keeps the GraphSAGE-v1 training and final
+inference path serial under every `compute_threads` setting. The operation
+replays positive pairs in start UUID / walk / transition order, builds sampled
+role-path computation graphs for the center, positive, and negative examples,
+accumulates one binary64 gradient tensor, and updates Adam moments in layer /
+output-coordinate / input-coordinate order. Each accepted pair changes the
+parameter and moment state consumed by the next pair, so private-pool
+speculation would require a new reduction contract and could change binary64
+Adam state, final Float32 embeddings, and fingerprints.
+
+The #560 disposition therefore preserves the serial numeric contract and records
+thread-policy parity rather than claiming a crossover. The Rust path consumes
+the normalized projection, shared resource preflight, cooperative cancellation,
+structured work/output errors, and bounded Arrow shaping already used by the
+embedding surface. Schemas, row order, fingerprints, cancellation, and limit
+behavior match the one-thread oracle at `1`/`2`/`4`/`8`/automatic
+configurations. No GPU, distributed, approximate, or foreign-engine fallback is
+implied.
 
 ## Observability
 
