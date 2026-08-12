@@ -599,6 +599,21 @@ Worker score chunks merge in canonical source order, so schemas, row order,
 scores, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/
 automatic configurations.
 
+## Serial articulation points (#563)
+
+`analyze(by="articulation_points")` is intentionally SERIAL. It shares the
+low-link DFS kernel used for cut-vertex and bridge classification; discovery
+indices, parent edges, root child counts, and low-link propagation are ordered
+state. Parallelizing those updates would change canonical cut-vertex evidence or
+require synchronization at each DFS step, which does not provide safe
+independent work for the private compute pool.
+
+The handler keeps Rust-owned adjacency projection and bounded Arrow output,
+does not use Rayon's global pool, and preserves shared cancellation and
+resource-limit behavior. A fingerprint test attaches private compute pools for
+`1`/`2`/`4`/`8` configured compute threads and requires identical schemas,
+cut-vertex ordering, and rows.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
