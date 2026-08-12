@@ -80,10 +80,11 @@ DataFusion target partitions, thread-parity cells over the host budget.
 
 The entry baseline records structural gates on the public facade. Fresh CSR
 index hits no longer expand into an O(E) HashMap (#340). Exact cosine KNN /
-similarity (#342), PageRank (#343), and Node2Vec walk generation (#344) may use
-the instance-owned private compute pool above documented crossovers while
-preserving one-thread fingerprints. Query-facing Parquet providers stream
-bounded batches via `GraphForgeParquetExec` (#339) rather than eager
+similarity (#342), PageRank (#343), Node2Vec walk generation (#344), and
+common-neighbors source aggregates (#505) may use the instance-owned private
+compute pool above documented crossovers while preserving one-thread
+fingerprints. Query-facing Parquet providers stream bounded batches via
+`GraphForgeParquetExec` (#339) rather than eager
 single-partition `MemTable` materialization; ExpandExec filtered reads and
 fixed-hop demand remain the selective-path contract.
 

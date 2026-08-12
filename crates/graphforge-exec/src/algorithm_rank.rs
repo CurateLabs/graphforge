@@ -88,6 +88,7 @@ const PAGERANK_TOLERANCE: f64 = 1.0e-10;
 /// embedded hosts. Numeric results remain identical either way.
 pub const PAGERANK_PARALLEL_CROSSOVER_EDGES: u64 = 4_096;
 const PAGERANK_CHECKPOINT_DESTINATIONS: usize = 4_096;
+<<<<<<< HEAD
 /// Estimated local neighbor-pair probes below which clustering coefficient stays serial (#504).
 ///
 /// Keeps small fixtures and sparse public invocations off the worker pool; above this,
@@ -115,6 +116,24 @@ const DEGREE_CHECKPOINT_NODES: usize = 1_024;
 /// The crossover keeps small fixtures off the private pool; parallel workers
 /// still run each source's Brandes BFS serially and reduce in source order.
 pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
+=======
+/// Estimated pair/intersection work below which common-neighbors stays serial (#505).
+///
+/// Chosen from manual serial-vs-parallel timings on this M4 agent host
+/// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers, debug
+/// test profile after a clean target-dir build; see
+/// ignored `measure_common_neighbors_parallel_crossover`):
+/// - ~230k estimated units: parallel still slower (~1.80x serial)
+/// - ~540k estimated units: parallel still slower (~1.20x serial)
+/// - ~1.2M estimated units: first clear win (~0.70x serial)
+/// - >=2.1M estimated units: >=1.8x speedup
+///
+/// `1_048_576` is the smallest power-of-two work estimate below that measured
+/// win boundary. Each source keeps serial candidate/intersection order, so
+/// exact counts remain identical on either path.
+pub const COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK: u64 = 1_048_576;
+const COMMON_NEIGHBORS_CHECKPOINT_INTERVAL: usize = 1_024;
+>>>>>>> ecfa5e4 (perf(exec): parallelize common neighbors rank)
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 /// Selected adjacency entries below which eigenvector stays on the serial path (#507).
@@ -329,6 +348,13 @@ pub(crate) enum PageRankExecutionPath {
     Parallel { threads: usize, chunks: usize },
 }
 
+/// Selected common-neighbors execution path for observability and crossover tests (#505).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommonNeighborsExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
 /// Dense inbound CSR: source ordinals in canonical source/edge order per destination.
 #[derive(Clone, Debug, Default)]
 struct PageRankInboundCsr {
@@ -439,6 +465,7 @@ pub(crate) fn select_pagerank_path(
 }
 
 fn destination_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+<<<<<<< HEAD
     ordinal_chunks(nodes, threads)
 }
 
@@ -447,6 +474,12 @@ fn source_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
 }
 
 fn ordinal_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+=======
+    source_chunks(nodes, threads)
+}
+
+fn source_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+>>>>>>> ecfa5e4 (perf(exec): parallelize common neighbors rank)
     if nodes == 0 {
         return Vec::new();
     }
@@ -1897,40 +1930,171 @@ fn common_neighbor_scores(
     control: &AlgorithmControl,
 ) -> Result<Vec<f64>, AlgorithmError> {
     let neighbors = simple_neighbors(graph, control, false)?;
+    let estimated_work = estimated_common_neighbors_work(&neighbors);
+    match select_common_neighbors_path(control, neighbors.len(), estimated_work) {
+        CommonNeighborsExecutionPath::Serial => common_neighbor_scores_serial(&neighbors, control),
+        CommonNeighborsExecutionPath::Parallel { .. } => {
+            common_neighbor_scores_parallel(&neighbors, control)
+        }
+    }
+}
+
+fn common_neighbor_scores_serial(
+    neighbors: &[Vec<usize>],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
     let mut visited = 0_usize;
     let mut scores = Vec::with_capacity(neighbors.len());
-    for (source, source_neighbors) in neighbors.iter().enumerate() {
-        let mut score = 0_u64;
-        for (candidate, candidate_neighbors) in neighbors.iter().enumerate() {
-            if visited.is_multiple_of(1024) {
-                control.checkpoint()?;
-            }
-            visited += 1;
-            if source == candidate || source_neighbors.binary_search(&candidate).is_ok() {
-                continue;
-            }
-            let (mut left, mut right) = (0, 0);
-            while left < source_neighbors.len() && right < candidate_neighbors.len() {
-                if visited.is_multiple_of(1024) {
-                    control.checkpoint()?;
-                }
-                visited += 1;
-                match source_neighbors[left].cmp(&candidate_neighbors[right]) {
-                    std::cmp::Ordering::Less => left += 1,
-                    std::cmp::Ordering::Greater => right += 1,
-                    std::cmp::Ordering::Equal => {
-                        score = score.checked_add(1).ok_or_else(|| {
-                            execution("common-neighbors score exceeds supported range")
-                        })?;
-                        left += 1;
-                        right += 1;
-                    }
-                }
-            }
-        }
+    for source in 0..neighbors.len() {
+        let score = common_neighbor_source_score(neighbors, source, || {
+            common_neighbors_checkpoint(control, &mut visited)
+        })?;
         scores.push(exact_u64_as_f64(score, "common-neighbors score")?);
     }
     Ok(scores)
+}
+
+fn common_neighbor_scores_parallel(
+    neighbors: &[Vec<usize>],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel common-neighbors requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(neighbors.len(), control.compute_threads());
+    let chunk_results = run_common_neighbors_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut work = 0_usize;
+                let mut local = Vec::with_capacity(end - start);
+                for source in start..end {
+                    let score = common_neighbor_source_score(neighbors, source, || {
+                        common_neighbors_checkpoint(control, &mut work)
+                    })?;
+                    local.push(exact_u64_as_f64(score, "common-neighbors score")?);
+                }
+                Ok((start, local))
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_error(results)
+    })?;
+
+    let mut scores = Vec::with_capacity(neighbors.len());
+    for (_start, local) in chunk_results {
+        scores.extend(local);
+    }
+    Ok(scores)
+}
+
+fn common_neighbor_source_score(
+    neighbors: &[Vec<usize>],
+    source: usize,
+    mut checkpoint: impl FnMut() -> Result<(), AlgorithmError>,
+) -> Result<u64, AlgorithmError> {
+    let source_neighbors = &neighbors[source];
+    let mut score = 0_u64;
+    for (candidate, candidate_neighbors) in neighbors.iter().enumerate() {
+        checkpoint()?;
+        if source == candidate || source_neighbors.binary_search(&candidate).is_ok() {
+            continue;
+        }
+        let (mut left, mut right) = (0, 0);
+        while left < source_neighbors.len() && right < candidate_neighbors.len() {
+            checkpoint()?;
+            match source_neighbors[left].cmp(&candidate_neighbors[right]) {
+                std::cmp::Ordering::Less => left += 1,
+                std::cmp::Ordering::Greater => right += 1,
+                std::cmp::Ordering::Equal => {
+                    score = score.checked_add(1).ok_or_else(|| {
+                        execution("common-neighbors score exceeds supported range")
+                    })?;
+                    left += 1;
+                    right += 1;
+                }
+            }
+        }
+    }
+    Ok(score)
+}
+
+fn common_neighbors_checkpoint(
+    control: &AlgorithmControl,
+    visited: &mut usize,
+) -> Result<(), AlgorithmError> {
+    if (*visited).is_multiple_of(COMMON_NEIGHBORS_CHECKPOINT_INTERVAL) {
+        control.checkpoint()?;
+    }
+    *visited = visited.saturating_add(1);
+    Ok(())
+}
+
+fn estimated_common_neighbors_work(neighbors: &[Vec<usize>]) -> u64 {
+    let sources = usize_to_u64_saturating(neighbors.len());
+    let degree_sum = neighbors.iter().fold(0_u64, |total, adjacent| {
+        total.saturating_add(usize_to_u64_saturating(adjacent.len()))
+    });
+    sources
+        .saturating_mul(sources)
+        .saturating_add(sources.saturating_mul(degree_sum).saturating_mul(2))
+}
+
+/// Choose serial vs private-pool parallel execution for a common-neighbors workload.
+pub(crate) fn select_common_neighbors_path(
+    control: &AlgorithmControl,
+    sources: usize,
+    estimated_work: u64,
+) -> CommonNeighborsExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || sources <= 1
+        || estimated_work < COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return CommonNeighborsExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    if chunks <= 1 {
+        return CommonNeighborsExecutionPath::Serial;
+    }
+    CommonNeighborsExecutionPath::Parallel { threads, chunks }
+}
+
+/// Prefer the lowest-index chunk error so parallel failures stay deterministic.
+fn first_chunk_error<T>(results: Vec<Result<T, AlgorithmError>>) -> Result<Vec<T>, AlgorithmError> {
+    let mut ok = Vec::with_capacity(results.len());
+    let mut first_error: Option<AlgorithmError> = None;
+    for result in results {
+        match result {
+            Ok(value) if first_error.is_none() => ok.push(value),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Ok(_) | Err(_) => {}
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(ok),
+    }
+}
+
+fn run_common_neighbors_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("common-neighbors worker panicked")),
+    }
+}
+
+fn usize_to_u64_saturating(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn resource_allocation_scores(
@@ -3326,8 +3490,51 @@ mod tests {
         )
     }
 
+    fn execute_common_neighbors_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(pool);
+        registry.execute(
+            Algorithm::Rank(RankAlgorithm::CommonNeighbors),
+            graph,
+            &control,
+        )
+    }
+
     fn common_neighbor_output_scores(output: &AlgorithmOutput) -> Vec<f64> {
         hits_hub_scores(output)
+    }
+
+    fn common_neighbor_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        common_neighbor_output_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    fn dense_common_neighbors_graph(nodes: usize) -> AdjacencyGraph {
+        let max_fanout = nodes.saturating_sub(1).max(1) / 2;
+        let fanout = ((COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK as usize)
+            / (nodes.max(1) * nodes.max(1)))
+        .clamp(4, max_fanout.max(1));
+        common_neighbors_ring_graph(nodes, fanout)
+    }
+
+    fn common_neighbors_ring_graph(nodes: usize, fanout: usize) -> AdjacencyGraph {
+        let fanout = fanout.clamp(1, (nodes.saturating_sub(1) / 2).max(1));
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
     }
 
     fn execute_resource_allocation(
@@ -6183,6 +6390,242 @@ mod tests {
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "common_neighbors");
+    }
+
+    #[test]
+    fn common_neighbors_path_selection_respects_crossover_and_one_thread() {
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_common_neighbors_path(&no_pool, 64, COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK),
+            CommonNeighborsExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_common_neighbors_path(&one, 64, COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK),
+            CommonNeighborsExecutionPath::Serial
+        );
+        let small = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_common_neighbors_path(&small, 64, COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK - 1),
+            CommonNeighborsExecutionPath::Serial
+        );
+        assert_eq!(
+            select_common_neighbors_path(&small, 64, COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK),
+            CommonNeighborsExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn common_neighbors_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_common_neighbors_graph(128);
+        let neighbors = simple_neighbors(
+            &graph,
+            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+            false,
+        )
+        .unwrap();
+        assert!(
+            estimated_common_neighbors_work(&neighbors) >= COMMON_NEIGHBORS_PARALLEL_CROSSOVER_WORK
+        );
+        let serial = execute_common_neighbors_with_pool(
+            &graph,
+            1,
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        let serial_rows = serial.rows();
+        let serial_bits = common_neighbor_bits(&serial);
+        for threads in [2_usize, 4, 8] {
+            let parallel = execute_common_neighbors_with_pool(
+                &graph,
+                threads,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(common_neighbor_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn common_neighbors_parallel_preserves_boundary_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(
+            5,
+            &[
+                (0, 2),
+                (0, 2),
+                (0, 3),
+                (0, 0),
+                (1, 2),
+                (1, 3),
+                (2, 0),
+                (2, 4),
+                (3, 4),
+            ],
+        );
+        let directed = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+        let undirected = AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]);
+        let complete =
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
+        for graph in [
+            &multigraph,
+            &directed,
+            &undirected,
+            &complete,
+            &empty,
+            &single,
+            &disconnected,
+        ] {
+            let serial = execute_common_neighbors_with_pool(
+                graph,
+                1,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel = execute_common_neighbors_with_pool(
+                    graph,
+                    threads,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    common_neighbor_bits(&parallel),
+                    common_neighbor_bits(&serial)
+                );
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+    }
+
+    #[test]
+    fn common_neighbors_parallel_limits_and_cancellation_return_structured() {
+        let graph = dense_common_neighbors_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_common_neighbors_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+        assert!(matches!(
+            execute_common_neighbors_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::IterationLimit { .. })
+        ));
+        assert!(matches!(
+            execute_common_neighbors_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 2,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn common_neighbors_source_chunks_cover_canonical_ranges() {
+        assert_eq!(source_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(source_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(source_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(source_chunks(8, 4), vec![(0, 2), (2, 4), (4, 6), (6, 8)]);
+        assert_eq!(source_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    #[ignore = "manual crossover measurement; run with --ignored --nocapture"]
+    fn measure_common_neighbors_parallel_crossover() {
+        use std::time::Instant;
+
+        for (nodes, fanout) in [
+            (64_usize, 8_usize),
+            (96, 12),
+            (128, 16),
+            (192, 16),
+            (256, 16),
+            (512, 32),
+            (1024, 32),
+        ] {
+            let graph = common_neighbors_ring_graph(nodes, fanout);
+            let neighbors = simple_neighbors(
+                &graph,
+                &AlgorithmControl::new(
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                ),
+                false,
+            )
+            .unwrap();
+            let work = estimated_common_neighbors_work(&neighbors);
+            let measurement_limits = AlgorithmLimits {
+                iterations: 1_000_000,
+                ..AlgorithmLimits::default()
+            };
+            let serial_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(1),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+            let parallel_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(4),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+            let mut serial_ns = u128::MAX;
+            let mut parallel_ns = u128::MAX;
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                let serial = common_neighbor_scores_serial(&neighbors, &serial_ctl).unwrap();
+                serial_ns = serial_ns.min(t0.elapsed().as_nanos());
+                let serial_bits = serial.iter().copied().map(f64::to_bits).collect::<Vec<_>>();
+
+                let t1 = Instant::now();
+                let parallel = common_neighbor_scores_parallel(&neighbors, &parallel_ctl).unwrap();
+                parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
+                let parallel_bits = parallel
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>();
+                assert_eq!(parallel_bits, serial_bits);
+            }
+            println!(
+                "nodes={nodes} fanout={fanout} work={work} serial_ns={serial_ns} parallel_ns={parallel_ns} ratio={}",
+                parallel_ns as f64 / serial_ns as f64
+            );
+        }
     }
 
     #[test]
