@@ -19,6 +19,7 @@ REQUIRED_WORKLOAD_IDS = {
     "aggregate-top-n",
     "pagerank",
     "paths-gomory-hu-tree",
+    "analyze-maximum-spanning-tree",
     "paths-min-steiner-tree",
     "paths-bellman-ford",
     "paths-min-cost-max-flow",

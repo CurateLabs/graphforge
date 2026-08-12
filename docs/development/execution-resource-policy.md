@@ -795,6 +795,11 @@ only, never a CI threshold.
 
 `analyze(by="minimum_spanning_tree")` has no parallel crossover. Its
 disposition is **serial Kruskal ascending union-find** for every
+
+## Serial analyze(by="maximum_spanning_tree") (#580)
+
+`analyze(by="maximum_spanning_tree")` has no parallel crossover. Its
+disposition is **serial Kruskal descending union-find** for every
 `compute_threads` setting, including `1`/`2`/`4`/`8`/automatic policies.
 
 The Rust kernel consumes CSR-native weighted undirected adjacency (#340),
