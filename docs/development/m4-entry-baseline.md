@@ -122,3 +122,5 @@ Every M4 child (#336–#344) compared against this gate’s structural contract.
 #345 reruns it as exit evidence on the final tree
 ([`m4-exit-evidence.md`](m4-exit-evidence.md) /
 [`m4-exit-evidence.json`](m4-exit-evidence.json)).
+common-neighbors source aggregates (#505) and closeness source BFS (#503) may use the instance-owned private
+Every M4 child (#336–#344, #503) compared against this gate’s structural contract.

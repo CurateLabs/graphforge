@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #515 triangles; #518 Components; #535 Jaccard similarity) |
 
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
@@ -796,3 +796,17 @@ counts.
 - [M4 Entry Baseline](m4-entry-baseline.md)
 - [Scale Limits](../reference/scale-limits.md)
 - Contract: [`tests/contracts/m4-entry-matrix.json`](../../tests/contracts/m4-entry-matrix.json)
+
+| Knob | Default (Explicit) | Applied to |
+|---|---|---|
+| `tokio_worker_threads` | `2` | Facade multi-thread Tokio runtime |
+| `target_partitions` | `2` | DataFusion `SessionConfig` |
+| `batch_size` | `8192` | DataFusion `SessionConfig`; analyst Arrow shaping / property enrichment (#341) |
+| `memory_budget_bytes` | `512 MiB` | DataFusion `RuntimeEnv` memory pool |
+| `spill` | disabled | Optional absolute spill directory + byte cap |
+| `io_concurrency` | `2` | Reserved I/O concurrency budget |
+| `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components; #503 closeness BFS) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #507 eigenvector) |
+
+## Parallel closeness BFS (#503)
