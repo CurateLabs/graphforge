@@ -2864,7 +2864,6 @@ fn resource_allocation_discount(degree: u64) -> Result<f64, AlgorithmError> {
     Ok(term)
 }
 
-
 fn total_neighbor_scores(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
@@ -8885,8 +8884,6 @@ mod tests {
             }
         );
     }
-
-
 
     #[test]
     fn total_neighbors_aggregates_missing_directed_links_deterministically() {
