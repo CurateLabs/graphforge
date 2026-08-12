@@ -20,35 +20,23 @@ pub(crate) fn strongly_connected_labels(
     control: &AlgorithmControl,
 ) -> Result<Vec<usize>, AlgorithmError> {
     control.check_cancelled()?;
-    let node_count = graph.node_ids().len();
-    let indices = graph
-        .node_ids()
+    let node_ids = graph.node_ids();
+    let node_count = node_ids.len();
+    let node_ordinals = node_ids
         .iter()
         .enumerate()
         .map(|(index, &node)| (node, index))
         .collect::<HashMap<_, _>>();
-    let mut adjacency = vec![Vec::new(); node_count];
-    let mut work = 0_usize;
-    for (source, &node) in graph.node_ids().iter().enumerate() {
-        for edge in graph.neighbors(node) {
-            checkpoint(control, &mut work)?;
-            adjacency[source].push(
-                indices
-                    .get(&edge.neighbor_id)
-                    .copied()
-                    .ok_or_else(|| execution("adjacency references an unselected node"))?,
-            );
-        }
-    }
 
     let mut discovery = vec![None; node_count];
     let mut lowlink = vec![0_usize; node_count];
     let mut on_stack = vec![false; node_count];
-    let mut component_stack = Vec::new();
-    let mut frames = Vec::new();
+    let mut component_stack = Vec::with_capacity(node_count);
+    let mut frames = Vec::with_capacity(node_count);
     let mut raw_labels = vec![usize::MAX; node_count];
     let mut next_discovery = 0_usize;
     let mut component_count = 0_usize;
+    let mut work = 0_usize;
 
     for root in 0..node_count {
         if discovery[root].is_some() {
@@ -68,8 +56,12 @@ pub(crate) fn strongly_connected_labels(
         while let Some(frame) = frames.last_mut() {
             checkpoint(control, &mut work)?;
             let node = frame.node;
-            if let Some(&neighbor) = adjacency[node].get(frame.next_neighbor) {
+            if let Some(edge) = graph.neighbors(node_ids[node]).get(frame.next_neighbor) {
                 frame.next_neighbor += 1;
+                let neighbor = node_ordinals
+                    .get(&edge.neighbor_id)
+                    .copied()
+                    .ok_or_else(|| execution("adjacency references an unselected node"))?;
                 if discovery[neighbor].is_none() {
                     discover(
                         neighbor,
