@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "ef489279cf02089d6ca8fee48519987d4405376e8f5dac722c24c214a772a4c2",
+  "sha256": "8ea9b66954aabf9a02c9bff17ff6752bd6156ab961ca937867dc27c782f782bc",
   "entries": [
     {
       "name": "graphforge-api",
@@ -20,7 +20,7 @@
         },
         {
           "name": "cucumber",
-          "req": "^0.21",
+          "req": "^0.23",
           "features": [],
           "optional": false,
           "uses_default_features": true,
