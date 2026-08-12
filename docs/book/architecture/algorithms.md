@@ -3807,6 +3807,12 @@ neighbors; the dense worst case is `O(V^3 log V)`. Shared limits allow at most
 normalization, counting, checked arithmetic, limit, cancellation, execution,
 and Arrow-shaping failures are atomic and return no partial scalar.
 
+One-thread policies and workloads below the measured 131,072 candidate-probe
+crossover stay on the serial path. Larger eligible workloads run independent
+source-ordinal ranges on the instance-owned private compute pool and reduce
+per-range `UInt64` counts in canonical range order, so multi-thread execution
+matches the one-thread schema, fingerprint, scalar value, and error surface.
+
 Typed Rust in `graphforge-exec` owns projection, normalization, exact counting,
 deterministic ordering, controls, and Arrow shaping. Python and Node only adapt
 arguments and the native Arrow result. They contain no triangle algorithm,

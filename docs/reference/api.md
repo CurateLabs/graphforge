@@ -2957,6 +2957,13 @@ direction-expanded adjacency entries at 100,000,000, output rows at
 projection, normalization, counting, checked arithmetic, limit, cancellation,
 execution, and shaping failures abort atomically without partial output.
 
+Counting stays serial for one-thread policies and for workloads below the
+measured crossover of 131,072 candidate wedge probes. At or above that boundary,
+multi-thread resource policies use the instance-owned private compute pool and
+merge per-range `UInt64` counts in canonical source-range order. This preserves
+the one-thread schema, fingerprint, scalar value, and structured failure
+contracts while avoiding a universal parallel tax for small selections.
+
 Rust owns dispatch, projection, normalization, exact counting, controls, and
 Arrow shaping. Python and Node only adapt arguments and the native Arrow
 result; neither binding contains a triangle algorithm. Knowledge-layer

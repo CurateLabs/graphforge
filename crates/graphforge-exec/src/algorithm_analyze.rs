@@ -1823,16 +1823,46 @@ pub fn analyze_algorithm(
     label: Option<TypeId>,
     options: &AnalyzeOptions,
 ) -> Result<RecordBatch, GfError> {
+    analyze_algorithm_with_compute(
+        provider,
+        dir,
+        mode,
+        label,
+        options,
+        AlgorithmLimits::default(),
+        None,
+    )
+}
+
+/// Execute a typed graph analysis algorithm with caller-supplied resource limits
+/// and an optional instance-owned compute pool.
+///
+/// # Errors
+/// Returns structured validation/execution errors for malformed selection,
+/// unavailable algorithms, adjacency reads, limits, or result shaping.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors analyze_algorithm plus resource-policy controls"
+)]
+pub fn analyze_algorithm_with_compute(
+    provider: &dyn AdjacencyProvider,
+    dir: &Path,
+    mode: OntologyMode,
+    label: Option<TypeId>,
+    options: &AnalyzeOptions,
+    limits: AlgorithmLimits,
+    compute: Option<crate::SharedComputePool>,
+) -> Result<RecordBatch, GfError> {
     let prepared = prepare_analyze_projection(provider, dir, mode, label, options)?;
     let algorithm = Algorithm::Analyze(prepared.options.by);
     let mut registry = AlgorithmRegistry::default();
     register_analyze_algorithms(&mut registry, prepared.options.directed)?;
     register_option_analyze_algorithm(&mut registry, &prepared.options, prepared.partitions)?;
-    let output = registry.execute(
-        algorithm,
-        &prepared.graph,
-        &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
-    )?;
+    let mut control = AlgorithmControl::new(limits, AlgorithmCancellation::default());
+    if let Some(pool) = compute {
+        control = control.with_compute_pool(pool);
+    }
+    let output = registry.execute(algorithm, &prepared.graph, &control)?;
     shape_algorithm_output(algorithm, &output).map_err(Into::into)
 }
 

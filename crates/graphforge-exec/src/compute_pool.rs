@@ -1,26 +1,12 @@
-//! Instance-owned bounded CPU pool for deterministic algorithm kernels (#337 / #342 / #343 / #344 / #504 / #515 / #506 / #501).
+//! Instance-owned bounded CPU pool for deterministic algorithm kernels
+//! (#337 / #342 / #343 / #344 / #500 / #501 / #504 / #505 / #506 / #507 / #515 / #588).
 //!
 //! GraphForge never installs work onto Rayon's process-global pool. Parallel
 //! cosine KNN (#342), PageRank (#343), Node2Vec walk generation (#344),
-//! clustering coefficient (#504), triangles (#515), Degree (#506), betweenness (#501), and sibling
-//! CPU kernels consume this private pool sized from [`crate`]-facing
-//! `compute_threads` on the embedded resource policy.
-//! Instance-owned bounded CPU pool for deterministic algorithm kernels (#337 / #342 / #343 / #344 / #507).
-//!
-//! GraphForge never installs work onto Rayon's process-global pool. Parallel
-//! cosine KNN (#342), PageRank (#343), Node2Vec walk generation (#344),
-//! eigenvector destination updates (#507), and sibling CPU kernels consume this
-//! private pool sized from [`crate`]-facing `compute_threads` on the embedded
-//! resource policy.
-//! common-neighbors source aggregates (#505), and sibling CPU kernels consume
-//! this private pool sized from [`crate`]-facing `compute_threads` on the
-//! embedded resource policy.
-//! Instance-owned bounded CPU pool for deterministic algorithm kernels (#337 / #342 / #343 / #344 / #500).
-//!
-//! GraphForge never installs work onto Rayon's process-global pool. Parallel
-//! cosine KNN (#342), PageRank (#343), Node2Vec walk generation (#344),
-//! ArticleRank (#500), and sibling CPU kernels consume this private pool sized
-//! from [`crate`]-facing `compute_threads` on the embedded resource policy.
+//! ArticleRank (#500), betweenness (#501), clustering coefficient (#504),
+//! common-neighbors (#505), Degree (#506), eigenvector (#507), triangles (#515),
+//! triangle count (#588), and sibling CPU kernels consume this private pool
+//! sized from [`crate`]-facing `compute_threads` on the embedded resource policy.
 
 use std::sync::Arc;
 
