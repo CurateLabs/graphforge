@@ -2,6 +2,8 @@
 //! Bellman-Ford residual shortest path mutates capacities, costs, and flow
 //! assignments consumed by the next augmentation, so private-pool work would
 //! change residual visibility and public tie behavior.
+//! The `min_cost_max_flow_edges` view (#548) projects per-edge flow/cost rows
+//! from that final canonical residual state, not from independent edge tasks.
 
 use std::collections::HashMap;
 use std::hash::Hash;

@@ -985,6 +985,22 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and no process-global Rayon pool. Schemas, row order, costs,
 paths, structured errors, and fingerprints match the one-thread oracle at
 supported `1`/`2`/`4`/`8`/automatic configurations.
+## Serial paths(by="min_cost_max_flow_edges") (#548)
+
+`paths(by="min_cost_max_flow_edges")` has no parallel crossover. Its
+disposition is **serial Bellman-Ford residual edge projection** for every
+`compute_threads` setting, including `1`/`2`/`4`/`8`/automatic policies.
+
+The edge view shares the min-cost maximum-flow optimizer. Capacity, unit cost,
+flow, and flow-cost state change after every selected residual shortest path;
+edge rows are valid only after the final residual graph is known and sorted by
+public edge UUID. Parallel augmentations would risk changing residual path
+choice, signed edge assignments, and fingerprints.
+
+The path still uses CSR-native projections (#340), bounded Arrow output (#341),
+structured cancellation/resource checks, and no process-global Rayon pool.
+Schemas, row order, signed edge assignments, structured errors, and fingerprints
+match the one-thread oracle at supported `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Serial paths(by="floyd_warshall") (#543)
 
