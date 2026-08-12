@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #514 total-neighbors aggregate; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #508 harmonic closeness BFS; #510 HITS hub; #513 resource allocation; #514 total-neighbors aggregate; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -285,6 +285,25 @@ serial path runs with no pool scheduling tax. Worker-local token counts merge
 by canonical node ordinal with checked addition. Training order and arithmetic
 are unchanged, so schemas, row order, metadata, and fingerprints match the
 one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel harmonic closeness BFS (#508)
+
+Exact outward harmonic closeness partitions **independent source BFS** ranges
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated BFS edge visits (`selected_nodes × selected_adjacency_entries`) are
+  at least `HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS` (`65_536`) in
+  `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the serial
+all-sources BFS path runs with no pool scheduling tax. Above it, each source BFS
+keeps serial queue order, reciprocal-distance accumulation, and score
+arithmetic; only the set of source ordinals is partitioned. Worker scores merge
+in canonical source order and public Arrow rows are written through the shared
+bounded sink, so schemas, row order, score bits, fingerprints, cancellation, and
+structured limit errors match the one-thread oracle at `1`/`2`/`4`/`8`/automatic
+configurations that execute.
 
 ## Parallel betweenness Brandes BFS (#501)
 
