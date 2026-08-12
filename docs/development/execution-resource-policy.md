@@ -673,6 +673,28 @@ peak RSS, result fingerprint, and hardware-specific timing) and verifies that
 executed thread configurations match the one-thread oracle. Timing remains
 evidence only, not a CI threshold.
 
+## Parallel FastRP row kernels (#559)
+
+`analyze_embedding(by="fast_random_projection")` partitions **independent
+source rows** across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- estimated row/coordinate operations are at least
+  `FASTRP_PARALLEL_CROSSOVER_OPS` (`65_536`) in `graphforge-exec`.
+
+The estimate covers sparse propagation
+(`adjacency_entries × propagated_iterations × dimensions`), initial projection,
+feature projection/mixing, and per-iteration accumulation. Below that crossover,
+or when the policy provides one compute thread, FastRP stays serial with no pool
+scheduling tax.
+
+Parallel FastRP never parallelizes a row's floating-point reduction. Initial
+projection, feature mixing, accumulation, and sparse matvec work are row-owned;
+each source row visits neighbors and coordinates in the same order as the
+one-thread oracle, and worker chunks merge by canonical node ordinal. Schemas,
+row order, f32 embedding bits, cancellation, and work-limit errors are covered at
+`1`/`2`/`4`/`8` thread configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

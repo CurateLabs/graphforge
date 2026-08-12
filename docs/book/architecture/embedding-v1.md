@@ -430,6 +430,15 @@ embedding(v) = sum_t iteration_weights[t] * unit_l2(H_t[v]).
 canonical adjacency, iteration, and coordinate order, followed by a checked
 Float32 cast. An isolate has `H_t=0` for `t>=1`.
 
+FastRP may use the instance-owned private compute pool when estimated
+row/coordinate work is at least `FASTRP_PARALLEL_CROSSOVER_OPS` (`65_536`) and
+the resource policy supplies more than one compute thread. Parallel work is
+source-row owned: initial projection, feature mixing, accumulation, and sparse
+matvec rows run independently, but every row still visits neighbors and
+coordinates in the serial order above. Chunks merge by canonical node ordinal, so
+schemas, row ordering, and f32 embedding fingerprints match the one-thread
+oracle. Smaller workloads and one-thread policies stay on the serial path.
+
 Memory includes output, two `nodes * dimensions` binary64 iteration buffers, a
 binary64 accumulator, UUID projection state, normalized adjacency, and the
 `properties * dimensions` feature projection. Checked arithmetic covers each
