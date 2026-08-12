@@ -160,6 +160,22 @@
       ]
     },
     {
+      "id": "rank-k-core",
+      "class": "core-decomposition-peeling",
+      "surface": "GraphForge::rank",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_priority_queue_peeling",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink"
+      ]
+    },
+    {
       "id": "analyze-maximum-spanning-tree",
       "class": "serial-spanning-tree-graph-algorithm",
       "surface": "GraphForge::analyze",

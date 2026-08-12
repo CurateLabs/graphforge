@@ -266,6 +266,10 @@ fn supported_runtime_configuration() -> serde_json::Value {
     })
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "matrix assembly keeps assertions and emitted evidence together"
+)]
 fn parity_configurations(
     contract: &serde_json::Value,
     fixture: &std::path::Path,
@@ -414,6 +418,11 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
         {
             let ev = run_paths_gomory_hu_tree(gf);
             assert!(ev.output_rows > 0, "paths-gomory-hu-tree must produce rows");
+            ev
+        },
+        {
+            let ev = run_k_core(gf);
+            assert_eq!(ev.output_rows, 5);
             ev
         },
         {
@@ -607,6 +616,45 @@ fn run_paths_gomory_hu_tree(gf: &GraphForge) -> WorkloadEvidence {
             (
                 "work_units",
                 serde_json::json!("component_bfs_and_ordered_min_cut_parent_updates"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
+fn run_k_core(gf: &GraphForge) -> WorkloadEvidence {
+    let options = RankOptions {
+        by: RankAlgorithm::KCore,
+        via: Some("KNOWS".into()),
+        directed: true,
+        ..RankOptions::default()
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf.rank("Person", options.clone()).expect("k_core");
+    let second = gf.rank("Person", options).expect("k_core repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "k_core must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "rank-k-core",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::rank")),
+            ("algorithm", serde_json::json!("k_core")),
+            (
+                "disposition",
+                serde_json::json!("serial_priority_queue_peeling"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("heap_pops_and_live_neighbor_decrements"),
             ),
             ("threads_path", serde_json::json!("serial_for_all_policies")),
             ("csr_native_projection", serde_json::json!(true)),
@@ -1004,6 +1052,11 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_k_core(&gf);
+            assert_eq!(ev.output_rows, 5);
+            ev
+        },
+        {
             let ev = run_analyze_maximum_spanning_tree(&gf);
             assert!(
                 ev.output_rows > 0,
@@ -1086,7 +1139,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 12);
+    assert_eq!(workloads.len(), 13);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -1096,6 +1149,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "aggregate-top-n",
             "pagerank",
             "paths-gomory-hu-tree",
+            "rank-k-core",
             "analyze-maximum-spanning-tree",
             "paths-min-steiner-tree",
             "paths-bellman-ford",
@@ -1203,11 +1257,9 @@ fn contract_classifies_thread_parity_configurations_for_337() {
             "resource_limit_behavior"
         ])
     );
-    assert!(
-        contract["current_runtime"]["public_resource_policy"]
-            .as_bool()
-            .unwrap()
-    );
+    assert!(contract["current_runtime"]["public_resource_policy"]
+        .as_bool()
+        .unwrap());
 }
 
 #[test]
@@ -1289,12 +1341,10 @@ fn evidence_distinguishes_structural_gates_from_timing_observations() {
         assert_eq!(workload["timing_is_pass_fail"], false);
         assert!(workload["timing_observation"].get("wall_time_ms").is_some());
         // Peak RSS may be unavailable on non-Linux hosts; presence of the field is required.
-        assert!(
-            workload["timing_observation"]
-                .as_object()
-                .expect("timing object")
-                .contains_key("peak_rss_bytes")
-        );
+        assert!(workload["timing_observation"]
+            .as_object()
+            .expect("timing object")
+            .contains_key("peak_rss_bytes"));
     }
     assert!(evidence.get("spill_bytes").is_some());
 }

@@ -1,4 +1,11 @@
 //! Exact deterministic core numbers shared by Rust rank and cluster handlers.
+//!
+//! K-core peeling intentionally remains serial (#511). The accepted public
+//! contract follows a min-priority queue keyed by `(current degree, dense node
+//! ordinal)`: each pop decides which live neighbors are decremented and which
+//! stale heap entries will later be ignored. That frontier is order-dependent,
+//! so there are no independent work units to send to the private compute pool
+//! without changing fingerprints or tie behavior.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
