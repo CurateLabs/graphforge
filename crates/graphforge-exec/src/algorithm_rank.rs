@@ -7704,6 +7704,20 @@ mod tests {
             execute_k_core(&graph, AlgorithmLimits::default(), cancellation),
             Err(AlgorithmError::Cancelled)
         );
+        assert!(matches!(
+            execute_k_core(
+                &graph,
+                AlgorithmLimits {
+                    output_rows: 2,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::OutputLimit {
+                observed: 3,
+                limit: 2
+            })
+        ));
         let mut registry = AlgorithmRegistry::default();
         register_rank_algorithms(&mut registry).unwrap();
         let capability = registry
@@ -7713,6 +7727,54 @@ mod tests {
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "k_core");
+    }
+
+    #[test]
+    fn k_core_serial_disposition_matches_across_compute_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_edges(
+            10,
+            &[
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (1, 2),
+                (1, 3),
+                (2, 3),
+                (0, 4),
+                (4, 5),
+                (7, 8),
+                (8, 9),
+                (9, 7),
+            ],
+        );
+        let limits = AlgorithmLimits {
+            batch_size: 2,
+            ..AlgorithmLimits::default()
+        };
+        let algorithm = Algorithm::Rank(RankAlgorithm::KCore);
+        let oracle = execute_rank_with_compute(
+            &graph,
+            algorithm,
+            limits.with_compute_threads(1),
+            Some(Arc::new(crate::ComputePool::new(1).unwrap())),
+        )
+        .unwrap();
+        assert_eq!(oracle.peak_builder_rows, 2);
+        assert_eq!(oracle.internal_batch_count, 5);
+
+        for threads in [2, 4, 8] {
+            let candidate = execute_rank_with_compute(
+                &graph,
+                algorithm,
+                limits.with_compute_threads(threads),
+                Some(Arc::new(crate::ComputePool::new(threads).unwrap())),
+            )
+            .unwrap();
+            assert_eq!(
+                candidate, oracle,
+                "serial k-core disposition must match one-thread oracle at {threads} threads"
+            );
+        }
     }
 
     #[test]

@@ -213,6 +213,61 @@ serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
 for contiguous ordinal ranges; the sink merges them in ascending node order so
 schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+## Parallel eigenvector (#507)
+
+`rank(by="eigenvector")` shifted power-iteration destination updates may run on
+the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `EIGENVECTOR_PARALLEL_CROSSOVER_EDGES` (`8_192`) in `graphforge-exec`.
+
+Release-mode local evidence on the 4-worker M4 agent host showed regular graphs
+that converge during warm-up avoid the pool, while irregular non-converged
+fixtures crossed over by ~8K selected adjacency entries:
+`8_689`, `24_440`, `65_505`, and `130_544` edge irregular fixtures repeatedly
+ran at roughly `0.4×–0.6×` of the one-thread time on four private workers.
+Those timings are hardware-specific evidence, not a CI gate.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial source-scatter path runs with no pool scheduling tax. Above the
+crossover, the first two required power iterations also stay serial; if the
+workload converges there, no inbound CSR or worker scheduling tax is paid.
+Remaining non-converged work is destination-owned: each worker owns a
+contiguous dense-ordinal destination range and applies inbound contributions
+after the implicit identity term in the same canonical source/edge order as
+serial scatter. L2 normalization and component-wise convergence checks stay
+serial, so scores, iteration counts, and fingerprints match the one-thread
+result at `1`/`2`/`4`/`8`/automatic configurations.
+## Parallel HITS hub / authority (#510 / #509)
+
+The shared `hits_scores` kernel used by `rank(by="hits_hub")` prepares selected
+and `rank(by="hits_authority")` prepares selected adjacency once as
+dense-ordinal outgoing and incoming CSR, then partitions independent node-score
+updates across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `HITS_PARALLEL_CROSSOVER_EDGES` (`4_096`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel work is node-owned: the
+authority phase owns contiguous target ranges over incoming CSR, and the hub
+phase owns contiguous source ranges over outgoing CSR. Each node's
+floating-point sum still walks its CSR slice in canonical source/edge order,
+and global L2 norms remain serial dense-ordinal reductions, so schemas, row
+order, scores, ties, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations. The crossover follows the same
+4 vCPU release-build structural benchmark regime used for adjacent M4 kernels:
+the parallel path avoids small-fixture tax and clears the worker-pool cost once
+20 fixed HITS iterations amortize two sparse matrix-vector phases per
+iteration. It is CPU-only; no GPU or universal scaling claim is made.
+
+The threshold is the first measured win on the M4 agent host using the ignored
+release harness (`measure_article_rank_parallel_crossover`) with a shared
+four-worker private pool: sizes through 32k selected entries stayed near parity
+within timing noise, while 131k and 262k selected entries were clear wins over
+the one-thread path.
 
 ## Parallel Node2Vec walk generation (#344)
 
@@ -577,7 +632,6 @@ Schemas, row order, marginal scores, projection fingerprints, structured
 limit/cancellation errors, and write-back atomicity match the one-thread oracle
 at `1`/`2`/`4`/`8`/automatic configurations. No GPU, distributed, approximate, or
 foreign-engine fallback is implied.
->>>>>>> dced88e (perf(exec): serial disposition for CELF (#502))
 
 ## Serial biconnected components (#517)
 
@@ -592,6 +646,31 @@ sink, avoids any Rayon global pool, and observes cancellation and shared
 iteration/output limits. The serial disposition is covered by a fingerprint test
 that attaches private compute pools for `1`/`2`/`4`/`8` configured compute
 threads and requires identical schemas, row ordering, labels, and rows.
+
+## Serial k-core peeling (#511)
+
+`rank(by="k_core")` has no parallel crossover. Its performance disposition is
+**serial priority-queue peeling** for every `compute_threads` setting, including
+`1`/`2`/`4`/`8`/automatic resource policies.
+
+The Rust kernel consumes the CSR-native `AdjacencyGraph` projection (#340),
+normalizes simple undirected neighbor ordinals for the exact core-decomposition
+contract, then peels through a min-priority queue keyed by
+`(current degree, dense node ordinal)`. Each heap pop decides which live
+neighbors are decremented and which stale entries will later be ignored, so the
+frontier is order-dependent rather than a set of independent work units. Using
+the private compute pool here would require concurrent decrease-key/tie
+coordination and would risk changing accepted row ordering, ties, and
+fingerprints.
+
+The path still uses shared cancellation/checkpoint controls, structured
+resource errors, and the bounded Arrow sink (#341); it never creates a
+parallel-only graph copy or uses Rayon's process-global pool. The M4 entry
+harness records `rank-k-core` structural evidence (work units, serial path,
+peak RSS, result fingerprint, and hardware-specific timing) and verifies that
+executed thread configurations match the one-thread oracle. Timing remains
+evidence only, not a CI threshold.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
