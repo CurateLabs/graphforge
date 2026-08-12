@@ -168,8 +168,10 @@ When `compute_threads > 1` and estimated walk transitions are at least
 `NODE2VEC_WALK_PARALLEL_CROSSOVER` (`256`), independent `(start ordinal, walk
 ordinal)` tasks may run on the instance-owned private CPU pool and merge in
 that same canonical order; seed derivation and every walk remain identical to
-the one-thread path. Skip-gram / negative-sampling training stays serial. For every
-center, contexts are positions in ascending order from
+the one-thread path. Skip-gram / negative-sampling training stays serial with
+no parallel crossover (#562): each accepted update mutates shared input/output
+vectors in corpus order, so reordering would change the public Float32
+fingerprint contract. For every center, contexts are positions in ascending order from
 `max(0,i-window_size)` to `min(length,i+window_size)`, excluding `i`; the window
 is not randomized. Token counts over that fixed corpus define
 
@@ -183,7 +185,10 @@ from `negative` (`U64(epoch), UUID(start), U64(walk ordinal),
 U64(center position), U64(context position), U64(negative ordinal)`). If no
 mass remains, the negative set for the example is empty. This conditioned
 distribution makes the classic context exclusion total without a
-probability-dependent redraw loop.
+probability-dependent redraw loop. GraphForge precomputes the canonical
+`count(v)^0.75` mass table once per corpus and excludes the current context at
+draw time; this is an allocation/representation optimization only and does not
+change the RNG keys, cumulative scan order, or sampled negatives.
 
 The input matrix is initialized coordinate-wise from
 `Uniform[-0.5/dimensions, 0.5/dimensions)` using `node2vec-init-input`

@@ -3920,6 +3920,13 @@ does not claim a parallel crossover for `analyze_embedding(by="graphsage")`.
 Thread policies at `1`/`2`/`4`/`8`/automatic preserve the one-thread schema, row
 order, embeddings, structured errors, and bounded Arrow shaping.
 
+M4 #562 disposition: Node2Vec walk generation may use the documented private-pool
+crossover, but SGNS / negative-sampling training remains serial. The trainer now
+precomputes the canonical negative-sampling mass table once per corpus and
+excludes the current context at draw time; update order, RNG keys, Float32
+arithmetic, schemas, row order, fingerprints, structured errors, and bounded
+Arrow shaping stay on the one-thread contract.
+
 ---
 
 ## `forge.similar()` — Pairwise Similarity

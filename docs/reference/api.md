@@ -3254,6 +3254,12 @@ updates, and final inference preserve one canonical order under every
 `compute_threads` policy; no parallel training crossover, GPU, or foreign-engine
 fallback is claimed.
 
+`by="node2vec"` uses the documented private-pool crossover only for walk-corpus
+generation. SGNS / negative-sampling training has an explicit serial disposition
+(#562): GraphForge preserves corpus-order updates and instead precomputes the
+canonical negative-sampling mass table once per corpus. No parallel training,
+GPU, or foreign-engine fallback is claimed.
+
 ---
 
 ### `similar(label, *, by, k=10, vector_property=None, via=None)` → `pyarrow.Table`
