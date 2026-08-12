@@ -20,6 +20,8 @@ Tokio runtime or any DataFusion execution session.
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #507 eigenvector) |
 
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #499 Adamic-Adar) |
+
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
 ## Modes
@@ -145,6 +147,14 @@ products retain serial coordinate order, PageRank keeps canonical contribution
 order with serial dangling/delta reductions, Node2Vec skip-gram training stays
 serial, and conductance keeps weighted cut/volume accumulation serial, so
 fingerprints match the one-thread path.
+
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+Adamic-Adar source aggregates (#499) may partition independent work across that
+pool above documented crossovers; work never uses Rayon's process-global pool.
+Cosine dot products retain serial coordinate order, PageRank keeps canonical
+contribution order with serial dangling/delta reductions, Node2Vec skip-gram
+training stays serial, and Adamic-Adar keeps serial candidate/intersection order
+per source, so fingerprints match the one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -590,6 +600,22 @@ ring-lattice fixture, 4 private workers, debug test profile after a clean
 target-dir build): ~230k units was still slower (~1.80x serial), ~540k units
 was still slower (~1.20x serial), ~1.2M units first won (~0.70x serial), and
 >=2.1M units was >=1.8x faster.
+## Parallel Adamic-Adar aggregate (#499)
+
+`rank(by="adamic_adar")` partitions **independent source ordinals** across the
+instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- the estimated pair/intersection work is at least
+  `ADAMIC_ADAR_PARALLEL_CROSSOVER_WORK` (`524_288`) in `graphforge-exec`.
+
+The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
+conservative O(V + E) proxy for the serial pair loop and two-pointer
+intersection scans. The threshold is the smallest power-of-two work estimate
+below the measured win boundary on the M4 agent host (4 vCPU, directed
+ring-lattice fixture, 4 private workers, release build): ~230k units was still
+neutral/slower, ~540k units first won (~0.61x serial), and >=2.1M units was
+>=2.8x faster.
 
 Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Parallel workers only own source
@@ -598,6 +624,10 @@ intersection, and checked integer accumulation remain serial per source.
 Worker score chunks merge in canonical source order, so schemas, row order,
 scores, and fingerprints match the one-thread result at `1`/`2`/`4`/`8`/
 automatic configurations.
+intersection, logarithmic discounts, and compensated floating-point summation
+remain serial per source. Worker score chunks merge in canonical source order,
+so schemas, row order, scores, and fingerprints match the one-thread result at
+`1`/`2`/`4`/`8`/automatic configurations.
 
 ## Observability
 

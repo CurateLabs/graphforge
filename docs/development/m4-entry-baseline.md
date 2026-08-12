@@ -85,6 +85,10 @@ common-neighbors source aggregates (#505) may use the instance-owned private
 compute pool above documented crossovers while preserving one-thread
 fingerprints. Query-facing Parquet providers stream bounded batches via
 `GraphForgeParquetExec` (#339) rather than eager
+Adamic-Adar source aggregates (#499) may use the instance-owned private compute
+pool above documented crossovers while preserving one-thread fingerprints.
+Query-facing Parquet providers stream bounded batches via `GraphForgeParquetExec`
+(#339) rather than eager
 single-partition `MemTable` materialization; ExpandExec filtered reads and
 fixed-hop demand remain the selective-path contract.
 
