@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "ef489279cf02089d6ca8fee48519987d4405376e8f5dac722c24c214a772a4c2",
+  "sha256": "557cc317a48c4179823fbc7accd0287acf10b59b7a999296dff33d942a9bf254",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1510,7 +1510,7 @@
         },
         {
           "name": "ureq",
-          "req": "=3.3.0",
+          "req": "=3.4.0",
           "features": [
             "rustls"
           ],

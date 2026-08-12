@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (311)
+- Apache License 2.0 (312)
 - MIT License (72)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -475,6 +475,7 @@ Used by:
 - nohash-hasher 0.2.0
 - parquet 58.3.0
 - tinyvec 1.12.0
+- ureq-proto 0.6.1
 - utf8_iter 1.0.4
 - zeroize 1.9.0
 
@@ -2685,7 +2686,7 @@ Used by:
 ## Apache License 2.0
 
 Used by:
-- ureq 3.3.0
+- ureq 3.4.0
 
 ```
                                  Apache License
@@ -5037,6 +5038,7 @@ Used by:
 - async-compression 0.4.42
 - autocfg 1.5.1
 - base64 0.22.1
+- base64 0.23.1
 - bitflags 2.11.1
 - bumpalo 3.20.3
 - bzip2 0.6.1
@@ -6613,7 +6615,7 @@ Used by:
 - android_system_properties 0.1.5
 - anyhow 1.0.104
 - arrow-pyarrow 58.3.0
-- async-trait 0.1.91
+- async-trait 0.1.92
 - blake3 1.8.5
 - bon 3.9.3
 - bon-macros 3.9.3
@@ -6663,9 +6665,9 @@ Used by:
 - syn 2.0.117
 - syn 3.0.2
 - thiserror 1.0.69
-- thiserror 2.0.19
+- thiserror 2.0.20
 - thiserror-impl 1.0.69
-- thiserror-impl 2.0.19
+- thiserror-impl 2.0.20
 - thrift 0.17.0
 - time 0.3.54
 - time-core 0.1.9
@@ -6673,7 +6675,6 @@ Used by:
 - typetag 0.2.23
 - typetag-impl 0.2.23
 - unicode-ident 1.0.24
-- ureq-proto 0.6.0
 - utf8-zero 0.8.1
 - utf8parse 0.2.2
 - wasip3 0.4.0+wasi-0.3.0-rc-2026-01-06
