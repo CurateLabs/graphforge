@@ -1037,6 +1037,28 @@ resource errors, and bounded Arrow shaping. Schemas, row order, community IDs,
 projection fingerprints, cancellation, and limit behavior match the one-thread
 oracle at supported `1`/`2`/`4`/`8`/automatic configurations.
 
+
+## Parallel modularity community contributions (#583)
+
+`analyze(by="modularity")` keeps weighted edge normalization, degree
+accumulation, internal-weight accumulation, total edge weight, volume
+accumulation, and the final modularity score reduction serial. Those stages
+contain floating-point additions whose order is part of the accepted bit-level
+contract. After the serial accumulators are complete, each community contribution
+is independent and can be evaluated on the instance-owned private compute pool
+when:
+
+- `compute_threads > 1`, and
+- normalized communities are at least
+  `MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES` (`128`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, modularity
+stays fully serial. Parallel workers compute contribution values for canonical
+community ranges; the values merge by ascending range and are then summed by the
+same serial community order used by the one-thread path. Schemas, scalar row
+shape, score bits, structured errors, and fingerprints match the one-thread
+result at `1`/`2`/`4`/`8`/automatic configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
