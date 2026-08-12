@@ -1689,6 +1689,13 @@ Projection errors, invalid selectors or options, strict-weight failures, accumul
 overflow, limit violations, cancellation, execution errors, and Arrow shaping failures abort
 the invocation without partial output.
 
+Proposal collection for bucket waves with at least 262,144 direction-expanded edge scans and
+more than one current source may run on the instance-owned private `ComputePool`; one-thread,
+single-source, missing-pool, and smaller waves stay serial. Workers only produce candidate
+proposals from CSR neighbor slices. Bucket mutation, distance updates, final sorting, and
+tie resolution remain canonical, so supported thread configurations must match the one-thread
+oracle bit-for-bit. No process-global Rayon pool is used.
+
 Projection, validation, bucket execution, deterministic tie resolution, limits, cancellation,
 and Arrow shaping are Rust-owned in `graphforge-exec`. Python and Node are argument/Arrow adapters
 only. Exploratory operation without a knowledge layer produces the same graph result,

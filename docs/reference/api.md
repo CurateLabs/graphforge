@@ -1815,6 +1815,12 @@ cooperative iteration checkpoints at 10,000. Selector, option, projection, weigh
 limit, cancellation, execution, or shaping failures return structured errors without partial
 output.
 
+For bucket waves with at least 262,144 direction-expanded edge scans and more than one current
+source, proposal collection may use the instance-owned private `ComputePool`; one-thread,
+single-source, missing-pool, and smaller waves remain serial. Distance updates and public
+ordering are still merged canonically against the same one-thread oracle, and no process-global
+Rayon pool is used.
+
 Rust owns projection, validation, execution, ordering, limits, cancellation, and Arrow
 shaping. Python and Node are thin adapters. Results are independent of the graph/knowledge boundary
 knowledge-layer presence. External libraries and documentation are development parity
