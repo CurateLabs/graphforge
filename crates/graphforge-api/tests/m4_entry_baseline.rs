@@ -21,7 +21,6 @@ use graphforge_api::{
     ExecutionResourcePolicy, GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector,
     PathsOptions, PropValue, RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
-use graphforge_core::AnalyzeOptions;
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
 };
