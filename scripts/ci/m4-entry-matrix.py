@@ -20,6 +20,7 @@ REQUIRED_WORKLOAD_IDS = {
     "pagerank",
     "paths-gomory-hu-tree",
     "paths-max-flow",
+    "paths-min-cut-edges",
     "rank-k-core",
     "analyze-maximum-spanning-tree",
     "paths-min-steiner-tree",

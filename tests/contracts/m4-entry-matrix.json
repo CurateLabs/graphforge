@@ -177,6 +177,23 @@
       ]
     },
     {
+      "id": "paths-min-cut-edges",
+      "class": "serial-cut-graph-algorithm",
+      "surface": "GraphForge::paths",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_constrained_min_cut_edge_projection",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
+    },
+    {
       "id": "rank-k-core",
       "class": "core-decomposition-peeling",
       "surface": "GraphForge::rank",

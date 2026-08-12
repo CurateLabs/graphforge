@@ -426,6 +426,11 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_paths_min_cut_edges(gf);
+            assert!(ev.output_rows > 0, "paths-min-cut-edges must produce rows");
+            ev
+        },
+        {
             let ev = run_k_core(gf);
             assert_eq!(ev.output_rows, 5);
             ev
@@ -674,6 +679,59 @@ fn run_paths_max_flow(gf: &GraphForge) -> WorkloadEvidence {
             (
                 "work_units",
                 serde_json::json!("residual_bfs_augmentations"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
+fn run_paths_min_cut_edges(gf: &GraphForge) -> WorkloadEvidence {
+    let source = person_selector("Alice");
+    let target = person_selector("Dave");
+    let options = PathsOptions {
+        by: PathAlgorithm::MinCutEdges,
+        via: None,
+        directed: true,
+        k: 1,
+        weight: Some("capacity".into()),
+        capacity_property: None,
+        cost_property: None,
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: Vec::new(),
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(&source, Some(&target), options.clone())
+        .expect("min_cut_edges");
+    let second = gf
+        .paths(&source, Some(&target), options)
+        .expect("min_cut_edges repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "min_cut_edges must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-min-cut-edges",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("min_cut_edges")),
+            (
+                "disposition",
+                serde_json::json!("serial_constrained_min_cut_edge_projection"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("max_flow_oracles_partition_then_edge_projection"),
             ),
             ("threads_path", serde_json::json!("serial_for_all_policies")),
             ("csr_native_projection", serde_json::json!(true)),
@@ -1115,6 +1173,11 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_paths_min_cut_edges(&gf);
+            assert!(ev.output_rows > 0, "paths-min-cut-edges must produce rows");
+            ev
+        },
+        {
             let ev = run_k_core(&gf);
             assert_eq!(ev.output_rows, 5);
             ev
@@ -1202,7 +1265,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 14);
+    assert_eq!(workloads.len(), 15);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -1213,6 +1276,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "pagerank",
             "paths-gomory-hu-tree",
             "paths-max-flow",
+            "paths-min-cut-edges",
             "rank-k-core",
             "analyze-maximum-spanning-tree",
             "paths-min-steiner-tree",
@@ -1220,7 +1284,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "paths-min-cost-max-flow",
             "analyze-minimum-k-spanning-tree",
             "exact-cosine-knn",
-            "node2vec"
+            "node2vec",
         ]
     );
 

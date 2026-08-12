@@ -1,3 +1,8 @@
+//! `min_cut_edges` shares the serial constrained-cut kernel (#550). Cut edges
+//! are emitted only after the canonical source-side partition is fixed, so edge
+//! projection is deterministic post-state rather than independent parallel
+//! work.
+
 //! `min_cut` intentionally remains serial (#549). The canonical source-side
 //! partition is built by a sequence of constrained max-flow oracle calls; each
 //! membership decision depends on the previously forced partition, so there are
