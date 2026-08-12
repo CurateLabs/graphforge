@@ -19,7 +19,6 @@ Tokio runtime or any DataFusion execution session.
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
 | `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components) |
 
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #499 Adamic-Adar) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -705,6 +704,24 @@ errors, and bounded Arrow shaping. Schemas, row order, selected edge UUIDs,
 projection fingerprints, cancellation, and limit behavior match the one-thread
 oracle at supported thread configurations. No GPU, distributed, approximate, or
 foreign-engine fallback is implied.
+
+## Serial paths(by="max_flow_edges") (#546)
+
+`paths(by="max_flow_edges")` has no parallel crossover. Its disposition is
+**serial Edmonds-Karp edge assignment** for every `compute_threads` setting,
+including `1`/`2`/`4`/`8`/automatic resource policies.
+
+The scalar and per-edge maximum-flow views share one Rust kernel. The kernel
+consumes the CSR-native projection (#340), sorts capacities by public edge UUID,
+then performs one canonical residual BFS and residual update at a time. The
+edge view is not independent post-processing: signed stored-orientation flow is
+updated during each augmentation and emitted only after the final residual state
+is known. Parallel augmentations would require shared residual coordination and
+would risk changing edge-flow ties, row ordering, and fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and never uses Rayon's process-global pool. Timing remains
+evidence only, not a CI threshold.
 
 ## Observability
 
