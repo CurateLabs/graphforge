@@ -2985,6 +2985,14 @@ normalization, blossom search, optimum tie resolution, checked arithmetic,
 output shaping, limit failures, and cancellation abort atomically without
 partial output.
 
+M4 #557 disposition: maximum-cardinality matching remains serial. The exact
+blossom/primal-dual core mutates labels, root queues, blossom contractions,
+dual state, and augmenting paths in one alternating forest, so GraphForge does
+not claim a parallel crossover for
+`analyze(by="max_cardinality_matching")`. Thread policies at
+`1`/`2`/`4`/`8`/automatic preserve the one-thread selected edge set, raw-edge
+UUID tie order, structured errors, and bounded Arrow shaping.
+
 Typed, dependency-free Rust in `graphforge-exec` owns projection, exact matching,
 deterministic choices, controls, and Arrow shaping. It may reuse the private
 shared matching/blossom core used by other exact matching handlers, but that

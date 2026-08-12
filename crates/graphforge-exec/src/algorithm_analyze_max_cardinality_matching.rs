@@ -10,6 +10,13 @@ pub(crate) struct MatchingEdge {
     pub target: [u8; 16],
 }
 
+/// Selected max-cardinality matching path for #557 disposition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaxCardinalityMatchingExecutionPath {
+    /// Exact blossom state and tie objective remain serial.
+    SerialBlossomSearch,
+}
+
 /// Returns the canonical maximum-cardinality matching of an undirected multigraph.
 ///
 /// A zero primary weight makes the shared exact blossom solver compare cardinality
@@ -21,6 +28,9 @@ pub(crate) fn maximum_cardinality_matching(
     edges: &[MatchingEdge],
     control: &AlgorithmControl,
 ) -> Result<Vec<MatchingEdge>, AlgorithmError> {
+    match select_max_cardinality_matching_path(control, nodes.len(), edges.len()) {
+        MaxCardinalityMatchingExecutionPath::SerialBlossomSearch => {}
+    }
     let weighted = edges
         .iter()
         .map(|edge| WeightedEdge {
@@ -44,10 +54,20 @@ pub(crate) fn maximum_cardinality_matching(
     })
 }
 
+pub(crate) fn select_max_cardinality_matching_path(
+    _control: &AlgorithmControl,
+    _node_count: usize,
+    _edge_count: usize,
+) -> MaxCardinalityMatchingExecutionPath {
+    MaxCardinalityMatchingExecutionPath::SerialBlossomSearch
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
@@ -63,6 +83,14 @@ mod tests {
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
     }
 
     fn selected(nodes: &[[u8; 16]], edges: &[MatchingEdge]) -> Vec<[u8; 16]> {
@@ -141,6 +169,35 @@ mod tests {
         let mut reversed = edges;
         reversed.reverse();
         assert_eq!(selected(&nodes, &reversed), expected);
+    }
+
+    #[test]
+    fn serial_disposition_holds_across_thread_budgets() {
+        let nodes = (0..8).map(uuid).collect::<Vec<_>>();
+        let edges = [
+            edge(9, 0, 1),
+            edge(8, 1, 2),
+            edge(7, 2, 0),
+            edge(6, 1, 3),
+            edge(5, 2, 4),
+            edge(4, 5, 6),
+            edge(3, 6, 5),
+            edge(2, 7, 7),
+        ];
+        let control = control_with_threads(8);
+        assert_eq!(
+            select_max_cardinality_matching_path(&control, nodes.len(), edges.len()),
+            MaxCardinalityMatchingExecutionPath::SerialBlossomSearch
+        );
+        let oracle =
+            maximum_cardinality_matching(&nodes, &edges, &control_with_threads(1)).unwrap();
+        for threads in [2_usize, 4, 8] {
+            assert_eq!(
+                maximum_cardinality_matching(&nodes, &edges, &control_with_threads(threads))
+                    .unwrap(),
+                oracle
+            );
+        }
     }
 
     #[test]
