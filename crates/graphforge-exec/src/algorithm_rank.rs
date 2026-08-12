@@ -2,6 +2,8 @@
 //!
 //! PageRank (#343), clustering coefficient (#504), triangles (#515), Degree
 //! Closeness (#503) may partition independent source BFS work across the same private pool; each BFS stays serial and worker scores merge by source ordinal.
+//! Harmonic closeness (#508) may partition independent source BFS work across
+//! the same private pool with the same serial-BFS / ordinal-merge guarantees.
 //! (#506), and betweenness (#501) may partition independent score updates across
 //! the instance-owned private compute pool while preserving serial contribution
 //! order, ordered merges, reductions, and bit-identical fingerprints.
@@ -199,6 +201,16 @@ const ADAMIC_ADAR_CHECKPOINT_INTERVAL: usize = 1_024;
 /// because each BFS is still serial and source scores merge in ordinal order.
 pub const CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS: u64 = 65_536;
 const CLOSENESS_CHECKPOINT_EDGES: usize = 1_024;
+/// Estimated edge visits below which harmonic closeness stays serial (#508).
+///
+/// Harmonic closeness has independent source BFS work. The threshold mirrors
+/// the #503 closeness disposition: private-pool scheduling and merge overhead
+/// lost below roughly 32k estimated edge visits, first cleared wins around 65k,
+/// and stayed beneficial beyond that on dense-ring fixtures. Score arithmetic is
+/// unchanged because each BFS remains serial and source scores merge in ordinal
+/// order.
+pub const HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS: u64 = 65_536;
+const HARMONIC_CLOSENESS_CHECKPOINT_EDGES: usize = 1_024;
 
 /// Estimated pair/intersection work below which resource allocation stays serial (#513).
 ///
@@ -495,6 +507,45 @@ struct ClosenessSourceScore {
 
 #[derive(Clone, Debug, PartialEq)]
 struct ClosenessChunkScores {
+    start: usize,
+    scores: Vec<f64>,
+    checkpoints: u64,
+}
+
+/// Selected harmonic closeness path for observability and crossover tests (#508).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HarmonicClosenessExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+#[derive(Clone, Debug, Default)]
+struct PreparedHarmonicCloseness {
+    offsets: Vec<u32>,
+    targets: Vec<u32>,
+    edge_count: u64,
+}
+
+impl PreparedHarmonicCloseness {
+    fn sources(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    fn neighbors(&self, source: usize) -> &[u32] {
+        let start = usize::try_from(self.offsets[source]).unwrap_or(0);
+        let end = usize::try_from(self.offsets[source + 1]).unwrap_or(start);
+        &self.targets[start.min(end)..end.min(self.targets.len())]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HarmonicClosenessSourceScore {
+    score: f64,
+    checkpoints: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HarmonicClosenessChunkScores {
     start: usize,
     scores: Vec<f64>,
     checkpoints: u64,
@@ -1303,70 +1354,239 @@ impl RustAlgorithm for HarmonicCloseness {
             return AlgorithmOutput::empty(algorithm, control);
         }
 
-        let indices: HashMap<u64, usize> = node_ids
-            .iter()
-            .enumerate()
-            .map(|(index, &node)| (node, index))
-            .collect();
+        let prepared = prepare_harmonic_closeness(graph)?;
         let denominator = f64::from(exact_u32(
             node_ids.len().saturating_sub(1).max(1),
             "node count",
         )?);
-        let mut scores = Vec::with_capacity(node_ids.len());
-        for source in 0..node_ids.len() {
-            control.checkpoint()?;
-            let mut distance = vec![usize::MAX; node_ids.len()];
-            distance[source] = 0;
-            let mut queue = VecDeque::from([source]);
-            let mut traversed_edges = 0_usize;
+        let scores =
+            match select_harmonic_closeness_path(control, node_ids.len(), prepared.edge_count) {
+                HarmonicClosenessExecutionPath::Serial => {
+                    harmonic_closeness_scores_serial(&prepared, denominator, control)?
+                }
+                HarmonicClosenessExecutionPath::Parallel { .. } => {
+                    harmonic_closeness_scores_parallel(&prepared, denominator, control)?
+                }
+            };
+        rank_scores_output(algorithm, graph, scores, control)
+    }
+}
 
-            while let Some(vertex) = queue.pop_front() {
-                for edge in graph.neighbors(node_ids[vertex]) {
-                    if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                        control.checkpoint()?;
-                    }
-                    traversed_edges += 1;
-                    let target = indices
-                        .get(&edge.neighbor_id)
-                        .copied()
-                        .ok_or_else(|| execution("adjacency references an unselected node"))?;
-                    if distance[target] == usize::MAX {
-                        distance[target] = distance[vertex] + 1;
-                        queue.push_back(target);
-                    }
+fn prepare_harmonic_closeness(
+    graph: &AdjacencyGraph,
+) -> Result<PreparedHarmonicCloseness, AlgorithmError> {
+    let node_ids = graph.node_ids();
+    let mut ordinals = HashMap::with_capacity(node_ids.len());
+    for (index, &node) in node_ids.iter().enumerate() {
+        ordinals.insert(node, exact_u32(index, "node index")?);
+    }
+    let capacity = usize::try_from(graph.edge_entry_count())
+        .map_err(|_| execution("edge count exceeds supported range"))?;
+    let mut offsets = Vec::with_capacity(node_ids.len() + 1);
+    let mut targets = Vec::with_capacity(capacity);
+    offsets.push(0);
+    for &node in node_ids {
+        for edge in graph.neighbors(node) {
+            let target = ordinals
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            targets.push(target);
+        }
+        offsets.push(exact_u32(targets.len(), "adjacency offset")?);
+    }
+    let edge_count = u64::try_from(targets.len())
+        .map_err(|_| execution("edge count exceeds supported range"))?;
+    Ok(PreparedHarmonicCloseness {
+        offsets,
+        targets,
+        edge_count,
+    })
+}
+
+/// Choose serial vs private-pool parallel execution for harmonic closeness.
+pub(crate) fn select_harmonic_closeness_path(
+    control: &AlgorithmControl,
+    sources: usize,
+    edge_count: u64,
+) -> HarmonicClosenessExecutionPath {
+    let threads = control.compute_threads();
+    let estimated_edge_visits = estimated_harmonic_closeness_edge_visits(sources, edge_count);
+    if threads <= 1
+        || sources <= 1
+        || estimated_edge_visits < HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return HarmonicClosenessExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    HarmonicClosenessExecutionPath::Parallel { threads, chunks }
+}
+
+fn estimated_harmonic_closeness_edge_visits(sources: usize, edge_count: u64) -> u64 {
+    u64::try_from(sources)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(edge_count)
+}
+
+fn harmonic_closeness_scores_serial(
+    prepared: &PreparedHarmonicCloseness,
+    denominator: f64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let mut scores = Vec::with_capacity(prepared.sources());
+    for source in 0..prepared.sources() {
+        scores.push(
+            harmonic_closeness_score_source(prepared, source, denominator, control, true)?.score,
+        );
+    }
+    Ok(scores)
+}
+
+fn harmonic_closeness_scores_parallel(
+    prepared: &PreparedHarmonicCloseness,
+    denominator: f64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel harmonic closeness requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(prepared.sources(), control.compute_threads());
+    let chunk_results = run_harmonic_closeness_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut scores = Vec::with_capacity(end - start);
+                let mut checkpoints = 0_u64;
+                for source in start..end {
+                    let result = harmonic_closeness_score_source(
+                        prepared,
+                        source,
+                        denominator,
+                        control,
+                        false,
+                    )?;
+                    checkpoints = checkpoints.checked_add(result.checkpoints).ok_or_else(|| {
+                        execution("harmonic closeness checkpoint count overflows")
+                    })?;
+                    scores.push(result.score);
+                }
+                Ok(HarmonicClosenessChunkScores {
+                    start,
+                    scores,
+                    checkpoints,
+                })
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>())
+    })?;
+    let chunks = first_harmonic_closeness_chunk_error(chunk_results)?;
+    let mut scores = vec![0.0; prepared.sources()];
+    for chunk in chunks {
+        for _ in 0..chunk.checkpoints {
+            control.checkpoint()?;
+        }
+        scores[chunk.start..chunk.start + chunk.scores.len()].copy_from_slice(&chunk.scores);
+    }
+    Ok(scores)
+}
+
+fn harmonic_closeness_score_source(
+    prepared: &PreparedHarmonicCloseness,
+    source: usize,
+    denominator: f64,
+    control: &AlgorithmControl,
+    consume_checkpoints: bool,
+) -> Result<HarmonicClosenessSourceScore, AlgorithmError> {
+    let mut checkpoints = 0_u64;
+    harmonic_closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+    let mut distance = vec![usize::MAX; prepared.sources()];
+    distance[source] = 0;
+    let mut queue = VecDeque::from([source]);
+    let mut traversed_edges = 0_usize;
+
+    while let Some(vertex) = queue.pop_front() {
+        for &target in prepared.neighbors(vertex) {
+            if traversed_edges > 0
+                && traversed_edges.is_multiple_of(HARMONIC_CLOSENESS_CHECKPOINT_EDGES)
+            {
+                harmonic_closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+            }
+            traversed_edges += 1;
+            let target = usize::try_from(target)
+                .map_err(|_| execution("adjacency index exceeds supported range"))?;
+            if distance[target] == usize::MAX {
+                distance[target] = distance[vertex] + 1;
+                queue.push_back(target);
+            }
+        }
+    }
+
+    let mut reciprocal_sum = 0.0_f64;
+    for hops in distance
+        .into_iter()
+        .filter(|&hops| hops != 0 && hops != usize::MAX)
+    {
+        reciprocal_sum += 1.0 / f64::from(exact_u32(hops, "shortest-path distance")?);
+    }
+    let score = reciprocal_sum / denominator;
+    if !score.is_finite() {
+        return Err(execution(
+            "harmonic closeness score exceeds supported range",
+        ));
+    }
+    Ok(HarmonicClosenessSourceScore { score, checkpoints })
+}
+
+fn harmonic_closeness_checkpoint(
+    control: &AlgorithmControl,
+    consume: bool,
+    checkpoints: &mut u64,
+) -> Result<(), AlgorithmError> {
+    if consume {
+        control.checkpoint()?;
+    } else {
+        control.check_cancelled()?;
+        *checkpoints = checkpoints
+            .checked_add(1)
+            .ok_or_else(|| execution("harmonic closeness checkpoint count overflows"))?;
+    }
+    Ok(())
+}
+
+fn first_harmonic_closeness_chunk_error(
+    results: Vec<Result<HarmonicClosenessChunkScores, AlgorithmError>>,
+) -> Result<Vec<HarmonicClosenessChunkScores>, AlgorithmError> {
+    let mut chunks = Vec::with_capacity(results.len());
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(chunk) => chunks.push(chunk),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
-
-            let mut reciprocal_sum = 0.0_f64;
-            for hops in distance
-                .into_iter()
-                .filter(|&hops| hops != 0 && hops != usize::MAX)
-            {
-                reciprocal_sum += 1.0 / f64::from(exact_u32(hops, "shortest-path distance")?);
-            }
-            let score = reciprocal_sum / denominator;
-            if !score.is_finite() {
-                return Err(execution(
-                    "harmonic closeness score exceeds supported range",
-                ));
-            }
-            scores.push(score);
         }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    chunks.sort_unstable_by_key(|chunk| chunk.start);
+    Ok(chunks)
+}
 
-        let rows = node_ids
-            .iter()
-            .zip(scores)
-            .map(|(&node, score)| {
-                let uuid = graph
-                    .node_uuid(node)
-                    .ok_or_else(|| execution("selected node has no UUID identity"))?;
-                Ok(vec![
-                    AlgorithmValue::Uuid(uuid),
-                    AlgorithmValue::Float64(score),
-                ])
-            })
-            .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(algorithm, control, rows)
+fn run_harmonic_closeness_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("Harmonic closeness worker panicked")),
     }
 }
 
@@ -4373,6 +4593,57 @@ mod tests {
             .collect()
     }
 
+    fn execute_harmonic_closeness_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        execute_harmonic_closeness_with_pool_and_limits(
+            graph,
+            threads,
+            AlgorithmLimits::default(),
+            cancellation,
+        )
+    }
+
+    fn execute_harmonic_closeness_with_pool_and_limits(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(pool);
+        registry.execute(
+            Algorithm::Rank(RankAlgorithm::HarmonicCloseness),
+            graph,
+            &control,
+        )
+    }
+
+    fn harmonic_closeness_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        harmonic_closeness_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    fn dense_harmonic_closeness_graph(nodes: usize) -> AdjacencyGraph {
+        let fanout = ((HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS as usize)
+            / nodes.max(1).pow(2))
+        .saturating_add(2)
+        .max(2);
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+
     fn execute_eigenvector(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
@@ -6125,6 +6396,162 @@ mod tests {
             })
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn harmonic_closeness_path_selection_respects_crossover_and_one_thread() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_harmonic_closeness_path(
+                &serial_control,
+                64,
+                (HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS / 64) - 1
+            ),
+            HarmonicClosenessExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_harmonic_closeness_path(
+                &one,
+                64,
+                HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+            ),
+            HarmonicClosenessExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_harmonic_closeness_path(
+                &parallel,
+                64,
+                HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+            ),
+            HarmonicClosenessExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn harmonic_closeness_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_harmonic_closeness_graph(128);
+        assert!(
+            estimated_harmonic_closeness_edge_visits(
+                graph.node_ids().len(),
+                graph.edge_entry_count()
+            ) >= HARMONIC_CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+        );
+        let serial =
+            execute_harmonic_closeness_with_pool(&graph, 1, AlgorithmCancellation::default())
+                .unwrap();
+        let serial_bits = harmonic_closeness_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel = execute_harmonic_closeness_with_pool(
+                &graph,
+                threads,
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(harmonic_closeness_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn harmonic_closeness_parallel_preserves_boundary_graph_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(4, &[(0, 1), (0, 1), (1, 2), (1, 1)]);
+        let directed = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+        let undirected = AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 2)]);
+        for graph in [
+            &multigraph,
+            &directed,
+            &undirected,
+            &empty,
+            &single,
+            &disconnected,
+        ] {
+            let serial =
+                execute_harmonic_closeness_with_pool(graph, 1, AlgorithmCancellation::default())
+                    .unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel = execute_harmonic_closeness_with_pool(
+                    graph,
+                    threads,
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    harmonic_closeness_bits(&parallel),
+                    harmonic_closeness_bits(&serial)
+                );
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+    }
+
+    #[test]
+    fn harmonic_closeness_parallel_cancellation_and_limits_are_structured() {
+        let graph = dense_harmonic_closeness_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_harmonic_closeness_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+        assert_eq!(
+            execute_harmonic_closeness_with_pool_and_limits(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::IterationLimit {
+                observed: 1,
+                limit: 0
+            })
+        );
+        assert!(matches!(
+            execute_harmonic_closeness_with_pool_and_limits(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 1,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn harmonic_closeness_worker_panic_returns_structured_error() {
+        let pool = crate::ComputePool::new(2).unwrap();
+        assert_eq!(
+            run_harmonic_closeness_on_pool(&pool, || -> Result<(), AlgorithmError> {
+                panic!("synthetic harmonic closeness panic");
+            }),
+            Err(execution("Harmonic closeness worker panicked"))
+        );
     }
 
     #[test]
