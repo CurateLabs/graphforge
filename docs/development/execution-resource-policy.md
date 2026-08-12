@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #515 triangles; #518 Components; #535 Jaccard similarity) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #515 triangles; #518 Components; #535 Jaccard similarity) |
 
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
