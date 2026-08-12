@@ -5649,7 +5649,14 @@ mod tests {
             hasher.update(column.null_count().to_le_bytes());
             hasher.update(format!("{column:?}").as_bytes());
         }
-        format!("{:x}", hasher.finalize())
+        let digest: [u8; 32] = hasher.finalize().into();
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(64);
+        for byte in digest {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0xf) as usize] as char);
+        }
+        out
     }
 
     fn add_person(graph: &GraphForge, name: &str) -> NodeHandle {
