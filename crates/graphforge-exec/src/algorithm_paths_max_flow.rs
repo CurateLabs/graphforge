@@ -1,8 +1,8 @@
-//! `max_flow_edges` shares the serial maximum-flow kernel (#546). The public
-//! edge assignment is read from the final residual state in canonical edge-UUID
-//! order, after every Edmonds-Karp augmentation has completed. Running
-//! augmentations concurrently would change residual visibility and edge-flow
-//! ties, so there is no private-pool crossover for this view.
+//! Maximum-flow views intentionally remain serial (#545/#546). Edmonds-Karp
+//! augmentation mutates one residual graph after each canonical BFS path, and
+//! each update determines the next path, edge-flow assignment, and tie order.
+//! Parallel augmentations would need shared residual coordination and could
+//! change public flow fingerprints, so no private-pool crossover is claimed.
 
 use std::collections::VecDeque;
 

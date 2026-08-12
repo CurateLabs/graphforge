@@ -160,6 +160,23 @@
       ]
     },
     {
+      "id": "paths-max-flow",
+      "class": "serial-flow-graph-algorithm",
+      "surface": "GraphForge::paths",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_edmonds_karp_augmenting_paths",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
+    },
+    {
       "id": "rank-k-core",
       "class": "core-decomposition-peeling",
       "surface": "GraphForge::rank",

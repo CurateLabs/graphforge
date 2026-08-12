@@ -870,6 +870,31 @@ Arrow output remain serial, so schemas, row order, community IDs, and
 fingerprints match the one-thread result at `1`/`2`/`4`/`8`/automatic
 configurations.
 
+
+## Serial paths(by="max_flow") (#545)
+
+`paths(by="max_flow")` has no parallel crossover. Its disposition is
+**serial Edmonds-Karp residual augmentation** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic resource policies.
+
+The Rust kernel consumes the CSR-native adjacency projection (#340), shapes
+graph-native capacities into canonical UUID-ordered residual arcs, and then
+repeats one shortest residual BFS plus one residual-capacity update at a time.
+Each augmentation changes the residual graph that the next BFS observes and
+updates the signed stored-edge flow assignment, so the work is a sequential
+state machine rather than independent tasks for the private compute pool.
+Forcing concurrent augmentations would require shared residual coordination and
+would risk changing accepted flow values, edge assignment ties, row ordering,
+and fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and never uses Rayon's process-global pool. The M4 entry
+harness records `paths-max-flow` structural evidence (work units, serial path,
+CSR projection, bounded Arrow sink, result fingerprint, peak RSS, and
+hardware-specific timing) and verifies fingerprint parity against the
+one-thread oracle for every supported resource-policy cell. Timing remains
+evidence only, not a CI threshold.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
