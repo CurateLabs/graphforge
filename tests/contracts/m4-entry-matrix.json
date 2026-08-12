@@ -211,6 +211,23 @@
       ]
     },
     {
+      "id": "analyze-minimum-k-spanning-tree",
+      "class": "serial-k-spanning-tree-graph-algorithm",
+      "surface": "GraphForge::analyze",
+      "short_ci": true,
+      "large_manual": true,
+      "disposition": "serial_exact_k_spanning_tree_enumeration",
+      "structural_gates": [
+        "schema",
+        "row_count",
+        "ordering",
+        "result_fingerprint",
+        "csr_native_projection",
+        "bounded_arrow_sink",
+        "serial_disposition"
+      ]
+    },
+    {
       "id": "exact-cosine-knn",
       "class": "exact-vector-search",
       "surface": "GraphForge::similar",
