@@ -1017,6 +1017,26 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and no process-global Rayon pool. The M4 harness records
 `paths-floyd-warshall` evidence and verifies one-thread parity; timing is
 report-only.
+## Serial Louvain modularity optimization (#528)
+
+`cluster(by="louvain")` has no parallel crossover. Its performance disposition
+is **serial topology-ordered local moves** for every `compute_threads` setting,
+including `1`/`2`/`4`/`8`/automatic resource policies.
+
+Each Louvain level starts with the current partition and sweeps dense node
+ordinals in order. Moving one node immediately changes its source and target
+community totals, which changes the modularity gain and tie context seen by
+later nodes in the same sweep. Condensation then builds the next weighted
+supergraph from that accepted partition. Speculative worker moves would require
+a new conflict-resolution and reduction contract and could change community IDs,
+row ordering, or fingerprints.
+
+The #528 disposition therefore preserves the serial contract, CSR-native
+selected adjacency access, shared cancellation/checkpoint controls, structured
+resource errors, and bounded Arrow shaping. Schemas, row order, community IDs,
+projection fingerprints, cancellation, and limit behavior match the one-thread
+oracle at supported `1`/`2`/`4`/`8`/automatic configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

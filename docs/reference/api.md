@@ -638,6 +638,11 @@ limits, bounded cancellation checkpoints, and structured errors apply.
 Python and Node only translate arguments and Arrow IPC and contain no algorithm
 backend, fallback, packaging dependency, or recovery path.
 
+`louvain` has an explicit serial performance disposition (#528): topology-ordered
+local moves update community totals before later nodes are evaluated, and each
+condensation level depends on that accepted partition. No parallel crossover,
+GPU, or foreign-engine fallback is claimed.
+
 `by="leiden"` performs deterministic, unweighted classic Leiden in Rust at
 resolution `1.0`. Each level applies topology-ordered positive-gain local
 moves, refines coarse communities into connected subcommunities, and aggregates

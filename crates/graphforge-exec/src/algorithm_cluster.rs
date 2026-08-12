@@ -5,6 +5,10 @@
 //! the accepted state from the previous step, so it keeps a serial execution
 //! disposition unless a future contract explicitly changes the numeric/tie
 //! semantics.
+//! Louvain (#528) is an order-sensitive multilevel modularity optimizer. Its
+//! local moves mutate community totals and accepted partitions one
+//! topology-ordered node at a time, so it keeps a serial execution disposition
+//! unless a future contract explicitly changes the numeric/tie semantics.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -61,6 +65,13 @@ struct Leiden;
 pub(crate) enum LeidenExecutionPath {
     /// Local moves, refinement, and aggregation remain serial.
     SerialRefinement,
+}
+
+/// Selected Louvain execution path for #528 disposition evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LouvainExecutionPath {
+    /// Topology-ordered local moves and condensation remain serial.
+    SerialLocalMoves,
 }
 
 struct LabelPropagation;
@@ -1000,6 +1011,9 @@ fn louvain_communities(
     graph: &AdjacencyGraph,
     control: &AlgorithmControl,
 ) -> Result<Vec<usize>, AlgorithmError> {
+    match select_louvain_path(control, graph.node_ids().len(), graph.edge_entry_count()) {
+        LouvainExecutionPath::SerialLocalMoves => {}
+    }
     let node_count = graph.node_ids().len();
     let (mut weights, mut members) = normalized_communities(graph, control)?;
 
@@ -1024,6 +1038,14 @@ fn louvain_communities(
         }
     }
     Ok(result)
+}
+
+pub(crate) fn select_louvain_path(
+    _control: &AlgorithmControl,
+    _node_count: usize,
+    _edge_count: u64,
+) -> LouvainExecutionPath {
+    LouvainExecutionPath::SerialLocalMoves
 }
 
 fn modularity_optimization_communities(
@@ -2330,6 +2352,23 @@ mod tests {
         execute_cluster(graph, Algorithm::Cluster(ClusterAlgorithm::Louvain), limits)
     }
 
+    fn execute_louvain_with_threads(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_cluster_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(
+            Algorithm::Cluster(ClusterAlgorithm::Louvain),
+            graph,
+            &control,
+        )
+    }
+
     fn execute_leiden(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
@@ -2551,6 +2590,87 @@ mod tests {
 
     fn output_fingerprint(output: &AlgorithmOutput) -> String {
         format!("{:?}|{:?}", output.schema, output.rows())
+    }
+
+    #[test]
+    fn louvain_serial_disposition_holds_across_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_edges(
+            8,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 0),
+                (3, 4),
+                (4, 5),
+                (5, 3),
+                (2, 3),
+                (6, 7),
+            ],
+        );
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(8),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(8).unwrap()));
+        assert_eq!(
+            select_louvain_path(&control, graph.node_ids().len(), graph.edge_entry_count()),
+            LouvainExecutionPath::SerialLocalMoves
+        );
+
+        let oracle = execute_louvain_with_threads(
+            &graph,
+            1,
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        for threads in [2_usize, 4, 8] {
+            let output = execute_louvain_with_threads(
+                &graph,
+                threads,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(output.schema, oracle.schema);
+            assert_eq!(output.rows(), oracle.rows());
+        }
+    }
+
+    #[test]
+    fn louvain_serial_path_preserves_limits_cancellation_and_arrow_shaping() {
+        let graph = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 2), (2, 3)]);
+        assert!(matches!(
+            execute_louvain_with_threads(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 1,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_louvain_with_threads(&graph, 4, AlgorithmLimits::default(), cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+
+        let shaped = execute_louvain_with_threads(
+            &graph,
+            4,
+            AlgorithmLimits::default().with_batch_size(2),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(shaped.num_rows(), 4);
+        assert_eq!(shaped.record_batch().num_rows(), 4);
+        assert!(shaped.internal_batch_count > 1);
+        assert!(shaped.peak_builder_rows <= 2);
     }
 
     #[test]
