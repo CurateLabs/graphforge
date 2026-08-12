@@ -1,3 +1,7 @@
+//! Minimum-k spanning tree enumeration remains serial (#581). The exact
+//! combination search updates one canonical top-k set ordered by total weight
+//! and edge UUIDs, so workers would contend on public tie state.
+
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 use crate::algorithm_weighted_undirected::{WeightedEdge, normalize_weighted_undirected};
 use std::cmp::Ordering;

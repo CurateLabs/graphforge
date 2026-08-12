@@ -887,6 +887,24 @@ Evidence is carried by:
 
 
 There is no crossover for SCC in M4: the documented disposition is `serial_tarjan`. Timing remains hardware-specific evidence, never a CI pass/fail gate.
+## Serial analyze(by="minimum_k_spanning_tree") (#581)
+
+`analyze(by="minimum_k_spanning_tree")` has no parallel crossover. Its
+disposition is **serial exact k-spanning-tree enumeration** for every
+`compute_threads` setting, including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted undirected adjacency (#340),
+normalizes candidates, then explores edge combinations while maintaining one
+canonical top-k tree set ordered by total weight and edge UUID sequence. Every
+accepted candidate can replace the current worst tree, so parallel enumeration
+would require shared top-k coordination and could alter tie order, resource
+errors, or fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`analyze-minimum-k-spanning-tree` evidence and verifies one-thread parity;
+timing is report-only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

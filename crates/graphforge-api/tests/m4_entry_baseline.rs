@@ -17,9 +17,9 @@ use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions, ExecutionResourcePolicy,
-    GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector, PathsOptions, PropValue,
-    RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
+    AnalyzeOptions, CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector,
+    PathsOptions, PropValue, RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
@@ -435,6 +435,14 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_analyze_minimum_k_spanning_tree(gf);
+            assert!(
+                ev.output_rows > 0,
+                "analyze-minimum-k-spanning-tree must produce rows"
+            );
+            ev
+        },
+        {
             let ev = run_knn(gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -759,6 +767,55 @@ fn run_paths_min_cost_max_flow(gf: &GraphForge) -> WorkloadEvidence {
     }
 }
 
+fn run_analyze_minimum_k_spanning_tree(gf: &GraphForge) -> WorkloadEvidence {
+    let options = AnalyzeOptions {
+        by: AnalyzeAlgorithm::MinimumKSpanningTree,
+        via: None,
+        directed: false,
+        weight: Some("cost".into()),
+        k: Some(2),
+        partition_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .analyze(Some("Person"), options.clone())
+        .expect("minimum_k_spanning_tree");
+    let second = gf
+        .analyze(Some("Person"), options)
+        .expect("minimum_k_spanning_tree repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(
+        &first,
+        &second,
+        "minimum_k_spanning_tree must be deterministic",
+    );
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "analyze-minimum-k-spanning-tree",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::analyze")),
+            ("algorithm", serde_json::json!("minimum_k_spanning_tree")),
+            (
+                "disposition",
+                serde_json::json!("serial_exact_k_spanning_tree_enumeration"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("ordered_combination_search_and_top_k_tree_set"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
 fn run_knn(gf: &GraphForge) -> WorkloadEvidence {
     let options = SimilarOptions {
         by: SimilarAlgorithm::Knn,
@@ -908,6 +965,14 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_analyze_minimum_k_spanning_tree(&gf);
+            assert!(
+                ev.output_rows > 0,
+                "analyze-minimum-k-spanning-tree must produce rows"
+            );
+            ev
+        },
+        {
             let ev = run_knn(&gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -956,7 +1021,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 10);
+    assert_eq!(workloads.len(), 11);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -969,6 +1034,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "paths-min-steiner-tree",
             "paths-bellman-ford",
             "paths-min-cost-max-flow",
+            "analyze-minimum-k-spanning-tree",
             "exact-cosine-knn",
             "node2vec"
         ]
