@@ -20,6 +20,8 @@
 //! updates across the instance-owned private compute pool while preserving the
 //! serial contribution order, reductions, and bit-identical fingerprints.
 //! CELF (#502) remains intentionally serial under every compute_threads budget.
+//! Preferential attachment (#512) partitions independent source aggregates;
+//! each source keeps the accepted algebraic missing-link formula.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -127,6 +129,20 @@ const DEGREE_CHECKPOINT_NODES: usize = 1_024;
 /// The crossover keeps small fixtures off the private pool; parallel workers
 /// still run each source's Brandes BFS serially and reduce in source order.
 pub const BETWEENNESS_PARALLEL_CROSSOVER_WORK: u64 = 65_536;
+/// Algebraic source/neighbor work below which preferential attachment stays serial (#512).
+///
+/// Chosen from release-mode serial-vs-parallel timings on this M4 agent host
+/// (4x Xeon vCPU, directed ring-lattice fixtures, 4 private workers; see
+/// ignored `measure_preferential_attachment_parallel_crossover`):
+/// - ~17k work units: effectively neutral (~0.99x serial)
+/// - ~68k work units: effectively neutral (~1.00x serial)
+/// - ~266k work units: first modest measured win (~0.96x serial)
+/// - >=2.1M work units: modest win improves to ~0.93x serial
+///
+/// `262_144` is the nearest power-of-two work estimate below the measured win
+/// boundary. Exact integer scores and row order remain identical on either path.
+pub const PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK: u64 = 262_144;
+const PREFERENTIAL_ATTACHMENT_CHECKPOINT_INTERVAL: usize = 1_024;
 /// Estimated pair/intersection work below which common-neighbors stays serial (#505).
 ///
 /// Chosen from manual serial-vs-parallel timings on this M4 agent host
@@ -2269,45 +2285,178 @@ fn preferential_attachment_scores(
     // For each node u, sum deg(u) * deg(v) over every missing outgoing
     // candidate v. Algebraic aggregation avoids materializing O(V^2) pairs.
     let neighbors = simple_neighbors(graph, control, false)?;
-    let degrees: Vec<u64> = neighbors
+    let degrees = preferential_attachment_degrees(&neighbors)?;
+    let total_degree = preferential_attachment_total_degree(&degrees)?;
+    let estimated_work = estimated_preferential_attachment_work(&neighbors);
+    match select_preferential_attachment_path(control, neighbors.len(), estimated_work) {
+        PreferentialAttachmentExecutionPath::Serial => {
+            preferential_attachment_scores_serial(&neighbors, &degrees, total_degree, control)
+        }
+        PreferentialAttachmentExecutionPath::Parallel { .. } => {
+            preferential_attachment_scores_parallel(&neighbors, &degrees, total_degree, control)
+        }
+    }
+}
+
+fn preferential_attachment_degrees(neighbors: &[Vec<usize>]) -> Result<Vec<u64>, AlgorithmError> {
+    neighbors
         .iter()
         .map(|adjacent| {
             u64::try_from(adjacent.len())
                 .map_err(|_| execution("preferential-attachment degree exceeds supported range"))
         })
-        .collect::<Result<_, _>>()?;
-    let total_degree = degrees.iter().try_fold(0_u64, |total, degree| {
+        .collect()
+}
+
+fn preferential_attachment_total_degree(degrees: &[u64]) -> Result<u64, AlgorithmError> {
+    degrees.iter().try_fold(0_u64, |total, degree| {
         total
             .checked_add(*degree)
             .ok_or_else(|| execution("preferential-attachment degree sum exceeds supported range"))
-    })?;
+    })
+}
+
+fn preferential_attachment_scores_serial(
+    neighbors: &[Vec<usize>],
+    degrees: &[u64],
+    total_degree: u64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
     let mut visited_neighbors = 0_usize;
-    neighbors
-        .iter()
-        .enumerate()
-        .map(|(node, adjacent)| {
-            if node.is_multiple_of(1024) {
-                control.checkpoint()?;
-            }
-            let linked_degree = adjacent.iter().try_fold(0_u64, |total, &neighbor| {
-                if visited_neighbors.is_multiple_of(1024) {
-                    control.checkpoint()?;
+    let mut scores = Vec::with_capacity(neighbors.len());
+    for source in 0..neighbors.len() {
+        let score =
+            preferential_attachment_source_score(neighbors, degrees, total_degree, source, || {
+                preferential_attachment_checkpoint(control, &mut visited_neighbors)
+            })?;
+        scores.push(exact_u64_as_f64(score, "preferential-attachment score")?);
+    }
+    Ok(scores)
+}
+
+fn preferential_attachment_scores_parallel(
+    neighbors: &[Vec<usize>],
+    degrees: &[u64],
+    total_degree: u64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel preferential-attachment requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(neighbors.len(), control.compute_threads());
+    let chunk_results = run_preferential_attachment_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut work = 0_usize;
+                let mut local = Vec::with_capacity(end - start);
+                for source in start..end {
+                    let score = preferential_attachment_source_score(
+                        neighbors,
+                        degrees,
+                        total_degree,
+                        source,
+                        || preferential_attachment_checkpoint(control, &mut work),
+                    )?;
+                    local.push(exact_u64_as_f64(score, "preferential-attachment score")?);
                 }
-                visited_neighbors += 1;
-                total.checked_add(degrees[neighbor]).ok_or_else(|| {
-                    execution("preferential-attachment neighbor sum exceeds supported range")
-                })
-            })?;
-            let candidate_degree = total_degree
-                .checked_sub(degrees[node])
-                .and_then(|remaining| remaining.checked_sub(linked_degree))
-                .ok_or_else(|| execution("preferential-attachment candidate sum underflow"))?;
-            let score = degrees[node].checked_mul(candidate_degree).ok_or_else(|| {
-                execution("preferential-attachment score exceeds supported range")
-            })?;
-            exact_u64_as_f64(score, "preferential-attachment score")
-        })
-        .collect()
+                Ok((start, local))
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_error(results)
+    })?;
+
+    let mut scores = Vec::with_capacity(neighbors.len());
+    for (_start, local) in chunk_results {
+        scores.extend(local);
+    }
+    Ok(scores)
+}
+
+fn preferential_attachment_source_score(
+    neighbors: &[Vec<usize>],
+    degrees: &[u64],
+    total_degree: u64,
+    source: usize,
+    mut checkpoint: impl FnMut() -> Result<(), AlgorithmError>,
+) -> Result<u64, AlgorithmError> {
+    checkpoint()?;
+    let linked_degree = neighbors[source]
+        .iter()
+        .try_fold(0_u64, |total, &neighbor| {
+            checkpoint()?;
+            total.checked_add(degrees[neighbor]).ok_or_else(|| {
+                execution("preferential-attachment neighbor sum exceeds supported range")
+            })
+        })?;
+    let candidate_degree = total_degree
+        .checked_sub(degrees[source])
+        .and_then(|remaining| remaining.checked_sub(linked_degree))
+        .ok_or_else(|| execution("preferential-attachment candidate sum underflow"))?;
+    degrees[source]
+        .checked_mul(candidate_degree)
+        .ok_or_else(|| execution("preferential-attachment score exceeds supported range"))
+}
+
+fn preferential_attachment_checkpoint(
+    control: &AlgorithmControl,
+    visited: &mut usize,
+) -> Result<(), AlgorithmError> {
+    if (*visited).is_multiple_of(PREFERENTIAL_ATTACHMENT_CHECKPOINT_INTERVAL) {
+        control.checkpoint()?;
+    }
+    *visited = visited.saturating_add(1);
+    Ok(())
+}
+
+fn estimated_preferential_attachment_work(neighbors: &[Vec<usize>]) -> u64 {
+    neighbors.iter().fold(
+        usize_to_u64_saturating(neighbors.len()),
+        |total, adjacent| total.saturating_add(usize_to_u64_saturating(adjacent.len())),
+    )
+}
+
+/// Choose serial vs private-pool parallel execution for preferential attachment.
+pub(crate) fn select_preferential_attachment_path(
+    control: &AlgorithmControl,
+    sources: usize,
+    estimated_work: u64,
+) -> PreferentialAttachmentExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || sources <= 1
+        || estimated_work < PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return PreferentialAttachmentExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    if chunks <= 1 {
+        return PreferentialAttachmentExecutionPath::Serial;
+    }
+    PreferentialAttachmentExecutionPath::Parallel { threads, chunks }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreferentialAttachmentExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+fn run_preferential_attachment_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("preferential-attachment worker panicked")),
+    }
 }
 
 fn adamic_adar_scores(
@@ -4500,6 +4649,47 @@ mod tests {
             graph,
             &AlgorithmControl::new(limits, cancellation),
         )
+    }
+
+    fn execute_preferential_attachment_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(pool);
+        registry.execute(
+            Algorithm::Rank(RankAlgorithm::PreferentialAttachment),
+            graph,
+            &control,
+        )
+    }
+
+    fn preferential_attachment_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        preferential_attachment_output_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    fn preferential_attachment_ring_graph(nodes: usize, fanout: usize) -> AdjacencyGraph {
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+
+    fn dense_preferential_attachment_graph(nodes: usize) -> AdjacencyGraph {
+        let fanout = ((PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK as usize) / nodes.max(1))
+            .saturating_add(2)
+            .min(nodes.saturating_sub(1).max(1));
+        preferential_attachment_ring_graph(nodes, fanout)
     }
 
     fn preferential_attachment_output_scores(output: &AlgorithmOutput) -> Vec<f64> {
@@ -7680,6 +7870,259 @@ mod tests {
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "preferential_attachment");
+    }
+
+    #[test]
+    fn preferential_attachment_path_selection_respects_crossover_and_one_thread() {
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_preferential_attachment_path(
+                &no_pool,
+                64,
+                PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK
+            ),
+            PreferentialAttachmentExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_preferential_attachment_path(
+                &one,
+                64,
+                PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK
+            ),
+            PreferentialAttachmentExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_preferential_attachment_path(
+                &parallel,
+                64,
+                PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK - 1
+            ),
+            PreferentialAttachmentExecutionPath::Serial
+        );
+        assert_eq!(
+            select_preferential_attachment_path(
+                &parallel,
+                64,
+                PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK
+            ),
+            PreferentialAttachmentExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn preferential_attachment_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_preferential_attachment_graph(4_096);
+        let neighbors = simple_neighbors(
+            &graph,
+            &AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default()),
+            false,
+        )
+        .unwrap();
+        assert!(
+            estimated_preferential_attachment_work(&neighbors)
+                >= PREFERENTIAL_ATTACHMENT_PARALLEL_CROSSOVER_WORK
+        );
+        let serial = execute_preferential_attachment_with_pool(
+            &graph,
+            1,
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        let serial_bits = preferential_attachment_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel = execute_preferential_attachment_with_pool(
+                &graph,
+                threads,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(preferential_attachment_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn preferential_attachment_parallel_preserves_boundary_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(
+            5,
+            &[(0, 1), (0, 1), (0, 2), (0, 0), (1, 2), (2, 0), (3, 2)],
+        );
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
+        let complete =
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]);
+        let edgeless = AdjacencyGraph::with_test_counts(3, 0);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        for graph in [
+            &multigraph,
+            &disconnected,
+            &complete,
+            &edgeless,
+            &empty,
+            &single,
+        ] {
+            let serial = execute_preferential_attachment_with_pool(
+                graph,
+                1,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel = execute_preferential_attachment_with_pool(
+                    graph,
+                    threads,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    preferential_attachment_bits(&parallel),
+                    preferential_attachment_bits(&serial)
+                );
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+    }
+
+    #[test]
+    fn preferential_attachment_parallel_limits_and_cancellation_return_structured() {
+        let graph = dense_preferential_attachment_graph(4_096);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_preferential_attachment_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits::default(),
+                cancellation
+            ),
+            Err(AlgorithmError::Cancelled)
+        );
+        assert!(matches!(
+            execute_preferential_attachment_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::IterationLimit { .. })
+        ));
+        assert!(matches!(
+            execute_preferential_attachment_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 2,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn preferential_attachment_worker_panic_returns_structured_error() {
+        let pool = crate::ComputePool::new(2).unwrap();
+        let error = run_preferential_attachment_on_pool(&pool, || -> Result<(), AlgorithmError> {
+            panic!("synthetic preferential-attachment worker failure")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AlgorithmError::Execution {
+                message: "preferential-attachment worker panicked".into()
+            }
+        );
+    }
+
+    #[test]
+    fn preferential_attachment_source_chunks_cover_canonical_ranges() {
+        assert_eq!(source_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(source_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(source_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(source_chunks(8, 4), vec![(0, 2), (2, 4), (4, 6), (6, 8)]);
+        assert_eq!(source_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+
+    #[test]
+    #[ignore = "manual crossover measurement; run with --ignored --nocapture"]
+    fn measure_preferential_attachment_parallel_crossover() {
+        use std::time::Instant;
+
+        for (nodes, fanout) in [
+            (1_024_usize, 16_usize),
+            (2_048, 32),
+            (4_096, 64),
+            (8_192, 128),
+            (16_384, 128),
+        ] {
+            let graph = preferential_attachment_ring_graph(nodes, fanout);
+            let control =
+                AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+            let neighbors = simple_neighbors(&graph, &control, false).unwrap();
+            let work = estimated_preferential_attachment_work(&neighbors);
+            let measurement_limits = AlgorithmLimits {
+                iterations: 1_000_000,
+                ..AlgorithmLimits::default()
+            };
+            let serial_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(1),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+            let parallel_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(4),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+            let mut serial_ns = u128::MAX;
+            let mut parallel_ns = u128::MAX;
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                let serial = preferential_attachment_scores(&graph, &serial_ctl).unwrap();
+                serial_ns = serial_ns.min(t0.elapsed().as_nanos());
+                let serial_bits = serial.iter().copied().map(f64::to_bits).collect::<Vec<_>>();
+
+                let t1 = Instant::now();
+                let parallel = preferential_attachment_scores(&graph, &parallel_ctl).unwrap();
+                parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
+                let parallel_bits = parallel
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>();
+                assert_eq!(parallel_bits, serial_bits);
+            }
+            println!(
+                "nodes={nodes} fanout={fanout} work={work} serial_ns={serial_ns} parallel_ns={parallel_ns} ratio={}",
+                parallel_ns as f64 / serial_ns as f64
+            );
+        }
     }
 
     #[test]
