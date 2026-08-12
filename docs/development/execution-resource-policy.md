@@ -967,6 +967,20 @@ at `1`/`2`/`4`/`8`/automatic configurations. No GPU, distributed, approximate, o
 foreign-engine fallback is implied.
 >>>>>>> dced88e (perf(exec): serial disposition for CELF (#502))
 
+## Serial biconnected components (#517)
+
+`cluster(by="biconnected")` is intentionally SERIAL. The implementation is an
+iterative Tarjan-style low-link traversal whose discovery indices, edge stack,
+and block-pop boundaries are sequential state; parallelizing those steps would
+either change the canonical primary-block labels or add synchronization that
+does not expose independent work to the private compute pool.
+
+The handler still uses Rust-owned adjacency projection and the bounded Arrow
+sink, avoids any Rayon global pool, and observes cancellation and shared
+iteration/output limits. The serial disposition is covered by a fingerprint test
+that attaches private compute pools for `1`/`2`/`4`/`8` configured compute
+threads and requires identical schemas, row ordering, labels, and rows.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

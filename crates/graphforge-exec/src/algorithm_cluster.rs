@@ -4284,4 +4284,53 @@ mod tests {
         assert_eq!(result_rx.recv().unwrap(), Err(AlgorithmError::Cancelled));
         worker.join().unwrap();
     }
+    fn execute_biconnected_with_compute_threads(
+        graph: &AdjacencyGraph,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_cluster_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(
+            Algorithm::Cluster(ClusterAlgorithm::Biconnected),
+            graph,
+            &control,
+        )
+    }
+    #[test]
+    fn biconnected_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            9,
+            &[
+                (0, 1),
+                (1, 2),
+                (2, 0),
+                (2, 3),
+                (3, 4),
+                (4, 2),
+                (4, 5),
+                (5, 6),
+                (6, 7),
+                (7, 5),
+                (7, 8),
+                (8, 8),
+                (1, 0),
+                (0, 1),
+            ],
+        );
+        let serial = execute_biconnected_with_compute_threads(&graph, 1).unwrap();
+        assert_eq!(community_ids(&serial), [0, 0, 0, 1, 1, 2, 3, 3, 4]);
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output = execute_biconnected_with_compute_threads(&graph, threads).unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
+        }
+    }
+
 }
