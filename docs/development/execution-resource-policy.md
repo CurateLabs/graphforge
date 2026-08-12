@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #515 triangles; #518 Components; #535 Jaccard similarity) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #515 triangles; #518 Components; #535 Jaccard similarity; #513 resource allocation) |
 
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
@@ -182,6 +182,15 @@ retain serial coordinate order, PageRank keeps canonical contribution order with
 serial dangling/delta reductions, ArticleRank keeps canonical per-destination
 message order with serial score/delta updates, and Node2Vec skip-gram training
 stays serial, so fingerprints match the one-thread path.
+
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+resource-allocation source aggregates (#513) may partition independent work
+across that pool above documented crossovers; work never uses Rayon's
+process-global pool. Cosine dot products retain serial coordinate order,
+PageRank keeps canonical contribution order with serial dangling/delta
+reductions, Node2Vec skip-gram training stays serial, and resource allocation
+keeps serial candidate/intersection order per source, so fingerprints match the
+one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -679,6 +688,34 @@ remain serial per source. Worker score chunks merge in canonical source order,
 so schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
 
+## Parallel resource-allocation aggregate (#513)
+
+`rank(by="resource_allocation")` partitions **independent source ordinals**
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- the estimated pair/intersection work is at least
+  `RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK` (`524_288`) in
+  `graphforge-exec`.
+
+The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
+conservative O(V + E) proxy for the serial pair loop and two-pointer
+intersection scans. The threshold is the smallest power-of-two estimate below
+the measured source-partition win boundary on this M4 agent host (directed
+ring-lattice fixture, 4 private workers, release build): ~69k and ~230k units
+were neutral, ~540k units first won (~0.74x serial), and >=1.2M units ran about
+0.52-0.56x serial. Below the boundary, pool scheduling can dominate; at and
+above it, source-owned chunks amortize pool work while preserving exact score
+bits.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel workers only own source
+ranges. Candidate order, missing-link checks, two-pointer neighborhood
+intersection, reciprocal-degree discounts, and compensated floating-point
+summation remain serial per source. Worker score chunks merge in canonical
+source order, so schemas, row order, scores, and fingerprints match the
+one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
+
 ## Serial articulation points (#563)
 
 `analyze(by="articulation_points")` is intentionally SERIAL. It shares the
@@ -856,37 +893,6 @@ records `paths-min-cost-max-flow` structural evidence and verifies parity
 against the one-thread oracle for supported resource-policy cells. Timing is
 hardware-specific evidence only.
 
-## Serial strongly connected components (#532)
-
-`cluster(by = "strongly_connected")` intentionally stays serial. The public
-algorithm is exact Tarjan SCC: discovery indices, low-link propagation,
-component-stack membership, component emission, and the final canonical label
-order all depend on one DFS traversal order. Forcing private-pool work into
-that state would require either shared mutable low-link/stack coordination or a
-different component algorithm, both of which would risk changing public row
-order, labels, fingerprints, cancellation points, and structured failure
-boundaries.
-
-The serial path still consumes #340 CSR-native adjacency: Tarjan walks
-`AdjacencyGraph::neighbors` slices directly in canonical edge order and keeps
-only the O(V) ordinal map plus Tarjan state (`discovery`, `lowlink`, stack
-flags, labels, and explicit DFS frames). It does not build a parallel-only graph
-copy and does not use Rayon's process-global pool. Checkpoints remain on the
-DFS edge/frame path so cancellation and limits return structured outcomes
-without partial public results.
-
-Evidence is carried by:
-
-- `graphforge-exec::algorithm_cluster_scc` unit coverage for exact labels,
-  duplicate/self-loop handling, exhaustive three-node digraph parity with
-  mutual reachability, deep iterative DFS, malformed adjacency errors, and
-  cancellation.
-- `graphforge-exec::algorithm_cluster` dispatch coverage for the public schema,
-  stable UUID-ordered output, one Rust owner, node/edge/output/iteration limits,
-  and cancellation.
-
-
-There is no crossover for SCC in M4: the documented disposition is `serial_tarjan`. Timing remains hardware-specific evidence, never a CI pass/fail gate.
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
@@ -933,5 +939,7 @@ counts.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #535 Jaccard similarity; #504 clustering coefficient; #515 triangles; #506 Degree; #501 betweenness; #518 Components; #503 closeness BFS) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #507 eigenvector) |
 
 ## Parallel closeness BFS (#503)
