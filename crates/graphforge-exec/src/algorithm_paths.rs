@@ -2656,6 +2656,85 @@ mod tests {
     }
 
     #[test]
+    fn bfs_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            8,
+            &[
+                (0, 2),
+                (0, 1),
+                (0, 1),
+                (1, 3),
+                (1, 4),
+                (2, 4),
+                (2, 5),
+                (3, 6),
+                (4, 6),
+                (5, 7),
+                (7, 7),
+            ],
+        );
+        let serial =
+            execute_path_with_compute_threads(&graph, PathAlgorithm::Bfs, 0, None, 1).unwrap();
+        assert_eq!(
+            serial.rows(),
+            vec![
+                vec![value(0), value(0), AlgorithmValue::Float64(0.0), path(&[0])],
+                vec![
+                    value(0),
+                    value(1),
+                    AlgorithmValue::Float64(1.0),
+                    path(&[0, 1]),
+                ],
+                vec![
+                    value(0),
+                    value(2),
+                    AlgorithmValue::Float64(1.0),
+                    path(&[0, 2]),
+                ],
+                vec![
+                    value(0),
+                    value(3),
+                    AlgorithmValue::Float64(2.0),
+                    path(&[0, 1, 3]),
+                ],
+                vec![
+                    value(0),
+                    value(4),
+                    AlgorithmValue::Float64(2.0),
+                    path(&[0, 1, 4]),
+                ],
+                vec![
+                    value(0),
+                    value(5),
+                    AlgorithmValue::Float64(2.0),
+                    path(&[0, 2, 5]),
+                ],
+                vec![
+                    value(0),
+                    value(6),
+                    AlgorithmValue::Float64(3.0),
+                    path(&[0, 1, 3, 6]),
+                ],
+                vec![
+                    value(0),
+                    value(7),
+                    AlgorithmValue::Float64(3.0),
+                    path(&[0, 2, 5, 7]),
+                ],
+            ]
+        );
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output =
+                execute_path_with_compute_threads(&graph, PathAlgorithm::Bfs, 0, None, threads)
+                    .unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
+        }
+    }
+
+    #[test]
     fn dfs_dispatch_shapes_traversal_rows_and_preserves_boundaries() {
         let graph = AdjacencyGraph::with_test_directed_edges(5, &[(0, 2), (0, 1), (1, 3), (2, 3)]);
         let output = execute_dfs(

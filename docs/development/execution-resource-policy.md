@@ -954,6 +954,19 @@ M4 entry harness records `paths-min-cut-edges` evidence and verifies parity
 against the one-thread oracle for supported resource-policy cells; timing is
 not a pass/fail gate.
 
+## Serial breadth-first search (#538)
+
+`paths(by="bfs")` is intentionally SERIAL. The public rows are ordered by hop
+count and stable node order, and predecessor choices for equal-length paths are
+defined by a single FIFO queue over sorted neighbor lists. Parallelizing frontier
+expansion would change those predecessor ties or require serial reassembly after
+each breadth layer.
+
+The handler uses Rust-owned adjacency projection and bounded Arrow output,
+does not use Rayon's global pool, and preserves shared cancellation and limits.
+A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
+configured compute threads and requires identical schemas, row ordering, costs,
+and paths.
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
