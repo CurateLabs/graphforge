@@ -1,13 +1,18 @@
 //! Exact weighted modularity for an explicit graph-layer partition.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use graphforge_core::algorithms::{Algorithm, AnalyzeAlgorithm};
+use rayon::prelude::*;
 
 use crate::algorithm_dispatch::{
     AlgorithmControl, AlgorithmError, AlgorithmLimits, AlgorithmOutput, AlgorithmValue,
 };
 use crate::algorithm_partition::ResolvedPartitionMap;
+
+/// Community counts below this stay serial to avoid private-pool scheduling tax.
+pub(crate) const MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ModularityEdge {
@@ -15,6 +20,12 @@ pub(crate) struct ModularityEdge {
     pub source_uuid: [u8; 16],
     pub target_uuid: [u8; 16],
     pub weight: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModularityExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
 }
 
 /// Compute classic weighted undirected modularity at fixed resolution 1.0.
@@ -115,16 +126,50 @@ pub(crate) fn modularity(
         add_string(&mut volumes, partition, degree)?;
     }
 
+    let contributions = match select_modularity_path(control, community_order.len()) {
+        ModularityExecutionPath::Serial => modularity_contributions_serial(
+            &community_order,
+            &internal_weights,
+            &volumes,
+            total_weight,
+            two_m,
+            control,
+            &mut work,
+        )?,
+        ModularityExecutionPath::Parallel { .. } => modularity_contributions_parallel(
+            &community_order,
+            &internal_weights,
+            &volumes,
+            total_weight,
+            two_m,
+            control,
+        )?,
+    };
     let mut score = 0.0;
-    for partition in community_order {
-        checkpoint(control, &mut work)?;
-        let internal = internal_weights[&partition];
-        let volume_ratio = volumes[&partition] / two_m;
-        let contribution = finite(internal / total_weight - volume_ratio * volume_ratio)?;
+    for contribution in contributions {
         score = finite(score + contribution)?;
     }
     control.check_cancelled()?;
     finite(score)
+}
+
+pub(crate) fn select_modularity_path(
+    control: &AlgorithmControl,
+    communities: usize,
+) -> ModularityExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || communities < MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return ModularityExecutionPath::Serial;
+    }
+    ModularityExecutionPath::Parallel {
+        threads,
+        chunks: community_chunks(communities, threads).len(),
+    }
 }
 
 /// Shape the stable scalar result owned by the modularity contract.
@@ -154,6 +199,118 @@ fn communities_by_minimum_uuid(partitions: &ResolvedPartitionMap) -> Vec<String>
             seen.insert(partition.clone()).then_some(partition)
         })
         .collect()
+}
+
+fn modularity_contributions_serial(
+    community_order: &[String],
+    internal_weights: &BTreeMap<String, f64>,
+    volumes: &BTreeMap<String, f64>,
+    total_weight: f64,
+    two_m: f64,
+    control: &AlgorithmControl,
+    work: &mut usize,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let mut contributions = Vec::with_capacity(community_order.len());
+    for partition in community_order {
+        checkpoint(control, work)?;
+        contributions.push(modularity_contribution(
+            partition,
+            internal_weights,
+            volumes,
+            total_weight,
+            two_m,
+        )?);
+    }
+    Ok(contributions)
+}
+
+fn modularity_contributions_parallel(
+    community_order: &[String],
+    internal_weights: &BTreeMap<String, f64>,
+    volumes: &BTreeMap<String, f64>,
+    total_weight: f64,
+    two_m: f64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel modularity requires an instance-owned compute pool"))?;
+    let ranges = community_chunks(community_order.len(), control.compute_threads());
+    let mut chunk_results = run_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let result = (|| {
+                    control.check_cancelled()?;
+                    let mut work = 0_usize;
+                    let mut local = Vec::with_capacity(end - start);
+                    for partition in &community_order[start..end] {
+                        checkpoint(control, &mut work)?;
+                        local.push(modularity_contribution(
+                            partition,
+                            internal_weights,
+                            volumes,
+                            total_weight,
+                            two_m,
+                        )?);
+                    }
+                    Ok(local)
+                })();
+                (start, result)
+            })
+            .collect::<Vec<(usize, Result<Vec<f64>, AlgorithmError>)>>())
+    })?;
+    chunk_results.sort_unstable_by_key(|(start, _)| *start);
+    let mut contributions = Vec::with_capacity(community_order.len());
+    for (_, chunk) in chunk_results {
+        contributions.extend(chunk?);
+    }
+    Ok(contributions)
+}
+
+fn modularity_contribution(
+    partition: &str,
+    internal_weights: &BTreeMap<String, f64>,
+    volumes: &BTreeMap<String, f64>,
+    total_weight: f64,
+    two_m: f64,
+) -> Result<f64, AlgorithmError> {
+    let internal = internal_weights[partition];
+    let volume_ratio = volumes[partition] / two_m;
+    finite(internal / total_weight - volume_ratio * volume_ratio)
+}
+
+fn community_chunks(len: usize, threads: usize) -> Vec<(usize, usize)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, len);
+    let base = len / workers;
+    let rem = len % workers;
+    let mut chunks = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let chunk_len = base + usize::from(index < rem);
+        let end = start + chunk_len;
+        if start < end {
+            chunks.push((start, end));
+        }
+        start = end;
+    }
+    chunks
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("modularity worker panicked")),
+    }
 }
 
 fn add(
@@ -209,11 +366,17 @@ mod tests {
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits};
     use crate::algorithm_output::shape_algorithm_output;
     use crate::algorithm_partition::PartitionValue;
+    use crate::compute_pool::ComputePool;
     use arrow::array::Float64Array;
     use arrow::datatypes::DataType;
+    use std::sync::Arc;
 
     fn uuid(value: u8) -> [u8; 16] {
         [value; 16]
+    }
+
+    fn wide_uuid(value: u128) -> [u8; 16] {
+        value.to_be_bytes()
     }
 
     fn edge(id: u8, source: u8, target: u8, weight: f64) -> ModularityEdge {
@@ -221,6 +384,15 @@ mod tests {
             edge_uuid: uuid(id),
             source_uuid: uuid(source),
             target_uuid: uuid(target),
+            weight,
+        }
+    }
+
+    fn wide_edge(id: u128, source: usize, target: usize, weight: f64) -> ModularityEdge {
+        ModularityEdge {
+            edge_uuid: wide_uuid(id),
+            source_uuid: wide_uuid(source as u128),
+            target_uuid: wide_uuid(target as u128),
             weight,
         }
     }
@@ -246,6 +418,43 @@ mod tests {
 
     fn control() -> AlgorithmControl {
         AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default())
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(ComputePool::new(threads).unwrap()))
+    }
+
+    fn singleton_fixture(
+        nodes: usize,
+    ) -> (Vec<[u8; 16]>, Vec<ModularityEdge>, ResolvedPartitionMap) {
+        let node_ids = (0..nodes)
+            .map(|node| wide_uuid(node as u128))
+            .collect::<Vec<_>>();
+        let edges = (0..nodes - 1)
+            .map(|source| {
+                wide_edge(
+                    10_000 + source as u128,
+                    source,
+                    source + 1,
+                    1.0 + (source % 7) as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let partitions = ResolvedPartitionMap::try_new(
+            node_ids.iter().copied(),
+            (0..nodes).map(|node| {
+                (
+                    wide_uuid(node as u128),
+                    PartitionValue::String(format!("p{node:04}")),
+                )
+            }),
+        )
+        .unwrap();
+        (node_ids, edges, partitions)
     }
 
     fn run(
@@ -378,6 +587,58 @@ mod tests {
             "1"
         );
         assert!(modularity_output(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn path_selection_respects_crossover_and_private_pool() {
+        let serial = control_with_threads(1);
+        assert_eq!(
+            select_modularity_path(&serial, MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES),
+            ModularityExecutionPath::Serial
+        );
+        let below = control_with_threads(4);
+        assert_eq!(
+            select_modularity_path(&below, MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES - 1),
+            ModularityExecutionPath::Serial
+        );
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_modularity_path(&no_pool, MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES),
+            ModularityExecutionPath::Serial
+        );
+        assert_eq!(
+            select_modularity_path(
+                &control_with_threads(4),
+                MODULARITY_PARALLEL_CROSSOVER_COMMUNITIES
+            ),
+            ModularityExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_modularity_score_bits() {
+        let (nodes, edges, partitions) = singleton_fixture(192);
+        let serial =
+            modularity(&nodes, &edges, false, &partitions, &control_with_threads(1)).unwrap();
+        for threads in [2_usize, 4, 8] {
+            let control = control_with_threads(threads);
+            assert!(matches!(
+                select_modularity_path(&control, 192),
+                ModularityExecutionPath::Parallel { .. }
+            ));
+            assert_eq!(
+                modularity(&nodes, &edges, false, &partitions, &control)
+                    .unwrap()
+                    .to_bits(),
+                serial.to_bits()
+            );
+        }
     }
 
     #[test]
