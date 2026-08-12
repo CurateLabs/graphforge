@@ -19,6 +19,7 @@
 //! PageRank (#343) and ArticleRank (#500) may partition destination-owned score
 //! updates across the instance-owned private compute pool while preserving the
 //! serial contribution order, reductions, and bit-identical fingerprints.
+//! CELF (#502) remains intentionally serial under every compute_threads budget.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -8613,4 +8614,105 @@ mod tests {
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "total_neighbors");
     }
+    #[test]
+    fn celf_serial_disposition_holds_across_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            8,
+            &[
+                (0, 1),
+                (0, 2),
+                (1, 3),
+                (1, 4),
+                (2, 4),
+                (2, 5),
+                (3, 6),
+                (4, 6),
+                (5, 7),
+                (6, 7),
+                (0, 1),
+                (4, 4),
+            ],
+        );
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(8),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(8).unwrap()));
+        assert_eq!(
+            select_celf_path(&control, graph.node_ids().len(), graph.edge_entry_count()),
+            CelfExecutionPath::SerialLazyForwardHeap
+        );
+
+        let fingerprint = *graph.projection_fingerprint().unwrap().as_bytes();
+        let oracle = execute_celf_with_pool(
+            &graph,
+            1,
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        let oracle_schema = oracle.schema.clone();
+        let oracle_rows = oracle.rows();
+        let oracle_bits = celf_score_bits(&oracle);
+
+        for threads in [2_usize, 4, 8] {
+            let output = execute_celf_with_pool(
+                &graph,
+                threads,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(output.schema, oracle_schema);
+            assert_eq!(output.rows(), oracle_rows);
+            assert_eq!(celf_score_bits(&output), oracle_bits);
+            assert_eq!(
+                *graph.projection_fingerprint().unwrap().as_bytes(),
+                fingerprint
+            );
+        }
+    }
+
+    #[test]
+    fn celf_serial_path_preserves_atomic_limits_and_bounded_arrow_shaping() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            5,
+            &[(0, 1), (1, 2), (2, 3), (3, 4), (0, 2), (2, 4)],
+        );
+        assert_eq!(
+            execute_celf_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 1,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::OutputLimit {
+                observed: 2,
+                limit: 1
+            })
+        );
+
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_celf_with_pool(&graph, 4, AlgorithmLimits::default(), cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+
+        let shaped = execute_celf_with_pool(
+            &graph,
+            4,
+            AlgorithmLimits::default().with_batch_size(2),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        assert_eq!(shaped.num_rows(), 5);
+        assert_eq!(shaped.record_batch().num_rows(), 5);
+        assert!(shaped.internal_batch_count > 1);
+        assert!(shaped.peak_builder_rows <= 2);
+    }
+
 }
