@@ -29,6 +29,10 @@ pub(crate) enum ModularityExecutionPath {
 }
 
 /// Compute classic weighted undirected modularity at fixed resolution 1.0.
+#[allow(
+    clippy::too_many_lines,
+    reason = "serial and parallel modularity paths share one validated entrypoint"
+)]
 pub(crate) fn modularity(
     nodes: &[[u8; 16]],
     edges: &[ModularityEdge],
