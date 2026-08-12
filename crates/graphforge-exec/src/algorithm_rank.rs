@@ -18,10 +18,10 @@
 //! reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, RankAlgorithm};
@@ -29,17 +29,17 @@ use graphforge_core::{GfError, OntologyMode, RankOptions, TypeId};
 use graphforge_ir::Direction;
 use rayon::prelude::*;
 
+use crate::AdjacencyProvider;
 use crate::algorithm_dispatch::{
     AlgorithmCancellation, AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmLimits,
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
-use crate::algorithm_graph::{export_adjacency, AdjacencyGraph, AdjacencySelection};
+use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
 use crate::algorithm_k_core::k_core_numbers;
 use crate::algorithm_neighbors::{simple_neighbors, simple_undirected_neighbors};
 use crate::algorithm_output::{
     materialize_node_properties_with_batch_size, shape_algorithm_output,
 };
-use crate::AdjacencyProvider;
 
 const BUILTIN_REVIEW: DependencyReview = DependencyReview {
     implementation: "graphforge-exec built-in",
@@ -4257,10 +4257,12 @@ mod tests {
 
     fn assert_scores_within(actual: &[f64], expected: &[f64], tolerance: f64) {
         assert_eq!(actual.len(), expected.len());
-        assert!(actual
-            .iter()
-            .zip(expected)
-            .all(|(actual, expected)| (actual - expected).abs() <= tolerance));
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+        );
     }
 
     #[test]
@@ -4729,14 +4731,16 @@ mod tests {
             ),
             &[0.0, 1.0 / 6.0, 0.0, 0.0],
         );
-        assert!(execute_betweenness(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_betweenness(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -4959,14 +4963,16 @@ mod tests {
             ),
             &[4.0 / 9.0, 1.0 / 3.0, 0.0, 0.0],
         );
-        assert!(execute_closeness(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_closeness(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
         assert_eq!(
             closeness_scores(
                 &execute_closeness(
@@ -5241,14 +5247,16 @@ mod tests {
             ),
             &[0.5, 1.0 / 3.0, 0.0, 0.0],
         );
-        assert!(execute_harmonic_closeness(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_harmonic_closeness(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
         assert_eq!(
             harmonic_closeness_scores(
                 &execute_harmonic_closeness(
@@ -5402,14 +5410,16 @@ mod tests {
             eigenvector_scores_for(&AdjacencyGraph::with_test_counts(1, 0)),
             [1.0]
         );
-        assert!(execute_eigenvector(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_eigenvector(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -5803,14 +5813,16 @@ mod tests {
             ),
             &[0.15; 3],
         );
-        assert!(execute_article_rank(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default()
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_article_rank(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default()
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -5946,14 +5958,16 @@ mod tests {
             ),
             &[0.0, 0.0],
         );
-        assert!(execute_hits_hub(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default()
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_hits_hub(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default()
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6177,14 +6191,16 @@ mod tests {
             ),
             &[0.0, 0.0],
         );
-        assert!(execute_hits_authority(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default()
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_hits_authority(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default()
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6448,14 +6464,16 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(execute_clustering_coefficient(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_clustering_coefficient(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6663,14 +6681,16 @@ mod tests {
                 &[1.0, 1.0, 1.0, 0.0],
             );
         }
-        assert!(execute_triangles(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_triangles(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6851,14 +6871,16 @@ mod tests {
                 &[2.0, 2.0, 2.0, 0.0],
             );
         }
-        assert!(execute_k_core(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_k_core(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6901,9 +6923,11 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(k_core_output_scores(&output)
-            .into_iter()
-            .all(|score| score == 1.0));
+        assert!(
+            k_core_output_scores(&output)
+                .into_iter()
+                .all(|score| score == 1.0)
+        );
     }
 
     #[test]
@@ -6974,34 +6998,40 @@ mod tests {
         );
         let complete =
             AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]);
-        assert!(preferential_attachment_output_scores(
-            &execute_preferential_attachment(
-                &complete,
+        assert!(
+            preferential_attachment_output_scores(
+                &execute_preferential_attachment(
+                    &complete,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .into_iter()
+            .all(|score| score == 0.0)
+        );
+        assert!(
+            preferential_attachment_output_scores(
+                &execute_preferential_attachment(
+                    &AdjacencyGraph::with_test_counts(3, 0),
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .into_iter()
+            .all(|score| score == 0.0)
+        );
+        assert!(
+            execute_preferential_attachment(
+                &AdjacencyGraph::default(),
                 AlgorithmLimits::default(),
                 AlgorithmCancellation::default(),
             )
-            .unwrap(),
-        )
-        .into_iter()
-        .all(|score| score == 0.0));
-        assert!(preferential_attachment_output_scores(
-            &execute_preferential_attachment(
-                &AdjacencyGraph::with_test_counts(3, 0),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap(),
-        )
-        .into_iter()
-        .all(|score| score == 0.0));
-        assert!(execute_preferential_attachment(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -7128,25 +7158,29 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(adamic_adar_output_scores(
-                &execute_adamic_adar(
-                    &graph,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
+            assert!(
+                adamic_adar_output_scores(
+                    &execute_adamic_adar(
+                        &graph,
+                        AlgorithmLimits::default(),
+                        AlgorithmCancellation::default(),
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0));
+                .into_iter()
+                .all(|score| score == 0.0)
+            );
         }
-        assert!(execute_adamic_adar(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_adamic_adar(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -7493,25 +7527,29 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(common_neighbor_output_scores(
-                &execute_common_neighbors(
-                    &graph,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
+            assert!(
+                common_neighbor_output_scores(
+                    &execute_common_neighbors(
+                        &graph,
+                        AlgorithmLimits::default(),
+                        AlgorithmCancellation::default(),
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0));
+                .into_iter()
+                .all(|score| score == 0.0)
+            );
         }
-        assert!(execute_common_neighbors(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_common_neighbors(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -7870,25 +7908,29 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(resource_allocation_output_scores(
-                &execute_resource_allocation(
-                    &graph,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
+            assert!(
+                resource_allocation_output_scores(
+                    &execute_resource_allocation(
+                        &graph,
+                        AlgorithmLimits::default(),
+                        AlgorithmCancellation::default(),
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0));
+                .into_iter()
+                .all(|score| score == 0.0)
+            );
         }
-        assert!(execute_resource_allocation(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_resource_allocation(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
@@ -8032,25 +8074,29 @@ mod tests {
             AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(total_neighbor_output_scores(
-                &execute_total_neighbors(
-                    &graph,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
+            assert!(
+                total_neighbor_output_scores(
+                    &execute_total_neighbors(
+                        &graph,
+                        AlgorithmLimits::default(),
+                        AlgorithmCancellation::default(),
+                    )
+                    .unwrap(),
                 )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0));
+                .into_iter()
+                .all(|score| score == 0.0)
+            );
         }
-        assert!(execute_total_neighbors(
-            &AdjacencyGraph::default(),
-            AlgorithmLimits::default(),
-            AlgorithmCancellation::default(),
-        )
-        .unwrap()
-        .rows()
-        .is_empty());
+        assert!(
+            execute_total_neighbors(
+                &AdjacencyGraph::default(),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap()
+            .rows()
+            .is_empty()
+        );
     }
 
     #[test]
