@@ -556,10 +556,16 @@ zero/boundary behavior.
 
 The implementation evaluates the aggregate algebraically in `O(V + E)` after
 adjacency construction. Degree totals, linked-neighbor sums, and products use
-checked integer arithmetic. Scores convert to `Float64` only when exactly
+checked integer arithmetic. Source rows are independent: one-thread and small
+workloads stay serial, while workloads at or above the measured `262_144`
+source-plus-neighbor work-unit crossover may partition canonical source ranges
+onto the instance-owned private `ComputePool`. Each source retains the same
+integer aggregation order, and chunk outputs merge by source range, so schemas,
+row order, and exact score fingerprints match the one-thread oracle at `1`/`2`/
+`4`/`8`/automatic thread settings. Scores convert to `Float64` only when exactly
 representable at or below `2^53`; larger results return a structured execution
 error instead of silently rounding. Batched checkpoints enforce shared iteration
-and cancellation limits.
+and cancellation limits on both execution paths.
 
 Stable topology order produces non-null `node_uuid: FixedSizeBinary(16)`,
 non-null `score: Float64`, then materialized node properties with Arrow NULLs for

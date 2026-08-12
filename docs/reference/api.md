@@ -414,7 +414,11 @@ apply. Candidate nodes in different disconnected components remain eligible.
 Isolated, complete, edgeless, singleton, and empty selections therefore have
 well-defined zero scores where no positive candidate contribution exists.
 
-The Rust implementation uses checked integer sums and products and returns an
+The Rust implementation uses checked integer sums and products. It keeps
+one-thread and small workloads serial, then may partition canonical source
+ranges over the instance-owned private `ComputePool` at the measured `262_144`
+source-plus-neighbor work-unit crossover. Parallel chunks keep the same per-source
+integer aggregation and merge in source order. The implementation returns an
 exact `Float64` score only while it is at most `2^53`; larger values produce a
 structured execution error rather than a rounded result. Results remain in
 canonical topology order with UUID-only public identity:
