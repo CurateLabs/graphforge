@@ -1,3 +1,7 @@
+//! Floyd-Warshall remains serial (#543). The dynamic-programming table is
+//! updated in canonical middle/source/target order, and each update can feed
+//! later updates and negative-cycle checks.
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
