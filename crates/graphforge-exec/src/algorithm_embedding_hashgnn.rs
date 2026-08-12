@@ -260,8 +260,8 @@ fn propagate_iteration_serial(
     words: usize,
     next: &mut [Vec<u64>],
 ) -> Result<(), HashGnnError> {
-    for node_index in 0..nodes.len() {
-        next[node_index] = propagate_node(
+    for (node_index, slot) in next.iter_mut().enumerate().take(nodes.len()) {
+        *slot = propagate_node(
             graph,
             options,
             type_tokens,
