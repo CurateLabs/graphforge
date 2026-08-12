@@ -1,3 +1,7 @@
+//! A* remains serial (#536). The accepted path is defined by one priority
+//! queue ordered by estimate, cost, path, and edge ID; each pop and relaxation
+//! mutates the best-path map consumed by the next pop.
+
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 

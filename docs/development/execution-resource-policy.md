@@ -723,6 +723,23 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and never uses Rayon's process-global pool. Timing remains
 evidence only, not a CI threshold.
 
+## Serial paths(by="astar") (#536)
+
+`paths(by="astar")` has no parallel crossover. Its disposition is **serial
+priority-queue A*** for every `compute_threads` setting, including
+`1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted adjacency and graph-native
+heuristic values (#340), then drives one priority queue ordered by estimate,
+cost, path, and edge ID. Each pop validates and mutates the best-path map that
+subsequent relaxations observe. Parallel relaxations would need shared heap and
+best-map coordination and could change accepted ties, cancellation points, or
+fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`paths-astar` evidence and verifies one-thread parity; timing is report-only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
