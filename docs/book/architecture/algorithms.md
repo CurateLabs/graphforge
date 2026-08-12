@@ -815,6 +815,14 @@ only after successful execution. Rust is the sole production owner; Python and
 Node only translate arguments and Arrow IPC and provide no backend, fallback,
 packaging dependency, or recovery path.
 
+M4 #528 disposition: Louvain remains serial. Each topology-ordered local move
+updates community totals before the next node evaluates its modularity gain, and
+each condensation level depends on the accepted partition from the previous
+level. GraphForge therefore does not claim a parallel crossover for
+`cluster(by="louvain")`; `1`/`2`/`4`/`8`/automatic thread policies preserve the
+one-thread schema, row order, community IDs, structured errors, and bounded
+Arrow shaping.
+
 ### Implemented Leiden contract
 
 `by="leiden"` is the Rust-owned classic Leiden implementation at modularity
