@@ -1,5 +1,9 @@
 //! Exact deterministic prize-collecting Steiner trees for undirected graphs.
 
+//! Prize-collecting Steiner tree remains serial (#552). Exact subset evaluation
+//! compares one global objective with canonical edge ties; parallel workers
+//! would need shared best-candidate coordination and could alter fingerprints.
+
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 
 /// A graph-native numeric property resolved before kernel dispatch.

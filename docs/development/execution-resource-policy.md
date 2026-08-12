@@ -1059,6 +1059,25 @@ same serial community order used by the one-thread path. Schemas, scalar row
 shape, score bits, structured errors, and fingerprints match the one-thread
 result at `1`/`2`/`4`/`8`/automatic configurations.
 
+## Serial paths(by="prize_collecting_steiner_tree") (#552)
+
+`paths(by="prize_collecting_steiner_tree")` has no parallel crossover. Its
+disposition is **serial exact prize subset search** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native undirected adjacency plus graph-native prize
+properties (#340), checks the exact state-space bound, and enumerates candidate
+edge subsets against one canonical objective. The best feasible tree is selected
+by objective, fewer edges, and edge UUID order, and every candidate observes the
+same global incumbent. Parallel subset workers would require shared incumbent
+coordination and could alter row order, fingerprints, or structured resource
+failures.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`paths-prize-collecting-steiner-tree` evidence and verifies one-thread parity;
+timing is report-only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

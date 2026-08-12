@@ -24,6 +24,7 @@ REQUIRED_WORKLOAD_IDS = {
     "rank-k-core",
     "analyze-maximum-spanning-tree",
     "paths-min-steiner-tree",
+    "paths-prize-collecting-steiner-tree",
     "paths-bellman-ford",
     "paths-min-cost-max-flow",
     "analyze-minimum-k-spanning-tree",
