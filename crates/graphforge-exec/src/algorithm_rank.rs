@@ -3667,6 +3667,20 @@ mod tests {
             cancellation,
         )
     }
+
+    fn execute_closeness_with_pool_and_limits(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(pool);
+        registry.execute(Algorithm::Rank(RankAlgorithm::Closeness), graph, &control)
+    }
     fn dense_closeness_graph(nodes: usize) -> AdjacencyGraph {
         let fanout = ((CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS as usize) / nodes.max(1).pow(2))
             .saturating_add(2)
