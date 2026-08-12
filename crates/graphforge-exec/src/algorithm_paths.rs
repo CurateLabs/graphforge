@@ -1726,6 +1726,27 @@ mod tests {
         )
     }
 
+    fn execute_path_with_compute_threads(
+        graph: &AdjacencyGraph,
+        algorithm: PathAlgorithm,
+        source: u64,
+        target: Option<u64>,
+        threads: usize,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let mut registry = AlgorithmRegistry::default();
+        register_path_algorithms(&mut registry, uuid(source), target.map(uuid), 1, None, None)?;
+        let control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(threads).unwrap()));
+        registry.execute(Algorithm::Paths(algorithm), graph, &control)
+    }
+
+    fn output_fingerprint(output: &AlgorithmOutput) -> String {
+        format!("{:?}|{:?}", output.schema, output.rows())
+    }
+
     fn execute_gomory_hu(
         graph: &AdjacencyGraph,
         limits: AlgorithmLimits,
@@ -2740,6 +2761,49 @@ mod tests {
             ),
         ] {
             assert!(matches!(result, Err(GfError::Validation(_))));
+        }
+    }
+
+    #[test]
+    fn dfs_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_directed_edges(
+            8,
+            &[
+                (0, 2),
+                (0, 1),
+                (0, 1),
+                (1, 3),
+                (1, 4),
+                (3, 6),
+                (6, 1),
+                (2, 5),
+                (5, 7),
+                (7, 7),
+            ],
+        );
+        let serial =
+            execute_path_with_compute_threads(&graph, PathAlgorithm::Dfs, 0, None, 1).unwrap();
+        assert_eq!(
+            serial.rows(),
+            vec![
+                traversal(0, 0, 0),
+                traversal(1, 1, 1),
+                traversal(3, 2, 2),
+                traversal(6, 3, 3),
+                traversal(4, 2, 4),
+                traversal(2, 1, 5),
+                traversal(5, 2, 6),
+                traversal(7, 3, 7),
+            ]
+        );
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output =
+                execute_path_with_compute_threads(&graph, PathAlgorithm::Dfs, 0, None, threads)
+                    .unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
         }
     }
 
