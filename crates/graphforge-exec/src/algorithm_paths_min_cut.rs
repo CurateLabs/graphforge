@@ -1,3 +1,8 @@
+//! `min_cut` intentionally remains serial (#549). The canonical source-side
+//! partition is built by a sequence of constrained max-flow oracle calls; each
+//! membership decision depends on the previously forced partition, so there are
+//! no independent cut decisions to send to the private compute pool.
+
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
 use crate::algorithm_paths_max_flow::{CapacityEdge, maximum_flow};
 

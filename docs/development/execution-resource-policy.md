@@ -740,6 +740,26 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and no process-global Rayon pool. The M4 harness records
 `paths-astar` evidence and verifies one-thread parity; timing is report-only.
 
+## Serial paths(by="min_cut") (#549)
+
+`paths(by="min_cut")` has no parallel crossover. Its disposition is
+**serial constrained min-cut oracle** for every `compute_threads` setting,
+including `1`/`2`/`4`/`8`/automatic resource policies.
+
+The Rust kernel consumes CSR-native capacity adjacency (#340), computes the
+minimum value through the shared serial max-flow oracle, then constructs the
+canonical source-side partition one UUID at a time. Every include/exclude
+decision runs a constrained cut-value oracle against the partition forced by
+previous decisions. That dependency chain fixes tie behavior and row ordering;
+parallelizing it would require speculative shared residual state and could
+change the accepted cut fingerprint.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and never uses Rayon's process-global pool. The M4 entry
+harness records `paths-min-cut` structural evidence and verifies one-thread
+fingerprint parity for supported resource-policy cells. Timing is evidence
+only, never a CI threshold.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
