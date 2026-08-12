@@ -806,6 +806,25 @@ resource checks, and no process-global Rayon pool. The M4 harness records
 `paths-bellman-ford` evidence and verifies one-thread parity; timing is
 report-only.
 
+## Serial paths(by="min_cost_max_flow") (#547)
+
+`paths(by="min_cost_max_flow")` has no parallel crossover. Its disposition is
+**serial Bellman-Ford residual augmentation** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic resource policies.
+
+The Rust kernel consumes CSR-native capacity and cost projections (#340), sorts
+public identities canonically, rejects undefined negative residual cycles, and
+then augments along one Bellman-Ford shortest residual path at a time. Each
+augmentation mutates residual capacities and accumulated cost before the next
+path is chosen, so the scalar optimum is a sequential state machine rather than
+independent work for the private compute pool.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and never uses Rayon's process-global pool. The M4 harness
+records `paths-min-cost-max-flow` structural evidence and verifies parity
+against the one-thread oracle for supported resource-policy cells. Timing is
+hardware-specific evidence only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

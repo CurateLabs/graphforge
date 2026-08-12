@@ -1,3 +1,8 @@
+//! Min-cost maximum-flow views intentionally remain serial (#547/#548). Each
+//! Bellman-Ford residual shortest path mutates capacities, costs, and flow
+//! assignments consumed by the next augmentation, so private-pool work would
+//! change residual visibility and public tie behavior.
+
 use std::collections::HashMap;
 use std::hash::Hash;
 
