@@ -967,6 +967,25 @@ does not use Rayon's global pool, and preserves shared cancellation and limits.
 A fingerprint test attaches private compute pools for `1`/`2`/`4`/`8`
 configured compute threads and requires identical schemas, row ordering, costs,
 and paths.
+
+## Serial paths(by="yens") (#555)
+
+`paths(by="yens")` has no parallel crossover. Its disposition is **serial Yen
+spur-candidate ranking** for every `compute_threads` setting, including
+`1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted adjacency (#340), accepts the first
+shortest path, then derives spur candidates from the previously accepted path.
+A single canonical candidate map is scanned and drained by cost/path/edge ties
+for each rank. Later work depends on earlier accepted paths, so parallel spur
+search would require shared candidate coordination and could change ranks, row
+order, or fingerprints.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. Schemas, row order, costs,
+paths, structured errors, and fingerprints match the one-thread oracle at
+supported `1`/`2`/`4`/`8`/automatic configurations.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

@@ -1,3 +1,7 @@
+//! Yen's k-shortest paths remain serial (#555). Each accepted path defines the
+//! next spur candidates, and the global candidate map is drained in canonical
+//! rank order, so iterations are not independent private-pool work.
+
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
