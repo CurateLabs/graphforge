@@ -1,4 +1,10 @@
 //! Deterministic HashGNN v1 binary minhash propagation.
+//!
+//! Propagation (#561) may partition independent node updates across the
+//! instance-owned private compute pool above a documented crossover. Each node
+//! still evaluates samples, self candidates, neighbor candidates, and ties in
+//! canonical serial order; worker outputs merge by public UUID node order so
+//! embedding fingerprints remain identical to the one-thread path.
 #![allow(
     dead_code,
     reason = "the parent-owned HashGNN dispatch integration follows this isolated kernel"
@@ -6,8 +12,10 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use graphforge_core::embedding_options::HashGnnOptions;
+use rayon::prelude::*;
 
 use crate::algorithm_embedding_control::{EmbeddingControl, EmbeddingResourceError};
 use crate::algorithm_embedding_output::EmbeddingOutputRow;
@@ -15,6 +23,21 @@ use crate::algorithm_embedding_rng::{EmbeddingRng, EmbeddingRngField};
 use crate::algorithm_graph::AdjacencyGraph;
 
 const ZERO_UUID: [u8; 16] = [0; 16];
+
+/// Candidate evaluations below which HashGNN propagation stays serial (#561).
+///
+/// The unit is an upper-bound count of minhash candidate comparisons per
+/// propagation iteration: `active_bits^2 * (nodes + adjacency_entries)`.
+/// Smaller fixtures avoid Rayon install/merge tax; larger workloads can split
+/// node-owned updates while preserving every per-node comparison order.
+pub const HASHGNN_PROPAGATE_PARALLEL_CROSSOVER: u64 = 4_096;
+
+/// Selected propagation execution path for observability and crossover tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HashGnnPropagationPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
 
 /// Explicit canonical UTF-8 type tokens resolved before heterogeneous dispatch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -41,6 +64,8 @@ pub(crate) enum HashGnnError {
     UnexpectedTypeTokens,
     #[error("hashgnn graph contains a node without UUID identity")]
     MissingNodeIdentity,
+    #[error("hashgnn propagation worker panicked")]
+    WorkerPanic,
     #[error(transparent)]
     Resource(#[from] EmbeddingResourceError),
 }
@@ -177,67 +202,272 @@ fn propagate(
 ) -> Result<Vec<Vec<u64>>, HashGnnError> {
     let active_bits = active_bit_count(options)?;
     let mut prior = initial.to_vec();
-    let mut next = vec![vec![0_u64; options.dimensions.div_ceil(64)]; nodes.len()];
+    let words = options.dimensions.div_ceil(64);
+    let estimated_work =
+        estimated_propagation_work(nodes.len(), graph.edge_entry_count(), active_bits);
+    let path = select_hashgnn_propagation_path(control, nodes.len(), estimated_work);
+    let mut next = vec![vec![0_u64; words]; nodes.len()];
     for iteration in 0..options.iterations {
         control.iteration_checkpoint()?;
-        for (node_index, &(node_uuid, node_id)) in nodes.iter().enumerate() {
-            control.checkpoint(1)?;
-            let neighbors = graph.neighbors(node_id);
-            if neighbors.is_empty() {
-                next[node_index].clone_from(&initial[node_index]);
-                continue;
-            }
-            next[node_index].fill(0);
-            for sample in 0..active_bits {
-                control.checkpoint(1)?;
-                let mut selected = None;
-                for coordinate in active_coordinates(&prior[node_index], options.dimensions) {
-                    consider(
-                        &mut selected,
-                        candidate(
-                            iteration,
-                            sample,
-                            CandidateRole::SelfNode,
-                            node_uuid,
-                            ZERO_UUID,
-                            coordinate,
-                            node_type(type_tokens, &node_uuid),
-                            None,
-                            options.seed,
-                        ),
-                    );
-                }
-                for edge in neighbors {
-                    control.checkpoint(1)?;
-                    let source_uuid = graph
-                        .node_uuid(edge.neighbor_id)
-                        .ok_or(HashGnnError::MissingNodeIdentity)?;
-                    let source_index = node_indexes[&edge.neighbor_id];
-                    for coordinate in active_coordinates(&prior[source_index], options.dimensions) {
-                        consider(
-                            &mut selected,
-                            candidate(
-                                iteration,
-                                sample,
-                                CandidateRole::Edge,
-                                source_uuid,
-                                edge.edge_uuid,
-                                coordinate,
-                                node_type(type_tokens, &source_uuid),
-                                relationship_type(type_tokens, &edge.edge_uuid),
-                                options.seed,
-                            ),
-                        );
-                    }
-                }
-                if let Some(candidate) = selected {
-                    set_bit(&mut next[node_index], candidate.coordinate);
-                }
+        match path {
+            HashGnnPropagationPath::Serial => propagate_iteration_serial(
+                graph,
+                options,
+                type_tokens,
+                control,
+                nodes,
+                node_indexes,
+                initial,
+                &prior,
+                iteration,
+                active_bits,
+                words,
+                &mut next,
+            )?,
+            HashGnnPropagationPath::Parallel { .. } => {
+                next = propagate_iteration_parallel(
+                    graph,
+                    options,
+                    type_tokens,
+                    control,
+                    nodes,
+                    node_indexes,
+                    initial,
+                    &prior,
+                    iteration,
+                    active_bits,
+                    words,
+                )?;
             }
         }
         std::mem::swap(&mut prior, &mut next);
     }
     Ok(prior)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_iteration_serial(
+    graph: &AdjacencyGraph,
+    options: &HashGnnOptions,
+    type_tokens: Option<&HashGnnTypeTokens>,
+    control: &EmbeddingControl<'_>,
+    nodes: &[([u8; 16], u64)],
+    node_indexes: &BTreeMap<u64, usize>,
+    initial: &[Vec<u64>],
+    prior: &[Vec<u64>],
+    iteration: usize,
+    active_bits: usize,
+    words: usize,
+    next: &mut [Vec<u64>],
+) -> Result<(), HashGnnError> {
+    for (node_index, slot) in next.iter_mut().enumerate().take(nodes.len()) {
+        *slot = propagate_node(
+            graph,
+            options,
+            type_tokens,
+            control,
+            nodes,
+            node_indexes,
+            initial,
+            prior,
+            iteration,
+            active_bits,
+            words,
+            node_index,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_iteration_parallel(
+    graph: &AdjacencyGraph,
+    options: &HashGnnOptions,
+    type_tokens: Option<&HashGnnTypeTokens>,
+    control: &EmbeddingControl<'_>,
+    nodes: &[([u8; 16], u64)],
+    node_indexes: &BTreeMap<u64, usize>,
+    initial: &[Vec<u64>],
+    prior: &[Vec<u64>],
+    iteration: usize,
+    active_bits: usize,
+    words: usize,
+) -> Result<Vec<Vec<u64>>, HashGnnError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        HashGnnError::Resource(EmbeddingResourceError::Algorithm(
+            crate::algorithm_dispatch::AlgorithmError::Execution {
+                message: "parallel hashgnn propagation requires an instance-owned compute pool"
+                    .into(),
+            },
+        ))
+    })?;
+    let ranges = node_chunks(nodes.len(), control.compute_threads());
+    let chunk_results = run_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut chunk = Vec::with_capacity(end.saturating_sub(start));
+                for node_index in start..end {
+                    chunk.push(propagate_node(
+                        graph,
+                        options,
+                        type_tokens,
+                        control,
+                        nodes,
+                        node_indexes,
+                        initial,
+                        prior,
+                        iteration,
+                        active_bits,
+                        words,
+                        node_index,
+                    )?);
+                }
+                Ok(chunk)
+            })
+            .collect::<Vec<Result<Vec<Vec<u64>>, HashGnnError>>>();
+        first_chunk_error(results)
+    })?;
+    Ok(chunk_results.into_iter().flatten().collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_node(
+    graph: &AdjacencyGraph,
+    options: &HashGnnOptions,
+    type_tokens: Option<&HashGnnTypeTokens>,
+    control: &EmbeddingControl<'_>,
+    nodes: &[([u8; 16], u64)],
+    node_indexes: &BTreeMap<u64, usize>,
+    initial: &[Vec<u64>],
+    prior: &[Vec<u64>],
+    iteration: usize,
+    active_bits: usize,
+    words: usize,
+    node_index: usize,
+) -> Result<Vec<u64>, HashGnnError> {
+    control.checkpoint(1)?;
+    let (node_uuid, node_id) = nodes[node_index];
+    let neighbors = graph.neighbors(node_id);
+    if neighbors.is_empty() {
+        return Ok(initial[node_index].clone());
+    }
+    let mut output = vec![0_u64; words];
+    for sample in 0..active_bits {
+        control.checkpoint(1)?;
+        let mut selected = None;
+        for coordinate in active_coordinates(&prior[node_index], options.dimensions) {
+            consider(
+                &mut selected,
+                candidate(
+                    iteration,
+                    sample,
+                    CandidateRole::SelfNode,
+                    node_uuid,
+                    ZERO_UUID,
+                    coordinate,
+                    node_type(type_tokens, &node_uuid),
+                    None,
+                    options.seed,
+                ),
+            );
+        }
+        for edge in neighbors {
+            control.checkpoint(1)?;
+            let source_uuid = graph
+                .node_uuid(edge.neighbor_id)
+                .ok_or(HashGnnError::MissingNodeIdentity)?;
+            let source_index = node_indexes[&edge.neighbor_id];
+            for coordinate in active_coordinates(&prior[source_index], options.dimensions) {
+                consider(
+                    &mut selected,
+                    candidate(
+                        iteration,
+                        sample,
+                        CandidateRole::Edge,
+                        source_uuid,
+                        edge.edge_uuid,
+                        coordinate,
+                        node_type(type_tokens, &source_uuid),
+                        relationship_type(type_tokens, &edge.edge_uuid),
+                        options.seed,
+                    ),
+                );
+            }
+        }
+        if let Some(candidate) = selected {
+            set_bit(&mut output, candidate.coordinate);
+        }
+    }
+    Ok(output)
+}
+
+fn run_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, HashGnnError> + Send,
+) -> Result<R, HashGnnError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(HashGnnError::WorkerPanic),
+    }
+}
+
+fn first_chunk_error<T>(results: Vec<Result<T, HashGnnError>>) -> Result<Vec<T>, HashGnnError> {
+    results.into_iter().collect()
+}
+
+/// Choose serial vs private-pool parallel propagation for a HashGNN workload.
+pub(crate) fn select_hashgnn_propagation_path(
+    control: &EmbeddingControl<'_>,
+    nodes: usize,
+    estimated_work: u64,
+) -> HashGnnPropagationPath {
+    let threads = control.compute_threads();
+    if threads <= 1 || nodes <= 1 || estimated_work < HASHGNN_PROPAGATE_PARALLEL_CROSSOVER {
+        return HashGnnPropagationPath::Serial;
+    }
+    if control
+        .compute_pool()
+        .is_none_or(|pool| !pool.is_parallel())
+    {
+        return HashGnnPropagationPath::Serial;
+    }
+    let chunks = node_chunks(nodes, threads).len();
+    if chunks <= 1 {
+        return HashGnnPropagationPath::Serial;
+    }
+    HashGnnPropagationPath::Parallel { threads, chunks }
+}
+
+fn estimated_propagation_work(nodes: usize, adjacency_entries: u64, active_bits: usize) -> u64 {
+    let nodes = u64::try_from(nodes).unwrap_or(u64::MAX);
+    let active_bits = u64::try_from(active_bits).unwrap_or(u64::MAX);
+    active_bits
+        .saturating_mul(active_bits)
+        .saturating_mul(nodes.saturating_add(adjacency_entries))
+}
+
+fn node_chunks(nodes: usize, threads: usize) -> Vec<(usize, usize)> {
+    if nodes == 0 {
+        return Vec::new();
+    }
+    let workers = threads.clamp(1, nodes);
+    let base = nodes / workers;
+    let rem = nodes % workers;
+    let mut ranges = Vec::with_capacity(workers);
+    let mut start = 0;
+    for index in 0..workers {
+        let len = base + usize::from(index < rem);
+        let end = start + len;
+        if start < end {
+            ranges.push((start, end));
+        }
+        start = end;
+    }
+    ranges
 }
 
 #[allow(
@@ -399,6 +629,8 @@ mod tests {
     };
     use crate::algorithm_embedding_control::EmbeddingResourceLimits;
     use crate::algorithm_graph::{ResolvedGraphEdge, ResolvedGraphProjection};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn options() -> HashGnnOptions {
         HashGnnOptions {
@@ -444,6 +676,21 @@ mod tests {
         hashgnn_embeddings(graph, options, types, &control)
     }
 
+    fn run_with_threads(
+        graph: &AdjacencyGraph,
+        options: &HashGnnOptions,
+        threads: usize,
+    ) -> Result<Vec<EmbeddingOutputRow>, HashGnnError> {
+        let pool = Arc::new(ComputePool::new(threads).unwrap());
+        let algorithm = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool);
+        let control = EmbeddingControl::new(&algorithm, EmbeddingResourceLimits::default());
+        hashgnn_embeddings(graph, options, None, &control)
+    }
+
     fn bits(rows: &[EmbeddingOutputRow]) -> Vec<([u8; 16], Vec<u32>)> {
         rows.iter()
             .map(|row| {
@@ -470,6 +717,22 @@ mod tests {
             .collect()
     }
 
+    fn ring_graph(nodes: usize) -> AdjacencyGraph {
+        let node_uuids = (0..nodes)
+            .map(|node| (node as u128 + 1).to_be_bytes())
+            .collect::<Vec<_>>();
+        let edges = (0..nodes)
+            .map(|source| {
+                (
+                    (1000_u128 + source as u128).to_be_bytes(),
+                    node_uuids[source],
+                    node_uuids[(source + 1) % nodes],
+                )
+            })
+            .collect::<Vec<_>>();
+        projection(true, &node_uuids, &edges)
+    }
+
     #[test]
     fn initial_code_sets_exact_k_smallest_priorities() {
         let node = 7_u128.to_be_bytes();
@@ -487,6 +750,70 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(embedding, vec![1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn propagation_path_respects_crossover_threads_and_pool() {
+        let serial_algorithm =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let serial_control =
+            EmbeddingControl::new(&serial_algorithm, EmbeddingResourceLimits::default());
+        assert_eq!(
+            select_hashgnn_propagation_path(
+                &serial_control,
+                8,
+                HASHGNN_PROPAGATE_PARALLEL_CROSSOVER
+            ),
+            HashGnnPropagationPath::Serial
+        );
+
+        let pool = Arc::new(ComputePool::new(4).unwrap());
+        let parallel_algorithm = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool);
+        let parallel_control =
+            EmbeddingControl::new(&parallel_algorithm, EmbeddingResourceLimits::default());
+        assert_eq!(
+            select_hashgnn_propagation_path(
+                &parallel_control,
+                8,
+                HASHGNN_PROPAGATE_PARALLEL_CROSSOVER - 1
+            ),
+            HashGnnPropagationPath::Serial
+        );
+        assert_eq!(
+            select_hashgnn_propagation_path(
+                &parallel_control,
+                8,
+                HASHGNN_PROPAGATE_PARALLEL_CROSSOVER
+            ),
+            HashGnnPropagationPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn thread_matrix_preserves_hashgnn_embedding_fingerprint() {
+        let graph = ring_graph(16);
+        let value = HashGnnOptions {
+            dimensions: 128,
+            iterations: 2,
+            embedding_density: 0.25,
+            seed: 99,
+            ..options()
+        };
+        let serial = bits(&run_with_threads(&graph, &value, 1).unwrap());
+        for threads in [2, 4, 8] {
+            assert_eq!(
+                bits(&run_with_threads(&graph, &value, threads).unwrap()),
+                serial,
+                "threads={threads}"
+            );
+        }
     }
 
     #[test]
