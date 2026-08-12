@@ -17,9 +17,9 @@ use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
-    CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions, ExecutionResourcePolicy,
-    GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector, PathsOptions, PropValue,
-    RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
+    AnalyzeOptions, CancellationToken, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector,
+    PathsOptions, PropValue, RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
