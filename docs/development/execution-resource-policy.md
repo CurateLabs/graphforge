@@ -914,6 +914,26 @@ time; RNG derivation, cumulative mass order, update arithmetic, schemas, row
 order, cancellation, work/output limits, and bounded Arrow shaping remain the
 one-thread oracle at `1`/`2`/`4`/`8`/automatic configurations. Walk generation
 continues to use the #344 private-pool crossover above.
+
+## Serial paths(by="min_cut_edges") (#550)
+
+`paths(by="min_cut_edges")` has no parallel crossover. Its disposition is
+**serial constrained min-cut edge projection** for every `compute_threads`
+setting, including `1`/`2`/`4`/`8`/automatic resource policies.
+
+The edge view shares the min-cut kernel: a serial max-flow oracle establishes
+the minimum value, then constrained oracle calls build the lexicographically
+canonical source-side partition. Only after that partition is final can the
+selected stored edges be projected in edge-UUID order. Parallel cut decisions or
+early edge projection would risk changing edge rows, capacities, and result
+fingerprints.
+
+The path still uses CSR-native adjacency (#340), bounded Arrow output (#341),
+structured cancellation/resource checks, and no process-global Rayon pool. The
+M4 entry harness records `paths-min-cut-edges` evidence and verifies parity
+against the one-thread oracle for supported resource-policy cells; timing is
+not a pass/fail gate.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
