@@ -175,6 +175,14 @@ contribution order with serial dangling/delta reductions, Node2Vec skip-gram
 training stays serial, and Adamic-Adar keeps serial candidate/intersection order
 per source, so fingerprints match the one-thread path.
 
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and ArticleRank
+(#500) may partition independent work across that pool above documented
+crossovers; work never uses Rayon's process-global pool. Cosine dot products
+retain serial coordinate order, PageRank keeps canonical contribution order with
+serial dangling/delta reductions, ArticleRank keeps canonical per-destination
+message order with serial score/delta updates, and Node2Vec skip-gram training
+stays serial, so fingerprints match the one-thread path.
+
 ## Parallel cosine KNN (#342)
 
 Exact, all-score, and filtered cosine partition **independent source rows**
@@ -287,6 +295,23 @@ Below that crossover, or when the policy provides one compute thread, the
 serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
 for contiguous ordinal ranges; the sink merges them in ascending node order so
 schemas, row order, scores, and fingerprints match the one-thread result at
+
+## Parallel ArticleRank (#500)
+
+ArticleRank destination message sums run on the instance-owned private compute
+pool when:
+
+- `compute_threads > 1`, and
+- selected adjacency entries are at least
+  `ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`131_072`) in `graphforge-exec`.
+
+Below that crossover, or when the policy provides one compute thread, the serial
+destination-pull path runs with no pool scheduling tax. Parallel work is
+destination-owned: each worker owns a contiguous dense-ordinal destination range
+and applies inbound messages in the same canonical source/edge order as the
+one-thread recurrence. Score accumulation, delta damping, and convergence
+checks remain serial in dense node order, so schemas, row order, scores,
+iteration counts, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
 ## Parallel eigenvector (#507)
 
@@ -338,6 +363,12 @@ order, scores, ties, and fingerprints match the one-thread result at
 the parallel path avoids small-fixture tax and clears the worker-pool cost once
 20 fixed HITS iterations amortize two sparse matrix-vector phases per
 iteration. It is CPU-only; no GPU or universal scaling claim is made.
+
+The threshold is the first measured win on the M4 agent host using the ignored
+release harness (`measure_article_rank_parallel_crossover`) with a shared
+four-worker private pool: sizes through 32k selected entries stayed near parity
+within timing noise, while 131k and 262k selected entries were clear wins over
+the one-thread path.
 
 ## Parallel Node2Vec walk generation (#344)
 

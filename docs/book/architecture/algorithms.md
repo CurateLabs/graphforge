@@ -298,6 +298,15 @@ before degree, average-degree, and score computation. Parallel adjacency entries
 contribute independently, and stored self-loops follow the shared adjacency
 adapter's directed/undirected export contract.
 
+Destination message sums may run through the instance-owned private compute
+pool (#337 / #500) above the documented
+`ARTICLE_RANK_PARALLEL_CROSSOVER_EDGES` (`131_072`) threshold. Each worker owns a
+contiguous dense-ordinal destination range and applies inbound source messages
+in the same canonical source/edge order as the one-thread recurrence; damping,
+score accumulation, and convergence checks remain serial in dense node order, so
+scores, iteration counts, schemas, row order, and fingerprints match the
+one-thread path.
+
 Disconnected components share only the graph-wide average-degree denominator.
 An edgeless non-empty selection scores every node `0.15`; a singleton does the
 same, and an empty selection returns the typed zero-row table. The public schema
@@ -308,7 +317,7 @@ score only after successful execution and is otherwise read-only.
 
 ArticleRank uses the shared hard caps of 10,000,000 selected nodes, 100,000,000
 selected adjacency entries, 10,000,000 output rows, and 10,000 cooperative
-iteration checkpoints, including edge-heavy checkpoints during propagation.
+iteration checkpoints, including checkpoints during propagation.
 Invalid selectors or unavailable catalog values, resource limits, cancellation,
 non-finite scores, and adjacency/storage/shaping/write-back failures remain
 structured Rust errors. Python and Node only translate arguments and Arrow IPC
