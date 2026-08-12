@@ -213,8 +213,6 @@ serial path runs with no pool scheduling tax. Workers emit `(uuid, score)` rows
 for contiguous ordinal ranges; the sink merges them in ascending node order so
 schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
-<<<<<<< HEAD
-=======
 ## Parallel eigenvector (#507)
 
 `rank(by="eigenvector")` shifted power-iteration destination updates may run on
@@ -270,7 +268,6 @@ release harness (`measure_article_rank_parallel_crossover`) with a shared
 four-worker private pool: sizes through 32k selected entries stayed near parity
 within timing noise, while 131k and 262k selected entries were clear wins over
 the one-thread path.
->>>>>>> 1d5f6e2 (perf(exec): serial disposition for k_core peeling (#511))
 
 ## Parallel Node2Vec walk generation (#344)
 
@@ -649,8 +646,6 @@ sink, avoids any Rayon global pool, and observes cancellation and shared
 iteration/output limits. The serial disposition is covered by a fingerprint test
 that attaches private compute pools for `1`/`2`/`4`/`8` configured compute
 threads and requires identical schemas, row ordering, labels, and rows.
-<<<<<<< HEAD
-=======
 
 ## Serial k-core peeling (#511)
 
@@ -676,7 +671,6 @@ peak RSS, result fingerprint, and hardware-specific timing) and verifies that
 executed thread configurations match the one-thread oracle. Timing remains
 evidence only, not a CI threshold.
 
->>>>>>> 1d5f6e2 (perf(exec): serial disposition for k_core peeling (#511))
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
