@@ -4332,5 +4332,4 @@ mod tests {
             assert_eq!(output_fingerprint(&output), serial_fingerprint);
         }
     }
-
 }
