@@ -1,3 +1,7 @@
+//! Spanning-forest analysis remains serial for minimum spanning trees (#582).
+//! Stable edge order and union-find acceptance define public ties, and each
+//! accepted edge mutates component state consumed by later candidates.
+
 use std::cmp::Ordering;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};

@@ -760,6 +760,24 @@ harness records `paths-min-cut` structural evidence and verifies one-thread
 fingerprint parity for supported resource-policy cells. Timing is evidence
 only, never a CI threshold.
 
+## Serial analyze(by="minimum_spanning_tree") (#582)
+
+`analyze(by="minimum_spanning_tree")` has no parallel crossover. Its
+disposition is **serial Kruskal ascending union-find** for every
+`compute_threads` setting, including `1`/`2`/`4`/`8`/automatic policies.
+
+The Rust kernel consumes CSR-native weighted undirected adjacency (#340),
+collapses mirrored entries by edge UUID, performs a stable canonical edge sort,
+and accepts candidates through one union-find state. Each accepted edge changes
+component state for all later edges, while equal-weight edge UUID ties are part
+of the public fingerprint. Parallel acceptance would need shared union-find
+coordination and could change rows or cancellation boundaries.
+
+The path still uses bounded Arrow output (#341), structured cancellation and
+resource checks, and no process-global Rayon pool. The M4 harness records
+`analyze-minimum-spanning-tree` evidence and verifies one-thread parity; timing
+is report-only.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose
