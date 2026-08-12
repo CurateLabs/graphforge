@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #515 triangles; #518 Components; #535 Jaccard similarity) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #515 triangles; #518 Components; #535 Jaccard similarity; #513 resource allocation) |
 
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
@@ -182,6 +182,15 @@ retain serial coordinate order, PageRank keeps canonical contribution order with
 serial dangling/delta reductions, ArticleRank keeps canonical per-destination
 message order with serial score/delta updates, and Node2Vec skip-gram training
 stays serial, so fingerprints match the one-thread path.
+
+(#342), PageRank (#343), Node2Vec walk-corpus generation (#344), and
+resource-allocation source aggregates (#513) may partition independent work
+across that pool above documented crossovers; work never uses Rayon's
+process-global pool. Cosine dot products retain serial coordinate order,
+PageRank keeps canonical contribution order with serial dangling/delta
+reductions, Node2Vec skip-gram training stays serial, and resource allocation
+keeps serial candidate/intersection order per source, so fingerprints match the
+one-thread path.
 
 ## Parallel cosine KNN (#342)
 
@@ -678,6 +687,34 @@ intersection, logarithmic discounts, and compensated floating-point summation
 remain serial per source. Worker score chunks merge in canonical source order,
 so schemas, row order, scores, and fingerprints match the one-thread result at
 `1`/`2`/`4`/`8`/automatic configurations.
+
+## Parallel resource-allocation aggregate (#513)
+
+`rank(by="resource_allocation")` partitions **independent source ordinals**
+across the instance-owned private compute pool when:
+
+- `compute_threads > 1`, and
+- the estimated pair/intersection work is at least
+  `RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK` (`524_288`) in
+  `graphforge-exec`.
+
+The estimate is `sources² + 2 × sources × distinct_adjacency_entries`, a
+conservative O(V + E) proxy for the serial pair loop and two-pointer
+intersection scans. The threshold is the smallest power-of-two estimate below
+the measured source-partition win boundary on this M4 agent host (directed
+ring-lattice fixture, 4 private workers, release build): ~69k and ~230k units
+were neutral, ~540k units first won (~0.74x serial), and >=1.2M units ran about
+0.52-0.56x serial. Below the boundary, pool scheduling can dominate; at and
+above it, source-owned chunks amortize pool work while preserving exact score
+bits.
+
+Below that crossover, or when the policy provides one compute thread, the
+serial path runs with no pool scheduling tax. Parallel workers only own source
+ranges. Candidate order, missing-link checks, two-pointer neighborhood
+intersection, reciprocal-degree discounts, and compensated floating-point
+summation remain serial per source. Worker score chunks merge in canonical
+source order, so schemas, row order, scores, and fingerprints match the
+one-thread result at `1`/`2`/`4`/`8`/automatic configurations.
 
 ## Serial articulation points (#563)
 

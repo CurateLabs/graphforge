@@ -165,6 +165,19 @@ const ADAMIC_ADAR_CHECKPOINT_INTERVAL: usize = 1_024;
 /// because each BFS is still serial and source scores merge in ordinal order.
 pub const CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS: u64 = 65_536;
 const CLOSENESS_CHECKPOINT_EDGES: usize = 1_024;
+
+/// Estimated pair/intersection work below which resource allocation stays serial (#513).
+///
+/// Uses the same source-owned partition regime as Adamic-Adar: each worker owns
+/// complete source ordinals while candidate order, intersections, reciprocal
+/// discounts, and compensated summation remain serial per source. Release-mode
+/// measurements on this M4 agent host with 4 private workers showed ~230k units
+/// still neutral and ~540k units as the first clear win, so this keeps small
+/// fixtures off the pool while naming the measured crossover used by docs and
+/// tests.
+pub const RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK: u64 = 524_288;
+const RESOURCE_ALLOCATION_CHECKPOINT_INTERVAL: usize = 1_024;
+
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 /// Selected adjacency entries below which eigenvector stays on the serial path (#507).
@@ -444,6 +457,12 @@ struct ClosenessChunkScores {
     start: usize,
     scores: Vec<f64>,
     checkpoints: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResourceAllocationExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
 }
 
 /// Dense inbound CSR: source ordinals in canonical source/edge order per destination.
@@ -2652,56 +2671,180 @@ fn resource_allocation_scores(
     control: &AlgorithmControl,
 ) -> Result<Vec<f64>, AlgorithmError> {
     let neighbors = simple_neighbors(graph, control, false)?;
+    let discount_degrees = resource_allocation_discount_degrees(&neighbors)?;
+    let estimated_work = estimated_pairwise_source_work(&neighbors);
+    match select_resource_allocation_path(control, neighbors.len(), estimated_work) {
+        ResourceAllocationExecutionPath::Serial => {
+            resource_allocation_scores_serial(&neighbors, &discount_degrees, control)
+        }
+        ResourceAllocationExecutionPath::Parallel { .. } => {
+            resource_allocation_scores_parallel(&neighbors, &discount_degrees, control)
+        }
+    }
+}
+
+fn resource_allocation_discount_degrees(
+    neighbors: &[Vec<usize>],
+) -> Result<Vec<u64>, AlgorithmError> {
     let mut discount_degrees = vec![0_u64; neighbors.len()];
-    for adjacent in &neighbors {
+    for adjacent in neighbors {
         for &neighbor in adjacent {
             discount_degrees[neighbor] = discount_degrees[neighbor]
                 .checked_add(1)
                 .ok_or_else(|| execution("resource-allocation degree exceeds supported range"))?;
         }
     }
+    Ok(discount_degrees)
+}
 
+fn resource_allocation_scores_serial(
+    neighbors: &[Vec<usize>],
+    discount_degrees: &[u64],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
     let mut visited = 0_usize;
     let mut scores = Vec::with_capacity(neighbors.len());
-    for (source, source_neighbors) in neighbors.iter().enumerate() {
-        let mut score = 0.0_f64;
-        let mut compensation = 0.0_f64;
-        for (candidate, candidate_neighbors) in neighbors.iter().enumerate() {
-            if visited.is_multiple_of(1024) {
-                control.checkpoint()?;
-            }
-            visited += 1;
-            if source == candidate || source_neighbors.binary_search(&candidate).is_ok() {
-                continue;
-            }
-            let (mut left, mut right) = (0, 0);
-            while left < source_neighbors.len() && right < candidate_neighbors.len() {
-                if visited.is_multiple_of(1024) {
-                    control.checkpoint()?;
-                }
-                visited += 1;
-                match source_neighbors[left].cmp(&candidate_neighbors[right]) {
-                    std::cmp::Ordering::Less => left += 1,
-                    std::cmp::Ordering::Greater => right += 1,
-                    std::cmp::Ordering::Equal => {
-                        let term =
-                            resource_allocation_discount(discount_degrees[source_neighbors[left]])?;
-                        let adjusted = term - compensation;
-                        let updated = score + adjusted;
-                        compensation = (updated - score) - adjusted;
-                        score = updated;
-                        left += 1;
-                        right += 1;
-                    }
-                }
-            }
-        }
-        if !score.is_finite() {
-            return Err(execution("resource-allocation score is not finite"));
-        }
+    for source in 0..neighbors.len() {
+        let score = resource_allocation_source_score(neighbors, discount_degrees, source, || {
+            resource_allocation_serial_checkpoint(control, &mut visited)
+        })?;
         scores.push(score);
     }
     Ok(scores)
+}
+
+fn resource_allocation_scores_parallel(
+    neighbors: &[Vec<usize>],
+    discount_degrees: &[u64],
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control.compute_pool().ok_or_else(|| {
+        execution("parallel resource-allocation requires an instance-owned compute pool")
+    })?;
+    let ranges = source_chunks(neighbors.len(), control.compute_threads());
+    let chunk_results = run_resource_allocation_on_pool(pool, || {
+        let results = ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                control.check_cancelled()?;
+                let mut work = 0_usize;
+                let mut local = Vec::with_capacity(end - start);
+                for source in start..end {
+                    let score = resource_allocation_source_score(
+                        neighbors,
+                        discount_degrees,
+                        source,
+                        || resource_allocation_serial_checkpoint(control, &mut work),
+                    )?;
+                    local.push(score);
+                }
+                Ok((start, local))
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>();
+        first_chunk_error(results)
+    })?;
+
+    let mut scores = Vec::with_capacity(neighbors.len());
+    for (_start, local) in chunk_results {
+        scores.extend(local);
+    }
+    Ok(scores)
+}
+
+fn resource_allocation_source_score(
+    neighbors: &[Vec<usize>],
+    discount_degrees: &[u64],
+    source: usize,
+    mut checkpoint: impl FnMut() -> Result<(), AlgorithmError>,
+) -> Result<f64, AlgorithmError> {
+    let source_neighbors = &neighbors[source];
+    let mut score = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for (candidate, candidate_neighbors) in neighbors.iter().enumerate() {
+        checkpoint()?;
+        if source == candidate || source_neighbors.binary_search(&candidate).is_ok() {
+            continue;
+        }
+        let (mut left, mut right) = (0, 0);
+        while left < source_neighbors.len() && right < candidate_neighbors.len() {
+            checkpoint()?;
+            match source_neighbors[left].cmp(&candidate_neighbors[right]) {
+                std::cmp::Ordering::Less => left += 1,
+                std::cmp::Ordering::Greater => right += 1,
+                std::cmp::Ordering::Equal => {
+                    let term =
+                        resource_allocation_discount(discount_degrees[source_neighbors[left]])?;
+                    let adjusted = term - compensation;
+                    let updated = score + adjusted;
+                    compensation = (updated - score) - adjusted;
+                    score = updated;
+                    left += 1;
+                    right += 1;
+                }
+            }
+        }
+    }
+    if !score.is_finite() {
+        return Err(execution("resource-allocation score is not finite"));
+    }
+    Ok(score)
+}
+
+fn resource_allocation_serial_checkpoint(
+    control: &AlgorithmControl,
+    visited: &mut usize,
+) -> Result<(), AlgorithmError> {
+    if (*visited).is_multiple_of(RESOURCE_ALLOCATION_CHECKPOINT_INTERVAL) {
+        control.checkpoint()?;
+    }
+    *visited = visited.saturating_add(1);
+    Ok(())
+}
+
+fn estimated_pairwise_source_work(neighbors: &[Vec<usize>]) -> u64 {
+    let sources = usize_to_u64_saturating(neighbors.len());
+    let degree_sum = neighbors.iter().fold(0_u64, |total, adjacent| {
+        total.saturating_add(usize_to_u64_saturating(adjacent.len()))
+    });
+    sources
+        .saturating_mul(sources)
+        .saturating_add(sources.saturating_mul(degree_sum).saturating_mul(2))
+}
+
+/// Choose serial vs private-pool parallel execution for resource allocation.
+pub(crate) fn select_resource_allocation_path(
+    control: &AlgorithmControl,
+    sources: usize,
+    estimated_work: u64,
+) -> ResourceAllocationExecutionPath {
+    let threads = control.compute_threads();
+    if threads <= 1
+        || sources <= 1
+        || estimated_work < RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return ResourceAllocationExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    if chunks <= 1 {
+        return ResourceAllocationExecutionPath::Serial;
+    }
+    ResourceAllocationExecutionPath::Parallel { threads, chunks }
+}
+
+fn run_resource_allocation_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("resource-allocation worker panicked")),
+    }
 }
 
 fn resource_allocation_discount(degree: u64) -> Result<f64, AlgorithmError> {
@@ -8446,6 +8589,300 @@ mod tests {
             .unwrap();
         assert_eq!(capability.dependency, BUILTIN_REVIEW);
         assert_eq!(capability.algorithm.as_str(), "resource_allocation");
+    }
+
+    fn execute_resource_allocation_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        limits: AlgorithmLimits,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let pool = Arc::new(crate::ComputePool::new(threads).unwrap());
+        let mut registry = AlgorithmRegistry::default();
+        register_rank_algorithms(&mut registry)?;
+        let control = AlgorithmControl::new(limits.with_compute_threads(threads), cancellation)
+            .with_compute_pool(pool);
+        registry.execute(
+            Algorithm::Rank(RankAlgorithm::ResourceAllocation),
+            graph,
+            &control,
+        )
+    }
+
+    fn dense_resource_allocation_graph(nodes: usize) -> AdjacencyGraph {
+        let max_fanout = nodes.saturating_sub(1).max(1) / 2;
+        let fanout = ((RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK as usize)
+            / (nodes.max(1) * nodes.max(1)))
+        .clamp(4, max_fanout.max(1));
+        resource_allocation_ring_graph(nodes, fanout)
+    }
+
+    fn resource_allocation_ring_graph(nodes: usize, fanout: usize) -> AdjacencyGraph {
+        let fanout = fanout.clamp(1, (nodes.saturating_sub(1) / 2).max(1));
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+
+    #[test]
+    #[ignore = "manual crossover measurement; run with --ignored --nocapture"]
+    fn measure_resource_allocation_parallel_crossover() {
+        use std::time::Instant;
+
+        for (nodes, fanout) in [
+            (64_usize, 8_usize),
+            (96, 12),
+            (128, 16),
+            (192, 16),
+            (256, 16),
+            (512, 32),
+            (1024, 32),
+        ] {
+            let graph = resource_allocation_ring_graph(nodes, fanout);
+            let control =
+                AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+            let neighbors = simple_neighbors(&graph, &control, false).unwrap();
+            let work = estimated_pairwise_source_work(&neighbors);
+            let measurement_limits = AlgorithmLimits {
+                iterations: 1_000_000,
+                ..AlgorithmLimits::default()
+            };
+            let serial_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(1),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+            let parallel_ctl = AlgorithmControl::new(
+                measurement_limits.with_compute_threads(4),
+                AlgorithmCancellation::default(),
+            )
+            .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+            let mut serial_ns = u128::MAX;
+            let mut parallel_ns = u128::MAX;
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                let serial = resource_allocation_scores(&graph, &serial_ctl).unwrap();
+                serial_ns = serial_ns.min(t0.elapsed().as_nanos());
+                let serial_bits = serial.iter().copied().map(f64::to_bits).collect::<Vec<_>>();
+
+                let t1 = Instant::now();
+                let parallel = resource_allocation_scores(&graph, &parallel_ctl).unwrap();
+                parallel_ns = parallel_ns.min(t1.elapsed().as_nanos());
+                let parallel_bits = parallel
+                    .iter()
+                    .copied()
+                    .map(f64::to_bits)
+                    .collect::<Vec<_>>();
+                assert_eq!(parallel_bits, serial_bits);
+            }
+            println!(
+                "nodes={nodes} fanout={fanout} work={work} serial_ns={serial_ns} parallel_ns={parallel_ns} ratio={}",
+                parallel_ns as f64 / serial_ns as f64
+            );
+        }
+    }
+
+    fn resource_allocation_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        resource_allocation_output_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
+    #[test]
+    fn resource_allocation_path_selection_respects_crossover_and_one_thread() {
+        let no_pool = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_resource_allocation_path(
+                &no_pool,
+                64,
+                RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK
+            ),
+            ResourceAllocationExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_resource_allocation_path(&one, 64, RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK),
+            ResourceAllocationExecutionPath::Serial
+        );
+        let small = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_resource_allocation_path(
+                &small,
+                64,
+                RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK - 1
+            ),
+            ResourceAllocationExecutionPath::Serial
+        );
+        assert_eq!(
+            select_resource_allocation_path(
+                &small,
+                64,
+                RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK
+            ),
+            ResourceAllocationExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+
+    #[test]
+    fn resource_allocation_parallel_preserves_boundary_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(
+            5,
+            &[
+                (0, 2),
+                (0, 2),
+                (0, 3),
+                (0, 0),
+                (1, 2),
+                (1, 3),
+                (2, 0),
+                (2, 4),
+                (3, 4),
+            ],
+        );
+        let directed = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+        let undirected = AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]);
+        let complete =
+            AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]);
+        for graph in [
+            &multigraph,
+            &directed,
+            &undirected,
+            &complete,
+            &empty,
+            &single,
+            &disconnected,
+        ] {
+            let serial = execute_resource_allocation_with_pool(
+                graph,
+                1,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel = execute_resource_allocation_with_pool(
+                    graph,
+                    threads,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
+                )
+                .unwrap();
+                assert_eq!(
+                    resource_allocation_bits(&parallel),
+                    resource_allocation_bits(&serial)
+                );
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+    }
+
+    #[test]
+    fn resource_allocation_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_resource_allocation_graph(128);
+        let control =
+            AlgorithmControl::new(AlgorithmLimits::default(), AlgorithmCancellation::default());
+        let neighbors = simple_neighbors(&graph, &control, false).unwrap();
+        assert!(
+            estimated_pairwise_source_work(&neighbors)
+                >= RESOURCE_ALLOCATION_PARALLEL_CROSSOVER_WORK
+        );
+        let serial = execute_resource_allocation_with_pool(
+            &graph,
+            1,
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap();
+        let serial_rows = serial.rows();
+        let serial_bits = resource_allocation_bits(&serial);
+        for threads in [2_usize, 4, 8] {
+            let parallel = execute_resource_allocation_with_pool(
+                &graph,
+                threads,
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(resource_allocation_bits(&parallel), serial_bits);
+        }
+    }
+
+    #[test]
+    fn resource_allocation_parallel_limits_and_cancellation_return_structured() {
+        let graph = dense_resource_allocation_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_resource_allocation_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits::default(),
+                cancellation
+            ),
+            Err(AlgorithmError::Cancelled)
+        );
+        assert!(matches!(
+            execute_resource_allocation_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::IterationLimit { .. })
+        ));
+        assert!(matches!(
+            execute_resource_allocation_with_pool(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 2,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default()
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn resource_allocation_worker_panic_returns_structured_error() {
+        let pool = crate::ComputePool::new(2).unwrap();
+        let error = run_resource_allocation_on_pool(&pool, || -> Result<(), AlgorithmError> {
+            panic!("synthetic resource-allocation worker failure")
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AlgorithmError::Execution {
+                message: "resource-allocation worker panicked".into()
+            }
+        );
     }
 
     #[test]
