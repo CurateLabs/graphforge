@@ -973,6 +973,7 @@ fn build_evidence(
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
     assert_eq!(workloads.len(), 10);
+    assert_eq!(workloads.len(), 9);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
