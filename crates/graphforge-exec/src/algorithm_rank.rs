@@ -1,6 +1,7 @@
 //! Rust-owned rank handlers registered under the shared algorithm dispatch contract.
 //!
 //! PageRank (#343), clustering coefficient (#504), triangles (#515), Degree
+//! Closeness (#503) may partition independent source BFS work across the same private pool; each BFS stays serial and worker scores merge by source ordinal.
 //! (#506), and betweenness (#501) may partition independent score updates across
 //! the instance-owned private compute pool while preserving serial contribution
 //! order, ordered merges, reductions, and bit-identical fingerprints.
@@ -17,10 +18,10 @@
 //! reductions, and bit-identical fingerprints.
 
 use std::collections::{HashMap, VecDeque};
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use graphforge_core::algorithms::{Algorithm, RankAlgorithm};
@@ -28,17 +29,17 @@ use graphforge_core::{GfError, OntologyMode, RankOptions, TypeId};
 use graphforge_ir::Direction;
 use rayon::prelude::*;
 
-use crate::AdjacencyProvider;
 use crate::algorithm_dispatch::{
     AlgorithmCancellation, AlgorithmCapability, AlgorithmControl, AlgorithmError, AlgorithmLimits,
     AlgorithmOutput, AlgorithmRegistry, AlgorithmValue, DependencyReview, RustAlgorithm,
 };
-use crate::algorithm_graph::{AdjacencyGraph, AdjacencySelection, export_adjacency};
+use crate::algorithm_graph::{export_adjacency, AdjacencyGraph, AdjacencySelection};
 use crate::algorithm_k_core::k_core_numbers;
 use crate::algorithm_neighbors::{simple_neighbors, simple_undirected_neighbors};
 use crate::algorithm_output::{
     materialize_node_properties_with_batch_size, shape_algorithm_output,
 };
+use crate::AdjacencyProvider;
 
 const BUILTIN_REVIEW: DependencyReview = DependencyReview {
     implementation: "graphforge-exec built-in",
@@ -152,6 +153,15 @@ const COMMON_NEIGHBORS_CHECKPOINT_INTERVAL: usize = 1_024;
 /// scores remain bit-identical on either path.
 pub const ADAMIC_ADAR_PARALLEL_CROSSOVER_WORK: u64 = 524_288;
 const ADAMIC_ADAR_CHECKPOINT_INTERVAL: usize = 1_024;
+/// Estimated edge visits below which closeness stays on the serial path (#503).
+///
+/// Closeness has independent source BFS work. Release-mode measurements on the
+/// M4 agent host showed the private-pool scheduling and merge tax losing below
+/// roughly 32k estimated edge visits, first clear wins around 65k, and stable
+/// wins beyond that on dense-ring fixtures. Numeric results remain identical
+/// because each BFS is still serial and source scores merge in ordinal order.
+pub const CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS: u64 = 65_536;
+const CLOSENESS_CHECKPOINT_EDGES: usize = 1_024;
 const EIGENVECTOR_MAX_ITERATIONS: usize = 20;
 const EIGENVECTOR_TOLERANCE: f64 = 1.0e-7;
 /// Selected adjacency entries below which eigenvector stays on the serial path (#507).
@@ -385,6 +395,45 @@ pub(crate) enum CommonNeighborsExecutionPath {
 pub(crate) enum AdamicAdarExecutionPath {
     Serial,
     Parallel { threads: usize, chunks: usize },
+}
+
+/// Selected closeness execution path for observability and crossover tests (#503).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClosenessExecutionPath {
+    Serial,
+    Parallel { threads: usize, chunks: usize },
+}
+
+#[derive(Clone, Debug, Default)]
+struct PreparedCloseness {
+    offsets: Vec<u32>,
+    targets: Vec<u32>,
+    edge_count: u64,
+}
+
+impl PreparedCloseness {
+    fn sources(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    fn neighbors(&self, source: usize) -> &[u32] {
+        let start = usize::try_from(self.offsets[source]).unwrap_or(0);
+        let end = usize::try_from(self.offsets[source + 1]).unwrap_or(start);
+        &self.targets[start.min(end)..end.min(self.targets.len())]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ClosenessSourceScore {
+    score: f64,
+    checkpoints: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ClosenessChunkScores {
+    start: usize,
+    scores: Vec<f64>,
+    checkpoints: u64,
 }
 
 /// Dense inbound CSR: source ordinals in canonical source/edge order per destination.
@@ -936,72 +985,231 @@ impl RustAlgorithm for Closeness {
             return AlgorithmOutput::empty(algorithm, control);
         }
 
-        let indices: HashMap<u64, usize> = node_ids
-            .iter()
-            .enumerate()
-            .map(|(index, &node)| (node, index))
-            .collect();
+        let prepared = prepare_closeness(graph)?;
         let node_count = f64::from(exact_u32(node_ids.len(), "node count")?);
-        let mut scores = Vec::with_capacity(node_ids.len());
-        for source in 0..node_ids.len() {
-            control.checkpoint()?;
-            let mut distance = vec![usize::MAX; node_ids.len()];
-            distance[source] = 0;
-            let mut queue = VecDeque::from([source]);
-            let mut traversed_edges = 0_usize;
+        let scores = match select_closeness_path(control, node_ids.len(), prepared.edge_count) {
+            ClosenessExecutionPath::Serial => {
+                closeness_scores_serial(&prepared, node_count, control)?
+            }
+            ClosenessExecutionPath::Parallel { .. } => {
+                closeness_scores_parallel(&prepared, node_count, control)?
+            }
+        };
+        rank_scores_output(algorithm, graph, scores, control)
+    }
+}
 
-            while let Some(vertex) = queue.pop_front() {
-                for edge in graph.neighbors(node_ids[vertex]) {
-                    if traversed_edges > 0 && traversed_edges.is_multiple_of(1024) {
-                        control.checkpoint()?;
-                    }
-                    traversed_edges += 1;
-                    let target = indices
-                        .get(&edge.neighbor_id)
-                        .copied()
-                        .ok_or_else(|| execution("adjacency references an unselected node"))?;
-                    if distance[target] == usize::MAX {
-                        distance[target] = distance[vertex] + 1;
-                        queue.push_back(target);
-                    }
+fn prepare_closeness(graph: &AdjacencyGraph) -> Result<PreparedCloseness, AlgorithmError> {
+    let node_ids = graph.node_ids();
+    let mut ordinals = HashMap::with_capacity(node_ids.len());
+    for (index, &node) in node_ids.iter().enumerate() {
+        ordinals.insert(node, exact_u32(index, "node index")?);
+    }
+    let capacity = usize::try_from(graph.edge_entry_count())
+        .map_err(|_| execution("edge count exceeds supported range"))?;
+    let mut offsets = Vec::with_capacity(node_ids.len() + 1);
+    let mut targets = Vec::with_capacity(capacity);
+    offsets.push(0);
+    for &node in node_ids {
+        for edge in graph.neighbors(node) {
+            let target = ordinals
+                .get(&edge.neighbor_id)
+                .copied()
+                .ok_or_else(|| execution("adjacency references an unselected node"))?;
+            targets.push(target);
+        }
+        offsets.push(exact_u32(targets.len(), "adjacency offset")?);
+    }
+    let edge_count = u64::try_from(targets.len())
+        .map_err(|_| execution("edge count exceeds supported range"))?;
+    Ok(PreparedCloseness {
+        offsets,
+        targets,
+        edge_count,
+    })
+}
+
+/// Choose serial vs private-pool parallel execution for a closeness workload.
+pub(crate) fn select_closeness_path(
+    control: &AlgorithmControl,
+    sources: usize,
+    edge_count: u64,
+) -> ClosenessExecutionPath {
+    let threads = control.compute_threads();
+    let estimated_edge_visits = estimated_closeness_edge_visits(sources, edge_count);
+    if threads <= 1
+        || sources <= 1
+        || estimated_edge_visits < CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+        || control
+            .compute_pool()
+            .is_none_or(|pool| !pool.is_parallel())
+    {
+        return ClosenessExecutionPath::Serial;
+    }
+    let chunks = source_chunks(sources, threads).len();
+    ClosenessExecutionPath::Parallel { threads, chunks }
+}
+
+fn estimated_closeness_edge_visits(sources: usize, edge_count: u64) -> u64 {
+    u64::try_from(sources)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(edge_count)
+}
+
+fn closeness_scores_serial(
+    prepared: &PreparedCloseness,
+    node_count: f64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let mut scores = Vec::with_capacity(prepared.sources());
+    for source in 0..prepared.sources() {
+        scores.push(closeness_score_source(prepared, source, node_count, control, true)?.score);
+    }
+    Ok(scores)
+}
+
+fn closeness_scores_parallel(
+    prepared: &PreparedCloseness,
+    node_count: f64,
+    control: &AlgorithmControl,
+) -> Result<Vec<f64>, AlgorithmError> {
+    let pool = control
+        .compute_pool()
+        .ok_or_else(|| execution("parallel closeness requires an instance-owned compute pool"))?;
+    let ranges = source_chunks(prepared.sources(), control.compute_threads());
+    let chunk_results = run_closeness_on_pool(pool, || {
+        Ok(ranges
+            .par_iter()
+            .map(|&(start, end)| {
+                let mut scores = Vec::with_capacity(end - start);
+                let mut checkpoints = 0_u64;
+                for source in start..end {
+                    let result =
+                        closeness_score_source(prepared, source, node_count, control, false)?;
+                    checkpoints = checkpoints
+                        .checked_add(result.checkpoints)
+                        .ok_or_else(|| execution("closeness checkpoint count overflows"))?;
+                    scores.push(result.score);
+                }
+                Ok(ClosenessChunkScores {
+                    start,
+                    scores,
+                    checkpoints,
+                })
+            })
+            .collect::<Vec<Result<_, AlgorithmError>>>())
+    })?;
+    let chunks = first_closeness_chunk_error(chunk_results)?;
+    let mut scores = vec![0.0; prepared.sources()];
+    for chunk in chunks {
+        for _ in 0..chunk.checkpoints {
+            control.checkpoint()?;
+        }
+        scores[chunk.start..chunk.start + chunk.scores.len()].copy_from_slice(&chunk.scores);
+    }
+    Ok(scores)
+}
+
+fn closeness_score_source(
+    prepared: &PreparedCloseness,
+    source: usize,
+    node_count: f64,
+    control: &AlgorithmControl,
+    consume_checkpoints: bool,
+) -> Result<ClosenessSourceScore, AlgorithmError> {
+    let mut checkpoints = 0_u64;
+    closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+    let mut distance = vec![usize::MAX; prepared.sources()];
+    distance[source] = 0;
+    let mut queue = VecDeque::from([source]);
+    let mut traversed_edges = 0_usize;
+
+    while let Some(vertex) = queue.pop_front() {
+        for &target in prepared.neighbors(vertex) {
+            if traversed_edges > 0 && traversed_edges.is_multiple_of(CLOSENESS_CHECKPOINT_EDGES) {
+                closeness_checkpoint(control, consume_checkpoints, &mut checkpoints)?;
+            }
+            traversed_edges += 1;
+            let target = usize::try_from(target)
+                .map_err(|_| execution("adjacency index exceeds supported range"))?;
+            if distance[target] == usize::MAX {
+                distance[target] = distance[vertex] + 1;
+                queue.push_back(target);
+            }
+        }
+    }
+
+    let mut reachable = 0_u32;
+    let mut distance_sum = 0.0_f64;
+    for hops in distance
+        .into_iter()
+        .filter(|&hops| hops != 0 && hops != usize::MAX)
+    {
+        reachable = reachable
+            .checked_add(1)
+            .ok_or_else(|| execution("reachable-node count exceeds supported score range"))?;
+        distance_sum += f64::from(exact_u32(hops, "shortest-path distance")?);
+    }
+    let reachable = f64::from(reachable);
+    let score = if node_count > 1.0 && reachable > 0.0 {
+        reachable * reachable / ((node_count - 1.0) * distance_sum)
+    } else {
+        0.0
+    };
+    if !score.is_finite() {
+        return Err(execution("closeness score exceeds supported range"));
+    }
+    Ok(ClosenessSourceScore { score, checkpoints })
+}
+
+fn closeness_checkpoint(
+    control: &AlgorithmControl,
+    consume: bool,
+    checkpoints: &mut u64,
+) -> Result<(), AlgorithmError> {
+    if consume {
+        control.checkpoint()?;
+    } else {
+        control.check_cancelled()?;
+        *checkpoints = checkpoints
+            .checked_add(1)
+            .ok_or_else(|| execution("closeness checkpoint count overflows"))?;
+    }
+    Ok(())
+}
+
+fn first_closeness_chunk_error(
+    results: Vec<Result<ClosenessChunkScores, AlgorithmError>>,
+) -> Result<Vec<ClosenessChunkScores>, AlgorithmError> {
+    let mut chunks = Vec::with_capacity(results.len());
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(chunk) => chunks.push(chunk),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
-
-            let mut reachable = 0_u32;
-            let mut distance_sum = 0.0_f64;
-            for hops in distance
-                .into_iter()
-                .filter(|&hops| hops != 0 && hops != usize::MAX)
-            {
-                reachable += 1;
-                distance_sum += f64::from(exact_u32(hops, "shortest-path distance")?);
-            }
-            let reachable = f64::from(reachable);
-            let score = if node_count > 1.0 && reachable > 0.0 {
-                reachable * reachable / ((node_count - 1.0) * distance_sum)
-            } else {
-                0.0
-            };
-            if !score.is_finite() {
-                return Err(execution("closeness score exceeds supported range"));
-            }
-            scores.push(score);
         }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    chunks.sort_unstable_by_key(|chunk| chunk.start);
+    Ok(chunks)
+}
 
-        let rows = node_ids
-            .iter()
-            .zip(scores)
-            .map(|(&node, score)| {
-                let uuid = graph
-                    .node_uuid(node)
-                    .ok_or_else(|| execution("selected node has no UUID identity"))?;
-                Ok(vec![
-                    AlgorithmValue::Uuid(uuid),
-                    AlgorithmValue::Float64(score),
-                ])
-            })
-            .collect::<Result<Vec<_>, AlgorithmError>>()?;
-        AlgorithmOutput::from_rows(algorithm, control, rows)
+fn run_closeness_on_pool<R>(
+    pool: &crate::ComputePool,
+    op: impl FnOnce() -> Result<R, AlgorithmError> + Send,
+) -> Result<R, AlgorithmError>
+where
+    R: Send,
+{
+    match catch_unwind(AssertUnwindSafe(|| pool.install(op))) {
+        Ok(result) => result,
+        Err(_) => Err(execution("Closeness worker panicked")),
     }
 }
 
@@ -3447,6 +3655,36 @@ mod tests {
         )
     }
 
+    fn execute_closeness_with_pool(
+        graph: &AdjacencyGraph,
+        threads: usize,
+        cancellation: AlgorithmCancellation,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        execute_closeness_with_pool_and_limits(
+            graph,
+            threads,
+            AlgorithmLimits::default(),
+            cancellation,
+        )
+    }
+    fn dense_closeness_graph(nodes: usize) -> AdjacencyGraph {
+        let fanout = ((CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS as usize) / nodes.max(1).pow(2))
+            .saturating_add(2)
+            .max(2);
+        let edges = (0..nodes)
+            .flat_map(|node| {
+                (1..=fanout).map(move |hop| (node as u64, ((node + hop) % nodes) as u64))
+            })
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes as u64, &edges)
+    }
+    fn closeness_bits(output: &AlgorithmOutput) -> Vec<u64> {
+        closeness_scores(output)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect()
+    }
+
     fn closeness_scores(output: &AlgorithmOutput) -> Vec<f64> {
         output
             .rows()
@@ -4005,12 +4243,10 @@ mod tests {
 
     fn assert_scores_within(actual: &[f64], expected: &[f64], tolerance: f64) {
         assert_eq!(actual.len(), expected.len());
-        assert!(
-            actual
-                .iter()
-                .zip(expected)
-                .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
-        );
+        assert!(actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (actual - expected).abs() <= tolerance));
     }
 
     #[test]
@@ -4479,16 +4715,14 @@ mod tests {
             ),
             &[0.0, 1.0 / 6.0, 0.0, 0.0],
         );
-        assert!(
-            execute_betweenness(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_betweenness(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -4711,16 +4945,14 @@ mod tests {
             ),
             &[4.0 / 9.0, 1.0 / 3.0, 0.0, 0.0],
         );
-        assert!(
-            execute_closeness(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_closeness(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
         assert_eq!(
             closeness_scores(
                 &execute_closeness(
@@ -4805,6 +5037,145 @@ mod tests {
     }
 
     #[test]
+    fn closeness_path_selection_respects_crossover_and_one_thread() {
+        let serial_control = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        );
+        assert_eq!(
+            select_closeness_path(
+                &serial_control,
+                64,
+                (CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS / 64) - 1
+            ),
+            ClosenessExecutionPath::Serial
+        );
+        let one = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(1),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(1).unwrap()));
+        assert_eq!(
+            select_closeness_path(&one, 64, CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS),
+            ClosenessExecutionPath::Serial
+        );
+        let parallel = AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(4),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(Arc::new(crate::ComputePool::new(4).unwrap()));
+        assert_eq!(
+            select_closeness_path(&parallel, 64, CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS),
+            ClosenessExecutionPath::Parallel {
+                threads: 4,
+                chunks: 4
+            }
+        );
+    }
+    #[test]
+    fn closeness_thread_matrix_matches_one_thread_bits_and_ordering() {
+        let graph = dense_closeness_graph(128);
+        assert!(
+            estimated_closeness_edge_visits(graph.node_ids().len(), graph.edge_entry_count())
+                >= CLOSENESS_PARALLEL_CROSSOVER_EDGE_VISITS
+        );
+        let serial =
+            execute_closeness_with_pool(&graph, 1, AlgorithmCancellation::default()).unwrap();
+        let serial_bits = closeness_bits(&serial);
+        let serial_rows = serial.rows();
+        for threads in [2_usize, 4, 8] {
+            let parallel =
+                execute_closeness_with_pool(&graph, threads, AlgorithmCancellation::default())
+                    .unwrap();
+            assert_eq!(parallel.schema, serial.schema);
+            assert_eq!(parallel.rows(), serial_rows);
+            assert_eq!(closeness_bits(&parallel), serial_bits);
+        }
+    }
+    #[test]
+    fn closeness_parallel_preserves_boundary_graph_bits() {
+        let multigraph = AdjacencyGraph::with_test_edges(4, &[(0, 1), (0, 1), (1, 2), (1, 1)]);
+        let directed = AdjacencyGraph::with_test_edges(2, &[(0, 1)]);
+        let undirected = AdjacencyGraph::with_test_edges(2, &[(0, 1), (1, 0)]);
+        let empty = AdjacencyGraph::default();
+        let single = AdjacencyGraph::with_test_edges(1, &[]);
+        let disconnected = AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 2)]);
+        for graph in [
+            &multigraph,
+            &directed,
+            &undirected,
+            &empty,
+            &single,
+            &disconnected,
+        ] {
+            let serial =
+                execute_closeness_with_pool(graph, 1, AlgorithmCancellation::default()).unwrap();
+            for threads in [2_usize, 4, 8] {
+                let parallel =
+                    execute_closeness_with_pool(graph, threads, AlgorithmCancellation::default())
+                        .unwrap();
+                assert_eq!(closeness_bits(&parallel), closeness_bits(&serial));
+                assert_eq!(parallel.rows(), serial.rows());
+            }
+        }
+    }
+    #[test]
+    fn closeness_parallel_cancellation_and_limits_are_structured() {
+        let graph = dense_closeness_graph(128);
+        let cancellation = AlgorithmCancellation::default();
+        cancellation.cancel();
+        assert_eq!(
+            execute_closeness_with_pool(&graph, 4, cancellation),
+            Err(AlgorithmError::Cancelled)
+        );
+        assert_eq!(
+            execute_closeness_with_pool_and_limits(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    iterations: 0,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::IterationLimit {
+                observed: 1,
+                limit: 0
+            })
+        );
+        assert!(matches!(
+            execute_closeness_with_pool_and_limits(
+                &graph,
+                4,
+                AlgorithmLimits {
+                    output_rows: 1,
+                    ..AlgorithmLimits::default()
+                },
+                AlgorithmCancellation::default(),
+            ),
+            Err(AlgorithmError::OutputLimit { .. })
+        ));
+    }
+    #[test]
+    fn closeness_source_chunks_cover_canonical_ranges() {
+        assert_eq!(source_chunks(0, 4), Vec::<(usize, usize)>::new());
+        assert_eq!(source_chunks(5, 1), vec![(0, 5)]);
+        assert_eq!(source_chunks(5, 2), vec![(0, 3), (3, 5)]);
+        assert_eq!(source_chunks(8, 4), vec![(0, 2), (2, 4), (4, 6), (6, 8)]);
+        assert_eq!(source_chunks(3, 8), vec![(0, 1), (1, 2), (2, 3)]);
+    }
+    #[test]
+    fn closeness_worker_panic_returns_structured_error() {
+        let pool = crate::ComputePool::new(2).unwrap();
+        assert_eq!(
+            run_closeness_on_pool(&pool, || -> Result<(), AlgorithmError> {
+                panic!("synthetic closeness panic");
+            }),
+            Err(execution("Closeness worker panicked"))
+        );
+    }
+
+    #[test]
     fn harmonic_closeness_scores_directed_and_undirected_chains_deterministically() {
         let directed = AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 2)]);
         let first = execute_harmonic_closeness(
@@ -4856,16 +5227,14 @@ mod tests {
             ),
             &[0.5, 1.0 / 3.0, 0.0, 0.0],
         );
-        assert!(
-            execute_harmonic_closeness(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_harmonic_closeness(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
         assert_eq!(
             harmonic_closeness_scores(
                 &execute_harmonic_closeness(
@@ -5019,16 +5388,14 @@ mod tests {
             eigenvector_scores_for(&AdjacencyGraph::with_test_counts(1, 0)),
             [1.0]
         );
-        assert!(
-            execute_eigenvector(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_eigenvector(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -5422,16 +5789,14 @@ mod tests {
             ),
             &[0.15; 3],
         );
-        assert!(
-            execute_article_rank(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default()
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_article_rank(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default()
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -5567,16 +5932,14 @@ mod tests {
             ),
             &[0.0, 0.0],
         );
-        assert!(
-            execute_hits_hub(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default()
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_hits_hub(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default()
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -5800,16 +6163,14 @@ mod tests {
             ),
             &[0.0, 0.0],
         );
-        assert!(
-            execute_hits_authority(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default()
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_hits_authority(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default()
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -6073,16 +6434,14 @@ mod tests {
             )
             .unwrap()
         );
-        assert!(
-            execute_clustering_coefficient(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_clustering_coefficient(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -6290,16 +6649,14 @@ mod tests {
                 &[1.0, 1.0, 1.0, 0.0],
             );
         }
-        assert!(
-            execute_triangles(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_triangles(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -6480,16 +6837,14 @@ mod tests {
                 &[2.0, 2.0, 2.0, 0.0],
             );
         }
-        assert!(
-            execute_k_core(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
-            )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+        assert!(execute_k_core(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -6532,11 +6887,9 @@ mod tests {
             AlgorithmCancellation::default(),
         )
         .unwrap();
-        assert!(
-            k_core_output_scores(&output)
-                .into_iter()
-                .all(|score| score == 1.0)
-        );
+        assert!(k_core_output_scores(&output)
+            .into_iter()
+            .all(|score| score == 1.0));
     }
 
     #[test]
@@ -6607,40 +6960,34 @@ mod tests {
         );
         let complete =
             AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]);
-        assert!(
-            preferential_attachment_output_scores(
-                &execute_preferential_attachment(
-                    &complete,
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
-                )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0)
-        );
-        assert!(
-            preferential_attachment_output_scores(
-                &execute_preferential_attachment(
-                    &AdjacencyGraph::with_test_counts(3, 0),
-                    AlgorithmLimits::default(),
-                    AlgorithmCancellation::default(),
-                )
-                .unwrap(),
-            )
-            .into_iter()
-            .all(|score| score == 0.0)
-        );
-        assert!(
-            execute_preferential_attachment(
-                &AdjacencyGraph::default(),
+        assert!(preferential_attachment_output_scores(
+            &execute_preferential_attachment(
+                &complete,
                 AlgorithmLimits::default(),
                 AlgorithmCancellation::default(),
             )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+            .unwrap(),
+        )
+        .into_iter()
+        .all(|score| score == 0.0));
+        assert!(preferential_attachment_output_scores(
+            &execute_preferential_attachment(
+                &AdjacencyGraph::with_test_counts(3, 0),
+                AlgorithmLimits::default(),
+                AlgorithmCancellation::default(),
+            )
+            .unwrap(),
+        )
+        .into_iter()
+        .all(|score| score == 0.0));
+        assert!(execute_preferential_attachment(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -6767,29 +7114,25 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(
-                adamic_adar_output_scores(
-                    &execute_adamic_adar(
-                        &graph,
-                        AlgorithmLimits::default(),
-                        AlgorithmCancellation::default(),
-                    )
-                    .unwrap(),
+            assert!(adamic_adar_output_scores(
+                &execute_adamic_adar(
+                    &graph,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
                 )
-                .into_iter()
-                .all(|score| score == 0.0)
-            );
-        }
-        assert!(
-            execute_adamic_adar(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
+                .unwrap(),
             )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+            .into_iter()
+            .all(|score| score == 0.0));
+        }
+        assert!(execute_adamic_adar(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -7136,29 +7479,25 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(
-                common_neighbor_output_scores(
-                    &execute_common_neighbors(
-                        &graph,
-                        AlgorithmLimits::default(),
-                        AlgorithmCancellation::default(),
-                    )
-                    .unwrap(),
+            assert!(common_neighbor_output_scores(
+                &execute_common_neighbors(
+                    &graph,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
                 )
-                .into_iter()
-                .all(|score| score == 0.0)
-            );
-        }
-        assert!(
-            execute_common_neighbors(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
+                .unwrap(),
             )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+            .into_iter()
+            .all(|score| score == 0.0));
+        }
+        assert!(execute_common_neighbors(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -7517,29 +7856,25 @@ mod tests {
             AdjacencyGraph::with_test_edges(4, &[(0, 1), (1, 0), (2, 3), (3, 2)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(
-                resource_allocation_output_scores(
-                    &execute_resource_allocation(
-                        &graph,
-                        AlgorithmLimits::default(),
-                        AlgorithmCancellation::default(),
-                    )
-                    .unwrap(),
+            assert!(resource_allocation_output_scores(
+                &execute_resource_allocation(
+                    &graph,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
                 )
-                .into_iter()
-                .all(|score| score == 0.0)
-            );
-        }
-        assert!(
-            execute_resource_allocation(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
+                .unwrap(),
             )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+            .into_iter()
+            .all(|score| score == 0.0));
+        }
+        assert!(execute_resource_allocation(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]
@@ -7683,29 +8018,25 @@ mod tests {
             AdjacencyGraph::with_test_edges(3, &[(0, 1), (1, 0), (0, 2), (2, 0), (1, 2), (2, 1)]),
             AdjacencyGraph::with_test_counts(3, 0),
         ] {
-            assert!(
-                total_neighbor_output_scores(
-                    &execute_total_neighbors(
-                        &graph,
-                        AlgorithmLimits::default(),
-                        AlgorithmCancellation::default(),
-                    )
-                    .unwrap(),
+            assert!(total_neighbor_output_scores(
+                &execute_total_neighbors(
+                    &graph,
+                    AlgorithmLimits::default(),
+                    AlgorithmCancellation::default(),
                 )
-                .into_iter()
-                .all(|score| score == 0.0)
-            );
-        }
-        assert!(
-            execute_total_neighbors(
-                &AdjacencyGraph::default(),
-                AlgorithmLimits::default(),
-                AlgorithmCancellation::default(),
+                .unwrap(),
             )
-            .unwrap()
-            .rows()
-            .is_empty()
-        );
+            .into_iter()
+            .all(|score| score == 0.0));
+        }
+        assert!(execute_total_neighbors(
+            &AdjacencyGraph::default(),
+            AlgorithmLimits::default(),
+            AlgorithmCancellation::default(),
+        )
+        .unwrap()
+        .rows()
+        .is_empty());
     }
 
     #[test]

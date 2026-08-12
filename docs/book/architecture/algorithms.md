@@ -4032,3 +4032,4 @@ instead exposes `k` and `vector_property`. All return Arrow Tables.
 - OCG crate: https://docs.rs/ocg/latest/ocg/ — algorithm interface reference (Apache-2.0)
 - Neo4j GDS: https://neo4j.com/docs/graph-data-science/current/algorithms/
 - igraph Python API: https://igraph.org/python/api/latest/
+the documented private-pool crossover (#503), independent source BFS ranges may
