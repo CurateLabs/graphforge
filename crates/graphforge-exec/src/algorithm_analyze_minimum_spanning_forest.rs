@@ -4,7 +4,6 @@
 //! later candidates, so there is no independent edge frontier for private-pool
 //! execution without changing ties.
 
-
 use std::cmp::Ordering;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
