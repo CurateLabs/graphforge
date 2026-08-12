@@ -585,7 +585,14 @@ Stable topology and neighbor order drive pair intersections. Contributions and
 node aggregates use compensated `Float64` summation, and a non-finite
 contribution or result produces a structured execution error. Batched
 checkpoints enforce the shared selected-node, adjacency-entry, output-row,
-iteration, and cancellation limits.
+iteration, and cancellation limits. Above the documented
+`ADAMIC_ADAR_PARALLEL_CROSSOVER_WORK` (`524_288`) estimate, and only when the
+resource policy provides more than one compute thread, independent source
+ordinals may run on the instance-owned private compute pool (#337 / #499).
+Candidate order, missing-link checks, two-pointer intersections, logarithmic
+discounts, and compensated summation remain serial per source; worker score
+chunks merge in source order, so scores and fingerprints match the one-thread
+path.
 
 The public schema remains non-null `node_uuid: FixedSizeBinary(16)`, non-null
 `score: Float64`, then materialized node properties with Arrow NULLs for missing

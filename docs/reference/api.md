@@ -439,11 +439,17 @@ selections retain deterministic finite boundary behavior.
 
 Neighbor contributions and node aggregates use stable topology order and
 compensated `Float64` summation; any non-finite result is a structured execution
-error. Results expose only `node_uuid: FixedSizeBinary(16)`, `score: Float64`,
-then materialized node properties. Shared Rust limits and cancellation apply,
-and `write_property` atomically persists every score only after successful
-execution. Python and Node only translate arguments and Arrow IPC; neither
-contains an algorithm backend, fallback, packaging dependency, or recovery path.
+error. When the estimated pair/intersection work reaches
+`ADAMIC_ADAR_PARALLEL_CROSSOVER_WORK` (`524_288`) and the resource policy
+provides multiple compute threads, independent source ordinals may run on the
+instance-owned private compute pool. Candidate/intersection scoring stays serial
+per source and score chunks merge in source order, so results match the
+one-thread fingerprint. Results expose only `node_uuid: FixedSizeBinary(16)`,
+`score: Float64`, then materialized node properties. Shared Rust limits and
+cancellation apply, and `write_property` atomically persists every score only
+after successful execution. Python and Node only translate arguments and Arrow
+IPC; neither contains an algorithm backend, fallback, packaging dependency, or
+recovery path.
 
 Common neighbors is deterministic, unweighted, and Rust-owned. Its pair score
 is `CN(u, v) = |N(u) intersect N(v)|`. `rank()` returns one score per selected

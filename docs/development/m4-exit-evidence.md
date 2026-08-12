@@ -32,7 +32,7 @@ ledger and does not block M4.
 | [`m4-exit-evidence.json`](m4-exit-evidence.json) | `graphforge-m4-entry-evidence/1` rerun on the final tree (short + thread-parity matrix) |
 | [`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json) | `graphforge-file-backed-oversize-evidence/1` public reopen past legacy 2 GiB envelope |
 | [`m4-entry-baseline.md`](m4-entry-baseline.md) | Entry contract narrative (updated for shipped M4) |
-| [`execution-resource-policy.md`](execution-resource-policy.md) | #337 policy + #342/#343/#344 crossovers |
+| [`execution-resource-policy.md`](execution-resource-policy.md) | #337 policy + #342/#343/#344/#499 crossovers |
 | [`../reference/scale-limits.md`](../reference/scale-limits.md) | Persistence / adjacency / CSR claim table |
 
 ## Final-tree reproduction
@@ -68,6 +68,9 @@ GF_FILE_BACKED_OVERSIZE_EVIDENCE_OUT=docs/development/file-backed-oversize-evide
 - **CPU kernels (#342–#344/#505):** exact cosine KNN, PageRank, Node2Vec walk
   generation, and common-neighbors source aggregates use the instance-owned
   private compute pool above documented crossovers; one-thread fingerprints are
+- **CPU kernels (#342–#344, #499):** exact cosine KNN, PageRank, Node2Vec walk
+  generation, and Adamic-Adar source aggregates use the instance-owned private
+  compute pool above documented crossovers; one-thread fingerprints are
   preserved. Thread cells that exceed the machine-relative concurrency budget
   are recorded `unavailable` (on this host `threads-8` is unavailable).
 
