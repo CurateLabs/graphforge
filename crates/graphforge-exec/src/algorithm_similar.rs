@@ -536,6 +536,8 @@ fn execution(message: impl Into<String>) -> AlgorithmError {
 mod tests {
     use super::*;
     use crate::algorithm_dispatch::{AlgorithmCancellation, AlgorithmLimits, AlgorithmValue};
+    use crate::compute_pool::ComputePool;
+    use std::sync::Arc;
 
     fn execute(
         graph: &AdjacencyGraph,
@@ -543,14 +545,42 @@ mod tests {
         limits: AlgorithmLimits,
         cancellation: AlgorithmCancellation,
     ) -> Result<AlgorithmOutput, AlgorithmError> {
-        let algorithm = Algorithm::Similar(SimilarAlgorithm::NodeSimilarity);
-        let mut registry = AlgorithmRegistry::default();
-        register_similar_algorithms(&mut registry, k)?;
-        registry.execute(
-            algorithm,
+        execute_algorithm(
             graph,
+            SimilarAlgorithm::NodeSimilarity,
+            k,
             &AlgorithmControl::new(limits, cancellation),
         )
+    }
+
+    fn execute_algorithm(
+        graph: &AdjacencyGraph,
+        similar: SimilarAlgorithm,
+        k: usize,
+        control: &AlgorithmControl,
+    ) -> Result<AlgorithmOutput, AlgorithmError> {
+        let algorithm = Algorithm::Similar(similar);
+        let mut registry = AlgorithmRegistry::default();
+        register_similar_algorithms(&mut registry, k)?;
+        registry.execute(algorithm, graph, control)
+    }
+
+    fn control_with_threads(threads: usize) -> AlgorithmControl {
+        let pool = Arc::new(ComputePool::new(threads).unwrap());
+        AlgorithmControl::new(
+            AlgorithmLimits::default().with_compute_threads(threads),
+            AlgorithmCancellation::default(),
+        )
+        .with_compute_pool(pool)
+    }
+
+    fn filtered_parallel_graph() -> AdjacencyGraph {
+        let nodes = 192_u64;
+        let fanout = 128_u64;
+        let edges = (0..nodes)
+            .flat_map(|source| (1..=fanout).map(move |offset| (source, (source + offset) % nodes)))
+            .collect::<Vec<_>>();
+        AdjacencyGraph::with_test_edges(nodes, &edges)
     }
 
     fn uuid(id: u64) -> AlgorithmValue {
@@ -711,5 +741,31 @@ mod tests {
         let mut registry = AlgorithmRegistry::default();
         register_similar_algorithms(&mut registry, 10).unwrap();
         assert_eq!(registry.capabilities()[0].dependency, BUILTIN_REVIEW);
+    }
+
+    #[test]
+    fn filtered_node_similarity_matches_one_thread_oracle_on_compute_pool() {
+        let graph = filtered_parallel_graph();
+        let serial = execute_algorithm(
+            &graph,
+            SimilarAlgorithm::FilteredNodeSimilarity,
+            4,
+            &control_with_threads(1),
+        )
+        .unwrap();
+        let parallel = execute_algorithm(
+            &graph,
+            SimilarAlgorithm::FilteredNodeSimilarity,
+            4,
+            &control_with_threads(4),
+        )
+        .unwrap();
+
+        assert_eq!(parallel.schema, serial.schema);
+        assert_eq!(parallel.rows(), serial.rows());
+        assert_eq!(
+            parallel.schema,
+            Algorithm::Similar(SimilarAlgorithm::FilteredNodeSimilarity).result_schema()
+        );
     }
 }

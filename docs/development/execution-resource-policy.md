@@ -17,7 +17,7 @@ Tokio runtime or any DataFusion execution session.
 | `spill` | disabled | Optional absolute spill directory + byte cap |
 | `io_concurrency` | `2` | Reserved I/O concurrency budget |
 | `max_concurrent_heavy_queries` | `64` | Instance-owned admission semaphore |
-| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #515 triangles; #518 Components; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
+| `compute_threads` | `2` | Instance-owned private CPU pool (#342 cosine KNN; #343 PageRank; #344 Node2Vec walks; #501 betweenness; #503 closeness BFS; #504 clustering coefficient; #506 Degree; #510 HITS hub; #513 resource allocation; #515 triangles; #518 Components; #534 filtered Jaccard; #535 Jaccard similarity; #542 Dijkstra APSP sources) |
 
 Defaults preserve pre-#337 fixed two-worker / two-partition behavior.
 
@@ -124,7 +124,9 @@ order, scores, ties, and fingerprints match the one-thread result at
 
 ## Parallel Jaccard node similarity (#535)
 
-Exact and filtered `similar(by="node_similarity")` Jaccard partition
+`filtered_node_similarity` shares this private-pool path and `JACCARD_PARALLEL_CROSSOVER_OPS` crossover; filtered candidate sets are per-source neighborhoods, and workers merge in source order for one-thread oracle parity (#534).
+
+Exact `similar(by="node_similarity")` (#535) and `similar(by="filtered_node_similarity")` (#534) Jaccard partition
 **independent source rows** across the instance-owned private compute pool when:
 
 - `compute_threads > 1`, and
