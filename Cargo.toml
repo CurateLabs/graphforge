@@ -38,7 +38,7 @@ serde_json = "1"
 serde_yaml = { version = "0.9", package = "serde_yaml_ng" }
 sha2 = "0.11"
 unicode-normalization = "0.1"
-ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
+ureq = { version = "=3.4.0", default-features = false, features = ["rustls"] }
 
 # Identifiers
 uuid = { version = "1", features = ["v5", "v7", "serde"] }

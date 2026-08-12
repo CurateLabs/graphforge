@@ -1,5 +1,5 @@
 {
-  "checksum": "9ff880bc510c97efaa7c5600ab49f73b1d8ee12ff2711319ff13f267d68f4490",
+  "checksum": "bdfccfb14c86e664f8382ec6181b05cad24fe9b8060282b794c9e927e6d5bcf6",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -2239,14 +2239,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "async-trait 0.1.91": {
+    "async-trait 0.1.92": {
       "name": "async-trait",
-      "version": "0.1.91",
+      "version": "0.1.92",
       "package_url": "https://github.com/dtolnay/async-trait",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/async-trait/0.1.91/download",
-          "sha256": "ae36dc4177970ef04fde5178d3e2429882def40e57a451f919c098f72baa6cec"
+          "url": "https://static.crates.io/crates/async-trait/0.1.92/download",
+          "sha256": "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
         }
       },
       "targets": [
@@ -2286,7 +2286,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "0.1.91"
+        "version": "0.1.92"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -2487,6 +2487,52 @@
         },
         "edition": "2018",
         "version": "0.22.1"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "base64 0.23.1": {
+      "name": "base64",
+      "version": "0.23.1",
+      "package_url": "https://github.com/marshallpierce/rust-base64",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/base64/0.23.1/download",
+          "sha256": "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "base64",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "base64",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "crate_features": {
+          "common": [
+            "alloc",
+            "std"
+          ],
+          "selects": {}
+        },
+        "edition": "2021",
+        "version": "0.23.1"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -6295,7 +6341,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -6411,7 +6457,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -6519,7 +6565,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -6875,7 +6921,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -6993,7 +7039,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -7101,7 +7147,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -7209,7 +7255,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -7349,7 +7395,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -7491,7 +7537,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -7607,7 +7653,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -8193,7 +8239,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -8976,7 +9022,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -9123,7 +9169,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -11958,7 +12004,7 @@
               "target": "tempfile"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -12021,7 +12067,7 @@
               "target": "serde"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12076,7 +12122,7 @@
               "target": "arrow"
             },
             {
-              "id": "napi 3.11.0",
+              "id": "napi 3.12.0",
               "target": "napi"
             },
             {
@@ -12315,7 +12361,7 @@
               "target": "sha2"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -12365,7 +12411,7 @@
               "target": "serde_json"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12435,7 +12481,7 @@
               "target": "sha2"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12466,7 +12512,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -12507,7 +12553,7 @@
         "deps": {
           "common": [
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12561,7 +12607,7 @@
               "target": "serde_json"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12624,7 +12670,7 @@
               "target": "serde_json"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -12699,7 +12745,7 @@
               "target": "sha2"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12754,7 +12800,7 @@
               "target": "datafusion"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12804,7 +12850,7 @@
               "target": "serde"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -12870,7 +12916,7 @@
               "target": "datafusion_functions_aggregate"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
           ],
@@ -12941,7 +12987,7 @@
               "target": "tantivy"
             },
             {
-              "id": "ureq 3.3.0",
+              "id": "ureq 3.4.0",
               "target": "ureq"
             }
           ],
@@ -13043,7 +13089,7 @@
               "target": "tempfile"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -13087,7 +13133,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -17189,14 +17235,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "napi 3.11.0": {
+    "napi 3.12.0": {
       "name": "napi",
-      "version": "3.11.0",
+      "version": "3.12.0",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi/3.11.0/download",
-          "sha256": "de33522036981030a75c231829566bc63414e08101a6f5ff4ac6cef19c8e0941"
+          "url": "https://static.crates.io/crates/napi/3.12.0/download",
+          "sha256": "6f71d6bc097c4a6eb853c3f24991ab8c9f50f57d1f719e305175541482217e36"
         }
       },
       "targets": [
@@ -17300,7 +17346,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.11.0"
+        "version": "3.12.0"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -18212,7 +18258,7 @@
               "target": "percent_encoding"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -18253,7 +18299,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -24625,7 +24671,7 @@
               "target": "tempfile"
             },
             {
-              "id": "thiserror 2.0.19",
+              "id": "thiserror 2.0.20",
               "target": "thiserror"
             },
             {
@@ -24838,7 +24884,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "async-trait 0.1.91",
+              "id": "async-trait 0.1.92",
               "target": "async_trait"
             }
           ],
@@ -25520,14 +25566,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "thiserror 2.0.19": {
+    "thiserror 2.0.20": {
       "name": "thiserror",
-      "version": "2.0.19",
+      "version": "2.0.20",
       "package_url": "https://github.com/dtolnay/thiserror",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/thiserror/2.0.19/download",
-          "sha256": "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
+          "url": "https://static.crates.io/crates/thiserror/2.0.20/download",
+          "sha256": "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
         }
       },
       "targets": [
@@ -25578,13 +25624,13 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "thiserror-impl 2.0.19",
+              "id": "thiserror-impl 2.0.20",
               "target": "thiserror_impl"
             }
           ],
           "selects": {}
         },
-        "version": "2.0.19"
+        "version": "2.0.20"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -25660,14 +25706,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "thiserror-impl 2.0.19": {
+    "thiserror-impl 2.0.20": {
       "name": "thiserror-impl",
-      "version": "2.0.19",
+      "version": "2.0.20",
       "package_url": "https://github.com/dtolnay/thiserror",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/thiserror-impl/2.0.19/download",
-          "sha256": "43cbfe0cf76104d42a574802844187e84a305e531ed54455f11fbde0f10541cd"
+          "url": "https://static.crates.io/crates/thiserror-impl/2.0.20/download",
+          "sha256": "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
         }
       },
       "targets": [
@@ -25707,7 +25753,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "2.0.19"
+        "version": "2.0.20"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -27476,14 +27522,14 @@
       ],
       "license_file": "LICENSE.txt"
     },
-    "ureq 3.3.0": {
+    "ureq 3.4.0": {
       "name": "ureq",
-      "version": "3.3.0",
+      "version": "3.4.0",
       "package_url": "https://github.com/algesten/ureq",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/ureq/3.3.0/download",
-          "sha256": "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
+          "url": "https://static.crates.io/crates/ureq/3.4.0/download",
+          "sha256": "972d7902c8735f2695410b8aed7df6ed12a47394aa1c8d7af49f0497b731a94d"
         }
       },
       "targets": [
@@ -27519,7 +27565,7 @@
         "deps": {
           "common": [
             {
-              "id": "base64 0.22.1",
+              "id": "base64 0.23.1",
               "target": "base64"
             },
             {
@@ -27539,7 +27585,7 @@
               "target": "rustls_pki_types"
             },
             {
-              "id": "ureq-proto 0.6.0",
+              "id": "ureq-proto 0.6.1",
               "target": "ureq_proto"
             },
             {
@@ -27554,7 +27600,7 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "3.3.0"
+        "version": "3.4.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -27563,14 +27609,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "ureq-proto 0.6.0": {
+    "ureq-proto 0.6.1": {
       "name": "ureq-proto",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "package_url": "https://github.com/algesten/ureq-proto",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/ureq-proto/0.6.0/download",
-          "sha256": "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
+          "url": "https://static.crates.io/crates/ureq-proto/0.6.1/download",
+          "sha256": "da5f78b09e6941e1a0f2e30e695e4b120377b54d5e0aec11b594bb57b3971613"
         }
       },
       "targets": [
@@ -27601,7 +27647,7 @@
         "deps": {
           "common": [
             {
-              "id": "base64 0.22.1",
+              "id": "base64 0.23.1",
               "target": "base64"
             },
             {
@@ -27620,14 +27666,14 @@
           "selects": {}
         },
         "edition": "2024",
-        "version": "0.6.0"
+        "version": "0.6.1"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
         "Apache-2.0",
         "MIT"
       ],
-      "license_file": "LICENSE-MIT.txt"
+      "license_file": "LICENSE-APACHE.txt"
     },
     "url 2.5.8": {
       "name": "url",
@@ -32381,7 +32427,7 @@
     "anyhow 1.0.104",
     "arrow 58.3.0",
     "arrow-data 58.3.0",
-    "async-trait 0.1.91",
+    "async-trait 0.1.92",
     "atomicwrites 0.4.4",
     "chrono 0.4.45",
     "chrono-tz 0.10.4",
@@ -32394,7 +32440,7 @@
     "futures 0.3.32",
     "libc 0.2.189",
     "named-lock 0.4.1",
-    "napi 3.11.0",
+    "napi 3.12.0",
     "napi-build 2.4.0",
     "napi-derive 3.6.2",
     "parquet 58.3.0",
@@ -32406,10 +32452,10 @@
     "sha2 0.11.0",
     "tantivy 0.26.1",
     "tempfile 3.27.0",
-    "thiserror 2.0.19",
+    "thiserror 2.0.20",
     "tokio 1.53.1",
     "unicode-normalization 0.1.25",
-    "ureq 3.3.0",
+    "ureq 3.4.0",
     "uuid 1.24.0"
   ],
   "direct_dev_deps": [
