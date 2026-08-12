@@ -19,6 +19,7 @@
 //! PageRank (#343) and ArticleRank (#500) may partition destination-owned score
 //! updates across the instance-owned private compute pool while preserving the
 //! serial contribution order, reductions, and bit-identical fingerprints.
+//! CELF (#502) remains intentionally serial under every compute_threads budget.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};

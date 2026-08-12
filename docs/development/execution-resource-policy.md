@@ -929,6 +929,7 @@ Evidence is carried by:
 
 
 There is no crossover for SCC in M4: the documented disposition is `serial_tarjan`. Timing remains hardware-specific evidence, never a CI pass/fail gate.
+<<<<<<< HEAD
 ## Serial analyze(by="minimum_k_spanning_tree") (#581)
 
 `analyze(by="minimum_k_spanning_tree")` has no parallel crossover. Its
@@ -946,6 +947,25 @@ The path still uses bounded Arrow output (#341), structured cancellation and
 resource checks, and no process-global Rayon pool. The M4 harness records
 `analyze-minimum-k-spanning-tree` evidence and verifies one-thread parity;
 timing is report-only.
+=======
+## Serial CELF influence maximization (#502)
+
+`rank(by="celf")` keeps the Cost-Effective Lazy Forward search serial under every
+`compute_threads` setting. The next useful marginal-spread recomputation is the
+current globally best stale candidate; once recomputed, that candidate either
+becomes the next seed or re-enters the heap with a new gain. Speculative
+multi-candidate refresh would need extra conflict resolution against changing
+seed state and could alter equal-gain UUID tie order or marginal-score bits.
+
+The #502 polish therefore removes avoidable serial allocation inside the accepted
+path rather than claiming a universal crossover. It reuses candidate-seed,
+activation, and queue buffers during spread evaluation, keeps selected adjacency
+access CSR-native, and continues to shape output through the bounded Arrow sink.
+Schemas, row order, marginal scores, projection fingerprints, structured
+limit/cancellation errors, and write-back atomicity match the one-thread oracle
+at `1`/`2`/`4`/`8`/automatic configurations. No GPU, distributed, approximate, or
+foreign-engine fallback is implied.
+>>>>>>> dced88e (perf(exec): serial disposition for CELF (#502))
 
 ## Observability
 
