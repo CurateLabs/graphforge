@@ -1,3 +1,9 @@
+//! `max_flow_edges` shares the serial maximum-flow kernel (#546). The public
+//! edge assignment is read from the final residual state in canonical edge-UUID
+//! order, after every Edmonds-Karp augmentation has completed. Running
+//! augmentations concurrently would change residual visibility and edge-flow
+//! ties, so there is no private-pool crossover for this view.
+
 use std::collections::VecDeque;
 
 use crate::algorithm_dispatch::{AlgorithmControl, AlgorithmError};
