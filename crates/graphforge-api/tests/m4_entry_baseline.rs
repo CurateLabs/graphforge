@@ -1257,9 +1257,11 @@ fn contract_classifies_thread_parity_configurations_for_337() {
             "resource_limit_behavior"
         ])
     );
-    assert!(contract["current_runtime"]["public_resource_policy"]
-        .as_bool()
-        .unwrap());
+    assert!(
+        contract["current_runtime"]["public_resource_policy"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[test]
@@ -1341,10 +1343,12 @@ fn evidence_distinguishes_structural_gates_from_timing_observations() {
         assert_eq!(workload["timing_is_pass_fail"], false);
         assert!(workload["timing_observation"].get("wall_time_ms").is_some());
         // Peak RSS may be unavailable on non-Linux hosts; presence of the field is required.
-        assert!(workload["timing_observation"]
-            .as_object()
-            .expect("timing object")
-            .contains_key("peak_rss_bytes"));
+        assert!(
+            workload["timing_observation"]
+                .as_object()
+                .expect("timing object")
+                .contains_key("peak_rss_bytes")
+        );
     }
     assert!(evidence.get("spill_bytes").is_some());
 }
