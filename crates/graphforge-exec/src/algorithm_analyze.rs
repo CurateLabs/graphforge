@@ -6882,6 +6882,54 @@ mod tests {
     }
 
     #[test]
+    fn articulation_points_keeps_serial_fingerprint_under_thread_budgets() {
+        let graph = AdjacencyGraph::with_test_undirected_multigraph(
+            10,
+            &[
+                (10, 0, 1),
+                (11, 1, 2),
+                (12, 2, 0),
+                (13, 1, 3),
+                (14, 3, 4),
+                (15, 4, 5),
+                (16, 5, 3),
+                (17, 5, 6),
+                (18, 6, 7),
+                (19, 7, 5),
+                (20, 7, 8),
+                (21, 8, 9),
+                (22, 7, 8),
+            ],
+        );
+        let serial =
+            execute_with_compute_threads(&graph, AnalyzeAlgorithm::ArticulationPoints, false, 1)
+                .unwrap();
+        assert_eq!(
+            serial.rows(),
+            [
+                vec![AlgorithmValue::Uuid(1_u128.to_be_bytes())],
+                vec![AlgorithmValue::Uuid(3_u128.to_be_bytes())],
+                vec![AlgorithmValue::Uuid(5_u128.to_be_bytes())],
+                vec![AlgorithmValue::Uuid(7_u128.to_be_bytes())],
+                vec![AlgorithmValue::Uuid(8_u128.to_be_bytes())],
+            ]
+        );
+        let serial_fingerprint = output_fingerprint(&serial);
+
+        for threads in [2_usize, 4, 8] {
+            let output = execute_with_compute_threads(
+                &graph,
+                AnalyzeAlgorithm::ArticulationPoints,
+                false,
+                threads,
+            )
+            .unwrap();
+            assert_eq!(output.schema, serial.schema);
+            assert_eq!(output_fingerprint(&output), serial_fingerprint);
+        }
+    }
+
+    #[test]
     fn bridges_dispatches_canonical_uuid_rows_with_shared_controls() {
         let graph = AdjacencyGraph::with_test_undirected_multigraph(
             8,
