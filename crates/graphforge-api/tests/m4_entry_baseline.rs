@@ -21,7 +21,6 @@ use graphforge_api::{
     ExecutionResourcePolicy, GraphForge, GraphForgeOptions, Node2VecOptions, NodeSelector,
     PathsOptions, PropValue, RankOptions, ResourcePolicyMode, SimilarOptions, SpillPolicy,
 };
-use graphforge_core::AnalyzeOptions;
 use graphforge_core::algorithms::{
     AnalyzeAlgorithm, PathAlgorithm, RankAlgorithm, SimilarAlgorithm,
 };
@@ -1087,7 +1086,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 11);
+    assert_eq!(workloads.len(), 12);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
