@@ -746,7 +746,9 @@ fn merge_row_chunks(rows: usize, chunks: Vec<(usize, Vec<Vec<f64>>)>) -> Vec<Vec
     output
 }
 
-fn fastrp_pool(control: &EmbeddingControl<'_>) -> Result<&crate::ComputePool, FastRpError> {
+fn fastrp_pool<'a>(
+    control: &'a EmbeddingControl<'a>,
+) -> Result<&'a crate::ComputePool, FastRpError> {
     control.compute_pool().ok_or_else(|| {
         FastRpError::Resource(EmbeddingResourceError::Algorithm(
             crate::algorithm_dispatch::AlgorithmError::Execution {
