@@ -503,6 +503,26 @@ projection fingerprints, cancellation, and limit behavior match the one-thread
 oracle at supported thread configurations. No GPU, distributed, approximate, or
 foreign-engine fallback is implied.
 
+## Serial maximum bipartite matching (#556)
+
+`analyze(by="max_bipartite_matching")` has no parallel crossover. Its
+performance disposition is **serial layered augmentation** for every
+`compute_threads` setting.
+
+The Rust kernel resolves the selected bipartite projection, builds canonical
+left/right adjacency, computes BFS layers from unmatched left roots, and commits
+augmenting paths in left-node order. Each committed path immediately changes the
+left/right mate arrays and the later DFS frontier, so parallel augmentation
+would need conflict resolution for shared endpoints and could change the
+accepted edge set or row order.
+
+The #556 disposition preserves CSR-native selected adjacency access before
+projection, shared cancellation/checkpoint controls, structured output-limit
+errors, and bounded Arrow shaping. Schemas, row order, selected edge UUIDs,
+projection fingerprints, cancellation, and limit behavior match the one-thread
+oracle at supported thread configurations. No GPU, distributed, approximate, or
+foreign-engine fallback is implied.
+
 ## Serial paths(by="max_flow_edges") (#546)
 
 `paths(by="max_flow_edges")` has no parallel crossover. Its disposition is

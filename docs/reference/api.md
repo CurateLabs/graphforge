@@ -2193,6 +2193,11 @@ consumes only graph-native topology and a validated UUID mapping: knowledge
 tables, confidence, provenance, assertions, evidence, belief state,
 hypotheses, and valid time cannot affect its options, result, or schema.
 
+`max_bipartite_matching` has an explicit serial performance disposition (#556):
+BFS layer construction and augmenting-path commits mutate shared mate arrays in
+the accepted left-node order. No parallel crossover, GPU, or foreign-engine
+fallback is claimed.
+
 **Eulerian** (`by=`):
 `euler_circuit`, `euler_path`, `has_euler_circuit`, `has_euler_path`
 
