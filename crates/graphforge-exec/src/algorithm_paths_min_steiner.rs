@@ -4,6 +4,10 @@
 //! It returns stored edge identities in the canonical order required by the
 //! dedicated Steiner edge schema.
 
+//! Minimum Steiner tree remains serial (#551). The exact subset search keeps one
+//! global best candidate with cost/fewer-edge/edge-UUID ties, so branch order and
+//! pruning are part of the deterministic public contract.
+
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 

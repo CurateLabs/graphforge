@@ -19,6 +19,7 @@ REQUIRED_WORKLOAD_IDS = {
     "aggregate-top-n",
     "pagerank",
     "paths-gomory-hu-tree",
+    "paths-min-steiner-tree",
     "exact-cosine-knn",
     "node2vec",
 }

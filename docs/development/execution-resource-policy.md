@@ -778,6 +778,17 @@ resource checks, and no process-global Rayon pool. The M4 harness records
 `analyze-minimum-spanning-tree` evidence and verifies one-thread parity; timing
 is report-only.
 
+## Serial paths(by="min_steiner_tree") (#551)
+
+`paths(by="min_steiner_tree")` has no parallel crossover. Its disposition is
+`serial_exact_subset_steiner_search`: exact subset search keeps one global best
+candidate, and cost / fewer-edge / edge-UUID ties make branch order and pruning
+part of the deterministic public contract.
+
+Acceptance for #551 is documented here and covered by the short CI matrix
+`paths-min-steiner-tree` evidence with one-thread parity across supported worker
+counts.
+
 ## Observability
 
 `GraphForge::resource_policy()` and `GraphForge::resource_diagnostics()` expose

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use arrow::array::FixedSizeBinaryArray;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use graphforge_api::{
@@ -413,6 +414,14 @@ fn collect_workloads_for(gf: &GraphForge) -> Vec<WorkloadEvidence> {
             ev
         },
         {
+            let ev = run_paths_min_steiner_tree(gf);
+            assert!(
+                ev.output_rows > 0,
+                "paths-min-steiner-tree must produce rows"
+            );
+            ev
+        },
+        {
             let ev = run_knn(gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -513,6 +522,19 @@ fn person_selector(name: &str) -> NodeSelector {
     }
 }
 
+fn person_uuid(gf: &GraphForge, name: &str) -> [u8; 16] {
+    let query = format!("MATCH (n:Person {{name:'{name}'}}) RETURN n.node_uuid AS id");
+    let result = gf.execute(&query).expect("person uuid lookup");
+    assert_eq!(result.stats.rows_produced, 1, "{name} must be unique");
+    let ids = result.batches[0]
+        .column_by_name("id")
+        .expect("id column")
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .expect("uuid column");
+    ids.value(0).try_into().expect("fixed-size UUID bytes")
+}
+
 fn run_paths_gomory_hu_tree(gf: &GraphForge) -> WorkloadEvidence {
     let options = PathsOptions {
         by: PathAlgorithm::GomoryHuTree,
@@ -556,6 +578,61 @@ fn run_paths_gomory_hu_tree(gf: &GraphForge) -> WorkloadEvidence {
             (
                 "work_units",
                 serde_json::json!("component_bfs_and_ordered_min_cut_parent_updates"),
+            ),
+            ("threads_path", serde_json::json!("serial_for_all_policies")),
+            ("csr_native_projection", serde_json::json!(true)),
+            ("bounded_arrow_sink", serde_json::json!(true)),
+        ]),
+    }
+}
+
+fn run_paths_min_steiner_tree(gf: &GraphForge) -> WorkloadEvidence {
+    let options = PathsOptions {
+        by: PathAlgorithm::MinSteinerTree,
+        via: Some("KNOWS".into()),
+        directed: false,
+        k: 1,
+        weight: Some("cost".into()),
+        capacity_property: None,
+        cost_property: None,
+        heuristic: None,
+        walk_length: None,
+        seed: None,
+        terminal_uuids: vec![
+            person_uuid(gf, "Alice"),
+            person_uuid(gf, "Carol"),
+            person_uuid(gf, "Dave"),
+        ],
+        prize_property: None,
+    };
+    let before_rss = peak_rss_bytes();
+    let started = Instant::now();
+    let first = gf
+        .paths(Option::<&NodeSelector>::None, None, options.clone())
+        .expect("min_steiner_tree");
+    let second = gf
+        .paths(Option::<&NodeSelector>::None, None, options)
+        .expect("min_steiner_tree repeat");
+    let wall_time_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    assert_logical_batch_equal(&first, &second, "min_steiner_tree must be deterministic");
+    let fingerprint = batch_structural_fingerprint(std::slice::from_ref(&first));
+    WorkloadEvidence {
+        id: "paths-min-steiner-tree",
+        schema_fields: schema_field_names(first.schema().as_ref()),
+        output_rows: first.num_rows() as u64,
+        fingerprint,
+        wall_time_ms,
+        peak_rss_bytes: peak_rss_bytes().or(before_rss),
+        structural: BTreeMap::from([
+            ("surface", serde_json::json!("GraphForge::paths")),
+            ("algorithm", serde_json::json!("min_steiner_tree")),
+            (
+                "disposition",
+                serde_json::json!("serial_exact_subset_steiner_search"),
+            ),
+            (
+                "work_units",
+                serde_json::json!("reachable_preflight_and_ordered_subset_search"),
             ),
             ("threads_path", serde_json::json!("serial_for_all_policies")),
             ("csr_native_projection", serde_json::json!(true)),
@@ -695,6 +772,14 @@ fn collect_short_matrix() -> (serde_json::Value, Vec<WorkloadEvidence>) {
             ev
         },
         {
+            let ev = run_paths_min_steiner_tree(&gf);
+            assert!(
+                ev.output_rows > 0,
+                "paths-min-steiner-tree must produce rows"
+            );
+            ev
+        },
+        {
             let ev = run_knn(&gf);
             assert!(ev.output_rows > 0, "knn must produce rows");
             ev
@@ -743,7 +828,7 @@ fn build_evidence(
 #[test]
 fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
     let (contract, workloads) = collect_short_matrix();
-    assert_eq!(workloads.len(), 7);
+    assert_eq!(workloads.len(), 8);
     let ids: Vec<_> = workloads.iter().map(|w| w.id).collect();
     assert_eq!(
         ids,
@@ -753,6 +838,7 @@ fn short_ci_matrix_runs_through_public_facade_under_fixed_two_workers() {
             "aggregate-top-n",
             "pagerank",
             "paths-gomory-hu-tree",
+            "paths-min-steiner-tree",
             "exact-cosine-knn",
             "node2vec"
         ]
