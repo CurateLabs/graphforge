@@ -86,7 +86,7 @@ source-range order, Node2Vec skip-gram training stays serial, and transitive
 closure merges source ranges canonically, so fingerprints match the one-thread
 
 `cluster(by="components")` (#518) may partition independent work across that
-pool above documented crossovers; work never uses Rayon's process-global pool.
+pool above documented crossovers; work never uses Rayon's process-global pool. Maximum-cardinality matching (#557) is explicitly dispositioned serial because blossom/primal-dual search mutates ordered matching state.
 Cosine dot products retain serial coordinate order, PageRank keeps canonical
 contribution order with serial dangling/delta reductions, Jaccard retains
 serial candidate order per source, clustering coefficient merges node-range
@@ -684,6 +684,27 @@ embedding surface. Schemas, row order, fingerprints, cancellation, and limit
 behavior match the one-thread oracle at `1`/`2`/`4`/`8`/automatic
 configurations. No GPU, distributed, approximate, or foreign-engine fallback is
 implied.
+
+## Serial maximum-cardinality matching (#557)
+
+`analyze(by="max_cardinality_matching")` has no parallel crossover. Its
+performance disposition is **serial exact blossom search** for every
+`compute_threads` setting.
+
+The unweighted wrapper normalizes the selected undirected multigraph, then uses
+the shared exact blossom/primal-dual core with cardinality as the primary
+objective and raw edge UUIDs as the deterministic tie order. Labels, root
+queues, blossom contractions/expansions, dual steps, and augmenting-path commits
+all update one alternating forest. Parallel speculation would need conflict
+resolution across shared vertices/blossoms and could change the chosen maximum
+matching or raw-edge UUID tie objective.
+
+The #557 disposition preserves CSR-native selected adjacency access before
+normalization, shared cancellation/checkpoint controls, structured resource
+errors, and bounded Arrow shaping. Schemas, row order, selected edge UUIDs,
+projection fingerprints, cancellation, and limit behavior match the one-thread
+oracle at supported thread configurations. No GPU, distributed, approximate, or
+foreign-engine fallback is implied.
 
 ## Observability
 

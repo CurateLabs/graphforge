@@ -2130,6 +2130,11 @@ projection fingerprint, normalized `label` and `via` selectors,
 version `1`. The shipped knowledge run API can persist the descriptor and
 `algorithm_run_uuid` without changing this result.
 
+`max_cardinality_matching` has an explicit serial performance disposition
+(#557): exact blossom labels, contractions, dual updates, and augmenting paths
+mutate one alternating forest and raw-edge UUID tie objective. No parallel
+crossover, GPU, or foreign-engine fallback is claimed.
+
 For `by="max_bipartite_matching"`, pass `directed=False`; the operation is
 unweighted and rejects `weight`. Supply `partition_property="side"` to resolve
 an explicit partition from every selected node's non-null scalar string or
