@@ -1,0 +1,51 @@
+name: CodSpeed
+
+# Continuous performance measurement for the Rust surface. Benchmarks are
+# divan targets built through `cargo codspeed` and measured with CodSpeed's
+# CPU simulation instrument, so results are hardware-agnostic and comparable
+# across runs. Cargo builds here are diagnostics-only: Bazel remains the
+# authoritative compile/test surface (see .github/workflows/README.md).
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  # Lets CodSpeed trigger a backtest run to seed the baseline.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # OpenID Connect authentication with CodSpeed (no long-lived token).
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  benchmarks:
+    name: Rust Benchmarks
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-codspeed@5.0.1
+
+      - name: Build benchmark targets
+        run: cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: simulation
+          run: cargo codspeed run

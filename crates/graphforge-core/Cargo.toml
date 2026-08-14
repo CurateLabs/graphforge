@@ -17,5 +17,13 @@ sha2 = { workspace = true }
 # The BDD API/TCK harness moved to graphforge-api (it drives the GraphForge facade,
 # which now lives there). See #716.
 
+[dev-dependencies]
+divan = { workspace = true }
+
+# Canonical encoding / fingerprint benchmarks (CodSpeed, simulation mode).
+[[bench]]
+name = "canonical"
+harness = false
+
 [lints]
 workspace = true
