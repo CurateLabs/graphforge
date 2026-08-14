@@ -1,7 +1,11 @@
 # GitHub Actions Workflows
 
-GraphForge uses one stable required `CI Gate`. A deterministic classifier runs
-only the policy, language, and binding jobs relevant to the pull request.
+GraphForge uses one stable required `CI Gate`. Live default-branch enforcement
+is repository ruleset **19988544** (required status check context exactly
+`CI Gate`); workflow job naming alone is not sufficient — see
+`scripts/ci/verify-ci-gate-enforcement.py` (`--check-live` for maintainers).
+A deterministic classifier runs only the policy, language, and binding jobs
+relevant to the pull request.
 
 **Speed is a first-class value alongside honesty.** Surfaces shed work that is
 not required for their objective. PR CI does **not** run full `llvm-cov`.
