@@ -2,7 +2,9 @@
 
 Build graphs with the Python API or openCypher. This page is the everyday
 construction path for v0.5.0: scalar nodes and edges first, then atomic bulk
-batches. Results and receipts are Apache Arrow tables.
+batches. Scalar `add_node` / `add_edge` return construction handles; atomic bulk
+publish and Cypher/analyst paths return Apache Arrow tables (including bulk
+receipts).
 
 For deeper architecture (project generations, Rust-owned validation, binding
 parity), see the [Book](../book/README.md).

@@ -85,7 +85,9 @@ GraphForge is organised into three layers with strict boundaries
   [ADR 0006](../../adr/0006-epistemic-model.md)). Lives in `provenance/` + `knowledge/`. Attaches to
   graph objects **by UUID reference only**.
 - **Workbench layer** — the analyst verbs, hybrid search, workflows, exploration, project envelope.
-  Consumes the layers below and returns Arrow; holds no graph-semantic state.
+  Consumes the layers below; data-bearing verb results are Arrow. Holds no
+  graph-semantic state. Control/lifecycle/construction surfaces may return
+  scalars, collections, unit, or handles.
 
 **Boundary rule:** knowledge attaches by UUID reference, never by embedding columns on graph tables.
 Graph-native query results never depend on knowledge-layer data (a tested invariant). This is what

@@ -138,7 +138,7 @@ lifecycle commands:
 
 ```text
 Python (PyO3, thin) ─┐
-Node (N-API, thin) ──┼──> graphforge-api ──> Arrow results
+Node (N-API, thin) ──┼──> graphforge-api ──> Arrow (data plane) + thin control/handle returns
 CLI (thin launcher) ─┘
 
 Cypher: graphforge-cypher ──> graphforge-ir ──> graphforge-rel ──> graphforge-exec

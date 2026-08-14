@@ -94,10 +94,17 @@ This pattern matches two Person nodes connected by a KNOWS relationship.
 
 ## Result Types
 
-**v0.5.0:** ALL methods return a PyArrow `Table` — `execute`, `rank`, `cluster`, `find`,
-and `schema`. There are no `CypherValue` wrappers and no `SearchHit` objects. Access values
-via `.as_py()` or pass the table directly to pandas, Polars, or NetworkX, which all accept
-Arrow as input.
+**v0.5.0 data plane:** Cypher `execute`, analyst verbs (`rank`, `cluster`,
+`paths`, `analyze`, `similar`, `find`), and tabular helpers such as `schema()`
+return a PyArrow `Table`. There are no `CypherValue` wrappers and no
+`SearchHit` objects for those results. Access values via `.as_py()` or pass the
+table directly to pandas, Polars, or NetworkX.
+
+**Control / construction plane:** methods such as `labels()`,
+`relationship_types()`, `node_count()`, `explain()`, ontology lifecycle helpers,
+and scalar `add_node` / `add_edge` return lists, integers, strings, `None`, or
+construction handles — not Arrow tables. See the
+[architecture overview](../book/architecture/overview.md#arrow-as-the-data-contract).
 
 ```python
 table = forge.execute("MATCH (p:Person) RETURN p.name, p.age")
