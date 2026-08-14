@@ -219,7 +219,17 @@ RETURN p.name AS name, id(p) AS node_id
 
 ### MERGE
 
-Find or create — safe for idempotent upserts.
+Find or create — safe for idempotent upserts within the shipped Rust subset
+([implementation status](../reference/implementation-status/clauses.md#merge)).
+
+**Supported:**
+- Standalone new-node MERGE: `MERGE (p:Person {email: '…'})`
+- Relationship MERGE when both endpoints are already bound: `MATCH (a), (b) MERGE (a)-[:KNOWS]->(b)`
+- `ON CREATE SET` / `ON MATCH SET` property (and label) actions when every row takes the same create-or-match branch
+
+**Not supported (structured plan errors):**
+- Multi-node / relationship-construction MERGE such as `MERGE (a:A)-[:R]->(b:B)` → `relationship and multi-node MERGE execution is not implemented yet`
+- Row-conditional map actions (`+=` / `=`) when some rows create and others match → `row-conditional MERGE map actions are not implemented yet`
 
 ```cypher
 -- Merge node (create if not exists, match if exists)

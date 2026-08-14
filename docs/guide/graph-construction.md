@@ -76,6 +76,11 @@ forge.execute("""
 
 ### MERGE (idempotent upsert)
 
+Standalone new-node MERGE and `ON CREATE` / `ON MATCH` property sets are
+supported. Prefer binding endpoints first, then merging the relationship —
+inline multi-node MERGE patterns are rejected. See
+[MERGE status](../reference/implementation-status/clauses.md#merge).
+
 ```python
 forge.execute("""
     MERGE (p:Person {email: $email})

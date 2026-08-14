@@ -89,7 +89,7 @@ that cannot be faithfully expressed as relational algebra:
 | `PathUnique` | Path isomorphism/homomorphism enforcement |
 | `ProvenanceSemijoin` | Semijoin with confidence propagation |
 | `OntologyInfer` | Transitive/symmetric closure materialization |
-| `GraphMerge` | MERGE upsert with write-path locking |
+| `GraphMerge` | Partial MERGE upsert (standalone new node or referenced-endpoint relationship) with write-path locking |
 
 All other operators (scan, filter, project, aggregate, sort, limit) run through standard
 DataFusion physical nodes.

@@ -237,7 +237,7 @@ The following operators remain as GraphForge-owned custom DataFusion nodes becau
 | Path uniqueness / distinctness | Cypher path semantics (isomorphism vs. homomorphism) |
 | Provenance-aware semijoins | Confidence propagation during join |
 | Ontology-aware inference | Transitive/symmetric closure — not a static join |
-| MERGE | Graph upsert semantics with write-path locking |
+| MERGE | Partial graph upsert: standalone new-node and referenced-endpoint relationship forms with write-path locking; multi-node construction and row-conditional map actions are rejected (`write_driver.rs`) |
 
 ---
 
