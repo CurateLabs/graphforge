@@ -141,10 +141,14 @@ fn raw_density(node_count: u64, edge_count: u64, directedness: GsiDirectedness) 
     if node_count < 2 {
         return 0.0;
     }
+    // GSI density is specified as an f64 ratio over live counts; mantissa loss on
+    // enormous V/E is acceptable for grading (clamped integer percent).
+    #[allow(clippy::cast_precision_loss)]
     let denominator = (node_count as f64) * ((node_count - 1) as f64);
     if denominator == 0.0 {
         return 0.0;
     }
+    #[allow(clippy::cast_precision_loss)]
     let numerator = match directedness {
         GsiDirectedness::Undirected => 2.0 * (edge_count as f64),
         GsiDirectedness::Directed | GsiDirectedness::Unknown => edge_count as f64,
@@ -247,7 +251,7 @@ mod tests {
         assert_eq!(tiny.density_integer, 0);
 
         graph
-            .set_graph_directedness(write_context(1), Some(GraphDirectedness::Directed))
+            .set_graph_directedness(&write_context(1), Some(GraphDirectedness::Directed))
             .unwrap();
         assert_eq!(
             graph.graph_directedness().unwrap(),
@@ -273,21 +277,21 @@ mod tests {
         assert_eq!(unknown.edge_count, 3);
 
         graph
-            .set_graph_directedness(write_context(2), Some(GraphDirectedness::Undirected))
+            .set_graph_directedness(&write_context(2), Some(GraphDirectedness::Undirected))
             .unwrap();
         let undirected = graph.profile_gsi().unwrap();
         assert_eq!(undirected.gsi, "GU-01-XS-D100");
         assert_eq!(undirected.directedness, GsiDirectedness::Undirected);
 
         graph
-            .set_graph_directedness(write_context(3), Some(GraphDirectedness::Directed))
+            .set_graph_directedness(&write_context(3), Some(GraphDirectedness::Directed))
             .unwrap();
         let directed = graph.profile_gsi().unwrap();
         assert_eq!(directed.gsi, "GD-01-XS-D50");
         assert_eq!(directed.directedness, GsiDirectedness::Directed);
 
         graph
-            .set_graph_directedness(write_context(4), None)
+            .set_graph_directedness(&write_context(4), None)
             .unwrap();
         assert_eq!(graph.graph_directedness().unwrap(), None);
         assert_eq!(graph.profile_gsi().unwrap().gsi, "Gx-01-XS-D50");

@@ -5917,7 +5917,7 @@ impl GraphForge {
         };
         let mut graph = self.open_write_guard()?;
         graph
-            .set_graph_directedness(context, directedness)
+            .set_graph_directedness(&context, directedness)
             .map_err(|error| to_napi_err(&error))
     }
 

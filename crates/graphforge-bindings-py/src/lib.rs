@@ -5531,7 +5531,7 @@ impl GraphForge {
                 .map_err(|error| to_pyerr(py, &error))?
                 .map(|operation| operation.0),
         };
-        py.detach(|| self.inner.set_graph_directedness(context, directedness))
+        py.detach(|| self.inner.set_graph_directedness(&context, directedness))
             .map_err(|error| to_pyerr(py, &error))
     }
 

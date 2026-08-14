@@ -72,7 +72,7 @@ impl GraphForge {
     /// Returns a structured publication, validation, or project error.
     pub fn set_graph_directedness(
         &mut self,
-        context: WriteContext,
+        context: &WriteContext,
         directedness: Option<GraphDirectedness>,
     ) -> Result<(), GfError> {
         let ontology = self.workspace_ontology()?;

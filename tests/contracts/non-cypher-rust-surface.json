@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "b4f9e9cba9d75f8ae91cb47fc64b9e224b33d7629f6da4ff8c76328ce7f11979",
+  "public_method_digest": "489b4ddff8728689a29476d5b4927eb6b0b1fb83e7b7be8988f923ea8d09b83d",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -38,6 +38,7 @@
       "crate.bulk_receipt_schema": "introspection",
       "crate.composite_generation_uuid": "introspection",
       "crate.composite_receipt_schema": "introspection",
+      "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
@@ -140,6 +141,18 @@
         {"path": "crates/graphforge-api/tests/release_load_construction.rs", "symbol": "bulk_load_construction_stays_within_recovery_bound"},
         {"path": "crates/graphforge-api/src/workspace_ontology.rs", "symbol": "clear_ontology_publishes_explicit_absence"},
         {"path": "crates/graphforge-api/src/checkpoint_graph_diff.rs", "symbol": "extracts_uuid_ordered_logical_nodes_and_edges_from_pinned_generation"}
+      ]
+    },
+    "gsi-profiler": {
+      "ids": [
+        "GraphForge.graph_directedness",
+        "GraphForge.profile_gsi",
+        "GraphForge.set_graph_directedness"
+      ],
+      "test_refs": [
+        {"path": "crates/graphforge-api/src/gsi_profiler.rs", "symbol": "empty_workspace_profiles_without_error"},
+        {"path": "crates/graphforge-api/src/gsi_profiler.rs", "symbol": "singleton_and_configured_directedness_grade"},
+        {"path": "crates/graphforge-api/src/gsi_profiler.rs", "symbol": "triangle_grades_gd_gu_and_gx"}
       ]
     },
     "checkpoint-view": {
