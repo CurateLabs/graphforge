@@ -153,9 +153,7 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 encoding="utf-8",
             )
             script = (
-                "import('file://"
-                + index.resolve().as_posix()
-                + "').then(m => {"
+                "import('file://" + index.resolve().as_posix() + "').then(m => {"
                 "  if (typeof m.version !== 'function') process.exit(2);"
                 "  if (typeof m.version() !== 'string') process.exit(3);"
                 "  process.stdout.write(m.version());"
@@ -211,9 +209,7 @@ class AssembleBazelBindingPackagesTests(unittest.TestCase):
                 wheel_tag="cp310-abi3-win_amd64",
             )
             self.assertEqual(py_evidence["wheel_tag"], "cp310-abi3-win_amd64")
-            self.assertTrue(
-                Path(py_evidence["wheel"]).name.endswith("-cp310-abi3-win_amd64.whl")
-            )
+            self.assertTrue(Path(py_evidence["wheel"]).name.endswith("-cp310-abi3-win_amd64.whl"))
 
             node_native = Path(tmp) / "libgraphforge_bindings_node.so"
             node_native.write_bytes(b"FAKE_NODE")
