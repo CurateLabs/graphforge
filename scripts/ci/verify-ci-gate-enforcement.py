@@ -56,9 +56,7 @@ def _status_check_entries(rule: dict[str, Any]) -> list[dict[str, Any]]:
     if entries is None:
         return []
     if not isinstance(entries, list):
-        raise EnforcementError(
-            "required_status_checks parameters must be a list of check objects"
-        )
+        raise EnforcementError("required_status_checks parameters must be a list of check objects")
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
@@ -86,14 +84,11 @@ def validate_ci_gate_ruleset(
 
     ruleset_id = ruleset.get("id")
     if ruleset_id != expected_id:
-        raise EnforcementError(
-            f"expected ruleset id {expected_id}, got {ruleset_id!r}"
-        )
+        raise EnforcementError(f"expected ruleset id {expected_id}, got {ruleset_id!r}")
 
     if ruleset.get("enforcement") != "active":
         raise EnforcementError(
-            f"ruleset {expected_id} must be actively enforced, "
-            f"got {ruleset.get('enforcement')!r}"
+            f"ruleset {expected_id} must be actively enforced, got {ruleset.get('enforcement')!r}"
         )
 
     if ruleset.get("target") != "branch":

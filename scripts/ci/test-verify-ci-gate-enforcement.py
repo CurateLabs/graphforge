@@ -93,11 +93,7 @@ def test_default_branch_condition_required() -> None:
 
 def test_preserved_deletion_and_non_fast_forward() -> None:
     ruleset = good_ruleset()
-    ruleset["rules"] = [
-        rule
-        for rule in ruleset["rules"]
-        if rule.get("type") != "deletion"
-    ]
+    ruleset["rules"] = [rule for rule in ruleset["rules"] if rule.get("type") != "deletion"]
     expect_fail(ruleset, "must preserve")
 
 
