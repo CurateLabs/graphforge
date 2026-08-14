@@ -2404,6 +2404,266 @@ fn fixed_hop_nodes_preserve_endpoint_labels_and_properties() {
     assert_eq!(titles.value(1), "Acme");
 }
 
+/// Labels list at path-node index `node_idx` in `nodes(p)` column `col_name`.
+fn path_node_labels_at(
+    batch: &arrow::record_batch::RecordBatch,
+    col_name: &str,
+    row: usize,
+    node_idx: usize,
+) -> Vec<String> {
+    let list = batch
+        .column_by_name(col_name)
+        .expect("column")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("List column");
+    let items_arr = list.value(row);
+    let items = items_arr
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("node structs");
+    let labels = items
+        .column_by_name("labels")
+        .expect("labels")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("labels List");
+    utf8_list_cell(labels, node_idx)
+}
+
+#[test]
+fn variable_length_path_nodes_preserve_full_multi_labels() {
+    // #705: Person:Employee through nodes(p) keeps both labels for bounded and
+    // unbounded VL patterns, matching direct labels() / label predicates and
+    // fixed-hop path values. Empty *0.. paths and reopen stay deterministic.
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().to_str().unwrap();
+    let gf = GraphForge::new(Some(path)).expect("persistent instance");
+    gf.execute(
+        "CREATE \
+         (a:Person:Employee {name:'Alice'}), \
+         (b:Person {name:'Bob'}), \
+         (c:Company {name:'Acme'}), \
+         (a)-[:KNOWS]->(b), \
+         (b)-[:KNOWS]->(a), \
+         (a)-[:WORKS_AT]->(c)",
+    )
+    .expect("create multi-label VL fixture");
+
+    let direct = rows(
+        &gf,
+        "MATCH (n:Person:Employee {name:'Alice'}) \
+         RETURN labels(n) AS labels, n:Person AS is_person, n:Employee AS is_employee",
+    );
+    assert_eq!(direct.stats.rows_produced, 1);
+    let direct_labels = utf8_list_cell(
+        direct.batches[0]
+            .column_by_name("labels")
+            .expect("labels")
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("labels List"),
+        0,
+    );
+    assert_eq!(direct_labels, vec!["Person", "Employee"]);
+    assert_eq!(bool_cell(&direct, "is_person", 0), Some(true));
+    assert_eq!(bool_cell(&direct, "is_employee", 0), Some(true));
+
+    for pattern in [
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*1..2]->(b:Person) \
+         RETURN nodes(p) AS ns, length(p) AS l",
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*]->(b:Person) \
+         RETURN nodes(p) AS ns, length(p) AS l",
+    ] {
+        let r = rows(&gf, pattern);
+        assert!(r.stats.rows_produced >= 1, "pattern must match: {pattern}");
+        for batch in &r.batches {
+            for row in 0..batch.num_rows() {
+                let labels = path_node_labels_at(batch, "ns", row, 0);
+                assert_eq!(
+                    labels, direct_labels,
+                    "VL path start node labels must match direct labels()"
+                );
+            }
+        }
+    }
+
+    // Fixed-hop parity with the same multi-label endpoint.
+    let fixed = rows(
+        &gf,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:WORKS_AT]->(c:Company) \
+         RETURN nodes(p) AS ns",
+    );
+    assert_eq!(fixed.stats.rows_produced, 1);
+    assert_eq!(
+        path_node_labels_at(&fixed.batches[0], "ns", 0, 0),
+        direct_labels
+    );
+    assert_eq!(
+        path_node_labels_at(&fixed.batches[0], "ns", 0, 1),
+        vec!["Company"]
+    );
+
+    // Empty / zero-hop path still hydrates the seed node's full label set.
+    let zero = rows(
+        &gf,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*0..0]->(b) \
+         RETURN nodes(p) AS ns, length(p) AS l",
+    );
+    assert_eq!(zero.stats.rows_produced, 1);
+    assert_eq!(
+        path_node_labels_at(&zero.batches[0], "ns", 0, 0),
+        direct_labels
+    );
+
+    // Repeated node on a 2-hop walk Alice→Bob→Alice keeps full labels both times.
+    let repeated = rows(
+        &gf,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*2..2]->(b:Person:Employee) \
+         RETURN nodes(p) AS ns",
+    );
+    assert_eq!(repeated.stats.rows_produced, 1);
+    assert_eq!(
+        path_node_labels_at(&repeated.batches[0], "ns", 0, 0),
+        direct_labels
+    );
+    assert_eq!(
+        path_node_labels_at(&repeated.batches[0], "ns", 0, 2),
+        direct_labels
+    );
+    assert_eq!(
+        path_node_labels_at(&repeated.batches[0], "ns", 0, 1),
+        vec!["Person"]
+    );
+
+    // labels(x) over path nodes agrees with the hydrated list; membership
+    // predicates use labels(x) because `x:Label` requires a bound node var.
+    let via_list = rows(
+        &gf,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*1..1]->(b:Person) \
+         RETURN [x IN nodes(p) | labels(x)] AS path_labels, \
+                [x IN nodes(p) | 'Employee' IN labels(x)] AS is_employee",
+    );
+    assert_eq!(via_list.stats.rows_produced, 1);
+    let path_labels = via_list.batches[0]
+        .column_by_name("path_labels")
+        .expect("path_labels")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("path_labels List");
+    let first = path_labels.value(0);
+    let first = first
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("nested label lists");
+    assert_eq!(utf8_list_cell(first, 0), direct_labels);
+    assert_eq!(utf8_list_cell(first, 1), vec!["Person"]);
+    let preds = via_list.batches[0]
+        .column_by_name("is_employee")
+        .expect("is_employee")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("predicate list");
+    let pred_vals = preds.value(0);
+    let pred_vals = pred_vals
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("bool list");
+    assert_eq!(pred_vals.value(0), true);
+    assert_eq!(pred_vals.value(1), false);
+
+    // Schema + values survive reopen.
+    let schema_before = r_schema_labels_field(&gf);
+    drop(gf);
+    let gf2 = GraphForge::new(Some(path)).expect("reopen");
+    let after = rows(
+        &gf2,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*1..2]->(b:Person) \
+         RETURN nodes(p) AS ns",
+    );
+    assert!(after.stats.rows_produced >= 1);
+    assert_eq!(
+        path_node_labels_at(&after.batches[0], "ns", 0, 0),
+        direct_labels
+    );
+    assert_eq!(r_schema_labels_field(&gf2), schema_before);
+}
+
+fn r_schema_labels_field(gf: &GraphForge) -> DataType {
+    let r = rows(
+        gf,
+        "MATCH p = (a:Person:Employee {name:'Alice'})-[:KNOWS*1..1]->(b:Person) \
+         RETURN nodes(p) AS ns",
+    );
+    let field = r.schema.field_with_name("ns").expect("ns");
+    let DataType::List(item) = field.data_type() else {
+        panic!("ns must be List, got {:?}", field.data_type());
+    };
+    let DataType::Struct(fields) = item.data_type() else {
+        panic!("ns item must be Struct, got {:?}", item.data_type());
+    };
+    fields
+        .iter()
+        .find(|f| f.name() == "labels")
+        .expect("labels field")
+        .data_type()
+        .clone()
+}
+
+#[test]
+fn variable_length_path_nodes_single_label_and_advisory_runtime() {
+    // #705: single-label nodes stay single-element lists; advisory/runtime
+    // labels resolve through the runtime catalog domain (not ontology IDs).
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    gf.execute(
+        "CREATE (a:Person {name:'Alice'})-[:KNOWS]->(b:Person {name:'Bob'}), \
+         (a)-[:KNOWS]->(c:Contractor {name:'Chris'})",
+    )
+    .expect("create single-label / runtime-label fixture");
+
+    let single = rows(
+        &gf,
+        "MATCH p = (:Person {name:'Alice'})-[:KNOWS*1..1]->(:Person {name:'Bob'}) \
+         RETURN nodes(p) AS ns",
+    );
+    assert_eq!(single.stats.rows_produced, 1);
+    assert_eq!(
+        path_node_labels_at(&single.batches[0], "ns", 0, 0),
+        vec!["Person"]
+    );
+    assert_eq!(
+        path_node_labels_at(&single.batches[0], "ns", 0, 1),
+        vec!["Person"]
+    );
+
+    let runtime = rows(
+        &gf,
+        "MATCH p = (:Person {name:'Alice'})-[:KNOWS*1..1]->(:Contractor) \
+         RETURN nodes(p) AS ns",
+    );
+    assert_eq!(runtime.stats.rows_produced, 1);
+    assert_eq!(
+        path_node_labels_at(&runtime.batches[0], "ns", 0, 1),
+        vec!["Contractor"]
+    );
+    let direct_runtime = rows(
+        &gf,
+        "MATCH (n:Contractor {name:'Chris'}) RETURN labels(n) AS labels",
+    );
+    assert_eq!(
+        utf8_list_cell(
+            direct_runtime.batches[0]
+                .column_by_name("labels")
+                .expect("labels")
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .expect("labels List"),
+            0,
+        ),
+        path_node_labels_at(&runtime.batches[0], "ns", 0, 1)
+    );
+}
+
 #[test]
 fn fixed_hop_return_p_carries_relationship_properties() {
     // #889: fixed-hop `RETURN p` uses the same relationship value shape as
