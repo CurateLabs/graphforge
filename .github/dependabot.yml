@@ -112,6 +112,8 @@ updates:
           - "patch"
 
   # Root npm / pnpm workspace
+  # If npm Dependabot is later added for iac/pulumi/typescript, it must carry
+  # the same typescript major-update guardrail below.
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -128,6 +130,10 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    # Stay on TypeScript 5.x; majors (e.g. 7.x) need an explicit coordinated bump.
+    ignore:
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       npm-minor-patch:
         patterns:

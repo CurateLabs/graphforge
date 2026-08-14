@@ -176,6 +176,8 @@ and [testing.md](testing.md) for command recipes and suite layout.
 - Thin adapters only — no semantic ownership in the binding layer
 - Type hints / typed APIs on public surfaces
 - No `# type: ignore` without explanation
+- First-party TypeScript compiler/loader policy:
+  [typescript-toolchain.md](typescript-toolchain.md)
 
 ---
 
