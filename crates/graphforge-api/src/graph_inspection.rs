@@ -37,6 +37,16 @@ impl GraphInspection {
         }
     }
 
+    pub(crate) fn edge_count(&self) -> Result<u64, GfError> {
+        let mut total = 0_u64;
+        for count in self.relationship_type_counts.values() {
+            total = total
+                .checked_add(*count)
+                .ok_or_else(|| resource_limit("graph inspection edge count exceeds UInt64"))?;
+        }
+        Ok(total)
+    }
+
     pub(crate) fn into_record_batch(self) -> Result<RecordBatch, GfError> {
         let row_count = self
             .label_counts

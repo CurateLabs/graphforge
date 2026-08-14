@@ -25,15 +25,15 @@ use graphforge_api::{
     EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo,
     EmbeddingSpaceProducer, EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult,
     FastRpOptions, FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError,
-    GraphForgeOptions, GraphSageAggregator, GraphSageOptions, HashGnnOptions, InvocationDescriptor,
-    InvocationError, IrLiteral, Node2VecOptions, NodeSelector, OpenRouterProviderSession,
-    OpenRouterProviderSessionConfig, OpenRouterWireLimits, OperationId, ProjectWriteMode,
-    PropValue, ProviderBatchLimits, ProviderCapabilities, ProviderCapability,
-    ProviderEmbeddingDistance, ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection,
-    ProviderEmbeddingPlanRequest, ProviderExecutionLimits, ProviderRequestLimits,
-    RerankAdvisoryPolicy, RerankFailurePolicy, RuntimeGuard, SearchIndexOptions,
-    SendableRecordBatchStream, TextIndexInspection, TokenCountClass, WriteContext,
-    validate_embedding_options,
+    GraphDirectedness, GraphForgeOptions, GraphSageAggregator, GraphSageOptions,
+    GraphScaleIndexProfile, HashGnnOptions, InvocationDescriptor, InvocationError, IrLiteral,
+    Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
+    OpenRouterWireLimits, OperationId, ProjectWriteMode, PropValue, ProviderBatchLimits,
+    ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
+    ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
+    ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
+    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
+    TokenCountClass, WriteContext, validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -1642,6 +1642,59 @@ pub struct PyEdgeHandle {
 #[pyclass(name = "InvocationDescriptor", module = "graphforge")]
 pub struct PyInvocationDescriptor {
     inner: InvocationDescriptor,
+}
+
+/// Structured Graph Scale Index grade for one opened workspace.
+#[pyclass(name = "GraphScaleIndexProfile", module = "graphforge")]
+pub struct PyGraphScaleIndexProfile {
+    inner: GraphScaleIndexProfile,
+}
+
+#[pymethods]
+impl PyGraphScaleIndexProfile {
+    #[getter]
+    fn gsi(&self) -> &str {
+        &self.inner.gsi
+    }
+
+    #[getter]
+    fn directedness(&self) -> &'static str {
+        self.inner.directedness.as_str()
+    }
+
+    #[getter]
+    fn node_count(&self) -> u64 {
+        self.inner.node_count
+    }
+
+    #[getter]
+    fn edge_count(&self) -> u64 {
+        self.inner.edge_count
+    }
+
+    #[getter]
+    fn density(&self) -> f64 {
+        self.inner.density
+    }
+
+    #[getter]
+    fn scale_code(&self) -> &str {
+        &self.inner.scale_code
+    }
+
+    #[getter]
+    fn size_tag(&self) -> &str {
+        &self.inner.size_tag
+    }
+
+    #[getter]
+    fn density_integer(&self) -> u32 {
+        self.inner.density_integer
+    }
+
+    fn __repr__(&self) -> String {
+        format!("GraphScaleIndexProfile(gsi={:?})", self.inner.gsi)
+    }
 }
 
 /// Result of one first-time recorded algorithm dispatch.
@@ -5445,6 +5498,51 @@ impl GraphForge {
             .map_err(|e| to_pyerr(py, &e))
     }
 
+    /// Read optional project-level graph directedness (`directed` / `undirected`).
+    fn graph_directedness(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
+        self.ensure_open()?;
+        py.detach(|| self.inner.graph_directedness())
+            .map(|value| value.map(GraphDirectedness::as_str))
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
+    /// Set or clear project-level graph directedness for GSI grading.
+    #[pyo3(signature = (directedness=None, *, operation_uuid, actor_uuid=None))]
+    fn set_graph_directedness(
+        &mut self,
+        py: Python<'_>,
+        directedness: Option<&str>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+    ) -> PyResult<()> {
+        self.ensure_open()?;
+        let directedness = match directedness {
+            None => None,
+            Some(value) => {
+                Some(GraphDirectedness::parse(value).map_err(|error| to_pyerr(py, &error))?)
+            }
+        };
+        let context = WriteContext {
+            operation_uuid: canonical_operation_id(operation_uuid)
+                .map_err(|error| to_pyerr(py, &error))?,
+            actor_uuid: actor_uuid
+                .map(canonical_operation_id)
+                .transpose()
+                .map_err(|error| to_pyerr(py, &error))?
+                .map(|operation| operation.0),
+        };
+        py.detach(|| self.inner.set_graph_directedness(&context, directedness))
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
+    /// Grade the live graph to a Graph Scale Index profile.
+    fn profile_gsi(&self, py: Python<'_>) -> PyResult<PyGraphScaleIndexProfile> {
+        self.ensure_open()?;
+        py.detach(|| self.inner.profile_gsi())
+            .map(|inner| PyGraphScaleIndexProfile { inner })
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
     /// Close the instance; subsequent operations raise `LifecycleError`.
     /// Idempotent. Storage is flushed/released when the handle is dropped.
     fn close(&mut self) {
@@ -5708,6 +5806,7 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNodeHandle>()?;
     m.add_class::<PyEdgeHandle>()?;
     m.add_class::<PyInvocationDescriptor>()?;
+    m.add_class::<PyGraphScaleIndexProfile>()?;
     m.add_class::<PyRecordedAlgorithmResult>()?;
     m.add_class::<PyResolvedBeliefProjection>()?;
     m.add_class::<PyResolvedRecordedAlgorithmResult>()?;
