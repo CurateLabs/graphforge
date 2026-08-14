@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 94,
+  "cargo_target_count": 96,
   "targets": [
     {
       "package": "graphforge-api",
@@ -624,6 +624,16 @@
       "notes": "#10; unit tests `//crates/graphforge-core:graphforge_core_test`"
     },
     {
+      "package": "graphforge-core",
+      "target": "canonical",
+      "class": "bench",
+      "source": "crates/graphforge-core/benches/canonical.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "CodSpeed divan benchmark; Cargo diagnostics surface"
+    },
+    {
       "package": "graphforge-cypher",
       "target": "corpus",
       "class": "integration-test",
@@ -642,6 +652,16 @@
       "bazel_label": "//crates/graphforge-cypher:graphforge_cypher",
       "exception_id": null,
       "notes": "#10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test`"
+    },
+    {
+      "package": "graphforge-cypher",
+      "target": "compile",
+      "class": "bench",
+      "source": "crates/graphforge-cypher/benches/compile.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "CodSpeed divan benchmark; Cargo diagnostics surface"
     },
     {
       "package": "graphforge-exec",
@@ -992,6 +1012,12 @@
       "tool": "Swift/Kotlin/UniFFI/mobile",
       "status": "excluded",
       "justification": "Abandoned for Bazel migration; not required targets"
+    },
+    {
+      "id": "RT-codspeed-bench",
+      "tool": "cargo codspeed / divan benches",
+      "status": "justified",
+      "justification": "Benchmarks are a Cargo diagnostics surface measured by the CodSpeed workflow, not compiled or tested by //:ci_rust_tests; modeling them in Bazel would add a benchmark toolchain with no correctness signal"
     }
   ]
 }
