@@ -58,12 +58,26 @@ pub(crate) fn id_field(name: &str) -> Field {
 
 /// True when `field` is an execution-internal surrogate identity column.
 ///
+/// Dropping requires the **current public field name** to still be a scan-key
+/// spelling (`node_id` / `edge_id` / `src_id` / `dst_id` / `neighbor_id`).
+/// DataFusion preserves [`INTERNAL_SURROGATE_META_KEY`] across `AS` renames, so
+/// a projection like `RETURN b.node_id AS id` must remain public under `id`
+/// (#703 / fixed-hop LIMIT regressions).
+///
 /// Provenance is the stamped metadata from [`id_field`]. As a storage-contract
 /// fallback, an unmarked top-level `node_id`/`edge_id` that is still `UInt64`
 /// is treated as a surrogate (user Cypher projections of those names are never
 /// bare `UInt64` scan keys). Name alone is never sufficient (#703).
 #[must_use]
 pub fn is_internal_surrogate_field(field: &Field) -> bool {
+    let name = field.name().as_str();
+    let is_scan_key_name = matches!(
+        name,
+        "node_id" | "edge_id" | "src_id" | "dst_id" | "neighbor_id"
+    );
+    if !is_scan_key_name {
+        return false;
+    }
     if field
         .metadata()
         .get(INTERNAL_SURROGATE_META_KEY)
@@ -71,7 +85,7 @@ pub fn is_internal_surrogate_field(field: &Field) -> bool {
     {
         return true;
     }
-    matches!(field.name().as_str(), "node_id" | "edge_id") && *field.data_type() == DataType::UInt64
+    matches!(name, "node_id" | "edge_id") && *field.data_type() == DataType::UInt64
 }
 
 /// The Arrow fields of a typed Cypher `duration` value (ADR 0009): signed
@@ -684,5 +698,10 @@ mod tests {
         );
         let user_alias = Field::new("node_id", DataType::Int64, false);
         assert!(!is_internal_surrogate_field(&user_alias));
+        // Metadata may survive DataFusion rename; aliased-away scan keys stay public.
+        let stamped = id_field("node_id");
+        let renamed = Field::new("id", stamped.data_type().clone(), stamped.is_nullable())
+            .with_metadata(stamped.metadata().clone());
+        assert!(!is_internal_surrogate_field(&renamed));
     }
 }
