@@ -8,9 +8,18 @@
 > [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json).
 
 !!! note "v0.5.0 unified API"
-This page documents the **v0.5.0 API**. All methods return Arrow Tables — there are no
-`CypherValue` wrappers or `SearchHit` objects. The conventional instance name is `forge`,
-not `db`. The Rust crate API is documented separately below.
+This page documents the **v0.5.0 API**. **Data-returning** operations —
+Cypher `execute`, analyst verbs, `schema()`, bulk-construction receipts, and
+other tabular/data-bearing surfaces — return Arrow Tables. There are no
+`CypherValue` wrappers or `SearchHit` objects for those results. Control,
+metadata, lifecycle, explanation, and scalar construction surfaces return
+scalars, collections, unit, or construction handles instead (for example
+`labels()` → `list[str]`, `node_count()` → `int`, `explain()` → `str`,
+`add_node()` → `NodeHandle`). See the
+[architecture overview](../book/architecture/overview.md#arrow-as-the-data-contract)
+for the data-plane versus control/construction-plane contract. The conventional
+instance name is `forge`, not `db`. The Rust crate API is documented separately
+below.
 
 UUID normalization and canonical Arrow/result fingerprints are identical
 across Rust, Python, and Node because all three surfaces use the versioned
@@ -3662,6 +3671,10 @@ registered again after reopen before its space can refresh.
 ---
 
 ## Graph Inspection
+
+These methods are **metadata / control plane**, not tabular query results
+(except `schema()`, which remains an Arrow table). Return types match the Rust
+facade and the thin Python/Node projections.
 
 ### `schema()` → `pyarrow.Table`
 

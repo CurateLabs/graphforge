@@ -45,7 +45,10 @@ flowchart LR
 - **Ontology** — optional progressive model (`exploratory` / `advisory` / `strict`).
 - **Knowledge records** — provenance, confidence, epistemic assertions attached by UUID,
   never as graph-table columns that alter Cypher results.
-- **Results** — Arrow tables/batches as the cross-language contract.
+- **Results (data plane)** — Arrow tables/batches for Cypher, analyst verbs, and
+  other tabular/data-bearing surfaces. Control, metadata, lifecycle, explanation,
+  and construction may return scalars, collections, unit, or handles; see
+  [`../book/architecture/overview.md`](../book/architecture/overview.md#arrow-as-the-data-contract).
 - **On disk** — Parquet for graph data; JSON for metadata and contracts.
 
 Schemas and frozen inventories also live under [`../contracts/`](https://github.com/CurateLabs/graphforge/tree/main/docs/contracts) and
