@@ -84,6 +84,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-api` | `list_semantics` | `integration-test` | `crates/graphforge-api/tests/list_semantics.rs` | `//crates/graphforge-api:list_semantics` | `mapped` | #8 |
 | `graphforge-api` | `algorithm_public_surface` | `integration-test` | `crates/graphforge-api/tests/algorithm_public_surface.rs` | `//crates/graphforge-api:algorithm_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `search_public_surface` | `integration-test` | `crates/graphforge-api/tests/search_public_surface.rs` | `//crates/graphforge-api:search_public_surface` | `mapped` | #8 |
+| `graphforge-api` | `scale_g500_scale20` | `integration-test` | `crates/graphforge-api/tests/scale_g500_scale20.rs` | `//crates/graphforge-api:scale_g500_scale20` | `mapped` | #710 |
 | `graphforge-api` | `provider_public_surface` | `integration-test` | `crates/graphforge-api/tests/provider_public_surface.rs` | `//crates/graphforge-api:provider_public_surface` | `mapped` | #8 |
 | `graphforge-api` | `m4_entry_baseline` | `integration-test` | `crates/graphforge-api/tests/m4_entry_baseline.rs` | `//crates/graphforge-api:m4_entry_baseline` | `mapped` | #8 |
 | `graphforge-api` | `file_backed_graph_generation` | `integration-test` | `crates/graphforge-api/tests/file_backed_graph_generation.rs` | `//crates/graphforge-api:file_backed_graph_generation` | `mapped` | #338 |
