@@ -62,7 +62,14 @@ def build_python(*, out: Path, wheel_tag: str | None) -> dict[str, str]:
     target = "//crates/graphforge-bindings-py:graphforge_bindings_py"
     _run(["bazelisk", "build", target])
     native = _find_native(target, (".so", ".dylib", ".dll", ".pyd"))
-    out.parent.mkdir(parents=True, exist_ok=True)
+    # ``out`` may be a directory (preferred) or a .whl path; the assembler
+    # rewrites untagged basenames to PEP 427 ``graphforge-{ver}-{tag}.whl``.
+    if out.suffix == ".whl":
+        out.parent.mkdir(parents=True, exist_ok=True)
+        evidence_scratch = out.parent / ".bazel-python-assemble.evidence.json"
+    else:
+        out.mkdir(parents=True, exist_ok=True)
+        evidence_scratch = out / ".bazel-python-assemble.evidence.json"
     cmd = [
         sys.executable,
         str(ASSEMBLE),
@@ -77,10 +84,18 @@ def build_python(*, out: Path, wheel_tag: str | None) -> dict[str, str]:
     ]
     if wheel_tag:
         cmd.extend(["--wheel-tag", wheel_tag])
-    evidence_path = out.with_suffix(out.suffix + ".evidence.json")
-    cmd.extend(["--write-evidence", str(evidence_path)])
+    cmd.extend(["--write-evidence", str(evidence_scratch)])
     _run(cmd)
-    return json.loads(evidence_path.read_text(encoding="utf-8"))
+    evidence = json.loads(evidence_scratch.read_text(encoding="utf-8"))
+    final_wheel = Path(evidence["wheel"])
+    adjacent = Path(str(final_wheel) + ".evidence.json")
+    if evidence_scratch.resolve() != adjacent.resolve():
+        adjacent.write_text(
+            evidence_scratch.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        evidence_scratch.unlink(missing_ok=True)
+    return evidence
 
 
 def build_node(*, out_dir: Path, platform_tag: str | None) -> dict[str, str]:
