@@ -70,12 +70,12 @@ pub use project_portable::{
 
 pub mod workspace_participants;
 pub use workspace_participants::{
-    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES,
-    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES, WORKSPACE_CAPABILITY_ID,
-    WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_ONTOLOGY_FAMILY,
-    WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_VERSION,
-    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
+    GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
+    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
+    WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,
+    WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceConfiguration, WorkspaceOntology,
+    WorkspaceOntologyMode, WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
 };

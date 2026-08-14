@@ -7,8 +7,9 @@ GraphForge is designed for research and notebook workflows on
 document describes practical limits on the v0.5.0 Rust core, distinguishes
 between query types, and explains why **edge count matters more than node
 count** for most operations. Profile concrete datasets with a full Graph Scale
-Index (for example `GD-06-MD-D00`). Do not compare wall-clock numbers across
-machines without matching hardware and graph layout.
+Index (for example `GD-06-MD-D00`) via [`profile_gsi`](api.md#profile_gsi--graphscaleindexprofile)
+or the [GSI reference](graph-scale-index.md). Do not compare wall-clock numbers
+across machines without matching hardware and graph layout.
 
 With DataFusion over Parquet, large-graph work is **disk-limited** (RAM for
 working sets). Escalation past Levels 01–06 (Graph500 SCALE ≥ 24 / GSI `07`+)

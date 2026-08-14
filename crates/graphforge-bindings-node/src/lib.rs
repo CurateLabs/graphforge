@@ -151,6 +151,27 @@ pub struct WorkspaceOntologyOutput {
     pub canonical_ontology: Option<serde_json::Value>,
 }
 
+#[napi(object)]
+/// Structured Graph Scale Index grade for one opened workspace.
+pub struct GraphScaleIndexProfileOutput {
+    /// Full GSI identifier.
+    pub gsi: String,
+    /// `directed`, `undirected`, or `unknown`.
+    pub directedness: String,
+    /// Live node count `V`.
+    pub node_count: BigInt,
+    /// Live edge count `E`.
+    pub edge_count: BigInt,
+    /// Raw clamped density in `[0.0, 1.0]`.
+    pub density: f64,
+    /// Two-character Scale Code.
+    pub scale_code: String,
+    /// Size Tag for the Scale Code band.
+    pub size_tag: String,
+    /// Integer density percent in `0..=100`.
+    pub density_integer: u32,
+}
+
 fn to_napi_invocation_err(error: &InvocationError) -> NodeError {
     match error {
         InvocationError::Graph(error) => to_napi_err(error),
@@ -5863,6 +5884,58 @@ impl GraphForge {
             .node_count(label.as_deref().unwrap_or(""))
             .map_err(|e| to_napi_err(&e))?;
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
+    }
+
+    /// Read optional project-level graph directedness (`directed` / `undirected`).
+    #[napi]
+    pub fn graph_directedness(&self) -> Result<Option<String>> {
+        let graph = self.open_guard()?;
+        Ok(graph
+            .graph_directedness()
+            .map_err(|error| to_napi_err(&error))?
+            .map(|value| value.as_str().to_owned()))
+    }
+
+    /// Set or clear project-level graph directedness for GSI grading.
+    #[napi]
+    pub fn set_graph_directedness(
+        &self,
+        operation_uuid: String,
+        directedness: Option<String>,
+        actor_uuid: Option<String>,
+    ) -> Result<()> {
+        let directedness = match directedness.as_deref() {
+            None => None,
+            Some(value) => Some(
+                graphforge_api::GraphDirectedness::parse(value)
+                    .map_err(|error| to_napi_err(&error))?,
+            ),
+        };
+        let context = WriteContext {
+            operation_uuid: canonical_operation_id(&operation_uuid)?,
+            actor_uuid: optional_uuid(actor_uuid.as_deref())?,
+        };
+        let mut graph = self.open_write_guard()?;
+        graph
+            .set_graph_directedness(context, directedness)
+            .map_err(|error| to_napi_err(&error))
+    }
+
+    /// Grade the live graph to a Graph Scale Index profile.
+    #[napi]
+    pub fn profile_gsi(&self) -> Result<GraphScaleIndexProfileOutput> {
+        let graph = self.open_guard()?;
+        let profile = graph.profile_gsi().map_err(|error| to_napi_err(&error))?;
+        Ok(GraphScaleIndexProfileOutput {
+            gsi: profile.gsi,
+            directedness: profile.directedness.as_str().to_owned(),
+            node_count: BigInt::from(profile.node_count),
+            edge_count: BigInt::from(profile.edge_count),
+            density: profile.density,
+            scale_code: profile.scale_code,
+            size_tag: profile.size_tag,
+            density_integer: profile.density_integer,
+        })
     }
 
     /// Close the instance; subsequent operations raise `LifecycleError`. Idempotent.

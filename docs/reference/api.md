@@ -3702,6 +3702,33 @@ Total node count, or the exact count for a specific label. Multi-label nodes
 count once in the total and once for every matching label; an unknown label
 returns `0`.
 
+### `graph_directedness()` → `str | None`
+
+Optional project-level directedness from `workspace_configuration@1`:
+`"directed"`, `"undirected"`, or `None` when unset (`Gx` in GSI).
+
+### `set_graph_directedness(directedness=None, *, operation_uuid, actor_uuid=None)` → `None`
+
+Set or clear `graph_directedness` on the authoritative configuration participant.
+Pass `"directed"` / `"undirected"`, or `None` to clear. Unknown tokens fail
+closed with validation. Requires a canonical UUID `operation_uuid` for
+idempotent publication.
+
+### `profile_gsi()` → `GraphScaleIndexProfile`
+
+Grade live nodes `V` and live edges `E` in the opened workspace to a Graph Scale
+Index. Never errors solely because the graph is empty or tiny. Returns a
+structured profile with:
+
+- `gsi` — full identifier `[GD|GU|Gx]-[Scale]-[Size]-D[Density]`
+- `directedness` — `"directed"` | `"undirected"` | `"unknown"`
+- `node_count` / `edge_count` — live `V` / `E`
+- `density` — raw clamped density in `[0.0, 1.0]`
+- `scale_code` / `size_tag` / `density_integer`
+
+Empty unset workspaces grade `Gx-00-XS-D00`. `Gx` uses the directed density
+formula. See [Graph Scale Index](graph-scale-index.md).
+
 GraphForge does not expose generic `begin()`, `commit()`, or `rollback()`
 methods. Each `execute()` write publishes atomically; use
 `publish_composite_transaction()` when graph and knowledge mutations must share

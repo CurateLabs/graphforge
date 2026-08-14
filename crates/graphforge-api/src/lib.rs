@@ -68,6 +68,7 @@ mod epistemic_snapshot;
 mod find_execution;
 mod graph_inspection;
 mod graph_snapshot;
+mod gsi_profiler;
 mod hypotheses;
 mod invocation_descriptor;
 mod knowledge;
@@ -139,7 +140,8 @@ pub use graphforge_core::{
 pub use graphforge_exec::validate_embedding_options;
 pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
 pub use graphforge_storage::{
-    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode, WorkspaceOntologySourceFormat,
+    GraphDirectedness, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
+    WorkspaceOntologySourceFormat,
 };
 // Query parameter literal type (for `execute_with_params`), re-exported so the
 // language bindings can build params without depending on `graphforge-ir` directly.
@@ -217,6 +219,7 @@ pub use graphforge_storage::{
     EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy,
     ResolvedEmbeddingRefreshPolicy, SearchArtifactError, TokenCountClass, TokenizerIdentity,
 };
+pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
 pub use hypotheses::{
     CreateHypothesisGroupRequest, ListHypothesisGroupsRequest, ListHypothesisMembershipRequest,
     ListHypothesisSelectionRequest, RecordHypothesisMembershipRequest,

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ontology::{OntologyCompiler, OntologyHandle, OntologyLoader};
 use graphforge_storage::{
-    ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
-    ProjectStageOutcome, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat,
+    GraphDirectedness, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
+    ProjectParticipantEncoding, ProjectStageOutcome, WorkspaceConfiguration, WorkspaceOntology,
+    WorkspaceOntologyMode, WorkspaceOntologySourceFormat,
 };
 use sha2::{Digest, Sha256};
 
@@ -53,6 +53,38 @@ impl GraphForge {
     /// Returns a structured project error for a missing or invalid participant.
     pub fn workspace_configuration(&self) -> Result<WorkspaceConfiguration, GfError> {
         current_configuration(self)
+    }
+
+    /// Read optional project-level directedness used by the GSI profiler.
+    ///
+    /// # Errors
+    /// Returns a structured project error for a missing or invalid participant.
+    pub fn graph_directedness(&self) -> Result<Option<GraphDirectedness>, GfError> {
+        Ok(current_configuration(self)?.graph_directedness)
+    }
+
+    /// Set or clear project-level directedness for GSI grading.
+    ///
+    /// Pass `None` to clear the field (GSI prefix `Gx`). Unknown tokens must be
+    /// rejected by callers before constructing [`GraphDirectedness`].
+    ///
+    /// # Errors
+    /// Returns a structured publication, validation, or project error.
+    pub fn set_graph_directedness(
+        &mut self,
+        context: WriteContext,
+        directedness: Option<GraphDirectedness>,
+    ) -> Result<(), GfError> {
+        let ontology = self.workspace_ontology()?;
+        let mut configuration = current_configuration(self)?;
+        configuration.graph_directedness = directedness;
+        publish_workspace_records(
+            self,
+            context.operation_uuid.0,
+            context.actor_uuid,
+            &ontology,
+            &configuration,
+        )
     }
 
     /// Adopt a validated YAML/JSON ontology into one complete generation.

@@ -130,6 +130,8 @@ def check_native_call_inventory() -> None:
         "workspace_ontology",  # adopted ontology inspection
         "adopt_ontology",  # ontology adoption
         "clear_ontology",  # ontology removal
+        "profile_gsi",  # GSI profiler
+        "set_graph_directedness",  # GSI directedness metadata
     }
     missing = sorted(name for name in required if f".{name}(" not in detached)
     assert not missing, f"native calls missing GIL-release boundary: {missing}"
