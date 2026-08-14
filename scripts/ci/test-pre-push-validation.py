@@ -322,6 +322,8 @@ class PrePushValidationTests(unittest.TestCase):
             coverage.commands[0],
             ("bash", "scripts/ci/test-coverage-rust.sh"),
         )
+        self.assertIn(".github/**/*.yml", coverage.inputs)
+        self.assertIn(".github/**/*.yaml", coverage.inputs)
         self.assertEqual(coverage.dependencies, ("rust-quality",))
         self.assertTrue(coverage.python_extension)
         self.assertEqual(coverage.artifacts, ("crates/graphforge-bindings-node/*.node",))

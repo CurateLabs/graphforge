@@ -614,6 +614,8 @@ def stages() -> tuple[Stage, ...]:
                 "scripts/ci/test-rust-coverage-ledger.py",
                 "tests/features/node/cucumber.js",
                 "tests/features/node/package.json",
+                ".github/**/*.yml",
+                ".github/**/*.yaml",
             ),
             artifacts=("crates/graphforge-bindings-node/*.node",),
             python_extension=True,
