@@ -11837,7 +11837,7 @@ fn path_node_struct_fields() -> datafusion::arrow::datatypes::Fields {
 /// Lowering-baked context for hydrating path-node elements with labels and
 /// properties (#1024). Sorted `Vec`s rather than maps so the UDF stays
 /// `Hash`/`Eq`.
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct PathNodeHydration {
     /// The project directory the invoke reads node/property files from.
     dir: std::path::PathBuf,
@@ -11996,7 +11996,9 @@ impl ScalarUDFImpl for CypherPathNodes {
         let fields = self.element_fields();
         let mut children: Vec<ArrayRef> = vec![uuid_child];
         if let Some(h) = self.hydrate.as_ref() {
-            children.extend(hydrate_path_node_children(h, &flat)?);
+            // Prefer the session/resource-policy batch size (#337 / #706).
+            let batch_size = args.config_options.execution.batch_size.max(1);
+            children.extend(hydrate_path_node_children(h, &flat, batch_size)?);
         }
 
         let struct_arr = StructArray::try_new(fields.clone(), children, None)
@@ -12015,14 +12017,52 @@ impl ScalarUDFImpl for CypherPathNodes {
 }
 
 /// Build the `labels` + property-union children for hydrated path-node
-/// elements (#1024), one entry per flattened node uuid.
+/// elements (#1024 / #706), one entry per flattened node uuid.
+///
+/// Demand-first: unique requested UUIDs are gathered once from batchwise
+/// topology/property reads (no full-stem `concat_batches`), then expanded back
+/// to flattened public positions so repeats keep identical values.
 fn hydrate_path_node_children(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
+    batch_size: usize,
 ) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
-    let mut children = vec![path_node_labels_child(h, flat)?];
-    children.extend(path_node_prop_children(h, flat)?);
+    let unique = unique_path_uuids(flat);
+    path_hydration_stats::record_request(unique.len() as u64);
+    let labels_of = gather_path_node_labels(h, &unique, batch_size)?;
+    let props_of = gather_path_node_props(h, &unique, batch_size)?;
+    check_path_hydration_cancel()?;
+    let mut children = vec![expand_path_node_labels(h, flat, &labels_of)];
+    children.extend(expand_path_node_props(h, flat, &props_of)?);
     Ok(children)
+}
+
+/// Stable-first unique UUIDs from a flattened path-node sequence (#706).
+fn unique_path_uuids(flat: &[[u8; 16]]) -> Vec<[u8; 16]> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::with_capacity(flat.len());
+    let mut unique = Vec::with_capacity(flat.len());
+    for u in flat {
+        if seen.insert(*u) {
+            unique.push(*u);
+        }
+    }
+    unique
+}
+
+/// Cooperative cancel / resource-exhaustion gate for path hydration (#706).
+fn check_path_hydration_cancel() -> datafusion::error::Result<()> {
+    if path_hydration_stats::is_cancelled() {
+        return Err(datafusion::error::DataFusionError::ResourcesExhausted(
+            "cypher_path_nodes: hydration cancelled".into(),
+        ));
+    }
+    if path_hydration_stats::resource_exhausted() {
+        return Err(datafusion::error::DataFusionError::ResourcesExhausted(
+            "cypher_path_nodes: hydration resource limit exceeded".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A `FixedSizeBinary(16)` column by name, for the hydration readers.
@@ -12041,24 +12081,29 @@ fn hydration_fsb16(
         })
 }
 
-/// The `labels` child (#1024 / #705): full `List<Utf8>` per flattened node from
-/// authoritative `topology/nodes.parquet` `type_ids`, resolved through the
-/// baked (id-sorted) catalog map — the same complete set `node_labels_list`
-/// projects for direct node values. Unknown catalog ids are skipped; a missing
-/// topology row keeps a single-null list element.
-fn path_node_labels_child(
+/// Gather authoritative `type_ids` for the requested UUID set only (#705 / #706).
+fn gather_path_node_labels(
     h: &PathNodeHydration,
-    flat: &[[u8; 16]],
-) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
-    use datafusion::arrow::array::{Array, ListArray, ListBuilder, StringBuilder, UInt32Array};
+    unique: &[[u8; 16]],
+    batch_size: usize,
+) -> datafusion::error::Result<std::collections::HashMap<[u8; 16], Vec<u32>>> {
+    use datafusion::arrow::array::{Array, ListArray, UInt32Array};
     use datafusion::error::DataFusionError;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     let exec_err = |m: String| DataFusionError::Execution(m);
-    let node_batches =
-        graphforge_storage::read_nodes(&h.dir).map_err(|e| exec_err(e.to_string()))?;
-    let mut label_ids_of: HashMap<[u8; 16], Vec<u32>> = HashMap::new();
-    for b in &node_batches {
+    if unique.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
+    let mut label_ids_of: HashMap<[u8; 16], Vec<u32>> = HashMap::with_capacity(unique.len());
+
+    graphforge_storage::visit_nodes_batched(&h.dir, batch_size, |b| {
+        check_path_hydration_cancel()?;
+        path_hydration_stats::record_node_batch(b.num_rows() as u64);
+        if remaining.is_empty() {
+            return Ok(false);
+        }
         let uuids = hydration_fsb16(b, "node_uuid")?;
         let type_ids = b
             .column_by_name("type_ids")
@@ -12070,6 +12115,9 @@ fn path_node_labels_child(
             }
             let mut u = [0u8; 16];
             u.copy_from_slice(uuids.value(r));
+            if !remaining.remove(&u) {
+                continue;
+            }
             let values = type_ids.value(r);
             let values = values
                 .as_any()
@@ -12084,8 +12132,26 @@ fn path_node_labels_child(
                 }
             }
             label_ids_of.insert(u, ids);
+            path_hydration_stats::record_node_gathered(1);
+            path_hydration_stats::record_peak_gathered(label_ids_of.len() as u64);
+            if remaining.is_empty() {
+                break;
+            }
         }
-    }
+        Ok(!remaining.is_empty())
+    })?;
+    path_hydration_stats::record_resolved(label_ids_of.len() as u64);
+    Ok(label_ids_of)
+}
+
+/// Expand gathered label ids to a `List<Utf8>` child aligned with `flat` (#705).
+fn expand_path_node_labels(
+    h: &PathNodeHydration,
+    flat: &[[u8; 16]],
+    label_ids_of: &std::collections::HashMap<[u8; 16], Vec<u32>>,
+) -> datafusion::arrow::array::ArrayRef {
+    use datafusion::arrow::array::{ListBuilder, StringBuilder};
+
     let mut labels_b = ListBuilder::new(StringBuilder::new());
     for u in flat {
         if let Some(ids) = label_ids_of.get(u) {
@@ -12100,83 +12166,293 @@ fn path_node_labels_child(
             labels_b.append(true);
         }
     }
-    Ok(std::sync::Arc::new(labels_b.finish()))
+    std::sync::Arc::new(labels_b.finish())
 }
 
-/// The property-union children (#1024), one array per union field: each node
-/// takes values from the stem file owning its `node_uuid`, coalesced across
-/// files — NULL where the owning file lacks the column or the row (LEFT-join
-/// parity with `join_node_properties`).
-fn path_node_prop_children(
+/// Location of one gathered property row inside a stem's kept batches.
+struct PropRowLoc {
+    stem: usize,
+    batch: usize,
+    row: u32,
+}
+
+/// Kept property batches per stem, plus UUID → row location (#706).
+type GatheredPathProps = (
+    Vec<Vec<datafusion::arrow::array::RecordBatch>>,
+    std::collections::HashMap<[u8; 16], PropRowLoc>,
+);
+
+/// Gather property rows for the requested UUID set only — batchwise, no
+/// complete-stem `concat_batches` (#706).
+fn gather_path_node_props(
     h: &PathNodeHydration,
-    flat: &[[u8; 16]],
-) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
-    use datafusion::arrow::array::{Array, ArrayRef, UInt32Array, new_null_array};
-    use datafusion::arrow::compute::kernels::zip::zip;
-    use datafusion::arrow::compute::{concat_batches, is_not_null, take};
+    unique: &[[u8; 16]],
+    batch_size: usize,
+) -> datafusion::error::Result<GatheredPathProps> {
+    use datafusion::arrow::array::UInt32Array;
     use datafusion::error::DataFusionError;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     let exec_err = |m: String| DataFusionError::Execution(m);
+    let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
+    let mut uuid_to_loc: HashMap<[u8; 16], PropRowLoc> = HashMap::with_capacity(unique.len());
+    let mut kept_by_stem: Vec<Vec<datafusion::arrow::array::RecordBatch>> =
+        Vec::with_capacity(h.prop_stems.len());
 
-    // One concatenated property batch per stem, then uuid → (owning batch,
-    // row). A node belongs to one property file, so first-wins is a no-op for
-    // well-formed data.
-    let mut batches = Vec::with_capacity(h.prop_stems.len());
-    for stem in &h.prop_stems {
-        let bs = graphforge_storage::read_properties(&h.dir, stem)
-            .map_err(|e| exec_err(e.to_string()))?;
-        if let Some(first) = bs.first() {
-            batches
-                .push(concat_batches(&first.schema(), &bs).map_err(|e| exec_err(e.to_string()))?);
-        }
+    if unique.is_empty() {
+        return Ok((kept_by_stem, uuid_to_loc));
     }
-    let mut uuid_to_loc: HashMap<[u8; 16], (usize, u32)> = HashMap::new();
-    for (bi, b) in batches.iter().enumerate() {
-        let key = hydration_fsb16(b, "node_uuid")?;
-        for r in 0..key.len() {
-            if key.is_null(r) {
-                continue;
+
+    for (si, stem) in h.prop_stems.iter().enumerate() {
+        check_path_hydration_cancel()?;
+        if remaining.is_empty() {
+            break;
+        }
+        path_hydration_stats::record_stem_opened();
+        let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
+        graphforge_storage::visit_properties_batched(&h.dir, stem, batch_size, |b| {
+            check_path_hydration_cancel()?;
+            path_hydration_stats::record_property_batch(b.num_rows() as u64);
+            if remaining.is_empty() {
+                return Ok(false);
             }
-            let mut u = [0u8; 16];
-            u.copy_from_slice(key.value(r));
-            uuid_to_loc.entry(u).or_insert((
-                bi,
-                u32::try_from(r).map_err(|_| exec_err(format!("property row {r} exceeds u32")))?,
-            ));
-        }
+            let key = hydration_fsb16(b, "node_uuid")?;
+            let mut take_rows: Vec<u32> = Vec::new();
+            let mut take_uuids: Vec<[u8; 16]> = Vec::new();
+            for r in 0..key.len() {
+                if key.is_null(r) {
+                    continue;
+                }
+                let mut u = [0u8; 16];
+                u.copy_from_slice(key.value(r));
+                if !remaining.contains(&u) {
+                    continue;
+                }
+                take_rows.push(
+                    u32::try_from(r)
+                        .map_err(|_| exec_err(format!("property row {r} exceeds u32")))?,
+                );
+                take_uuids.push(u);
+            }
+            if take_rows.is_empty() {
+                return Ok(true);
+            }
+            let indices = UInt32Array::from(take_rows);
+            let filtered = take_record_batch_rows(b, &indices)?;
+            let batch_idx = kept.len();
+            for (local_row, u) in take_uuids.into_iter().enumerate() {
+                if remaining.remove(&u) {
+                    let row = u32::try_from(local_row).map_err(|_| {
+                        exec_err(format!("gathered property row {local_row} exceeds u32"))
+                    })?;
+                    uuid_to_loc.insert(
+                        u,
+                        PropRowLoc {
+                            stem: si,
+                            batch: batch_idx,
+                            row,
+                        },
+                    );
+                    path_hydration_stats::record_property_gathered(1);
+                }
+            }
+            path_hydration_stats::record_peak_gathered(uuid_to_loc.len() as u64);
+            kept.push(filtered);
+            Ok(!remaining.is_empty())
+        })?;
+        kept_by_stem.push(kept);
     }
-    let take_by_batch: Vec<UInt32Array> = (0..batches.len())
-        .map(|bi| {
-            flat.iter()
-                .map(|u| match uuid_to_loc.get(u) {
-                    Some(&(owner, row)) if owner == bi => Some(row),
-                    _ => None,
-                })
-                .collect()
+    Ok((kept_by_stem, uuid_to_loc))
+}
+
+/// `take` every column of `batch` at `indices` into a new batch (#706 gather).
+fn take_record_batch_rows(
+    batch: &datafusion::arrow::array::RecordBatch,
+    indices: &datafusion::arrow::array::UInt32Array,
+) -> datafusion::error::Result<datafusion::arrow::array::RecordBatch> {
+    use datafusion::arrow::compute::take;
+    use datafusion::error::DataFusionError;
+
+    let cols: datafusion::error::Result<Vec<_>, _> = batch
+        .columns()
+        .iter()
+        .map(|c| {
+            take(c.as_ref(), indices, None).map_err(|e| DataFusionError::Execution(e.to_string()))
         })
         .collect();
+    datafusion::arrow::array::RecordBatch::try_new(batch.schema(), cols?)
+        .map_err(|e| DataFusionError::Execution(e.to_string()))
+}
 
+/// Expand gathered property rows into one nullable union child per field (#1024).
+fn expand_path_node_props(
+    h: &PathNodeHydration,
+    flat: &[[u8; 16]],
+    gathered: &GatheredPathProps,
+) -> datafusion::error::Result<Vec<datafusion::arrow::array::ArrayRef>> {
+    use datafusion::arrow::array::{ArrayRef, UInt32Array, new_null_array};
+    use datafusion::arrow::compute::kernels::zip::zip;
+    use datafusion::arrow::compute::{is_not_null, take};
+    use datafusion::error::DataFusionError;
+
+    let exec_err = |m: String| DataFusionError::Execution(m);
+    let (kept_by_stem, uuid_to_loc) = gathered;
     let mut children = Vec::with_capacity(h.fields.len().saturating_sub(2));
     for field in h.fields.iter().skip(2) {
         let mut child: ArrayRef = new_null_array(field.data_type(), flat.len());
-        for (bi, b) in batches.iter().enumerate() {
-            // Field in the union but absent in this stem's file — this stem's
-            // nodes contribute NULLs.
-            let Some(col) = b.column_by_name(field.name()) else {
-                continue;
-            };
-            let taken = take(col, &take_by_batch[bi], None).map_err(|e| exec_err(e.to_string()))?;
-            child = if batches.len() == 1 {
-                taken
-            } else {
+        for (si, batches) in kept_by_stem.iter().enumerate() {
+            for (bi, b) in batches.iter().enumerate() {
+                let Some(col) = b.column_by_name(field.name()) else {
+                    continue;
+                };
+                let indices = UInt32Array::from(
+                    flat.iter()
+                        .map(|u| match uuid_to_loc.get(u) {
+                            Some(loc) if loc.stem == si && loc.batch == bi => Some(loc.row),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let taken = take(col, &indices, None).map_err(|e| exec_err(e.to_string()))?;
                 let mask = is_not_null(&taken).map_err(|e| exec_err(e.to_string()))?;
-                zip(&mask, &taken, &child).map_err(|e| exec_err(e.to_string()))?
-            };
+                child = zip(&mask, &taken, &child).map_err(|e| exec_err(e.to_string()))?;
+            }
         }
         children.push(child);
     }
     Ok(children)
+}
+
+/// Process-global structural counters for path-node hydration (#706).
+///
+/// Aggregate-only: never records UUIDs, property values, or paths. Tests
+/// [`reset`](path_hydration_stats::reset) immediately before a measured
+/// invoke and keep that section single-threaded.
+mod path_hydration_stats {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static UNIQUE_REQUESTED: AtomicU64 = AtomicU64::new(0);
+    static UNIQUE_RESOLVED_LABELS: AtomicU64 = AtomicU64::new(0);
+    static NODE_BATCHES_READ: AtomicU64 = AtomicU64::new(0);
+    static NODE_ROWS_EXAMINED: AtomicU64 = AtomicU64::new(0);
+    static NODE_ROWS_GATHERED: AtomicU64 = AtomicU64::new(0);
+    static PROPERTY_STEMS_OPENED: AtomicU64 = AtomicU64::new(0);
+    static PROPERTY_BATCHES_READ: AtomicU64 = AtomicU64::new(0);
+    static PROPERTY_ROWS_EXAMINED: AtomicU64 = AtomicU64::new(0);
+    static PROPERTY_ROWS_GATHERED: AtomicU64 = AtomicU64::new(0);
+    static PEAK_GATHERED_ENTRIES: AtomicU64 = AtomicU64::new(0);
+    static CANCELLED: AtomicBool = AtomicBool::new(false);
+    static MAX_EXAMINE_ROWS: AtomicU64 = AtomicU64::new(0);
+
+    /// Point-in-time copy of path-hydration counters.
+    #[cfg(test)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(super) struct Snapshot {
+        pub unique_uuids_requested: u64,
+        pub unique_uuids_resolved_labels: u64,
+        pub node_batches_read: u64,
+        pub node_rows_examined: u64,
+        pub node_rows_gathered: u64,
+        pub property_stems_opened: u64,
+        pub property_batches_read: u64,
+        pub property_rows_examined: u64,
+        pub property_rows_gathered: u64,
+        pub peak_gathered_entries: u64,
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        for c in [
+            &UNIQUE_REQUESTED,
+            &UNIQUE_RESOLVED_LABELS,
+            &NODE_BATCHES_READ,
+            &NODE_ROWS_EXAMINED,
+            &NODE_ROWS_GATHERED,
+            &PROPERTY_STEMS_OPENED,
+            &PROPERTY_BATCHES_READ,
+            &PROPERTY_ROWS_EXAMINED,
+            &PROPERTY_ROWS_GATHERED,
+            &PEAK_GATHERED_ENTRIES,
+            &MAX_EXAMINE_ROWS,
+        ] {
+            c.store(0, Ordering::Relaxed);
+        }
+        CANCELLED.store(false, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn snapshot() -> Snapshot {
+        Snapshot {
+            unique_uuids_requested: UNIQUE_REQUESTED.load(Ordering::Relaxed),
+            unique_uuids_resolved_labels: UNIQUE_RESOLVED_LABELS.load(Ordering::Relaxed),
+            node_batches_read: NODE_BATCHES_READ.load(Ordering::Relaxed),
+            node_rows_examined: NODE_ROWS_EXAMINED.load(Ordering::Relaxed),
+            node_rows_gathered: NODE_ROWS_GATHERED.load(Ordering::Relaxed),
+            property_stems_opened: PROPERTY_STEMS_OPENED.load(Ordering::Relaxed),
+            property_batches_read: PROPERTY_BATCHES_READ.load(Ordering::Relaxed),
+            property_rows_examined: PROPERTY_ROWS_EXAMINED.load(Ordering::Relaxed),
+            property_rows_gathered: PROPERTY_ROWS_GATHERED.load(Ordering::Relaxed),
+            peak_gathered_entries: PEAK_GATHERED_ENTRIES.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_cancelled(v: bool) {
+        CANCELLED.store(v, Ordering::SeqCst);
+    }
+
+    pub(super) fn is_cancelled() -> bool {
+        CANCELLED.load(Ordering::Relaxed)
+    }
+
+    /// Soft examine budget for tests (`0` = unlimited).
+    #[cfg(test)]
+    pub(super) fn set_max_examine_rows(n: u64) {
+        MAX_EXAMINE_ROWS.store(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn resource_exhausted() -> bool {
+        let max = MAX_EXAMINE_ROWS.load(Ordering::Relaxed);
+        max > 0
+            && NODE_ROWS_EXAMINED
+                .load(Ordering::Relaxed)
+                .saturating_add(PROPERTY_ROWS_EXAMINED.load(Ordering::Relaxed))
+                > max
+    }
+
+    pub(super) fn record_request(n: u64) {
+        UNIQUE_REQUESTED.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_resolved(n: u64) {
+        UNIQUE_RESOLVED_LABELS.store(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_node_batch(rows: u64) {
+        NODE_BATCHES_READ.fetch_add(1, Ordering::Relaxed);
+        NODE_ROWS_EXAMINED.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_node_gathered(n: u64) {
+        NODE_ROWS_GATHERED.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_stem_opened() {
+        PROPERTY_STEMS_OPENED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_property_batch(rows: u64) {
+        PROPERTY_BATCHES_READ.fetch_add(1, Ordering::Relaxed);
+        PROPERTY_ROWS_EXAMINED.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_property_gathered(n: u64) {
+        PROPERTY_ROWS_GATHERED.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(super) fn record_peak_gathered(n: u64) {
+        PEAK_GATHERED_ENTRIES.fetch_max(n, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12193,6 +12469,29 @@ mod tests {
 
     static VOLATILE_CALLS: AtomicUsize = AtomicUsize::new(0);
     static VOLATILE_ROWS: AtomicUsize = AtomicUsize::new(0);
+    /// Path-hydration structural counters are process-global (#706); serialize
+    /// tests that arm cancel/resource hooks or assert snapshots.
+    static PATH_HYDRATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PathHydrationTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl PathHydrationTestGuard {
+        fn arm() -> Self {
+            let lock = PATH_HYDRATION_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            path_hydration_stats::reset();
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for PathHydrationTestGuard {
+        fn drop(&mut self) {
+            path_hydration_stats::reset();
+        }
+    }
 
     fn invoke_test_udf<U: ScalarUDFImpl>(
         udf: &U,
@@ -14832,6 +15131,15 @@ mod tests {
         seed: datafusion::arrow::array::ArrayRef,
         rels: datafusion::arrow::array::ArrayRef,
     ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
+        invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8_192)
+    }
+
+    fn invoke_hydrated_path_nodes_with_batch_size(
+        hydrate: PathNodeHydration,
+        seed: datafusion::arrow::array::ArrayRef,
+        rels: datafusion::arrow::array::ArrayRef,
+        batch_size: usize,
+    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
         use std::sync::Arc;
 
         use datafusion::arrow::datatypes::Field;
@@ -14839,6 +15147,8 @@ mod tests {
 
         let udf = CypherPathNodes::with_hydration(hydrate);
         let n = seed.len();
+        let mut config = ConfigOptions::default();
+        config.execution.batch_size = batch_size.max(1);
         let args = ScalarFunctionArgs {
             args: vec![
                 ColumnarValue::Array(Arc::clone(&seed)),
@@ -14850,7 +15160,7 @@ mod tests {
             ],
             number_rows: n,
             return_field: Arc::new(Field::new("nodes", udf.return_type(&[])?, true)),
-            config_options: Arc::new(ConfigOptions::default()),
+            config_options: Arc::new(config),
         };
         udf.invoke_with_args(args).map(|v| match v {
             ColumnarValue::Array(a) => a,
@@ -14892,6 +15202,7 @@ mod tests {
     fn hydrated_path_nodes_preserve_full_type_ids_labels() {
         // #705: multi-label nodes keep every catalog-resolved label from
         // authoritative `type_ids` (not the legacy primary `type_id` alone).
+        let _guard = PathHydrationTestGuard::arm();
         use datafusion::arrow::array::FixedSizeBinaryArray;
         use datafusion::arrow::datatypes::Field;
         use graphforge_core::uuid::{new_v7, to_bytes};
@@ -15018,6 +15329,242 @@ mod tests {
         assert_eq!(
             loop_labels[0],
             vec![Some("Person".into()), Some("Employee".into())]
+        );
+    }
+
+    fn path_node_prop_strings(
+        out: &datafusion::arrow::array::ArrayRef,
+        row: usize,
+        field: &str,
+    ) -> Option<Vec<Option<String>>> {
+        use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
+        let list = out.as_any().downcast_ref::<ListArray>().unwrap();
+        if list.is_null(row) {
+            return None;
+        }
+        let items = list.value(row);
+        let items = items.as_any().downcast_ref::<StructArray>().unwrap();
+        let col = items
+            .column_by_name(field)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        Some(
+            (0..col.len())
+                .map(|i| (!col.is_null(i)).then(|| col.value(i).to_owned()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn hydrated_path_nodes_sparse_selection_bounds_gather_work() {
+        // #706: a small path in a large property table gathers only requested
+        // UUIDs, stops reading once they are found, and never materializes the
+        // full stem via concat.
+        let _guard = PathHydrationTestGuard::arm();
+        use std::collections::HashMap;
+
+        use datafusion::arrow::array::FixedSizeBinaryArray;
+        use datafusion::arrow::datatypes::Field;
+        use graphforge_core::uuid::{new_v7, to_bytes};
+        use graphforge_core::{OntologyMode, TypeId};
+        use graphforge_ir::IrLiteral;
+        use graphforge_storage::GraphWriter;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
+        let keep_a = new_v7();
+        let keep_b = new_v7();
+        w.create_node_with_labels(keep_a, &[TypeId(1)]).unwrap();
+        w.create_node_with_labels(keep_b, &[TypeId(1)]).unwrap();
+        w.set_properties(
+            &keep_a,
+            None,
+            HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
+        )
+        .unwrap();
+        w.set_properties(
+            &keep_b,
+            None,
+            HashMap::from([("name".into(), IrLiteral::Str("Bob".into()))]),
+        )
+        .unwrap();
+        // Many irrelevant property rows after the selected pair.
+        for i in 0..200 {
+            let u = new_v7();
+            w.create_node_with_labels(u, &[TypeId(1)]).unwrap();
+            w.set_properties(
+                &u,
+                None,
+                HashMap::from([("name".into(), IrLiteral::Str(format!("filler-{i}")))]),
+            )
+            .unwrap();
+        }
+        w.flush().unwrap();
+
+        let a = to_bytes(&keep_a);
+        let b = to_bytes(&keep_b);
+        let hydrate = PathNodeHydration {
+            dir: dir.path().to_path_buf(),
+            labels_by_type: vec![(1, "Person".to_owned())],
+            prop_stems: vec!["_untyped".to_owned()],
+            fields: vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+                Field::new("name", DataType::Utf8, true),
+            ]
+            .into(),
+        };
+        // Repeated UUID in the walk: hydrate once, emit twice publicly.
+        let seed =
+            std::sync::Arc::new(FixedSizeBinaryArray::try_from_iter([a].iter().copied()).unwrap())
+                as datafusion::arrow::array::ArrayRef;
+        use datafusion::arrow::array::{FixedSizeBinaryBuilder, ListBuilder, StructBuilder};
+        let edge_fields: datafusion::arrow::datatypes::Fields = vec![
+            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
+        ]
+        .into();
+        let mut edge_b = ListBuilder::new(StructBuilder::new(
+            edge_fields,
+            vec![
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+            ],
+        ));
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(0)
+            .unwrap()
+            .append_value(a)
+            .unwrap();
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(1)
+            .unwrap()
+            .append_value(b)
+            .unwrap();
+        edge_b.values().append(true);
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(0)
+            .unwrap()
+            .append_value(b)
+            .unwrap();
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(1)
+            .unwrap()
+            .append_value(a)
+            .unwrap();
+        edge_b.values().append(true);
+        edge_b.append(true);
+        let rels = std::sync::Arc::new(edge_b.finish()) as datafusion::arrow::array::ArrayRef;
+
+        path_hydration_stats::reset();
+        let out = invoke_hydrated_path_nodes_with_batch_size(
+            hydrate.clone(),
+            seed.clone(),
+            rels.clone(),
+            8,
+        )
+        .unwrap();
+        let snap = path_hydration_stats::snapshot();
+        assert_eq!(snap.unique_uuids_requested, 2);
+        assert_eq!(snap.node_rows_gathered, 2);
+        assert_eq!(snap.property_rows_gathered, 2);
+        assert!(
+            snap.property_rows_examined < 50,
+            "early-exit must avoid examining all filler rows: examined {}",
+            snap.property_rows_examined
+        );
+        assert!(
+            snap.node_rows_examined < 50,
+            "early-exit must avoid examining all filler node rows: examined {}",
+            snap.node_rows_examined
+        );
+        assert!(
+            snap.peak_gathered_entries <= 2,
+            "gather map peak must stay within unique requested UUIDs"
+        );
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "name").unwrap(),
+            vec![Some("Ada".into()), Some("Bob".into()), Some("Ada".into())]
+        );
+        let labels = path_node_label_lists(&out, 0).unwrap();
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0], vec![Some("Person".into())]);
+        assert_eq!(labels[2], labels[0]);
+
+        // Batch-size / reopen parity: same public values under a larger batch.
+        path_hydration_stats::reset();
+        let out_large =
+            invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8_192).unwrap();
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "name"),
+            path_node_prop_strings(&out_large, 0, "name")
+        );
+        assert_eq!(
+            path_node_label_lists(&out, 0),
+            path_node_label_lists(&out_large, 0)
+        );
+    }
+
+    #[test]
+    fn hydrated_path_nodes_cancel_and_resource_limit_are_structured() {
+        let _guard = PathHydrationTestGuard::arm();
+        use datafusion::arrow::array::FixedSizeBinaryArray;
+        use datafusion::arrow::datatypes::Field;
+        use graphforge_core::uuid::{new_v7, to_bytes};
+        use graphforge_core::{OntologyMode, TypeId};
+        use graphforge_storage::GraphWriter;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
+        let u = new_v7();
+        w.create_node_with_labels(u, &[TypeId(1)]).unwrap();
+        for _ in 0..32 {
+            w.create_node_with_labels(new_v7(), &[TypeId(1)]).unwrap();
+        }
+        w.flush().unwrap();
+        let bytes = to_bytes(&u);
+        let hydrate = PathNodeHydration {
+            dir: dir.path().to_path_buf(),
+            labels_by_type: vec![(1, "Person".to_owned())],
+            prop_stems: vec![],
+            fields: vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+            ]
+            .into(),
+        };
+        let seed = std::sync::Arc::new(
+            FixedSizeBinaryArray::try_from_iter([bytes].iter().copied()).unwrap(),
+        ) as datafusion::arrow::array::ArrayRef;
+        let rels = edge_list(&[Some(&[])]);
+
+        path_hydration_stats::set_cancelled(true);
+        let err = invoke_hydrated_path_nodes_with_batch_size(
+            hydrate.clone(),
+            seed.clone(),
+            rels.clone(),
+            4,
+        )
+        .expect_err("cancelled hydration must fail closed");
+        assert!(
+            err.to_string().contains("cancelled"),
+            "expected structured cancel, got {err}"
+        );
+        path_hydration_stats::set_cancelled(false);
+
+        path_hydration_stats::reset();
+        path_hydration_stats::set_max_examine_rows(1);
+        let err = invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 4)
+            .expect_err("resource limit must fail closed");
+        assert!(
+            err.to_string().contains("resource limit"),
+            "expected structured resource error, got {err}"
         );
     }
 
