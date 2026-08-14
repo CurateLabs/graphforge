@@ -39,23 +39,21 @@ try {
   writeFileSync(join(dir, "fixture.ts"), "const value: string = 1;\n");
   const invalid = runTsc(dir);
   if (invalid.status === 0) {
-    console.error(
-      "typecheck-fail-closed: tsc --noEmit accepted a type-invalid fixture",
-    );
     if (invalid.stdout) process.stderr.write(invalid.stdout);
     if (invalid.stderr) process.stderr.write(invalid.stderr);
-    process.exit(1);
+    throw new Error(
+      "typecheck-fail-closed: tsc --noEmit accepted a type-invalid fixture",
+    );
   }
 
   writeFileSync(join(dir, "fixture.ts"), 'const value: string = "ok";\n');
   const valid = runTsc(dir);
   if (valid.status !== 0) {
-    console.error(
-      "typecheck-fail-closed: tsc --noEmit rejected a type-valid control fixture",
-    );
     if (valid.stdout) process.stderr.write(valid.stdout);
     if (valid.stderr) process.stderr.write(valid.stderr);
-    process.exit(1);
+    throw new Error(
+      "typecheck-fail-closed: tsc --noEmit rejected a type-valid control fixture",
+    );
   }
 
   console.log(
