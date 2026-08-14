@@ -77,6 +77,10 @@ clap = { version = "4", features = ["derive"] }
 insta = "1"
 cucumber = "0.21"
 
+# Benchmarking. The CodSpeed compatibility layer is a drop-in for `divan`; it
+# is renamed so benchmark sources stay plain divan code (see docs/development).
+divan = { version = "5", package = "codspeed-divan-compat" }
+
 # --------------------------------------------------------------
 # Workspace-wide lint policy
 # --------------------------------------------------------------

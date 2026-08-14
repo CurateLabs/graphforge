@@ -10,6 +10,7 @@
   <a href="crates/graphforge-bindings-node"><img src="https://img.shields.io/badge/Node.js-20%2B-5FA04E.svg?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/Rust-1.96-000000.svg?logo=rust&logoColor=white" alt="Rust 1.96" /></a>
   <a href="https://github.com/CurateLabs/graphforge/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/CurateLabs/graphforge/test.yml?branch=main&label=CI%20Gate&logo=github" alt="CI Gate status" /></a>
+  <a href="https://app.codspeed.io/CurateLabs/graphforge?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed" /></a>
   <a href="https://docs.graphforge.sh/"><img src="https://img.shields.io/badge/docs-online-0A66C2.svg" alt="Documentation" /></a>
   <a href="https://docs.graphforge.sh/reference/tck-compliance/"><img src="https://img.shields.io/badge/openCypher%20TCK-3897%2F3897-brightgreen.svg" alt="openCypher TCK" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache License 2.0" /></a>
