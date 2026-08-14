@@ -112,6 +112,8 @@ updates:
           - "patch"
 
   # Root npm / pnpm workspace
+  # Repo standard pins TypeScript exactly to 5.9.3 (see
+  # docs/development/typescript-toolchain.md and root pnpm.overrides).
   # If npm Dependabot is later added for iac/pulumi/typescript, it must carry
   # the same typescript major-update guardrail below.
   - package-ecosystem: "npm"
@@ -130,7 +132,8 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Stay on TypeScript 5.x; majors (e.g. 7.x) need an explicit coordinated bump.
+    # Pin stays 5.9.3; ignore majors so Dependabot cannot open unplanned 6+/7+ PRs.
+    # Coordinated pin/override bumps are manual (policy doc + all direct pins).
     ignore:
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
