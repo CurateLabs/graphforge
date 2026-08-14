@@ -102,6 +102,10 @@ impl GraphForge {
             properties.insert(name.clone(), prop_literal(value)?);
         }
 
+        // Same-instance write admission and visibility must precede snapshot
+        // selection, endpoint registration against live topology, surrogate
+        // allocation, flush, and publication (see #704).
+        let _visibility = self.graph_visibility.lock()?;
         let prior = crate::graph_snapshot::capture(&self.dir)?;
         let expected_generation = *self
             .current_generation_uuid

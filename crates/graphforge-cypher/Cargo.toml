@@ -16,6 +16,12 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+divan = { workspace = true }
+
+# Cypher front-end (lex → parse → bind) benchmarks (CodSpeed, simulation mode).
+[[bench]]
+name = "compile"
+harness = false
 
 [lints]
 workspace = true

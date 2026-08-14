@@ -12041,53 +12041,64 @@ fn hydration_fsb16(
         })
 }
 
-/// The `labels` child (#1024): one-element `List<Utf8>` per flattened node,
-/// resolved through `topology/nodes.parquet`'s `type_id` and the baked
-/// (sorted) map — the element is NULL when the type is unknown (mirroring
-/// `node_value_struct`'s no-map case).
+/// The `labels` child (#1024 / #705): full `List<Utf8>` per flattened node from
+/// authoritative `topology/nodes.parquet` `type_ids`, resolved through the
+/// baked (id-sorted) catalog map — the same complete set `node_labels_list`
+/// projects for direct node values. Unknown catalog ids are skipped; a missing
+/// topology row keeps a single-null list element.
 fn path_node_labels_child(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
 ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
-    use datafusion::arrow::array::{Array, ListBuilder, StringBuilder};
+    use datafusion::arrow::array::{Array, ListArray, ListBuilder, StringBuilder, UInt32Array};
     use datafusion::error::DataFusionError;
     use std::collections::HashMap;
 
     let exec_err = |m: String| DataFusionError::Execution(m);
     let node_batches =
         graphforge_storage::read_nodes(&h.dir).map_err(|e| exec_err(e.to_string()))?;
-    let mut label_of: HashMap<[u8; 16], usize> = HashMap::new();
+    let mut label_ids_of: HashMap<[u8; 16], Vec<u32>> = HashMap::new();
     for b in &node_batches {
         let uuids = hydration_fsb16(b, "node_uuid")?;
         let type_ids = b
-            .column_by_name("type_id")
-            .and_then(|c| {
-                c.as_any()
-                    .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-                    .cloned()
-            })
-            .ok_or_else(|| exec_err("cypher_path_nodes: no UInt32 type_id column".into()))?;
+            .column_by_name("type_ids")
+            .and_then(|c| c.as_any().downcast_ref::<ListArray>())
+            .ok_or_else(|| exec_err("cypher_path_nodes: no List type_ids column".into()))?;
         for r in 0..b.num_rows() {
             if uuids.is_null(r) || type_ids.is_null(r) {
                 continue;
             }
             let mut u = [0u8; 16];
             u.copy_from_slice(uuids.value(r));
-            if let Ok(i) = h
-                .labels_by_type
-                .binary_search_by_key(&type_ids.value(r), |(id, _)| *id)
-            {
-                label_of.insert(u, i);
+            let values = type_ids.value(r);
+            let values = values
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| {
+                    exec_err("cypher_path_nodes: type_ids values are not UInt32".into())
+                })?;
+            let mut ids = Vec::with_capacity(values.len());
+            for i in 0..values.len() {
+                if !values.is_null(i) {
+                    ids.push(values.value(i));
+                }
             }
+            label_ids_of.insert(u, ids);
         }
     }
     let mut labels_b = ListBuilder::new(StringBuilder::new());
     for u in flat {
-        match label_of.get(u) {
-            Some(&i) => labels_b.values().append_value(&h.labels_by_type[i].1),
-            None => labels_b.values().append_null(),
+        if let Some(ids) = label_ids_of.get(u) {
+            for id in ids {
+                if let Ok(i) = h.labels_by_type.binary_search_by_key(id, |(tid, _)| *tid) {
+                    labels_b.values().append_value(&h.labels_by_type[i].1);
+                }
+            }
+            labels_b.append(true);
+        } else {
+            labels_b.values().append_null();
+            labels_b.append(true);
         }
-        labels_b.append(true);
     }
     Ok(std::sync::Arc::new(labels_b.finish()))
 }
@@ -14812,6 +14823,201 @@ mod tests {
         assert_eq!(
             out.data_type(),
             &CypherPathNodes::new().return_type(&[]).unwrap()
+        );
+    }
+
+    /// Hydrated `cypher_path_nodes` invoke over a real topology directory (#705).
+    fn invoke_hydrated_path_nodes(
+        hydrate: PathNodeHydration,
+        seed: datafusion::arrow::array::ArrayRef,
+        rels: datafusion::arrow::array::ArrayRef,
+    ) -> datafusion::error::Result<datafusion::arrow::array::ArrayRef> {
+        use std::sync::Arc;
+
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let udf = CypherPathNodes::with_hydration(hydrate);
+        let n = seed.len();
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Array(Arc::clone(&seed)),
+                ColumnarValue::Array(Arc::clone(&rels)),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("seed", seed.data_type().clone(), true)),
+                Arc::new(Field::new("rels", rels.data_type().clone(), true)),
+            ],
+            number_rows: n,
+            return_field: Arc::new(Field::new("nodes", udf.return_type(&[])?, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        };
+        udf.invoke_with_args(args).map(|v| match v {
+            ColumnarValue::Array(a) => a,
+            ColumnarValue::Scalar(s) => s.to_array_of_size(n).unwrap(),
+        })
+    }
+
+    fn path_node_label_lists(
+        out: &datafusion::arrow::array::ArrayRef,
+        row: usize,
+    ) -> Option<Vec<Vec<Option<String>>>> {
+        use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
+        let list = out.as_any().downcast_ref::<ListArray>().unwrap();
+        if list.is_null(row) {
+            return None;
+        }
+        let items = list.value(row);
+        let items = items.as_any().downcast_ref::<StructArray>().unwrap();
+        let labels = items
+            .column_by_name("labels")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        Some(
+            (0..labels.len())
+                .map(|i| {
+                    let values = labels.value(i);
+                    let strings = values.as_any().downcast_ref::<StringArray>().unwrap();
+                    (0..strings.len())
+                        .map(|j| (!strings.is_null(j)).then(|| strings.value(j).to_owned()))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn hydrated_path_nodes_preserve_full_type_ids_labels() {
+        // #705: multi-label nodes keep every catalog-resolved label from
+        // authoritative `type_ids` (not the legacy primary `type_id` alone).
+        use datafusion::arrow::array::FixedSizeBinaryArray;
+        use datafusion::arrow::datatypes::Field;
+        use graphforge_core::uuid::{new_v7, to_bytes};
+        use graphforge_core::{OntologyMode, TypeId};
+        use graphforge_storage::GraphWriter;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, 0).unwrap();
+        let multi = new_v7();
+        let single = new_v7();
+        let unknown_only = new_v7();
+        w.create_node_with_labels(multi, &[TypeId(1), TypeId(3)])
+            .unwrap();
+        w.create_node_with_labels(single, &[TypeId(2)]).unwrap();
+        // type_ids present but absent from the baked catalog → empty label list.
+        w.create_node_with_labels(unknown_only, &[TypeId(99)])
+            .unwrap();
+        w.flush().unwrap();
+
+        let multi_bytes = to_bytes(&multi);
+        let single_bytes = to_bytes(&single);
+        let unknown_bytes = to_bytes(&unknown_only);
+        let missing_bytes = [0xABu8; 16];
+
+        let hydrate = PathNodeHydration {
+            dir: dir.path().to_path_buf(),
+            labels_by_type: vec![
+                (1, "Person".to_owned()),
+                (2, "Company".to_owned()),
+                (3, "Employee".to_owned()),
+            ],
+            prop_stems: vec![],
+            fields: vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+            ]
+            .into(),
+        };
+
+        // Zero-hop walk over four seeds: multi-label, single-label, missing
+        // catalog id, and uuid absent from topology.
+        let seed = std::sync::Arc::new(
+            FixedSizeBinaryArray::try_from_iter(
+                [multi_bytes, single_bytes, unknown_bytes, missing_bytes]
+                    .iter()
+                    .copied(),
+            )
+            .unwrap(),
+        ) as datafusion::arrow::array::ArrayRef;
+        let rels = edge_list(&[Some(&[]), Some(&[]), Some(&[]), Some(&[])]);
+        let out = invoke_hydrated_path_nodes(hydrate, seed, rels).unwrap();
+        let labels = path_node_label_lists(&out, 0).unwrap();
+        assert_eq!(
+            labels[0],
+            vec![Some("Person".into()), Some("Employee".into())],
+            "multi-label node keeps full type_ids set in catalog order"
+        );
+        // Remaining seeds are separate rows (one zero-hop path each).
+        let labels1 = path_node_label_lists(&out, 1).unwrap();
+        assert_eq!(labels1[0], vec![Some("Company".into())]);
+        let labels2 = path_node_label_lists(&out, 2).unwrap();
+        assert_eq!(
+            labels2[0],
+            Vec::<Option<String>>::new(),
+            "unknown catalog ids skipped"
+        );
+        let labels3 = path_node_label_lists(&out, 3).unwrap();
+        assert_eq!(
+            labels3[0],
+            vec![None],
+            "missing topology row keeps a single-null labels element"
+        );
+
+        // Repeated node on a self-loop walk must repeat the full label set.
+        let seed_loop = std::sync::Arc::new(
+            FixedSizeBinaryArray::try_from_iter([multi_bytes].iter().copied()).unwrap(),
+        ) as datafusion::arrow::array::ArrayRef;
+        // Build a one-edge list with real uuids (not the byte-tag helper).
+        use datafusion::arrow::array::{FixedSizeBinaryBuilder, ListBuilder, StructBuilder};
+        let fields: datafusion::arrow::datatypes::Fields = vec![
+            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
+        ]
+        .into();
+        let mut b = ListBuilder::new(StructBuilder::new(
+            fields,
+            vec![
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+            ],
+        ));
+        b.values()
+            .field_builder::<FixedSizeBinaryBuilder>(0)
+            .unwrap()
+            .append_value(multi_bytes)
+            .unwrap();
+        b.values()
+            .field_builder::<FixedSizeBinaryBuilder>(1)
+            .unwrap()
+            .append_value(multi_bytes)
+            .unwrap();
+        b.values().append(true);
+        b.append(true);
+        let loop_rels = std::sync::Arc::new(b.finish()) as datafusion::arrow::array::ArrayRef;
+
+        let hydrate2 = PathNodeHydration {
+            dir: dir.path().to_path_buf(),
+            labels_by_type: vec![
+                (1, "Person".to_owned()),
+                (2, "Company".to_owned()),
+                (3, "Employee".to_owned()),
+            ],
+            prop_stems: vec![],
+            fields: vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+            ]
+            .into(),
+        };
+        let looped = invoke_hydrated_path_nodes(hydrate2, seed_loop, loop_rels).unwrap();
+        let loop_labels = path_node_label_lists(&looped, 0).unwrap();
+        assert_eq!(loop_labels.len(), 2);
+        assert_eq!(loop_labels[0], loop_labels[1]);
+        assert_eq!(
+            loop_labels[0],
+            vec![Some("Person".into()), Some("Employee".into())]
         );
     }
 

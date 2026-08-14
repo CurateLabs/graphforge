@@ -26,5 +26,8 @@
     "@types/node": "24.10.1",
     "prettier": "3.9.5",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "typescript": "5.9.3"
   }
 }

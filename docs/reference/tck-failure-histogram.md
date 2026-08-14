@@ -51,7 +51,7 @@ TCK_DUMP_FAILURES=/tmp/tck_failures.jsonl cargo test -p graphforge-api --test bd
 | 8 | Binder: composite-var reference after projection | 71 | (bug) | — | `graphforge-rel/lowerer.rs` |
 | 9 | SET/REMOVE `<label>` | 25 | 25\* | high | \*needs full multi-label storage+exec+ledger (4 layers) |
 | 10 | Aggregation in `WITH` | 60 | ~15 | med | binder; blocked by read-after-write for write-area scenarios |
-| 11 | MERGE (node only) | 32 | ~5 | high | binder stub + IR; ON-clauses & rel-MERGE are separate |
+| 11 | MERGE (partial subset) | 32 | ~5+ | high | Standalone node + referenced-endpoint rel MERGE ship; multi-node construction and row-conditional map actions still reject |
 | 12 | CALL procedures | 52 | **0** | high | greenfield: harness registry + CALL/YIELD exec + error codes; every scenario double-blocked |
 | — | "ORDER BY wrong result" | 58 | **0** | high | **mislabeled** — ORDER BY works; folds into finding #3 (renderer) |
 
@@ -74,7 +74,7 @@ Pure test-harness work, no engine risk — the highest ROI on the board, and the
 - **CALL (52 → 0):** double-blocked (no harness fixture step *and* CALL is a binder stub).
 - **ORDER BY (58 → 0):** ORDER BY is implemented; failures are renderer formatting.
 - **Agg-in-WITH (60 → 15):** write-area scenarios blocked by read-after-write.
-- **MERGE (32 → 5):** binder stub; ON-clauses dropped; rel-MERGE separate.
+- **MERGE (32 → 5):** standalone node + referenced-endpoint relationship MERGE ship; multi-node construction and row-conditional map actions remain rejected.
 - **duration (122 → 51), params (62 → 31), typed-prop (65 → 49):** each hides a value-model gap.
 
 ## E. Recommended sequencing

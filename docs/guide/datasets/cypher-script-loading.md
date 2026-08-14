@@ -58,7 +58,7 @@ CREATE (keanu)-[:ACTED_IN]->(matrix);
 All standard Cypher query statements are executed:
 
 - **CREATE** - Node and relationship creation
-- **MERGE** - Create or match patterns with ON CREATE/MATCH SET
+- **MERGE** - Partial: standalone new-node and referenced-endpoint relationship MERGE with ON CREATE/MATCH SET (see [MERGE status](../implementation-status/clauses.md#merge))
 - **MATCH** - Pattern matching
 - **SET** - Property updates
 - **DELETE** / **DETACH DELETE** - Node and relationship deletion

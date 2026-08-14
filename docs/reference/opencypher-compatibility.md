@@ -42,7 +42,7 @@ GraphForge prioritizes:
 ### Writing clauses
 
 - **CREATE**, **SET**, **REMOVE**, **DELETE**, **DETACH DELETE**
-- **MERGE** with **ON CREATE** / **ON MATCH**
+- **MERGE** (partial) — standalone new-node upsert and relationship MERGE with already-bound endpoints; multi-node construction and row-conditional map actions are rejected. See [implementation-status/clauses.md](implementation-status/clauses.md#merge).
 
 ### Aggregations
 

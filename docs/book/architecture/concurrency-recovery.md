@@ -29,6 +29,13 @@ merge. Stable outcomes are `GF_IDEMPOTENCY_CONFLICT`, `GF_WRITE_CONFLICT`, or
 optimistically in v0.5.0; other mutation APIs keep their established
 single-writer behavior even when the facade selects optimistic mode.
 
+Scalar construction (`add_edge`) acquires the same graph visibility /
+write-admission coordinator as Cypher writes, bulk publication, and other
+mutations before selecting a mutation snapshot or touching the workspace.
+Endpoint validation, surrogate allocation, flush, publication, and rollback
+stay inside that one coherent transaction so concurrent same-instance callers
+cannot interleave partial edges or overlapping surrogates.
+
 These modes coordinate embedded callers directly against the project directory.
 GraphForge core does not include an MCP or HTTP server. A separately packaged
 extension may expose one authenticated remote authority without changing the

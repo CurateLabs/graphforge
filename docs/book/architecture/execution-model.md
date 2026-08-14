@@ -89,7 +89,7 @@ that cannot be faithfully expressed as relational algebra:
 | `PathUnique` | Path isomorphism/homomorphism enforcement |
 | `ProvenanceSemijoin` | Semijoin with confidence propagation |
 | `OntologyInfer` | Transitive/symmetric closure materialization |
-| `GraphMerge` | MERGE upsert with write-path locking |
+| `GraphMerge` | Partial MERGE upsert (standalone new node or referenced-endpoint relationship) with write-path locking |
 
 All other operators (scan, filter, project, aggregate, sort, limit) run through standard
 DataFusion physical nodes.
@@ -250,8 +250,12 @@ Full algorithm catalog: [Algorithm Verbs](algorithms.md).
 
 ## Arrow Result Contract
 
-All results are returned as **Arrow RecordBatch streams**. The schema for query results
-carries GraphForge metadata:
+Data-bearing execution results — Cypher `execute`, analyst verbs, and other
+tabular algorithm or inspection tables — are returned as **Arrow RecordBatch
+streams**. Control, metadata, lifecycle, explanation, and construction surfaces
+may return scalars, collections, unit, or handles instead; see
+[Arrow as the Data Contract](overview.md#arrow-as-the-data-contract). The schema
+for query results carries GraphForge metadata:
 
 ```rust
 fn result_schema(fields: Vec<Field>, query_id: &str, ontology_ver: &str) -> Schema {
