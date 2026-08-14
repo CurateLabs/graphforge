@@ -29,12 +29,18 @@ set -euo pipefail
 NATIVE=$$(echo $(locations //crates/graphforge-bindings-py:graphforge_bindings_py) | tr ' ' '\\n' | grep -E '\\.(so|dylib|dll)$$' | head -n1)
 INIT=$$(echo $(locations //crates/graphforge-bindings-py:python_sources) | tr ' ' '\\n' | grep 'python/graphforge/__init__.py$$' | head -n1)
 PKG_ROOT=$$(cd "$$(dirname "$$INIT")/../.." && pwd)
+STAGE=$$(mktemp -d)
 python3 $(execpath //scripts/ci:assemble_bazel_binding_packages_py) \
   --language python \
   --native "$$NATIVE" \
   --package-root "$$PKG_ROOT" \
-  --out $(location graphforge-bazel-smoke.whl) \
+  --out "$$STAGE" \
   --write-evidence $(location python-bazel-native-evidence.json)
+# Assembler emits a PEP 427 basename; copy into the declared Bazel out for
+# bookkeeping. Binding RC installs the tagged name from a directory ``--out``.
+WHL=$$(ls "$$STAGE"/graphforge-*-*.whl | head -n1)
+cp "$$WHL" $(location graphforge-bazel-smoke.whl)
+rm -rf "$$STAGE"
 """,
     tools = ["//scripts/ci:assemble_bazel_binding_packages_py"],
 )
