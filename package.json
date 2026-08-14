@@ -32,6 +32,9 @@
     "onlyBuiltDependencies": [
       "esbuild",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "typescript": "5.9.3"
+    }
   }
 }

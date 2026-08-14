@@ -740,6 +740,8 @@ RETURN product
 
 **Purpose**: Ensure that a pattern exists in the graph. Either the pattern already exists (and is matched), or it needs to be created. Combines MATCH and CREATE functionality.
 
+**GraphForge support:** Partial — see [implementation-status/clauses.md](../implementation-status/clauses.md#merge). Spec text below describes openCypher MERGE; GraphForge executes standalone new-node MERGE and referenced-endpoint relationship MERGE only. Multi-node construction and row-conditional map actions raise structured plan errors and are not shipped support.
+
 **Syntax**:
 ```cypher
 MERGE (variable:Label {properties})
@@ -767,7 +769,7 @@ ON MATCH SET person.last_seen = datetime()
 RETURN person
 ```
 
-*Complex - Merge pattern with relationships*:
+*Supported GraphForge relationship form (endpoints already bound)*:
 ```cypher
 MERGE (user:User {id: $user_id})
 ON CREATE SET user.created_at = datetime(),

@@ -8,24 +8,28 @@ Inventory of partially implemented and unimplemented OpenCypher features in Grap
 
 | Category | Partial | Not Implemented | Total |
 |----------|---------|-----------------|-------|
-| **Clauses** | 1 | 3 | 4 |
+| **Clauses** | 2 | 3 | 5 |
 | **Functions** | 0 | 19 | 19 |
 | **Operators** | 0 | 4 | 4 |
 | **Patterns** | 1 | 1 | 2 |
-| **TOTAL** | **2** | **27** | **29** |
+| **TOTAL** | **3** | **27** | **30** |
 
 ---
 
-## Clauses (4 features)
+## Clauses (5 features)
 
-### Partial Implementation (1)
+### Partial Implementation (2)
 
 | Feature | Status | TCK Scenarios | Priority |
 |---------|--------|---------------|----------|
 | CALL { } subqueries | ⚠️ PARTIAL | ~10 | Medium |
+| MERGE | ⚠️ PARTIAL | 75 | High |
 
-**Current:** EXISTS/COUNT subqueries only
-**Needs:** General CALL { } syntax, UNION in subqueries, variable importing
+**CALL { } — Current:** EXISTS/COUNT subqueries only
+**CALL { } — Needs:** General CALL { } syntax, UNION in subqueries, variable importing
+
+**MERGE — Current:** Standalone new-node MERGE and relationship MERGE with already-bound endpoints; `ON CREATE` / `ON MATCH` property/label actions when all frontier rows share one branch. Authority: `crates/graphforge-exec/src/write_driver.rs`. Direct evidence: `crates/graphforge-api/tests/e2e_baseline.rs` (`merge_node_*`, `merge_relationship_*`).
+**MERGE — Rejected (not support):** multi-node / relationship-construction MERGE (`relationship and multi-node MERGE execution is not implemented yet`); row-conditional map actions (`row-conditional MERGE map actions are not implemented yet`). Details: [clauses.md](implementation-status/clauses.md#merge).
 
 ### Not Implemented (3)
 

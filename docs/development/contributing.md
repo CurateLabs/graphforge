@@ -176,6 +176,8 @@ and [testing.md](testing.md) for command recipes and suite layout.
 - Thin adapters only — no semantic ownership in the binding layer
 - Type hints / typed APIs on public surfaces
 - No `# type: ignore` without explanation
+- First-party TypeScript compiler/loader policy:
+  [typescript-toolchain.md](typescript-toolchain.md)
 
 ---
 
@@ -228,7 +230,7 @@ onboarding contract.
 ## Design Principles
 
 1. **Spec-driven correctness** — openCypher semantics over performance
-2. **Arrow as the wire contract** — results cross language boundaries as Arrow RecordBatch streams
+2. **Arrow as the data-plane wire contract** — Cypher and analyst/data-bearing results cross language boundaries as Arrow RecordBatch streams; control/metadata/lifecycle/explanation/construction may return scalars, collections, unit, or handles
 3. **GraphForge owns the semantics** — no binding or storage provider becomes the semantic owner
 4. **Surfaces stay independent** — analyst verbs bypass the Cypher parser; they do not rewrite it
 5. **Inspectable** — `explain` at every compiler stage; structured errors with spans

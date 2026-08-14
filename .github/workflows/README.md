@@ -110,6 +110,16 @@ Content is synced from allowlisted `docs/**` pages into the Starlight content
 collection at build time. Pull-request runs are cancellable; `main`
 deployments remain serialized to GitHub Pages.
 
+### `codspeed.yml` — CodSpeed
+
+Builds the divan benchmark targets with `cargo codspeed` and measures them
+under CodSpeed's CPU simulation instrument on pull requests to `main`, pushes
+to `main`, and manual dispatch. It reports performance deltas against the base
+commit as evidence; it is **not** part of the required `CI Gate` aggregate, and
+its Cargo build stays a diagnostic path next to authoritative Bazel
+compilation. See
+[`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
+
 ### `binding-release-candidate.yml`
 
 A maintainer manually dispatches this non-publishing workflow with an exact

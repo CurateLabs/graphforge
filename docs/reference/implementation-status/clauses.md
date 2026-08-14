@@ -13,12 +13,12 @@ Implementation status of OpenCypher query clauses in GraphForge.
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| ✅ Complete | 17 | 85% |
-| ⚠️ Partial | 0 | 0% |
+| ✅ Complete | 16 | 80% |
+| ⚠️ Partial | 1 | 5% |
 | ❌ Not Implemented | 3 | 15% |
 | **TOTAL** | **20** | **100%** |
 
-*Updated for v0.3.8 — all TCK-covered clauses are fully compliant (3,885/3,885 scenarios passing).*
+*Updated for v0.5.0 — MERGE is a documented partial Rust subset; authoritative TCK status is in [tck-compliance.md](../tck-compliance.md).*
 
 ---
 
@@ -290,20 +290,31 @@ Implementation status of OpenCypher query clauses in GraphForge.
 ## Reading/Writing Clauses
 
 ### MERGE
-**Status:** ✅ COMPLETE
+**Status:** ⚠️ PARTIAL
 
-**Implementation:**
-- File: `src/graphforge/executor/executor.py:2269` (`_execute_merge`)
-- Grammar: `src/graphforge/parser/cypher.lark:96`
+**Implementation (Rust authority):**
+- Parser: `crates/graphforge-cypher/src/parser/clauses.rs` (`parse_merge_clause`)
+- Binder / IR: `crates/graphforge-ir/src/binder.rs` (MERGE op with `on_create` / `on_match`)
+- Planner node: `crates/graphforge-plan/src/lib.rs` (`GraphMergeNode`)
+- Executor: `crates/graphforge-exec/src/write_driver.rs` (`run_merge_phase`, `run_relationship_merge_phase`)
 
-**Features:**
-- ✅ Match or create pattern (idempotent)
-- ✅ ON CREATE SET
-- ✅ ON MATCH SET
-- ✅ Works with nodes and relationships
-- ✅ Multiple patterns
+**Supported forms (direct execution evidence):**
+- ✅ Standalone new-node MERGE by label + properties — `MERGE (:Person {name:'Alice'})`
+  - Evidence: `crates/graphforge-api/tests/e2e_baseline.rs` (`merge_node_is_idempotent_by_label_and_properties`)
+- ✅ `ON CREATE SET` / `ON MATCH SET` property (and label) actions when every frontier row takes the same create-or-match branch
+  - Evidence: `merge_node_runs_only_the_selected_on_action`, `merge_relationship_is_idempotent_and_runs_selected_action`
+- ✅ Relationship MERGE whose endpoints are already-bound references — `MATCH (a), (b) MERGE (a)-[r:TYPE {…}]->(b)`
+  - Evidence: `merge_relationship_is_idempotent_and_runs_selected_action`, `merge_relationship_preserves_all_existing_matches`, `merge_relationship_combines_pending_and_committed_matches`, `merge_relationship_resolves_row_properties_after_entity_aliasing`
 
-**Test Coverage:** Good (Merge1-9.feature, ~75 TCK scenarios)
+**Unsupported forms (structured plan errors — not support):**
+- ❌ Multi-node / relationship-construction MERGE that creates endpoints in the same pattern (for example `MERGE (a:A)-[:R]->(b:B)`), merging an already-bound node alone, or any MERGE pattern that is not exactly one standalone new node or one edge with reference-only endpoints
+  - Error: `relationship and multi-node MERGE execution is not implemented yet` (`write_driver.rs` `run_merge_phase`)
+- ❌ Row-conditional `ON CREATE` / `ON MATCH` map actions (`n += {…}` / `n = {…}`) when some frontier rows create and others match in the same MERGE
+  - Error: `row-conditional MERGE map actions are not implemented yet` (`write_driver.rs` `run_merge_actions_masked`)
+- ❌ Comma-separated / multi-pattern MERGE in one clause (parser accepts a single `PathPattern` only)
+- ❌ Treating parse/bind/plan success or TCK inventory counts as end-to-end proof — logical-plan / wrapper tests are not execution support
+
+**Test Coverage:** Direct facade tests in `e2e_baseline.rs` above. Official TCK `clauses/merge` (Merge1–9, ~75 scenarios) is inventory coverage, not a completeness claim for the unsupported shapes.
 
 ---
 
@@ -417,16 +428,17 @@ Implementation status of OpenCypher query clauses in GraphForge.
 
 ### Strengths
 
-1. **Core clauses complete**: All essential reading, writing, and projecting clauses fully implemented
+1. **Core clauses mostly complete**: Essential reading, writing, and projecting clauses are implemented; MERGE is an explicit partial subset
 2. **Advanced features**: Variable-length paths, OPTIONAL MATCH, UNION, subquery expressions
 3. **Query chaining**: WITH clause with full spec compliance (v0.3.0)
 4. **Pattern matching**: Comprehensive pattern support including variable-length and path binding
 
 ### Limitations
 
-1. **CALL procedures**: No procedure system implemented
-2. **CALL { } subqueries**: Only EXISTS/COUNT supported, not general syntax
-3. **Import/Export**: No LOAD CSV or equivalent (use dataset system instead)
+1. **MERGE**: Partial — standalone new-node and referenced-endpoint relationship forms only; multi-node construction and row-conditional map actions reject with structured plan errors
+2. **CALL procedures**: No procedure system implemented
+3. **CALL { } subqueries**: Only EXISTS/COUNT supported, not general syntax
+4. **Import/Export**: No LOAD CSV or equivalent (use dataset system instead)
 
 ### Recommended Priority for v0.4.0+
 
@@ -449,6 +461,8 @@ Implementation status of OpenCypher query clauses in GraphForge.
 ## References
 
 - OpenCypher Specification: https://opencypher.org/resources/
-- GraphForge Grammar: `src/graphforge/parser/cypher.lark`
-- GraphForge Executor: `src/graphforge/executor/executor.py`
-- GraphForge Planner: `src/graphforge/planner/planner.py`
+- MERGE executor authority: `crates/graphforge-exec/src/write_driver.rs`
+- MERGE parser: `crates/graphforge-cypher/src/parser/clauses.rs`
+- MERGE binder: `crates/graphforge-ir/src/binder.rs`
+- MERGE planner node: `crates/graphforge-plan/src/lib.rs` (`GraphMergeNode`)
+- Direct MERGE execution tests: `crates/graphforge-api/tests/e2e_baseline.rs`

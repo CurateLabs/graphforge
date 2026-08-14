@@ -1,7 +1,7 @@
 # GraphForge Architecture Overview
 
 **Status:** v0.5.0 — Rust core shipped
-**Last Updated:** 2026-07-27
+**Last Updated:** 2026-08-14
 
 > **Implementation status legend** (used across architecture docs): **Shipped** = implemented and
 > tested on `main`; **Partially built** = some paths real, others stubbed; **Designed** = specified,
@@ -34,10 +34,10 @@ the stable in-memory and FFI contract, Parquet for durable graph data).
 
 ## Architecture Principles
 
-1. **Arrow is the wire contract** — results cross language boundaries as Arrow RecordBatch streams; no GraphForge-specific buffer protocol
+1. **Arrow is the data-plane wire contract** — Cypher, analyst verbs, and other tabular/data-bearing results cross language boundaries as Arrow RecordBatch streams; no GraphForge-specific buffer protocol for those results
 2. **GraphForge owns the semantics** — the Cypher compiler, ontology, and Graph IR live in GraphForge-owned Rust crates; no storage provider or binding becomes the semantic owner
 3. **DataFusion is the execution backbone** — GraphForge extends DataFusion with custom graph operators rather than writing a full executor from scratch
-4. **Unified result contract** — all methods return Arrow Tables; no surface returns a bespoke result type
+4. **Scoped result contract** — data-returning operations use Arrow in and Arrow out; control, metadata, lifecycle, explanation, and construction surfaces may return scalars, collections, unit, or construction handles (not binding-owned graph result objects)
 5. **Correctness over performance** — strict openCypher TCK compliance remains the primary constraint
 6. **Ontology is progressive, not required** — GraphForge supports three modes: `exploratory` (no ontology required, all labels accepted), `advisory` (ontology present, violations are warnings), and `strict` (ontology enforced, violations are errors). Exploratory analysis is a first-class workflow. See [ADR 0003](../../adr/0003-progressive-ontology.md).
 7. **Three layers, clean boundaries** — graph concerns, knowledge concerns, and workbench concerns are separated; the graph layer stays graph-native and never absorbs the others. See the next section and [ADR 0005](../../adr/0005-layered-architecture.md).
@@ -193,7 +193,11 @@ See [AST & Planning](ast-and-planning.md) for the full compiler pipeline.
 
 ## Arrow as the Data Contract
 
-All execution results cross language boundaries as **Arrow RecordBatch streams**. Arrow provides:
+**Data-plane** results — Cypher `execute` / streaming sinks, analyst verbs
+(`rank` / `cluster` / `paths` / `analyze` / `similar` / `find`), tabular
+inspection such as `schema()`, bulk-construction receipts, and other
+data-bearing algorithm or knowledge tables — cross language boundaries as
+**Arrow RecordBatch streams**. Arrow provides:
 
 - A stable, language-independent columnar memory format
 - Zero-copy in-process exchange via the C Data Interface
@@ -211,7 +215,31 @@ graphforge.query_id = "01J..."
 ```
 
 These annotations survive IPC serialization and Parquet round-trips, which is why Arrow is
-the correct contract rather than a Polars or Python-specific result type.
+the correct contract for tabular results rather than a Polars or Python-specific result type.
+
+### Control and construction plane (intentional non-Arrow returns)
+
+Not every public method is a tabular data operation. The Rust facade
+(`graphforge-api`) intentionally returns non-Arrow values for control,
+metadata, lifecycle, explanation, and construction. Python and Node mirror the
+same categories as thin projections — they do **not** execute graph logic or
+rebuild tabular engine results into binding-owned objects.
+
+| Category | Typical returns | Examples (Rust → Python / Node) |
+| -------- | --------------- | -------------------------------- |
+| **Metadata / inspection** | string collections, scalars | `labels()` / `relationship_types()` → `Vec<String>` / `list[str]`; `node_count()` → `u64` / `int` |
+| **Explanation** | plain text | `explain()` → `String` / `str` |
+| **Lifecycle / control** | unit (`()` / `None`) | `index(...)`, `load_ontology(...)`, `adopt_ontology(...)`, `clear_ontology(...)`, `execute_to_parquet(...)`, embedding publish helpers |
+| **Construction handles** | instance-bound handles | `add_node(...)` → `NodeHandle`; `add_edge(...)` → `EdgeHandle` |
+
+**Construction handles vs metadata/control:** a `NodeHandle` / `EdgeHandle` is a
+Rust-owned, instance-bound identity token (stable UUID plus label or relationship
+metadata) so callers can wire subsequent construction or selectors. It is not a
+tabular query result and not a binding-side graph object model. Metadata and
+control returns (`Vec<String>`, `u64`, `String`, `()`) answer inspection,
+planning, or lifecycle questions without columnar payloads. Bulk construction
+and Cypher/analyst paths remain on the Arrow data plane (including Arrow
+receipts for atomic bulk publish).
 
 ---
 
@@ -219,14 +247,15 @@ the correct contract rather than a Polars or Python-specific result type.
 
 | Language | Mechanism | Crate / Package | Result contract | v0.5.0 |
 | ---------- | ---------------- | ----------------------------------------- | -------------------------------------------- | -------- |
-| **Rust** | Native crate API | `graphforge-api` / `graphforge-core` | Arrow batches via the facade | **Shipped** |
-| **Python** | PyO3 + maturin | `graphforge-bindings-py` | `pyarrow.Table` or `RecordBatchReader` | **Shipped** (thin) |
-| **Node** | napi-rs | `graphforge-bindings-node` | Arrow IPC `Buffer` → `tableFromIPC(buf)` | **Shipped** (thin) |
-| **Swift** | UniFFI (planned) | deferred | Arrow IPC | **Deferred** (v0.5.1) |
-| **Kotlin** | UniFFI (planned) | deferred | Arrow IPC | **Deferred** (v0.5.1) |
+| **Rust** | Native crate API | `graphforge-api` / `graphforge-core` | Arrow for data-bearing results; scalars / collections / unit / handles elsewhere | **Shipped** |
+| **Python** | PyO3 + maturin | `graphforge-bindings-py` | `pyarrow.Table` (or reader) for tabular results; same non-Arrow categories as Rust | **Shipped** (thin) |
+| **Node** | napi-rs | `graphforge-bindings-node` | Arrow IPC `Buffer` → `tableFromIPC(buf)` for tabular results; same non-Arrow categories as Rust | **Shipped** (thin) |
+| **Swift** | UniFFI (planned) | deferred | Arrow IPC (data plane) | **Deferred** (v0.5.1) |
+| **Kotlin** | UniFFI (planned) | deferred | Arrow IPC (data plane) | **Deferred** (v0.5.1) |
 
 The architectural rule: **never let a binding become the semantic owner**. Bindings project
 requests and results; the Rust core owns Cypher, verbs, storage, and knowledge semantics.
+Bindings never reshape tabular engine results into binding-owned row/object graphs.
 See [ADR 0001](../../adr/0001-rust-core.md).
 
 ---
@@ -242,7 +271,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 | Ontology runtime | Load/validate round-trips for progressive modes |
 | Data contract | Arrow/Parquet/IPC round-trips pass |
 | Storage | Parquet project generations with atomic publication / recovery |
-| Bindings | Thin Python and Node projections execute and consume Arrow results |
+| Bindings | Thin Python and Node projections; tabular results stay Arrow |
 | Knowledge | knowledge ledger + epistemic records attach by UUID without changing graph results |
 ---
 

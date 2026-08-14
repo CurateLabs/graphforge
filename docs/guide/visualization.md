@@ -1,6 +1,7 @@
 # Visualization examples
 
-GraphForge returns Arrow tables from its public Python and Node APIs. This guide
+GraphForge returns Arrow tables from its public Python and Node **data-plane**
+APIs (Cypher `execute`, analyst verbs, and other tabular results). This guide
 shows how to take **one shared real-data projection** and render it with common
 ecosystem libraries in both Python and Node.js—without adding visualization
 behavior to GraphForge Core.

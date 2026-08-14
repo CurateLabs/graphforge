@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "557cc317a48c4179823fbc7accd0287acf10b59b7a999296dff33d942a9bf254",
+  "sha256": "3c01e947ac827ff997813fff2ed788ec256d501d457deb399acd2f188f24fd62",
   "entries": [
     {
       "name": "graphforge-api",
@@ -566,6 +566,15 @@
       "features": [],
       "dependencies": [
         {
+          "name": "codspeed-divan-compat",
+          "req": "^5",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
+        {
           "name": "serde",
           "req": "^1",
           "features": [
@@ -623,6 +632,15 @@
       "version": "0.5.2",
       "features": [],
       "dependencies": [
+        {
+          "name": "codspeed-divan-compat",
+          "req": "^5",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
         {
           "name": "graphforge-ast",
           "req": "^0.5.2",

@@ -12,7 +12,7 @@ Mapping of OpenCypher clauses to their corresponding TCK test scenarios.
 |--------|---------------|-----------------|---------------------|----------|
 | MATCH | match, match-where | 195 | ✅ Complete | Excellent |
 | CREATE | create | 78 | ✅ Complete | Excellent |
-| MERGE | merge | 75 | ✅ Complete | Excellent |
+| MERGE | merge | 75 | ⚠️ Partial | Subset — see MERGE section |
 | RETURN | return, return-orderby, return-skip-limit | 129 | ✅ Complete | Excellent |
 | WHERE | match-where, with-where | 53 | ✅ Complete | Good |
 | WITH | with, with-where, with-orderBy, with-skip-limit | 156 | ✅ Complete | Excellent |
@@ -307,15 +307,21 @@ tests/tck/features/official/clauses/match-where/MatchWhere1-6.feature (34 scenar
 
 **Total TCK Coverage:** 75 scenarios
 
-**Implementation Status:** ✅ COMPLETE
+**Implementation Status:** ⚠️ PARTIAL
 
 **TCK Coverage Details:**
-- Merge1-9.feature: Match or create semantics
-- ON CREATE SET
-- ON MATCH SET
-- Node and relationship merging
+- Inventory covers Merge1–9 (node/relationship MERGE, ON CREATE / ON MATCH)
+- GraphForge executes only the Rust subset below; remaining TCK shapes are not shipped support
 
-**Coverage Assessment:** Excellent - comprehensive MERGE scenarios
+**Shipped subset (direct execution tests in `crates/graphforge-api/tests/e2e_baseline.rs`):**
+- Standalone new-node MERGE (`merge_node_is_idempotent_by_label_and_properties`, `merge_node_runs_only_the_selected_on_action`)
+- Referenced-endpoint relationship MERGE (`merge_relationship_*`)
+
+**Explicitly unsupported (plan errors, not support):**
+- Multi-node / relationship-construction MERGE → `relationship and multi-node MERGE execution is not implemented yet`
+- Row-conditional MERGE map actions → `row-conditional MERGE map actions are not implemented yet`
+
+**Coverage Assessment:** TCK inventory is broad; execution completeness is partial — see [clauses.md](../implementation-status/clauses.md#merge)
 
 ---
 

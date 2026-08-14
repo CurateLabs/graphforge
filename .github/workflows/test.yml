@@ -681,6 +681,9 @@ jobs:
           pnpm smoke:node-cli
           pnpm --filter @curatelabs/graphforge-cli test:lifecycle
 
+      - name: Typecheck Node BDD package
+        run: pnpm --filter @curatelabs/graphforge-bdd-node typecheck
+
       - name: Run Node BDD suite
         working-directory: tests/features/node
         shell: bash
