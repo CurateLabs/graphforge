@@ -318,6 +318,10 @@ class PrePushValidationTests(unittest.TestCase):
         coverage = next(
             stage for stage in GATE.stages() if stage.name == "rust-tests-coverage-native"
         )
+        self.assertEqual(
+            coverage.commands[0],
+            ("bash", "scripts/ci/test-coverage-rust.sh"),
+        )
         self.assertEqual(coverage.dependencies, ("rust-quality",))
         self.assertTrue(coverage.python_extension)
         self.assertEqual(coverage.artifacts, ("crates/graphforge-bindings-node/*.node",))

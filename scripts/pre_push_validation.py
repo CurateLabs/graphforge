@@ -597,6 +597,7 @@ def stages() -> tuple[Stage, ...]:
         Stage(
             "rust-tests-coverage-native",
             commands=(
+                ("bash", "scripts/ci/test-coverage-rust.sh"),
                 ("uv", "run", "--no-sync", "python", "scripts/ci/test-rust-coverage-ledger.py"),
                 ("make", "coverage-rust"),
             ),
@@ -608,7 +609,11 @@ def stages() -> tuple[Stage, ...]:
                 "crates/**/*.rs",
                 "crates/**/Cargo.toml",
                 "tests/**/*.rs",
+                "scripts/coverage-rust.sh",
+                "scripts/ci/test-coverage-rust.sh",
                 "scripts/ci/test-rust-coverage-ledger.py",
+                "tests/features/node/cucumber.js",
+                "tests/features/node/package.json",
             ),
             artifacts=("crates/graphforge-bindings-node/*.node",),
             python_extension=True,

@@ -43,6 +43,10 @@ assert_classification "$contracts" tests/contracts/knowledge-contract-matrix.jso
 assert_classification "$contracts" tests/contracts/epistemic-contract-matrix.json
 assert_classification "$contracts" tests/contracts/m4-entry-matrix.json
 assert_classification "$coverage_ledger" scripts/coverage_rust_ledger.py
+assert_classification "$coverage_ledger" scripts/coverage-rust.sh
+assert_classification "$coverage_ledger" scripts/ci/test-coverage-rust.sh
+assert_classification "$coverage_ledger" tests/features/node/cucumber.js
+assert_classification "$coverage_ledger" tests/features/node/package.json
 assert_classification "$storage" .github/workflows/docs.yml
 assert_classification "$all" .github/workflows/test.yml
 # Unknown paths must fail closed toward full policy validation.
