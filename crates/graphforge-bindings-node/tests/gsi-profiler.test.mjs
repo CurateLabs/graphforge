@@ -59,6 +59,7 @@ test("tiny graph and unknown directedness fail closed", () => {
         "00000000-0000-0000-0000-000000009b7c",
         "bidirectional",
       ),
-    (error) => error?.code === "GF_VALIDATION" || /directedness/i.test(String(error)),
+    (error) =>
+      error?.code === "GF_VALIDATION" || /directedness/i.test(String(error)),
   );
 });
