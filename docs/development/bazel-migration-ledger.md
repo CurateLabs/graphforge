@@ -117,8 +117,10 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | `//crates/graphforge-cli:repository` | `mapped` | #8 |
 | `graphforge-cli` | `build-script-build` | `custom-build` | `crates/graphforge-cli/build.rs` | `//crates/graphforge-cli:graphforge_cli_build_script` | `mapped` | #7/#8; RT-cli-build-script closed |
 | `graphforge-core` | `graphforge_core` | `lib` | `crates/graphforge-core/src/lib.rs` | `//crates/graphforge-core:graphforge_core` | `mapped` | #10; unit tests `//crates/graphforge-core:graphforge_core_test` |
+| `graphforge-core` | `canonical` | `bench` | `crates/graphforge-core/benches/canonical.rs` | — | `exception` | RT-codspeed-bench; CodSpeed divan benchmark |
 | `graphforge-cypher` | `graphforge_cypher` | `lib` | `crates/graphforge-cypher/src/lib.rs` | `//crates/graphforge-cypher:graphforge_cypher` | `mapped` | #10; unit tests `//crates/graphforge-cypher:graphforge_cypher_test` |
 | `graphforge-cypher` | `corpus` | `integration-test` | `crates/graphforge-cypher/tests/corpus.rs` | `//crates/graphforge-cypher:corpus` | `mapped` | #8 |
+| `graphforge-cypher` | `compile` | `bench` | `crates/graphforge-cypher/benches/compile.rs` | — | `exception` | RT-codspeed-bench; CodSpeed divan benchmark |
 | `graphforge-exec` | `graphforge_exec` | `lib` | `crates/graphforge-exec/src/lib.rs` | `//crates/graphforge-exec:graphforge_exec` | `mapped` | #9; unit tests `//crates/graphforge-exec:graphforge_exec_test` |
 | `graphforge-exec` | `adjacency_expand` | `integration-test` | `crates/graphforge-exec/tests/adjacency_expand.rs` | `//crates/graphforge-exec:adjacency_expand` | `mapped` | #8 |
 | `graphforge-exec` | `bench_traversal_scaling` | `integration-test` | `crates/graphforge-exec/tests/bench_traversal_scaling.rs` | `//crates/graphforge-exec:bench_traversal_scaling` | `mapped` | #8 |
@@ -164,6 +166,7 @@ ledger check fails closed on `stub` or missing justification.
 | RT-cli-build-script | `graphforge-cli` lib (`build.rs` → embedded `project-skills`) | Mapped via `cargo_build_script` + `//:project_skills_bundle`; bin/tests mapped | #8 complete | closed |
 | RT-bindings-cdylib | `graphforge-bindings-py` / `graphforge-bindings-node` packages | Mapped as `rust_shared_library` cdylibs + packaging smoke targets | #7 | mapped |
 | RT-examples | `graphforge-api` examples (11) | All 11 example binaries mapped under `//crates/graphforge-api:*` | #6 | closed |
+| RT-codspeed-bench | `cargo codspeed` / divan benches (`crates/*/benches/*.rs`, workflow `codspeed.yml`) | Benchmarks are a Cargo diagnostics surface measured by CodSpeed, not a correctness signal compiled or tested by `//:ci_rust_tests` | keep Cargo | justified |
 | RT-mobile | Swift / Kotlin / UniFFI / XCFramework / JVM AAR | **Abandoned for Bazel migration** — not a deliverable; do not inventory as required targets | excluded | excluded |
 
 ## Cross-platform release platforms (#6)
@@ -374,4 +377,3 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 4. Mobile bindings stay `excluded` — never promote to required Bazel-migration targets.
 5. Release platform additions must update `release_platforms.json` and
    `//platforms:*` together with the Binding RC contract.
-
