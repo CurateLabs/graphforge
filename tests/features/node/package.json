@@ -5,7 +5,8 @@
   "license": "Apache-2.0",
   "scripts": {
     "test:bdd": "cucumber-js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typecheck:fail-closed": "node ./scripts/typecheck-fail-closed.mjs"
   },
   "dependencies": {
     "@curatelabs/graphforge": "workspace:*"
