@@ -43,6 +43,19 @@ Feature BDD (Cucumber) uses `tsx/cjs`.
 **`ts-node` is deprecated and prohibited** for new or first-party GraphForge
 code — manifests, scripts, CI, and docs. Do not introduce it.
 
+## Feature BDD: typecheck is a separate gate
+
+Runtime `tsx/cjs` transpilation is not TypeScript checking. For
+`tests/features/node`, CI must run both:
+
+1. `pnpm --filter @curatelabs/graphforge-bdd-node typecheck` (`tsc --noEmit`
+   over the package-local `tsconfig.json`)
+2. `pnpm --filter @curatelabs/graphforge-bdd-node typecheck:fail-closed`
+   (hermetic invalid-fixture proof that the compiler exits nonzero)
+
+Do not treat Cucumber/`tsx` success as evidence that step definitions are
+type-correct.
+
 ## Out of scope for direct pins
 
 - **`docs-site`** does not directly pin or invoke `tsc`. Astro owns its
