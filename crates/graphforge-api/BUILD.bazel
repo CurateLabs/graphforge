@@ -177,6 +177,16 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "scale_g500_scale20",
+    srcs = ["tests/scale_g500_scale20.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "file_backed_graph_generation",
     srcs = [
         "tests/file_backed_graph_generation.rs",
@@ -472,6 +482,7 @@ test_suite(
         ":public_facade_remaining_conformance",
         ":public_lifecycle_conformance",
         ":release_load_construction",
+        ":scale_g500_scale20",
         ":strict_runtime_properties",
         ":value_access_semantics",
         ":value_semantics",

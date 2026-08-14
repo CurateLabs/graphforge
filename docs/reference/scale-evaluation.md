@@ -267,7 +267,7 @@ until published.
 | Progressive / first-fail stop + evidence artifacts (Official track) | Yes | Spec + issue links for product claims |
 | Dedicated runners / disk budgets | Yes | No |
 | Normal GitHub Actions CI for Graph500 Toy+ / LDBC SF≥1 | No | Must not |
-| Thin reference clients | May call | Optional only; no bulk generators |
+| Thin reference clients | May call | Optional only; no bulk generators. In-tree Official-parameter client: [perf-g500-scale20.md](../development/perf-g500-scale20.md) (SCALE-6 CI smoke + ignored SCALE-20; not `track: official`) |
 | Chunked ingest / CSR / Cypher via GraphForge APIs | Invokes published APIs | Engine + thin bindings |
 
 ### Expected inputs
@@ -382,10 +382,20 @@ silently mix.
 - Wire full Graph500 / LDBC suites (Official or Derived) into normal CI
 - Present Derived density-matrix cells as official Graph500 submissions
 
+### In-tree Official-parameter reference client
+
+[perf-g500-scale20.md](../development/perf-g500-scale20.md) runs Graph500
+**parameters** (SCALE / ef=16, undirected Kronecker) through published
+`GraphForge` bulk ingest, reopen, measured GSI, and `LIMIT 1000` Cypher. It is
+**not** Official-track: the generator is bench-local, evidence must not set
+`track: "official"`, and `teps` stays null. SCALE-6 is CI; SCALE-20 is
+`make bench-g500-scale20` only.
+
 ---
 
 ## Further reading
 
+- [Official-parameter SCALE-20 client](../development/perf-g500-scale20.md) — public-facade engineering green (not Official-track)
 - [Graph Scale Index](graph-scale-index.md) — size axis (node band + density)
 - [Scale Limits](scale-limits.md) — product envelopes; disk-limited DataFusion framing
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB
