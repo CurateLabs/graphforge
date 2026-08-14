@@ -184,8 +184,9 @@ pub use parquet_scan::{GraphForgeParquetExec, IoConcurrencyExt, ParquetFragment}
 pub mod schemas;
 pub use schemas::{
     ADJACENCY_CSR_SCHEMA, ADJACENCY_MANIFEST_SCHEMA, EDGE_PROPERTY_BASE_SCHEMA,
-    EXPLORATORY_EDGE_SCHEMA, PROPERTY_BASE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA,
-    property_schema, property_type_to_arrow, result_schema,
+    EXPLORATORY_EDGE_SCHEMA, INTERNAL_SURROGATE_META_KEY, PROPERTY_BASE_SCHEMA,
+    TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, is_internal_surrogate_field, property_schema,
+    property_type_to_arrow, result_schema,
 };
 
 pub mod writer;

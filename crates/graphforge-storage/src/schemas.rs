@@ -34,14 +34,44 @@ use graphforge_ontology::ontology::{PropertyDef, PropertyValueType};
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Arrow field metadata key marking an execution-internal surrogate identity
+/// column (`node_id`, `edge_id`, `src_id`, `dst_id`, …). Public result shaping
+/// drops fields that carry this marker; user projections that happen to reuse
+/// the same spelling (e.g. `RETURN 42 AS node_id`) must not (#703).
+pub const INTERNAL_SURROGATE_META_KEY: &str = "graphforge.internal_surrogate";
+
 /// UUID column: `FixedSizeBinary(16)`, not nullable.
 pub(crate) fn uuid_field(name: &str) -> Field {
     Field::new(name, DataType::FixedSizeBinary(16), false)
 }
 
-/// Surrogate ID column: `UInt64`, not nullable.
+/// Surrogate ID column: `UInt64`, not nullable, stamped with
+/// [`INTERNAL_SURROGATE_META_KEY`] so public shaping can distinguish it from a
+/// legal user alias of the same name (#703).
 pub(crate) fn id_field(name: &str) -> Field {
-    Field::new(name, DataType::UInt64, false)
+    Field::new(name, DataType::UInt64, false).with_metadata(
+        [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
+            .into_iter()
+            .collect(),
+    )
+}
+
+/// True when `field` is an execution-internal surrogate identity column.
+///
+/// Provenance is the stamped metadata from [`id_field`]. As a storage-contract
+/// fallback, an unmarked top-level `node_id`/`edge_id` that is still `UInt64`
+/// is treated as a surrogate (user Cypher projections of those names are never
+/// bare `UInt64` scan keys). Name alone is never sufficient (#703).
+#[must_use]
+pub fn is_internal_surrogate_field(field: &Field) -> bool {
+    if field
+        .metadata()
+        .get(INTERNAL_SURROGATE_META_KEY)
+        .is_some_and(|value| value == "true")
+    {
+        return true;
+    }
+    matches!(field.name().as_str(), "node_id" | "edge_id") && *field.data_type() == DataType::UInt64
 }
 
 /// The Arrow fields of a typed Cypher `duration` value (ADR 0009): signed
@@ -339,9 +369,9 @@ pub fn property_schema(entity_type: &str, property_defs: &[PropertyDef]) -> Sche
 ///
 /// # Panics (debug builds only)
 ///
-/// Panics if any field name ends with `_id`.  Surrogate ID columns (`node_id`,
-/// `src_id`, `dst_id`, `edge_id`) are execution-internal and must never appear
-/// in public API result schemas — see the storage architecture contract.
+/// Panics if any field is an internal surrogate ([`is_internal_surrogate_field`]).
+/// Legal user aliases that reuse surrogate spellings (e.g. `RETURN id(n) AS
+/// node_id`) are allowed (#703).
 #[must_use]
 pub fn result_schema(
     fields: Vec<Field>,
@@ -350,12 +380,12 @@ pub fn result_schema(
     ir_ver: &str,
 ) -> Schema {
     debug_assert!(
-        fields.iter().all(|f| !f.name().ends_with("_id")),
-        "result_schema: surrogate '*_id' columns must not appear in public API results \
+        fields.iter().all(|f| !is_internal_surrogate_field(f)),
+        "result_schema: internal surrogate columns must not appear in public API results \
          (offending fields: {:?})",
         fields
             .iter()
-            .filter(|f| f.name().ends_with("_id"))
+            .filter(|f| is_internal_surrogate_field(f))
             .map(arrow::datatypes::Field::name)
             .collect::<Vec<_>>()
     );
@@ -625,14 +655,34 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "surrogate '*_id' columns must not appear")]
+    #[should_panic(expected = "internal surrogate columns must not appear")]
     fn result_schema_rejects_surrogate_id_field() {
-        // In debug builds, passing a *_id field must panic.
-        let _ = result_schema(
-            vec![Field::new("node_id", DataType::UInt64, false)],
+        // In debug builds, a stamped / UInt64 surrogate field must panic.
+        let _ = result_schema(vec![id_field("node_id")], "q1", "v1", "0.1.0");
+    }
+
+    #[test]
+    fn result_schema_allows_user_alias_named_node_id() {
+        // #703: a non-surrogate projection aliased `node_id` is public data.
+        let schema = result_schema(
+            vec![Field::new("node_id", DataType::Int64, false)],
             "q1",
             "v1",
             "0.1.0",
         );
+        assert_eq!(schema.fields().len(), 1);
+        assert_eq!(schema.field(0).name(), "node_id");
+    }
+
+    #[test]
+    fn id_field_stamps_internal_surrogate_marker() {
+        let field = id_field("node_id");
+        assert!(is_internal_surrogate_field(&field));
+        assert_eq!(
+            field.metadata().get(INTERNAL_SURROGATE_META_KEY),
+            Some(&"true".to_owned())
+        );
+        let user_alias = Field::new("node_id", DataType::Int64, false);
+        assert!(!is_internal_surrogate_field(&user_alias));
     }
 }
