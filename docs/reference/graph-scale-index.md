@@ -241,6 +241,7 @@ concrete fixture (for example `GD-03-XS-D12`), not the bare matrix letter.
 ## Further reading
 
 - [Scale Evaluation](scale-evaluation.md) — Official Graph500 + Derived density matrix; harness contract; evidence schema
+- [Official-parameter SCALE-20 client](../development/perf-g500-scale20.md) — in-tree public-facade engineering green (not Official-track)
 - [Scale Limits](scale-limits.md) — GraphForge product envelopes and fixed-hop LIMIT contract
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB (spec-level)
 - [Standardized Release Load Matrix](../development/release-load-matrix.md) — CI size/density taxonomy (distinct from GSI)

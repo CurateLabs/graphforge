@@ -1,7 +1,7 @@
 module.exports = {
   default: {
     paths: ["features/**/*.feature"],
-    requireModule: ["ts-node/register"],
+    requireModule: ["tsx/cjs"],
     require: ["step_definitions/**/*.ts"],
   },
 };
