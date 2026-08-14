@@ -5,8 +5,11 @@
 Knowledge graphs give structure to information that starts life as unstructured text —
 research papers, support tickets, product catalogues, codebases, or any corpus where
 entities and their relationships matter. GraphForge is well suited to this pattern
-because it is embedded (no server, no network hop), fully openCypher-compatible, and
-provides MERGE semantics that make incremental, idempotent graph construction natural.
+because it is embedded (no server, no network hop), openCypher-compatible for the
+shipped surface, and provides MERGE semantics (standalone nodes and
+referenced-endpoint relationships; see
+[MERGE status](../../reference/implementation-status/clauses.md#merge)) that make
+incremental, idempotent graph construction natural.
 
 ### When to use this pattern
 

@@ -13,11 +13,11 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 
 | Category | Total Features | Complete | Partial | Not Implemented | Coverage |
 |----------|---------------|----------|---------|-----------------|----------|
-| **Clauses** | 20 | 17 (85%) | 1 (5%) | 2 (10%) | Excellent |
+| **Clauses** | 20 | 16 (80%) | 2 (10%) | 2 (10%) | Excellent |
 | **Functions** | 83 | 82 (99%) | 0 (0%) | 1 (1%) | Excellent |
 | **Operators** | 34 | 34 (100%) | 0 (0%) | 0 (0%) | Complete |
 | **Patterns** | 8 | 7 (87%) | 0 (0%) | 1 (13%) | Excellent |
-| **TOTAL** | **145** | **140 (97%)** | **1 (1%)** | **4 (3%)** | **Excellent** |
+| **TOTAL** | **145** | **139 (96%)** | **2 (1%)** | **4 (3%)** | **Excellent** |
 
 ### Overall Compliance: **~99% TCK Compliant (3,801/3,885 scenarios)**
 
@@ -25,10 +25,10 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 
 ## Quick Reference
 
-### ✅ Fully Supported (140 features)
+### ✅ Fully Supported (139 features)
 - Core querying: MATCH, RETURN, WHERE, ORDER BY, LIMIT, SKIP
 - Query chaining: WITH (full spec compliance)
-- Writing: CREATE, MERGE, SET, REMOVE, DELETE, DETACH DELETE
+- Writing: CREATE, SET, REMOVE, DELETE, DETACH DELETE
 - Advanced: OPTIONAL MATCH, UNION, UNWIND, variable-length paths
 - Temporal: All date/time types and functions (100% complete)
 - Spatial: Point and distance functions (100% complete)
@@ -41,7 +41,8 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 - Aggregation: count, sum, avg, min, max, collect, percentileDisc, percentileCont, stDev, stDevP (10/10)
 - Numeric math: Full suite including trig, log, exp, e(), pi(), degrees(), radians() (19 functions)
 
-### ⚠️ Partially Supported (1 feature)
+### ⚠️ Partially Supported (2 features)
+- MERGE (standalone new-node and referenced-endpoint relationship forms; multi-node construction and row-conditional map actions rejected)
 - CALL { } / EXISTS subquery (simple EXISTS implemented; full correlated subquery syntax pending)
 
 ### ❌ Not Supported (4 features)
@@ -54,7 +55,7 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 
 ## Detailed Feature Matrix
 
-### Clauses (20 total: 17 complete, 1 partial, 2 not implemented)
+### Clauses (20 total: 16 complete, 2 partial, 2 not implemented)
 
 | Clause | Status | TCK Scenarios | Implementation Files | Notes |
 |--------|--------|---------------|---------------------|-------|
@@ -66,7 +67,7 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 | **ORDER BY** | ✅ Complete | 134 | executor.py | ASC/DESC, multiple keys, NULL ordering |
 | **LIMIT** | ✅ Complete | 40 | executor.py | Result limiting |
 | **SKIP** | ✅ Complete | 40 | executor.py | Pagination support |
-| **MERGE** | ✅ Complete | 75 | executor.py | With ON CREATE/MATCH |
+| **MERGE** | ⚠️ Partial | 75 | `write_driver.rs` (`run_merge_phase`) | Standalone new-node + referenced-endpoint relationship forms; multi-node construction and row-conditional map actions rejected |
 | **SET** | ✅ Complete | 53 | executor.py | Property/label updates |
 | **REMOVE** | ✅ Complete | 33 | executor.py | Property/label removal |
 | **DELETE** | ✅ Complete | 41 | executor.py | Node/relationship deletion |
