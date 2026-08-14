@@ -120,7 +120,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           python3 scripts/ci/binding_rc_bazel_native.py python \
-            --out dist/graphforge-bazel.whl \
+            --out dist \
             --wheel-tag "${{ matrix.wheel_tag }}"
 
       - name: Build native abi3 wheel
