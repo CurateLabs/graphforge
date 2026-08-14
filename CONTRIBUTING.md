@@ -17,6 +17,9 @@ process, and design principles — is:
 
 **[docs/development/contributing.md](docs/development/contributing.md)**
 
+TypeScript first-party policy (compiler 5.9.3, `tsx`, no `ts-node`):
+[docs/development/typescript-toolchain.md](docs/development/typescript-toolchain.md).
+
 Agent-oriented workflow and architecture rules are in [AGENTS.md](AGENTS.md).
 
 ### Validation (summary)

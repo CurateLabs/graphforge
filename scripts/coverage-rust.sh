@@ -201,7 +201,7 @@ run_node_acceptance() {
     cd tests/features/node
     node node_modules/@cucumber/cucumber/bin/cucumber.js \
       "../api/**/*.feature" \
-      --require-module ts-node/register \
+      --require-module tsx/cjs \
       --require "step_definitions/**/*.ts" \
       --tags "not @excluded-api-bdd and not @excluded-node-api-bdd" \
       --format summary

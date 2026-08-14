@@ -16,6 +16,12 @@ grep -Fq 'wait "$python_pid"' "$RUNNER"
 grep -Fq 'wait "$node_pid"' "$RUNNER"
 grep -Fq 'stamp_matches()' "$RUNNER"
 grep -Fq 'write_stamp()' "$RUNNER"
+# Node acceptance must load TypeScript via tsx, not ts-node (#719).
+grep -Fq -- 'tsx/cjs' "$RUNNER"
+if grep -Fq -- 'ts-node' "$RUNNER"; then
+  echo "coverage-rust.sh must not reference ts-node" >&2
+  exit 1
+fi
 
 if rg -n --glob '*.{yml,yaml}' 'coverage-rust|make coverage|make pre-push' "$ROOT/.github"; then
   echo "Rust coverage must remain outside PR CI" >&2
