@@ -4472,9 +4472,11 @@ impl Binder {
                     span,
                     format!("unknown label `{name}` — using runtime catalog"),
                 ));
-                TypeId(self.catalog.lock().unwrap().intern_label(name).0)
+                crate::runtime_entity_type_id(self.catalog.lock().unwrap().intern_label(name))
             }
-            OntologyMode::Exploratory => TypeId(self.catalog.lock().unwrap().intern_label(name).0),
+            OntologyMode::Exploratory => {
+                crate::runtime_entity_type_id(self.catalog.lock().unwrap().intern_label(name))
+            }
         }
     }
 
@@ -6552,10 +6554,11 @@ fn check_duplicate_aliases(items: &[ReturnItem], s: &mut BinderState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RuntimeTypeId;
     use crate::{ProcedureDefinition, ProcedureField};
     use arrow::array::{StringArray, UInt32Array, UInt64Array};
     use graphforge_cypher::parse;
-    use graphforge_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle};
+    use graphforge_ontology::{OntologyCompiler, OntologyDoc, OntologyHandle, OntologyLoader};
 
     fn make_binder(mode: OntologyMode) -> (Binder, Arc<Mutex<RuntimeCatalog>>) {
         let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
@@ -6706,6 +6709,47 @@ mod tests {
         assert_eq!(error.kind, kind);
         assert_eq!(&query[error.span.start..error.span.end], span);
         error
+    }
+
+    #[test]
+    fn advisory_runtime_entity_label_is_tagged_away_from_ontology_zero() {
+        let doc = OntologyLoader::load_yaml(std::io::Cursor::new(
+            b"\
+ontology_id: people
+version: \"v1\"
+entity_types:
+  - name: Person
+    abstract: false
+relation_types: []
+properties: []
+constraints: []
+migrations: []
+",
+        ))
+        .unwrap();
+        let ontology = OntologyHandle::new(OntologyCompiler::compile(&doc).unwrap());
+        assert_eq!(ontology.entity_type_id("Person"), Some(TypeId(0)));
+
+        let catalog = Arc::new(Mutex::new(RuntimeCatalog::new()));
+        let binder = Binder::new(
+            Some(ontology.clone()),
+            Arc::clone(&catalog),
+            OntologyMode::Advisory,
+        );
+        let plan = binder
+            .bind(&parse("MATCH (n:Ghost) RETURN n").unwrap())
+            .expect("advisory Ghost bind");
+        let ghost_ty = plan
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                GraphOp::NodeScan { ty: Some(ty), .. } => Some(*ty),
+                _ => None,
+            })
+            .expect("NodeScan");
+        assert_eq!(ghost_ty, crate::runtime_entity_type_id(RuntimeTypeId(0)));
+        assert_ne!(ghost_ty, TypeId(0));
+        assert_eq!(catalog.lock().unwrap().intern_label("Ghost").0, 0);
     }
 
     #[test]

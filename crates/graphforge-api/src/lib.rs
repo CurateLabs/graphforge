@@ -570,6 +570,13 @@ impl GraphForge {
             hydrate_graph_workspace(&resolved_generation, read_only)?;
 
         let runtime_catalog = load_runtime_catalog(&dir);
+        if !read_only {
+            graphforge_storage::reconcile_runtime_entity_label_ids(
+                &dir,
+                ontology.as_ref(),
+                &runtime_catalog,
+            )?;
+        }
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
             resource_policy.max_concurrent_heavy_queries,
         ));
@@ -1401,7 +1408,9 @@ impl GraphForge {
                     .lock()
                     .expect("runtime catalog poisoned")
                     .entity_type_names_with_ids()
-                    .find_map(|(id, name)| (name == label).then_some(TypeId(id.0)))
+                    .find_map(|(id, name)| {
+                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id))
+                    })
             })
             .unwrap_or(TypeId(u32::MAX));
         let stem = if matches!(self.ontology_mode, OntologyMode::Exploratory) {
@@ -3596,6 +3605,10 @@ fn persist_runtime_catalog(dir: &std::path::Path, rc: &RuntimeCatalog) -> Result
     writer
         .close()
         .map_err(|e| GfError::Storage(e.to_string()))?;
+    // Persisting observed runtime entity labels implies the tagged plan/storage
+    // encoding (#702). Mark the project so reopen does not treat ontology type
+    // zero as an unmarked legacy collision with the first advisory label.
+    graphforge_storage::write_runtime_entity_label_encoding_marker(dir)?;
     Ok(())
 }
 

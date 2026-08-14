@@ -1499,10 +1499,10 @@ pub struct GraphCatalog {
     /// the runtime catalog. Lets the lowering layer resolve a `TypedEdgeScan`'s
     /// relation name in exploratory mode (where the ontology map is empty).
     rel_names: HashMap<u32, String>,
-    /// Reverse map `TypeId.0` → entity-type (node label) name, from the runtime
-    /// catalog. Lets the lowering layer render a real label for an unlabelled
-    /// `MATCH (n) RETURN n` in exploratory mode (where the ontology map is
-    /// empty) by resolving the node's stored `type_id` (#889).
+    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    /// runtime catalog. The lowerer tags these keys with
+    /// [`graphforge_ir::runtime_entity_type_id`] before merging them with
+    /// ontology TypeIds (#702 / #889).
     label_names: HashMap<u32, String>,
 }
 
@@ -1612,10 +1612,10 @@ impl GraphCatalog {
         &self.rel_names
     }
 
-    /// Reverse map `TypeId.0` → entity-type (node label) name, from the runtime
-    /// catalog. Used by the relational lowering layer to render a node value's
-    /// label for an unlabelled match — including in exploratory mode, where the
-    /// ontology map is empty (#889).
+    /// Reverse map `RuntimeTypeId.0` → entity-type (node label) name, from the
+    /// runtime catalog. The relational lowerer tags these keys before merging
+    /// them with ontology TypeIds so the two zero-based ID spaces cannot collide
+    /// (#702).
     #[must_use]
     pub fn label_names(&self) -> &HashMap<u32, String> {
         &self.label_names
@@ -1651,13 +1651,14 @@ fn build_rel_names(runtime_catalog: &RuntimeCatalog) -> HashMap<u32, String> {
         .collect()
 }
 
-/// Build the `TypeId.0 → label-name` map from the runtime catalog.
+/// Build the `RuntimeTypeId.0 → label-name` map from the runtime catalog.
 ///
 /// As with [`build_rel_names`], only the runtime-catalog side is needed: the
 /// binder resolves labels ontology-first, so ontology-sourced label `TypeId`s
 /// are already covered by the lowerer's ontology map; this fills the exploratory
-/// case (no ontology), letting an unlabelled `MATCH (n) RETURN n` recover the
-/// node's label name from its stored `type_id` (#889).
+/// / advisory-miss case. Consumers must tag keys with
+/// [`graphforge_ir::runtime_entity_type_id`] before comparing them to stored
+/// plan/storage TypeIds (#702 / #889).
 fn build_label_names(runtime_catalog: &RuntimeCatalog) -> HashMap<u32, String> {
     runtime_catalog
         .entity_type_names_with_ids()

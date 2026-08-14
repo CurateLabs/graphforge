@@ -120,12 +120,19 @@ durable authority still requires explicit ontology adoption.
 
 ```
 bind(label: &str) → TypeId:
-1. Check OntologyHandle (if present): return TypeId if found
+1. Check OntologyHandle (if present): return ontology TypeId if found
 2. Check RuntimeCatalog: return existing RuntimeTypeId if seen before
 3. New label: RuntimeCatalog::intern(label) → new RuntimeTypeId
 4. Record: observation count += 1
-5. Return RuntimeTypeId for use in GraphOp
+5. Encode runtime entity labels with bit 30 (`runtime_entity_type_id`) so they
+   stay disjoint from ontology entity TypeIds; runtime relations use bit 31
+6. Return the plan/storage TypeId for use in GraphOp
 ```
+
+Catalog-local RuntimeTypeIds remain untagged in `runtime_catalog.parquet`.
+Projects mark the tagged entity encoding in
+`topology/runtime_entity_label_encoding.json`; unmarked colliding legacy state
+fails closed on open.
 
 ---
 

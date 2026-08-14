@@ -178,6 +178,13 @@ pub use catalog::{
     read_nodes_filtered_observed, read_properties, read_properties_batched,
 };
 
+pub mod runtime_entity_labels;
+pub use runtime_entity_labels::{
+    RUNTIME_ENTITY_LABEL_ENCODING_VERSION, RuntimeEntityLabelReconcile,
+    has_runtime_entity_label_encoding_marker, reconcile_runtime_entity_label_ids,
+    runtime_entity_plan_id_is_disjoint_from_ontology, write_runtime_entity_label_encoding_marker,
+};
+
 pub mod parquet_scan;
 pub use parquet_scan::{GraphForgeParquetExec, IoConcurrencyExt, ParquetFragment};
 

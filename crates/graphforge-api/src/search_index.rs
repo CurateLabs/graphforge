@@ -421,7 +421,9 @@ impl GraphForge {
                     .lock()
                     .expect("runtime catalog poisoned")
                     .entity_type_names_with_ids()
-                    .find_map(|(id, name)| (name == label).then_some(id.0))
+                    .find_map(|(id, name)| {
+                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id).0)
+                    })
             })
     }
 }

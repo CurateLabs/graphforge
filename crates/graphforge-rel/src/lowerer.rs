@@ -244,14 +244,19 @@ impl<'a> GraphPlanLowerer<'a> {
     /// `PropId → name` map.
     fn expr_lowerer<'b>(&self, arena: &'b ExprArena, var_map: &'b VarMap) -> ExprLowerer<'b> {
         // Label-name map for node-value rendering (#889): the ontology entity
-        // names plus the runtime catalog's labels (exploratory). Built here,
-        // separate from `type_id_to_entity_name` (which must stay ontology-only
-        // for property-table routing), so an unlabelled `MATCH (n) RETURN n` can
-        // resolve a node's stored `type_id` to its label name.
+        // names plus tagged runtime-catalog labels (exploratory/advisory). Built
+        // here, separate from `type_id_to_entity_name` (which must stay
+        // ontology-only for property-table routing), so an unlabelled
+        // `MATCH (n) RETURN n` can resolve a node's stored `type_id` to its
+        // label name without colliding with ontology type 0 (#702).
         let mut node_label_names = self.type_id_to_entity_name.clone();
         if let Some(c) = self.catalog {
             for (id, name) in c.label_names() {
-                node_label_names.entry(*id).or_insert_with(|| name.clone());
+                let plan_id =
+                    graphforge_ir::runtime_entity_type_id(graphforge_ir::RuntimeTypeId(*id));
+                node_label_names
+                    .entry(plan_id.0)
+                    .or_insert_with(|| name.clone());
             }
         }
         let mut lowerer = ExprLowerer::with_prop_names_and_nodes(
