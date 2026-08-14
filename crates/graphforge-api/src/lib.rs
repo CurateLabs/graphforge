@@ -3502,12 +3502,21 @@ fn shape_result(
 struct Shaper {
     /// Source-batch column indices to keep, in output order.
     keep: Vec<usize>,
+    /// True when at least one internal surrogate column was dropped from the
+    /// source schema. Distinguishes surrogate-only projections (#703: preserve
+    /// row count) from already-empty schemas such as void `CALL` unit rows
+    /// (public result must stay empty for TCK Call1).
+    dropped_internal_surrogates: bool,
     /// The pruned, metadata-stamped public schema.
     schema: SchemaRef,
 }
 
 impl Shaper {
     fn new(schema: &SchemaRef, mode: OntologyMode, ontology: Option<&OntologyHandle>) -> Self {
+        let dropped_internal_surrogates = schema
+            .fields()
+            .iter()
+            .any(|f| graphforge_storage::is_internal_surrogate_field(f));
         let keep: Vec<usize> = schema
             .fields()
             .iter()
@@ -3522,6 +3531,7 @@ impl Shaper {
         ));
         Self {
             keep,
+            dropped_internal_surrogates,
             schema: new_schema,
         }
     }
@@ -3538,13 +3548,18 @@ impl Shaper {
             )));
         }
         let cols: Vec<_> = self.keep.iter().map(|&i| batch.column(i).clone()).collect();
-        // Preserve the logical row count even when every column was an internal
-        // surrogate (#703): an empty keep list must not collapse nonempty input
-        // into a zero-row batch.
+        // Surrogate-only projections must keep their logical row count (#703).
+        // Already-empty schemas (void CALL unit rows) must stay publicly empty
+        // so TCK Call1 "yields no results" scenarios do not regress.
+        let row_count = if self.keep.is_empty() && !self.dropped_internal_surrogates {
+            0
+        } else {
+            batch.num_rows()
+        };
         arrow::record_batch::RecordBatch::try_new_with_options(
             self.schema.clone(),
             cols,
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count)),
         )
     }
 }
@@ -6644,6 +6659,27 @@ mod tests {
         let shaped = shaper.apply(&batch).expect("zero-column shape");
         assert_eq!(shaped.num_columns(), 0);
         assert_eq!(shaped.num_rows(), 3);
+    }
+
+    #[test]
+    fn shaper_collapses_void_unit_row_without_surrogate_drops() {
+        use arrow::datatypes::Schema;
+
+        // Empty-plan / void CALL execution yields a zero-column unit row. Public
+        // shaping must report an empty result (TCK Call1), not preserve the
+        // internal unit row when no surrogate columns were dropped.
+        let source_schema = Arc::new(Schema::empty());
+        let batch = arrow::record_batch::RecordBatch::try_new_with_options(
+            source_schema.clone(),
+            vec![],
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let shaper = Shaper::new(&source_schema, OntologyMode::Exploratory, None);
+        let shaped = shaper.apply(&batch).expect("void shape");
+        assert_eq!(shaped.num_columns(), 0);
+        assert_eq!(shaped.num_rows(), 0);
     }
 
     #[test]
