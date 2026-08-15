@@ -404,6 +404,7 @@ pub fn recover_project_transactions(
     // observe the issue #275 signature (writer free, checkpoints still held).
     // Matches MutationLocks::Drop order in project_checkpoints.
     drop(checkpoint_roots);
+    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
     drop(writer_lock);
     Ok(report)
 }
@@ -1184,6 +1185,7 @@ mod tests {
         );
         assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
         recover_project_transactions(root.path()).unwrap();
+        wait_for_writer_lock_release(root.path());
         let request = ProjectGenerationRequest {
             transaction_uuid,
             generation_uuid,
