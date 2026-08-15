@@ -144,9 +144,14 @@ CARGO_TARGET_DIR=/tmp/cargo-336-adj \
   make bench-adjacency-200m
 ```
 
-Manual/scheduled 8M/128M reproduction (not CI): build or point at the measured
-fixture, publish through `GraphForge`, reopen, and record RSS/storage/fingerprint
-via the #334 evidence emitter.
+Manual/scheduled densified 8M/128M public reopen (not CI):
+
+```bash
+CARGO_TARGET_DIR=/tmp/cargo-338-fb \
+  make bench-file-backed-128m
+```
+
+Checked-in evidence: [`file-backed-128m-evidence.json`](../development/file-backed-128m-evidence.json).
 
 ## CSR-native execution (#340)
 
