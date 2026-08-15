@@ -575,19 +575,27 @@ jobs:
         shell: bash
         run: |
           mkdir -p ~/.graphforge/datasets
-          # snap.stanford.edu is intermittently reset by peer from CI egress;
-          # retry with backoff so an unrelated fixture fetch does not fail the gate.
-          for attempt in 1 2 3 4 5; do
-            if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
-              --connect-timeout 30 --max-time 120 \
-              --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
-              https://snap.stanford.edu/data/facebook_combined.txt.gz; then
-              break
-            fi
-            echo "SNAP download attempt ${attempt} failed; sleeping before retry"
-            sleep $((attempt * 5))
-          done
-          test -s ~/.graphforge/datasets/snap-ego-facebook.txt.gz
+          dest="$HOME/.graphforge/datasets/snap-ego-facebook.txt.gz"
+          # Prefer the checked-in CI fixture. snap.stanford.edu is intermittently
+          # unreachable from CI egress (connection reset), which is unrelated to
+          # binding correctness.
+          if [[ -s tests/fixtures/snap-ego-facebook.txt.gz ]]; then
+            cp tests/fixtures/snap-ego-facebook.txt.gz "$dest"
+          else
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+                --connect-timeout 30 --max-time 120 \
+                --output "$dest" \
+                https://snap.stanford.edu/data/facebook_combined.txt.gz; then
+                break
+              fi
+              echo "SNAP download attempt ${attempt} failed; sleeping before retry"
+              sleep $((attempt * 5))
+            done
+          fi
+          test -s "$dest"
+          echo "125e84db872eeba443d270c70315c256b0af43a502fcfe51f50621166ad035d7  $dest" \
+            | shasum -a 256 -c -
 
       - name: Run Python unit, integration, and BDD tests
         shell: bash
