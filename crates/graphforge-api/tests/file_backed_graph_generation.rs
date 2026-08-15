@@ -116,6 +116,10 @@ fn checkpoint_read_only_open_pins_graph_tree_in_place() {
         view.project_open_recovery().kind,
         graphforge_storage::ProjectOpenRecoveryKind::CheckpointView
     );
+    assert_eq!(
+        view.project_open_recovery().selected_generation_class,
+        graphforge_storage::ProjectRecoveryGenerationClass::CheckpointPinned
+    );
 
     let result = view
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS n")

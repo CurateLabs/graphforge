@@ -136,6 +136,11 @@ There are three CI surfaces for concurrency and durability contracts:
    (`open_or_initialize_project_with_recovery` / facade open) runs bounded
    inspection and idempotent cleanup when locks are free, and defers cleanup
    without blocking a valid `CURRENT` snapshot when a live writer holds them.
+   Bounded snapshot retention and orphan GC (`inspect_project_reachability`,
+   `preview_project_cleanup`, `execute_project_cleanup`) reuse the same verified
+   reachability oracle as recovery: CURRENT, configured ancestors, and checkpoint
+   roots. Live leases skip without waiting; concurrent publication returns
+   `GF_WRITER_BUSY`; unknown or linked paths are quarantined and never deleted.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by

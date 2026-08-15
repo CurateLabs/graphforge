@@ -24,9 +24,12 @@ use crate::project_publication::{
     sync_directory, write_journal,
 };
 
-const TRASH_DIR: &str = "trash";
-const MAX_RECOVERY_ENTRIES: usize = 10_000;
-const RETAINED_ANCESTORS: usize = 2;
+pub(crate) const TRASH_DIR: &str = "trash";
+pub(crate) const MAX_RECOVERY_ENTRIES: usize = 10_000;
+/// Default CURRENT-ancestor retention window (ADR 0013).
+pub const DEFAULT_RETAINED_ANCESTORS: usize = 2;
+/// Upper bound for configured ancestor retention.
+pub const MAX_RETAINED_ANCESTORS: usize = 1024;
 
 /// Stable summary of one recovery pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,11 +66,13 @@ impl ProjectRecoveryDeferral {
 /// Authority class of the generation pinned by open/recovery.
 ///
 /// Recovery never elects by UUID, time, or directory order; only a validated
-/// `CURRENT` pointer grants authority.
+/// `CURRENT` pointer or an explicit checkpoint pin grants authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectRecoveryGenerationClass {
     /// Exact generation named by a validated `CURRENT` record.
     CommittedCurrent,
+    /// Exact generation named by a validated active checkpoint row.
+    CheckpointPinned,
 }
 
 impl ProjectRecoveryGenerationClass {
@@ -76,6 +81,7 @@ impl ProjectRecoveryGenerationClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CommittedCurrent => "committed_current",
+            Self::CheckpointPinned => "checkpoint_pinned",
         }
     }
 }
@@ -140,7 +146,7 @@ impl ProjectOpenRecoveryEvidence {
         Self {
             kind: ProjectOpenRecoveryKind::CheckpointView,
             selected_generation_uuid,
-            selected_generation_class: ProjectRecoveryGenerationClass::CommittedCurrent,
+            selected_generation_class: ProjectRecoveryGenerationClass::CheckpointPinned,
             work_detected: false,
             repaired_journals: 0,
             aborted_journals: 0,
@@ -386,7 +392,12 @@ pub fn recover_project_transactions(
     let selected = resolve_project_generation(&root).map_err(map_recovery_resolution)?;
     let selected_uuid = selected.generation_uuid();
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(&root)?;
-    let retained = retained_generations(&root, &selected, &checkpoint_roots.roots)?;
+    let retained = compute_reachable_generations(
+        &root,
+        &selected,
+        &checkpoint_roots.roots,
+        DEFAULT_RETAINED_ANCESTORS,
+    )?;
     let mut report = ProjectRecoveryReport {
         selected_generation_uuid: selected_uuid,
         repaired_journals: 0,
@@ -409,7 +420,7 @@ pub fn recover_project_transactions(
     Ok(report)
 }
 
-fn acquire_recovery_lock(root: &Path) -> Result<File, GfError> {
+pub(crate) fn acquire_recovery_lock(root: &Path) -> Result<File, GfError> {
     let lock_dir = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     sync_directory(root)?;
     let writer_lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE))?;
@@ -509,15 +520,31 @@ fn repair_reachable_journal(
     Ok(())
 }
 
-fn retained_generations(
+/// Verified reachability oracle shared by recovery and retention/GC.
+///
+/// Reachability is exactly: validated `CURRENT`, its configured finite verified
+/// ancestor window, and every active checkpoint root whose manifest digest
+/// matches the registry. Directory enumeration, age, PID, and UUID order never
+/// grant reachability. Live reader leases are enforced separately by exclusive
+/// lease acquisition before any move/delete.
+pub(crate) fn compute_reachable_generations(
     root: &Path,
     selected: &crate::ResolvedProjectGeneration,
     checkpoint_roots: &[(Uuid, [u8; 32])],
+    retained_ancestors: usize,
 ) -> Result<BTreeSet<Uuid>, GfError> {
+    if retained_ancestors > MAX_RETAINED_ANCESTORS {
+        return Err(project_error(
+            ProjectErrorCode::ResourceLimit,
+            format!(
+                "retained_ancestors={retained_ancestors} exceeds MAX_RETAINED_ANCESTORS={MAX_RETAINED_ANCESTORS}"
+            ),
+        ));
+    }
     let mut retained = BTreeSet::new();
     retained.insert(selected.generation_uuid());
     let mut parent = selected.parent_generation_uuid();
-    for _ in 0..RETAINED_ANCESTORS {
+    for _ in 0..retained_ancestors {
         let Some(uuid) = parent else {
             break;
         };
@@ -536,6 +563,91 @@ fn retained_generations(
         retained.insert(*uuid);
     }
     Ok(retained)
+}
+
+/// Outcome of one unreachable-generation cleanup attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenerationCleanupOutcome {
+    /// Generation directory moved to trash and deleted.
+    Removed,
+    /// A live shared/exclusive lease blocked cleanup.
+    SkippedLiveLease,
+    /// No generation directory was present.
+    Absent,
+    /// Generation is in the verified reachable set.
+    Retained,
+}
+
+/// Move an unreachable generation to trash and delete it (ADR 0013 GC path).
+///
+/// Rechecks reachability and `CURRENT` under the caller's writer lock before
+/// the move. A busy lease skips without waiting. Crash boundaries reuse the
+/// existing `project.after_gc_move` / `project.after_gc_delete` failpoints.
+pub(crate) fn cleanup_unreachable_generation(
+    root: &Path,
+    generation_uuid: Uuid,
+    checkpoint_roots: &[(Uuid, [u8; 32])],
+    retained_ancestors: usize,
+) -> Result<GenerationCleanupOutcome, GfError> {
+    let generation_name = generation_uuid.hyphenated().to_string();
+    let generation_path = root.join(GENERATIONS_DIR).join(&generation_name);
+    let trash_root = ensure_machine_directory(root, Path::new(TRASH_DIR))?;
+    let trash_path = trash_root.join(&generation_name);
+
+    if trash_path.exists() {
+        remove_trash_entry(
+            root,
+            &trash_root,
+            &trash_path,
+            generation_uuid,
+            generation_uuid,
+        )?;
+        return Ok(GenerationCleanupOutcome::Removed);
+    }
+    if !generation_path.exists() {
+        return Ok(GenerationCleanupOutcome::Absent);
+    }
+    reject_real_directory(&generation_path)?;
+    let lease_path = generation_path.join("lease.lock");
+    let _lease = if lease_path.exists() {
+        let lease = open_regular_lock(&lease_path)?;
+        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
+            return Ok(GenerationCleanupOutcome::SkippedLiveLease);
+        }
+        Some(lease)
+    } else {
+        None
+    };
+
+    let current = resolve_project_generation(root).map_err(map_recovery_resolution)?;
+    if current.generation_uuid() == generation_uuid {
+        return Ok(GenerationCleanupOutcome::Retained);
+    }
+    // Fresh reachability after lease acquisition (ADR 0013 step 4).
+    let reachable =
+        compute_reachable_generations(root, &current, checkpoint_roots, retained_ancestors)?;
+    if reachable.contains(&generation_uuid) {
+        return Ok(GenerationCleanupOutcome::Retained);
+    }
+
+    std::fs::rename(&generation_path, &trash_path).map_err(storage_io)?;
+    sync_directory(&root.join(GENERATIONS_DIR))?;
+    sync_directory(&trash_root)?;
+    project_failpoint::hit(
+        "project.after_gc_move",
+        Some(generation_uuid),
+        Some(generation_uuid),
+        "GC",
+        true,
+    )?;
+    remove_trash_entry(
+        root,
+        &trash_root,
+        &trash_path,
+        generation_uuid,
+        generation_uuid,
+    )?;
+    Ok(GenerationCleanupOutcome::Removed)
 }
 
 fn cleanup_abandoned_generation(
@@ -655,6 +767,30 @@ fn remove_trash_entry(
     )
 }
 
+/// Delete a trash entry that is not the committed generation.
+pub(crate) fn cleanup_trash_generation(
+    root: &Path,
+    generation_uuid: Uuid,
+) -> Result<GenerationCleanupOutcome, GfError> {
+    let trash_root = root.join(TRASH_DIR);
+    if !trash_root.exists() {
+        return Ok(GenerationCleanupOutcome::Absent);
+    }
+    reject_real_directory(&trash_root)?;
+    let trash_path = trash_root.join(generation_uuid.hyphenated().to_string());
+    if !trash_path.exists() {
+        return Ok(GenerationCleanupOutcome::Absent);
+    }
+    remove_trash_entry(
+        root,
+        &trash_root,
+        &trash_path,
+        generation_uuid,
+        generation_uuid,
+    )?;
+    Ok(GenerationCleanupOutcome::Removed)
+}
+
 fn count_unknown_generation_entries(
     root: &Path,
     retained: &BTreeSet<Uuid>,
@@ -680,7 +816,7 @@ fn count_unknown_generation_entries(
     Ok(unknown)
 }
 
-fn bounded_directory_entries(root: &Path) -> Result<Vec<PathBuf>, GfError> {
+pub(crate) fn bounded_directory_entries(root: &Path) -> Result<Vec<PathBuf>, GfError> {
     reject_real_directory(root)?;
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(root).map_err(storage_io)? {
@@ -698,12 +834,12 @@ fn journal_file_uuid(path: &Path) -> Option<Uuid> {
     parse_canonical_uuid(stem)
 }
 
-fn parse_canonical_uuid(value: &str) -> Option<Uuid> {
+pub(crate) fn parse_canonical_uuid(value: &str) -> Option<Uuid> {
     let uuid = Uuid::parse_str(value).ok()?;
     (uuid.hyphenated().to_string() == value).then_some(uuid)
 }
 
-fn reject_real_directory(path: &Path) -> Result<(), GfError> {
+pub(crate) fn reject_real_directory(path: &Path) -> Result<(), GfError> {
     let metadata = std::fs::symlink_metadata(path).map_err(storage_io)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(recovery_corrupt(
@@ -724,17 +860,7 @@ fn digest_hex(digest: [u8; 32]) -> String {
         })
 }
 
-fn recovery_corrupt(cause: &str) -> GfError {
-    project_error(
-        ProjectErrorCode::ProjectCorrupt,
-        format!(
-            "phase=RECOVERY committed=unknown cause={cause}; preserve the project and restore \
-             CURRENT plus its exact committed generation from a verified backup"
-        ),
-    )
-}
-
-fn map_recovery_resolution(error: GfError) -> GfError {
+pub(crate) fn map_recovery_resolution(error: GfError) -> GfError {
     if error.code() == "GF_PROJECT_CORRUPT" {
         recovery_corrupt("committed publication record is invalid or ambiguous")
     } else {
@@ -742,15 +868,25 @@ fn map_recovery_resolution(error: GfError) -> GfError {
     }
 }
 
-fn storage_io(error: impl std::fmt::Display) -> GfError {
+pub(crate) fn storage_io(error: impl std::fmt::Display) -> GfError {
     GfError::Storage(error.to_string())
 }
 
-fn project_error(code: ProjectErrorCode, message: impl Into<String>) -> GfError {
+pub(crate) fn project_error(code: ProjectErrorCode, message: impl Into<String>) -> GfError {
     GfError::Project {
         code,
         message: message.into(),
     }
+}
+
+pub(crate) fn recovery_corrupt(cause: &str) -> GfError {
+    project_error(
+        ProjectErrorCode::ProjectCorrupt,
+        format!(
+            "phase=RECOVERY committed=unknown cause={cause}; preserve the project and restore \
+             CURRENT plus its exact committed generation from a verified backup"
+        ),
+    )
 }
 
 #[cfg(test)]
