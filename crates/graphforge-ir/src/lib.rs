@@ -16,7 +16,11 @@ pub mod binder;
 pub use binder::{BindError, BindErrorKind, Binder};
 
 pub mod catalog;
-pub use catalog::{RuntimeCatalog, RuntimePropId, RuntimeTypeId, runtime_relation_type_id};
+pub use catalog::{
+    RUNTIME_ENTITY_TYPE_TAG, RUNTIME_RELATION_TYPE_TAG, RuntimeCatalog, RuntimePropId,
+    RuntimeTypeId, is_runtime_entity_type_id, runtime_entity_type_id, runtime_relation_type_id,
+    runtime_type_id_from_entity_plan_id,
+};
 
 pub mod expr;
 pub use expr::{BinaryOpKind, CaseArm, ExprArena, IrExpr, IrLiteral, UnaryOpKind};

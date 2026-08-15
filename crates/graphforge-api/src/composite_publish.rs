@@ -5,7 +5,7 @@ use std::path::Path;
 
 use arrow::array::{Array, FixedSizeBinaryArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
-use graphforge_core::{GfError, OntologyMode, ProjectErrorCode, TypeId};
+use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ir::{IrLiteral, RuntimeCatalog};
 use graphforge_knowledge::{
     AssertionLedger, AssertionStatusLedger, AssertionSupersessionLedger, AssertionValidityLedger,
@@ -519,7 +519,7 @@ fn reconcile_workspace_to(
     *graph
         .runtime_catalog
         .lock()
-        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir);
+        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir)?;
     *graph
         .current_generation_uuid
         .lock()
@@ -815,7 +815,9 @@ fn apply_graph_mutations(
                     .ontology
                     .as_ref()
                     .and_then(|ontology| ontology.entity_type_id(label))
-                    .unwrap_or_else(|| TypeId(catalog.intern_label(label).0));
+                    .unwrap_or_else(|| {
+                        graphforge_ir::runtime_entity_type_id(catalog.intern_label(label))
+                    });
                 writer.create_node(*node_uuid, type_id)?;
                 created_nodes.insert(*node_uuid);
                 if !properties.is_empty() {

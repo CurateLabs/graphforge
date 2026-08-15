@@ -276,11 +276,21 @@ Typed edge tables require predefined relation type names. In exploratory mode:
 
 ```
 bind(label: &str) → TypeId:
-1. Check OntologyHandle (if present): return TypeId if found
+1. Check OntologyHandle (if present): return ontology TypeId if found
 2. Check RuntimeCatalog: return existing RuntimeTypeId if previously seen
 3. New label: RuntimeCatalog::intern(label) → new RuntimeTypeId
-4. Return RuntimeTypeId for use in GraphOp
+4. Encode runtime entity labels with bit 30 (`runtime_entity_type_id`) so they
+   remain disjoint from ontology entity TypeIds (which occupy the untagged low
+   range). Runtime relation types use bit 31 (`runtime_relation_type_id`).
+5. Return the plan/storage TypeId for use in GraphOp and topology membership
 ```
+
+Catalog-local `RuntimeTypeId` values in `runtime_catalog.parquet` remain
+untagged and zero-based. Only the binder/plan/storage boundary applies the
+entity tag. Projects record
+`topology/runtime_entity_label_encoding.json` once they write or migrate under
+this encoding; unmarked projects that still store colliding untagged advisory
+entity IDs fail closed on open rather than silently cross-classifying labels.
 
 In strict mode, step 3 is replaced by `BindError::UnknownLabel`.
 

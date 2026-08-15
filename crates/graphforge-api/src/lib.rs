@@ -574,7 +574,20 @@ impl GraphForge {
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
 
-        let runtime_catalog = load_runtime_catalog(&dir);
+        let runtime_catalog = load_runtime_catalog(&dir)?;
+        if read_only {
+            graphforge_storage::validate_runtime_entity_label_ids(
+                &dir,
+                ontology.as_ref(),
+                &runtime_catalog,
+            )?;
+        } else {
+            graphforge_storage::reconcile_runtime_entity_label_ids(
+                &dir,
+                ontology.as_ref(),
+                &runtime_catalog,
+            )?;
+        }
         let heavy_query_admission = Arc::new(resource_policy::HeavyQueryAdmission::new(
             resource_policy.max_concurrent_heavy_queries,
         ));
@@ -1408,7 +1421,9 @@ impl GraphForge {
                     .lock()
                     .expect("runtime catalog poisoned")
                     .entity_type_names_with_ids()
-                    .find_map(|(id, name)| (name == label).then_some(TypeId(id.0)))
+                    .find_map(|(id, name)| {
+                        (name == label).then_some(graphforge_ir::runtime_entity_type_id(id))
+                    })
             })
             .unwrap_or(TypeId(u32::MAX));
         let stem = if matches!(self.ontology_mode, OntologyMode::Exploratory) {
@@ -3055,27 +3070,58 @@ fn validate_call_params(
 }
 
 /// Seed a [`RuntimeCatalog`] from `topology/runtime_catalog.parquet` if present,
-/// else return a fresh one. A read failure degrades to a fresh catalog (the
-/// binder will re-observe types) rather than failing instance construction.
-fn load_runtime_catalog(dir: &std::path::Path) -> RuntimeCatalog {
+/// else return a fresh one. Missing or empty files yield an empty catalog; a
+/// present but malformed / undecodable catalog fails closed so reconciliation
+/// cannot write the encoding marker against an incomplete identity map (#702/#725).
+fn load_runtime_catalog(dir: &std::path::Path) -> Result<RuntimeCatalog, GfError> {
     let path = dir.join("topology").join("runtime_catalog.parquet");
     if !path.exists() {
-        return RuntimeCatalog::new();
+        return Ok(RuntimeCatalog::new());
     }
-    read_runtime_catalog(&path).unwrap_or_default()
+    read_runtime_catalog(&path)
 }
 
-/// Read and decode `runtime_catalog.parquet` into a [`RuntimeCatalog`].
-fn read_runtime_catalog(path: &std::path::Path) -> Option<RuntimeCatalog> {
+/// Read and decode every batch of `runtime_catalog.parquet` into a [`RuntimeCatalog`].
+fn read_runtime_catalog(path: &std::path::Path) -> Result<RuntimeCatalog, GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .ok()?
+    let file = std::fs::File::open(path).map_err(|e| {
+        GfError::Storage(format!(
+            "failed to open runtime catalog {}: {e}",
+            path.display()
+        ))
+    })?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| {
+            GfError::Storage(format!("malformed runtime catalog {}: {e}", path.display()))
+        })?
         .build()
-        .ok()?;
-    let batch = reader.next()?.ok()?;
-    RuntimeCatalog::from_record_batch(&batch).ok()
+        .map_err(|e| {
+            GfError::Storage(format!("malformed runtime catalog {}: {e}", path.display()))
+        })?;
+    let mut batches = Vec::new();
+    for batch in reader {
+        batches.push(batch.map_err(|e| {
+            GfError::Storage(format!(
+                "failed reading runtime catalog {}: {e}",
+                path.display()
+            ))
+        })?);
+    }
+    // Zero-row / zero-batch parquet is equivalent to a missing catalog. Fail
+    // closed only on malformed or undecodable content.
+    if batches.is_empty() {
+        return Ok(RuntimeCatalog::new());
+    }
+    let schema = batches[0].schema();
+    let merged = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
+        GfError::Storage(format!(
+            "failed to merge runtime catalog batches in {}: {e}",
+            path.display()
+        ))
+    })?;
+    RuntimeCatalog::from_record_batch(&merged)
+        .map_err(|e| GfError::Storage(format!("invalid runtime catalog {}: {e}", path.display())))
 }
 
 /// A long-lived multi-thread Tokio runtime that shuts down **without blocking**
@@ -3611,6 +3657,10 @@ fn persist_runtime_catalog(dir: &std::path::Path, rc: &RuntimeCatalog) -> Result
     writer
         .close()
         .map_err(|e| GfError::Storage(e.to_string()))?;
+    // Persisting observed runtime entity labels implies the tagged plan/storage
+    // encoding (#702). Mark the project so reopen does not treat ontology type
+    // zero as an unmarked legacy collision with the first advisory label.
+    graphforge_storage::write_runtime_entity_label_encoding_marker(dir)?;
     Ok(())
 }
 

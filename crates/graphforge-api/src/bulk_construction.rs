@@ -510,7 +510,7 @@ impl GraphForge {
                 .as_ref()
                 .and_then(|ontology| ontology.entity_type_id(&row.label))
                 .unwrap_or_else(|| {
-                    graphforge_core::TypeId(next_catalog.intern_label(&row.label).0)
+                    graphforge_ir::runtime_entity_type_id(next_catalog.intern_label(&row.label))
                 });
             writer.create_node(row.node_uuid, type_id)?;
             let properties = row

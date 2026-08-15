@@ -32,7 +32,44 @@ use graphforge_core::{GfError, TypeId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeTypeId(pub u32);
 
-const RUNTIME_RELATION_TYPE_TAG: u32 = 1 << 31;
+/// Plan-space tag for runtime-catalog entity labels (`TypeId` bit 30).
+///
+/// Distinct from [`RUNTIME_RELATION_TYPE_TAG`] so entity and relation runtime
+/// encodings never share a bit, and both remain disjoint from ontology IDs
+/// (which occupy the untagged low range).
+pub const RUNTIME_ENTITY_TYPE_TAG: u32 = 1 << 30;
+
+/// Plan-space tag for runtime-catalog relation types (`TypeId` bit 31).
+pub const RUNTIME_RELATION_TYPE_TAG: u32 = 1 << 31;
+
+/// Maximum untagged runtime catalog ID that can be encoded into plan space.
+const RUNTIME_TYPE_ID_PLAN_LIMIT: u32 = RUNTIME_ENTITY_TYPE_TAG;
+
+/// Encode one runtime-catalog entity label ID in the plan/storage TypeId space.
+///
+/// Ontology and runtime IDs both begin at zero. Tagging runtime entity IDs
+/// keeps advisory/exploratory labels disjoint from ontology entity type IDs
+/// while the bound plan and persisted topology cross the IR/storage boundary.
+#[must_use]
+pub fn runtime_entity_type_id(id: RuntimeTypeId) -> TypeId {
+    assert!(
+        id.0 < RUNTIME_TYPE_ID_PLAN_LIMIT,
+        "runtime entity type ID exceeds the plan encoding range"
+    );
+    TypeId(id.0 | RUNTIME_ENTITY_TYPE_TAG)
+}
+
+/// Returns true when `id` carries the runtime-entity plan tag.
+#[must_use]
+pub fn is_runtime_entity_type_id(id: TypeId) -> bool {
+    id.0 & RUNTIME_ENTITY_TYPE_TAG != 0 && id.0 & RUNTIME_RELATION_TYPE_TAG == 0
+}
+
+/// Strip the runtime-entity plan tag, returning the catalog-local ID.
+#[must_use]
+pub fn runtime_type_id_from_entity_plan_id(id: TypeId) -> Option<RuntimeTypeId> {
+    is_runtime_entity_type_id(id).then_some(RuntimeTypeId(id.0 & !RUNTIME_ENTITY_TYPE_TAG))
+}
 
 /// Encode one runtime-catalog relation ID in the plan TypeId space.
 ///
@@ -42,7 +79,7 @@ const RUNTIME_RELATION_TYPE_TAG: u32 = 1 << 31;
 #[must_use]
 pub fn runtime_relation_type_id(id: RuntimeTypeId) -> TypeId {
     assert!(
-        id.0 < RUNTIME_RELATION_TYPE_TAG,
+        id.0 < RUNTIME_TYPE_ID_PLAN_LIMIT,
         "runtime relation type ID exceeds the plan encoding range"
     );
     TypeId(id.0 | RUNTIME_RELATION_TYPE_TAG)
@@ -498,6 +535,22 @@ mod tests {
         cat.intern_property("name", Some("Person"));
         cat.intern_property("founded", Some("Company"));
         cat
+    }
+
+    #[test]
+    fn runtime_entity_type_id_tags_disjoint_from_ontology_zero() {
+        let tagged = runtime_entity_type_id(RuntimeTypeId(0));
+        assert_ne!(tagged, TypeId(0));
+        assert!(is_runtime_entity_type_id(tagged));
+        assert_eq!(
+            runtime_type_id_from_entity_plan_id(tagged),
+            Some(RuntimeTypeId(0))
+        );
+        assert!(!is_runtime_entity_type_id(TypeId(0)));
+        assert_ne!(
+            runtime_entity_type_id(RuntimeTypeId(0)),
+            runtime_relation_type_id(RuntimeTypeId(0))
+        );
     }
 
     #[test]
