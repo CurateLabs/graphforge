@@ -3070,9 +3070,9 @@ fn validate_call_params(
 }
 
 /// Seed a [`RuntimeCatalog`] from `topology/runtime_catalog.parquet` if present,
-/// else return a fresh one. Missing file is empty; a present but unreadable or
-/// empty catalog fails closed so reconciliation cannot write the encoding
-/// marker against an incomplete identity map (#702/#725).
+/// else return a fresh one. Missing or empty files yield an empty catalog; a
+/// present but malformed / undecodable catalog fails closed so reconciliation
+/// cannot write the encoding marker against an incomplete identity map (#702/#725).
 fn load_runtime_catalog(dir: &std::path::Path) -> Result<RuntimeCatalog, GfError> {
     let path = dir.join("topology").join("runtime_catalog.parquet");
     if !path.exists() {
@@ -3108,11 +3108,10 @@ fn read_runtime_catalog(path: &std::path::Path) -> Result<RuntimeCatalog, GfErro
             ))
         })?);
     }
+    // Zero-row / zero-batch parquet is equivalent to a missing catalog. Fail
+    // closed only on malformed or undecodable content.
     if batches.is_empty() {
-        return Err(GfError::Storage(format!(
-            "runtime catalog {} contains no record batches",
-            path.display()
-        )));
+        return Ok(RuntimeCatalog::new());
     }
     let schema = batches[0].schema();
     let merged = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
