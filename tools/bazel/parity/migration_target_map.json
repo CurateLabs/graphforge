@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 98,
+  "cargo_target_count": 99,
   "targets": [
     {
       "package": "graphforge-api",
@@ -952,6 +952,16 @@
       "bazel_label": "//crates/graphforge-storage:filtered_read",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "graph_delta_journal",
+      "class": "integration-test",
+      "source": "crates/graphforge-storage/tests/graph_delta_journal.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-storage:graph_delta_journal",
+      "exception_id": null,
+      "notes": "#8 / #752"
     },
     {
       "package": "graphforge-storage",
