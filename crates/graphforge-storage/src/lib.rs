@@ -43,6 +43,9 @@ pub use project_generation::{
 
 mod project_failpoint;
 
+#[cfg(any(test, feature = "test-failpoints"))]
+pub mod project_fault_oracle;
+
 pub mod project_checkpoints;
 pub use project_checkpoints::{
     CheckpointCreateRequest, CheckpointDeleteRequest, CheckpointReceipt, CheckpointRecord,
