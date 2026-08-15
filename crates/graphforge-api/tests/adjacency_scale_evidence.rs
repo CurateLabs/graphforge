@@ -54,7 +54,7 @@ const MIN_EDGES: u64 = 200_000_001;
 const BATCH_ROWS: usize = 262_144;
 const REL_TYPE: &str = "LINK";
 const MEMORY_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const CHUNK_ROWS: usize = 8_388_608;
+const CHUNK_ROWS: usize = 16_777_216;
 const POLICY_BATCH_SIZE: usize = 65_536;
 const BUILD_TS: i64 = 1_700_000_000_000_000;
 
