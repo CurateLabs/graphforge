@@ -1,0 +1,48 @@
+{
+  "build": {
+    "batch_size": 65536,
+    "chunk_rows": 8388608,
+    "memory_budget_bytes": 4294967296,
+    "public_api": "GraphForge::index_adjacency",
+    "publish_path": "capture_graph_files + stage_project_generation_with_graph_tree (one generation)",
+    "spill_enabled": true
+  },
+  "fixture": {
+    "edge_count": 201000000,
+    "generator": "graphwriter-nodes + streamed-exploratory-parquet-edges + single-file-backed-publish",
+    "node_count": 1048576,
+    "rel_type": "LINK"
+  },
+  "git_sha": "c8211dd82cda368c25d2d2209ab6d96f99b8dffb",
+  "hardware": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "issue": 336,
+  "notes": "Densified >200M-edge public adjacency build for #336. Single file-backed generation avoids publish_bulk per-chunk amplification. Timing is hardware-specific; no universal graph-size ceiling is claimed.",
+  "outcomes": {
+    "adjacency_state": "Current",
+    "artifact_fingerprint": "sha256:775e8e412831617d8590502feaae101064a1c6ae14843932160b4ccd7bad065f",
+    "one_hop_limit_rows": 1000,
+    "source_topology_generation": 12
+  },
+  "pass": true,
+  "resources": {
+    "disk_used_bytes": 13970826492,
+    "peak_rss_bytes_after_build": 7073234944,
+    "peak_rss_bytes_after_write": 419446784,
+    "peak_rss_bytes_before_build": 420986880,
+    "peak_rss_bytes_before_write": 10518528,
+    "peak_rss_note": "Linux: VmHWM from /proc/self/status. macOS: sampled RSS via ps at each checkpoint (not kernel high-water)."
+  },
+  "schema": "graphforge-adjacency-200m-evidence/1",
+  "schema_version": "1",
+  "timing": {
+    "adjacency_build_wall_time_s": 283.742766916,
+    "one_hop_limit_wall_time_s": 5.342038583,
+    "publish_wall_time_s": 1.075645583,
+    "reopen_wall_time_s": 0.610590875,
+    "total_wall_time_s": 350.701247374,
+    "workspace_write_wall_time_s": 59.930205417
+  }
+}

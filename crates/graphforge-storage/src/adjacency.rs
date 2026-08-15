@@ -959,8 +959,8 @@ impl EntryGroup {
         self.in_runs.push(in_path);
 
         self.buffer.clear();
-        // Drop capacity so peak memory tracks the chunk budget across flushes.
-        self.buffer.shrink_to_fit();
+        // Keep capacity so subsequent chunks avoid reallocation; peak retained
+        // heap stays O(chunk_rows), not O(total edges).
         Ok(())
     }
 
@@ -996,8 +996,9 @@ fn write_keyed_run(
     entries: &[(u64, u64, u64)],
     spill: &mut SpillSession,
 ) -> Result<(), GfError> {
-    use std::io::Write;
-    let mut file = std::fs::File::create(path).map_err(storage_err)?;
+    use std::io::{BufWriter, Write};
+    let file = std::fs::File::create(path).map_err(storage_err)?;
+    let mut file = BufWriter::with_capacity(1 << 20, file);
     let header = 8 + 4 + 8;
     let body = entries.len() as u64 * BYTES_PER_KEYED_ENTRY;
     spill.account_write(header + body)?;
@@ -1012,12 +1013,15 @@ fn write_keyed_run(
         file.write_all(&neighbor.to_le_bytes())
             .map_err(storage_err)?;
     }
-    file.sync_all().map_err(storage_err)?;
+    // Spill runs are ephemeral (SpillSession removes them on success/failure/
+    // cancel and never publish). Avoid per-run sync_all — it dominated >200M
+    // build wall time on agent hosts without improving published-index safety.
+    file.flush().map_err(storage_err)?;
     Ok(())
 }
 
 struct RunCursor {
-    file: std::fs::File,
+    file: std::io::BufReader<std::fs::File>,
     remaining: u64,
     current: Option<(u64, u64, u64)>,
 }
@@ -1025,7 +1029,8 @@ struct RunCursor {
 impl RunCursor {
     fn open(path: &Path) -> Result<Self, GfError> {
         use std::io::Read;
-        let mut file = std::fs::File::open(path).map_err(storage_err)?;
+        let file = std::fs::File::open(path).map_err(storage_err)?;
+        let mut file = std::io::BufReader::with_capacity(1 << 20, file);
         let mut magic = [0u8; 8];
         file.read_exact(&mut magic).map_err(storage_err)?;
         if &magic != SPILL_RUN_MAGIC {
@@ -1221,12 +1226,15 @@ fn for_each_adjacency_edge_file(
         // An unreadable edge file must FAIL the build, not be skipped: a
         // manifest written without it would stamp the current generation and
         // make an index missing a relation's edges look fresh.
-        let _schema = crate::catalog::discover_parquet_schema(&path).ok_or_else(|| {
-            GfError::Storage(format!(
-                "adjacency build: cannot read parquet schema for {}",
-                path.display()
-            ))
-        })?;
+        let _schema = match crate::catalog::discover_parquet_schema_detailed(&path) {
+            Ok(schema) => schema,
+            Err(detail) => {
+                return Err(GfError::Storage(format!(
+                    "adjacency build: cannot read parquet schema for {}: {detail}",
+                    path.display()
+                )));
+            }
+        };
         let exploratory = stem == "_exploratory";
         let columns: &[&str] = if exploratory {
             &["edge_id", "src_id", "dst_id", "rel_type_name"]
