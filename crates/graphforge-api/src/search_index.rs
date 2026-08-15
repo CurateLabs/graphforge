@@ -370,7 +370,7 @@ impl GraphForge {
                 let budget_entries = policy
                     .memory_budget_bytes
                     .saturating_div(24u64.saturating_mul(4));
-                usize::try_from(budget_entries.min(MAX_CHUNK_ROWS).max(1))
+                usize::try_from(budget_entries.clamp(1, MAX_CHUNK_ROWS))
                     .unwrap_or(graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS)
             },
             batch_size: policy.batch_size.max(1),
