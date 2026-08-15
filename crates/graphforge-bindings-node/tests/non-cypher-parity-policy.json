@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 181,
-  "releaseSurfaceDigest": "41bac2ceb292e089ccafc3c896afd1fd60ae1518c917174d306fbf7beae07427",
+  "releaseSurfaceCount": 184,
+  "releaseSurfaceDigest": "98bf3c9277a0cf13146ce4ecfe98e4e213c94e21edc0e8e48536783ffd02bc7e",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -17,6 +17,7 @@
     "repository-sync": "lifecycleConstruction",
     "ontology-lifecycle": "ontologyLifecycle",
     "lifecycle-construction": "lifecycleConstruction",
+    "gsi-profiler": "gsiProfiler",
     "checkpoint-view": "checkpointView",
     "algorithm": "algorithm",
     "search-provider-rerank": "m19ProviderRerank",
@@ -67,6 +68,7 @@
       "GraphForge.explain",
       "GraphForge.export_ontology",
       "GraphForge.find",
+      "GraphForge.graph_directedness",
       "GraphForge.hypothesis_members",
       "GraphForge.hypothesis_selection",
       "GraphForge.index",
@@ -105,6 +107,7 @@
       "GraphForge.prepare_paths_invocation",
       "GraphForge.prepare_analyze_invocation",
       "GraphForge.prepare_similar_invocation",
+      "GraphForge.profile_gsi",
       "GraphForge.project_capabilities",
       "GraphForge.provenance_event",
       "GraphForge.publish_bulk_edges",
@@ -131,6 +134,7 @@
       "GraphForge.set_default_embedding_space",
       "GraphForge.set_embedding_refresh_project_policy",
       "GraphForge.set_embedding_refresh_space_policy",
+      "GraphForge.set_graph_directedness",
       "GraphForge.similar",
       "GraphForge.supersede_assertion",
       "GraphForge.suggest_ontology",
@@ -195,6 +199,13 @@
     "lifecycleConstruction": {
       "core.test.mjs": ["add node", "graph inspection surface"],
       "smoke.test.mjs": ["lifecycle"]
+    },
+    "gsiProfiler": {
+      "gsi-profiler.test.mjs": [
+        "empty workspace grades Gx-00-XS-D00",
+        "triangle grades GD/GU/Gx with configuration",
+        "tiny graph and unknown directedness fail closed"
+      ]
     },
     "checkpointView": {
       "checkpoints.test.mjs": [

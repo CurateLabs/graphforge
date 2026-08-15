@@ -98,8 +98,10 @@ while IFS= read -r -d '' path; do
       tests/contracts/non-cypher-rust-surface.json)
       contracts=true
       ;;
-    scripts/coverage_rust_ledger.py | scripts/check-coverage-rust.sh | \
-      scripts/ci/test-rust-coverage-ledger.py)
+    scripts/coverage-rust.sh | scripts/coverage_rust_ledger.py | \
+      scripts/check-coverage-rust.sh | scripts/ci/test-coverage-rust.sh | \
+      scripts/ci/test-rust-coverage-ledger.py | \
+      tests/features/node/cucumber.js | tests/features/node/package.json)
       coverage_ledger=true
       ;;
     scripts/ci/check-binding-parity-policy.py)

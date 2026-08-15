@@ -121,6 +121,10 @@ jobs:
           python3 scripts/ci/m4-entry-matrix.py validate
           python3 scripts/ci/test-m4-entry-matrix.py
 
+      - name: Test Rust coverage runner and Cucumber loader policy
+        if: steps.policy-suites.outputs.coverage_ledger == 'true'
+        run: bash scripts/ci/test-coverage-rust.sh
+
       - name: Test Rust coverage ledger failure modes
         if: steps.policy-suites.outputs.coverage_ledger == 'true'
         run: python3 scripts/ci/test-rust-coverage-ledger.py
@@ -203,6 +207,9 @@ jobs:
         if: steps.policy-suites.outputs.storage == 'true'
         run: python3 scripts/ci/test-ci-storage-policy.py
 
+      - name: Test CI Gate ruleset enforcement contract
+        run: python3 scripts/ci/test-verify-ci-gate-enforcement.py
+
       - name: Validate GitHub Actions workflows
         run: scripts/check-workflows.sh
 
@@ -243,7 +250,7 @@ jobs:
 
       - name: Install cargo-deny and cargo-about
         if: steps.cargo-licenses.outputs.run == 'true'
-        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
 
@@ -568,9 +575,19 @@ jobs:
         shell: bash
         run: |
           mkdir -p ~/.graphforge/datasets
-          curl --fail --location \
-            --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
-            https://snap.stanford.edu/data/facebook_combined.txt.gz
+          # snap.stanford.edu is intermittently reset by peer from CI egress;
+          # retry with backoff so an unrelated fixture fetch does not fail the gate.
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+              --connect-timeout 30 --max-time 120 \
+              --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
+              https://snap.stanford.edu/data/facebook_combined.txt.gz; then
+              break
+            fi
+            echo "SNAP download attempt ${attempt} failed; sleeping before retry"
+            sleep $((attempt * 5))
+          done
+          test -s ~/.graphforge/datasets/snap-ego-facebook.txt.gz
 
       - name: Run Python unit, integration, and BDD tests
         shell: bash
@@ -682,7 +699,9 @@ jobs:
           pnpm --filter @curatelabs/graphforge-cli test:lifecycle
 
       - name: Typecheck Node BDD package
-        run: pnpm --filter @curatelabs/graphforge-bdd-node typecheck
+        run: |
+          pnpm --filter @curatelabs/graphforge-bdd-node typecheck
+          pnpm --filter @curatelabs/graphforge-bdd-node typecheck:fail-closed
 
       - name: Run Node BDD suite
         working-directory: tests/features/node

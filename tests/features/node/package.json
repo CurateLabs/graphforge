@@ -5,13 +5,14 @@
   "license": "Apache-2.0",
   "scripts": {
     "test:bdd": "cucumber-js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typecheck:fail-closed": "node ./scripts/typecheck-fail-closed.mjs"
   },
   "dependencies": {
     "@curatelabs/graphforge": "workspace:*"
   },
   "devDependencies": {
-    "@cucumber/cucumber": "^11.0.0",
+    "@cucumber/cucumber": "^12.9.0",
     "@types/node": "^26.2.0",
     "apache-arrow": "^21.2.0",
     "tsx": "^4.20.0",

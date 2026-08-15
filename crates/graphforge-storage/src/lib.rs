@@ -70,12 +70,12 @@ pub use project_portable::{
 
 pub mod workspace_participants;
 pub use workspace_participants::{
-    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES,
-    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES, WORKSPACE_CAPABILITY_ID,
-    WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY, WORKSPACE_ONTOLOGY_FAMILY,
-    WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_VERSION,
-    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
-    WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
+    GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
+    MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ENTRIES, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_ID_BYTES,
+    WORKSPACE_CAPABILITY_ID, WORKSPACE_CAPABILITY_VERSION, WORKSPACE_CONFIGURATION_FAMILY,
+    WORKSPACE_ONTOLOGY_FAMILY, WORKSPACE_REPOSITORY_SNAPSHOT_FAMILY,
+    WORKSPACE_REPOSITORY_SNAPSHOT_VERSION, WorkspaceConfiguration, WorkspaceOntology,
+    WorkspaceOntologyMode, WorkspaceOntologySourceFormat, WorkspaceRepositoryDefinitionDigest,
     WorkspaceRepositoryGitProvenance, WorkspaceRepositorySnapshot, WorkspaceRepositorySourceDigest,
     empty_workspace_participants,
 };
@@ -175,7 +175,8 @@ pub use catalog::{
     EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
     UnionEdgeTable, list_edge_property_stems, list_property_stems, read_edge_properties,
     read_edges, read_edges_filtered, read_edges_filtered_observed, read_nodes, read_nodes_filtered,
-    read_nodes_filtered_observed, read_properties, read_properties_batched,
+    read_nodes_filtered_observed, read_properties, read_properties_batched, visit_nodes_batched,
+    visit_properties_batched,
 };
 
 pub mod runtime_entity_labels;
@@ -191,8 +192,9 @@ pub use parquet_scan::{GraphForgeParquetExec, IoConcurrencyExt, ParquetFragment}
 pub mod schemas;
 pub use schemas::{
     ADJACENCY_CSR_SCHEMA, ADJACENCY_MANIFEST_SCHEMA, EDGE_PROPERTY_BASE_SCHEMA,
-    EXPLORATORY_EDGE_SCHEMA, PROPERTY_BASE_SCHEMA, TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA,
-    property_schema, property_type_to_arrow, result_schema,
+    EXPLORATORY_EDGE_SCHEMA, INTERNAL_SURROGATE_META_KEY, PROPERTY_BASE_SCHEMA,
+    TOPOLOGY_NODES_SCHEMA, TYPED_EDGE_SCHEMA, is_internal_surrogate_field, property_schema,
+    property_type_to_arrow, result_schema,
 };
 
 pub mod writer;

@@ -15,6 +15,7 @@ RECEIVERS = {
     "PyCancellationToken": "CancellationToken",
     "PyCheckpointView": "CheckpointView",
     "PyEdgeHandle": "EdgeHandle",
+    "PyGraphScaleIndexProfile": "GraphScaleIndexProfile",
     "PyInvocationDescriptor": "InvocationDescriptor",
     "PyNodeHandle": "NodeHandle",
     "PyRecordedAlgorithmResult": "RecordedAlgorithmResult",

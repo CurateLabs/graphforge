@@ -1049,15 +1049,90 @@ pub fn read_properties_batched(
     stem: &str,
     batch_size: usize,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let mut out = Vec::new();
+    visit_properties_batched(dir, stem, batch_size, |batch| {
+        out.push(batch.clone());
+        Ok(true)
+    })?;
+    Ok(out)
+}
+
+/// Visit `properties/<stem>.parquet` one bounded batch at a time (#706).
+///
+/// `visit` returns `Ok(true)` to continue or `Ok(false)` to stop early without
+/// decoding the rest of the file. A missing file is a no-op (zero visits).
+///
+/// # Errors
+/// Propagates Parquet / Arrow errors, or any error returned by `visit`.
+pub fn visit_properties_batched<F>(
+    dir: &Path,
+    stem: &str,
+    batch_size: usize,
+    mut visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
     let path = dir.join("properties").join(format!("{stem}.parquet"));
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let file = File::open(&path).map_err(|e| io_err(&e))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
     let builder = builder.with_batch_size(batch_size.max(1));
     let reader = builder.build().map_err(parquet_err)?;
-    reader.collect::<Result<Vec<_>, _>>().map_err(parquet_err)
+    for batch in reader {
+        let batch = batch.map_err(parquet_err)?;
+        if !visit(&batch)? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Visit `topology/nodes.parquet` one bounded batch at a time (#706).
+///
+/// Applies the same legacy `type_id` → `type_ids` normalization as
+/// [`read_nodes`]. `visit` returns `Ok(true)` to continue or `Ok(false)` to
+/// stop early. A missing file yields a single empty schema-shaped batch (parity
+/// with [`read_nodes`]).
+///
+/// # Errors
+/// Propagates Parquet / Arrow / normalization errors, or any error from `visit`.
+pub fn visit_nodes_batched<F>(
+    dir: &Path,
+    batch_size: usize,
+    mut visit: F,
+) -> Result<(), DataFusionError>
+where
+    F: FnMut(&RecordBatch) -> Result<bool, DataFusionError>,
+{
+    let path = dir.join("topology").join("nodes.parquet");
+    if !path.exists() {
+        let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
+        let _ = visit(&empty)?;
+        return Ok(());
+    }
+    let file = File::open(&path).map_err(|e| io_err(&e))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(parquet_err)?;
+    let builder = builder.with_batch_size(batch_size.max(1));
+    let reader = builder.build().map_err(parquet_err)?;
+    let mut any = false;
+    for batch in reader {
+        any = true;
+        let batch = batch.map_err(parquet_err)?;
+        let normalized = normalize_topology_nodes(vec![batch])?;
+        for b in &normalized {
+            if !visit(b)? {
+                return Ok(());
+            }
+        }
+    }
+    if !any {
+        let empty = RecordBatch::new_empty(TOPOLOGY_NODES_SCHEMA.clone());
+        let _ = visit(&empty)?;
+    }
+    Ok(())
 }
 
 /// Edge analogue of [`read_properties`]: read `edge_properties/<stem>.parquet`
@@ -1402,9 +1477,16 @@ impl TableProvider for EdgePropertyTable {
 /// Read just the Arrow schema of a Parquet file, or `None` if it is absent or
 /// unreadable.
 pub(crate) fn discover_parquet_schema(path: &Path) -> Option<SchemaRef> {
-    let file = File::open(path).ok()?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
-    Some(builder.schema().clone())
+    discover_parquet_schema_detailed(path).ok()
+}
+
+/// Like [`discover_parquet_schema`], but preserves the underlying I/O / Parquet
+/// error string for scale-host diagnostics.
+pub(crate) fn discover_parquet_schema_detailed(path: &Path) -> Result<SchemaRef, String> {
+    let file = File::open(path).map_err(|error| format!("open failed: {error}"))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
+    Ok(builder.schema().clone())
 }
 
 #[async_trait]

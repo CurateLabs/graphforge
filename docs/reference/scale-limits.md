@@ -7,8 +7,9 @@ GraphForge is designed for research and notebook workflows on
 document describes practical limits on the v0.5.0 Rust core, distinguishes
 between query types, and explains why **edge count matters more than node
 count** for most operations. Profile concrete datasets with a full Graph Scale
-Index (for example `GD-06-MD-D00`). Do not compare wall-clock numbers across
-machines without matching hardware and graph layout.
+Index (for example `GD-06-MD-D00`) via [`profile_gsi`](api.md#profile_gsi--graphscaleindexprofile)
+or the [GSI reference](graph-scale-index.md). Do not compare wall-clock numbers
+across machines without matching hardware and graph layout.
 
 With DataFusion over Parquet, large-graph work is **disk-limited** (RAM for
 working sets). Escalation past Levels 01–06 (Graph500 SCALE ≥ 24 / GSI `07`+)
@@ -125,17 +126,23 @@ or failed build cannot publish a fresh-looking partial index.
 
 Deterministic CI covers multi-row-group streaming without UUID projection,
 tiny-`chunk_rows` golden CSR equality against `csr_from_entries`, and
-cancel/spill cleanup. A full **>200M-edge** public-path index build remains an
-M4 scale / scheduled evidence run (map to the #334 harness after hardware and
-spill configuration are recorded). Do **not** read the former 134M Arrow
-boundary as a GraphForge maximum graph size.
+cancel/spill cleanup. A full **>200M-edge** public-path index build is proven
+by checked-in scale-host evidence (not CI). Do **not** read the former 134M
+Arrow boundary as a GraphForge maximum graph size.
 
 | Claim | Status |
 |---|---|
 | No full-file UUID concat during adjacency build/validate/inspect | Covered by CI streaming seam |
 | CSR bytes match scan-build semantics under spill | Covered by tiny-chunk golden tests |
 | Cancel/failure leaves prior index or absent/stale | Covered by cancel + spill-cap tests |
-| >200M edges indexes on a supported machine | Accepted disposition: pending scale-host / scheduled evidence (#345). Not a product claim on agent hosts. |
+| >200M edges indexes on a supported machine | Proven — [`adjacency-200m-evidence.json`](../development/adjacency-200m-evidence.json) via `make bench-adjacency-200m` (#336). Hardware-specific; not a universal graph-size ceiling. |
+
+Manual/scheduled >200M public adjacency evidence (not CI):
+
+```bash
+CARGO_TARGET_DIR=/tmp/cargo-336-adj \
+  make bench-adjacency-200m
+```
 
 Manual/scheduled 8M/128M reproduction (not CI): build or point at the measured
 fixture, publish through `GraphForge`, reopen, and record RSS/storage/fingerprint

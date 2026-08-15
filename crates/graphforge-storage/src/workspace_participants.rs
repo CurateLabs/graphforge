@@ -79,6 +79,44 @@ pub struct WorkspaceOntology {
     pub canonical_ontology: Option<Value>,
 }
 
+/// Project-level graph directedness metadata for GSI profiling.
+///
+/// Absent configuration yields GSI prefix `Gx` (unknown). Algorithm
+/// `directed=` options remain call-scoped and independent of this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GraphDirectedness {
+    /// Edges are directed; GSI prefix `GD`.
+    Directed,
+    /// Edges are undirected; GSI prefix `GU`.
+    Undirected,
+}
+
+impl GraphDirectedness {
+    /// Parse a fail-closed canonical directedness token.
+    ///
+    /// # Errors
+    /// Returns validation for any value other than `directed` or `undirected`.
+    pub fn parse(value: &str) -> Result<Self, GfError> {
+        match value {
+            "directed" => Ok(Self::Directed),
+            "undirected" => Ok(Self::Undirected),
+            _ => Err(GfError::Validation(
+                "graph_directedness must be \"directed\" or \"undirected\"".into(),
+            )),
+        }
+    }
+
+    /// Canonical lowercase token used in configuration JSON and GSI docs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Directed => "directed",
+            Self::Undirected => "undirected",
+        }
+    }
+}
+
 /// Canonical authoritative project configuration participant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -91,6 +129,12 @@ pub struct WorkspaceConfiguration {
     pub capability_configuration: BTreeMap<String, Value>,
     /// Registered embedding settings ordered by stable setting ID.
     pub embedding_configuration: BTreeMap<String, Value>,
+    /// Optional project-level directedness for Graph Scale Index grading.
+    ///
+    /// Absent / unset → GSI prefix `Gx`. Serialized only when present so
+    /// existing `workspace_configuration@1` records remain byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_directedness: Option<GraphDirectedness>,
 }
 
 /// One declared repository definition identified without retaining its path or contents.
@@ -183,6 +227,7 @@ impl WorkspaceConfiguration {
             ontology_mode: WorkspaceOntologyMode::None,
             capability_configuration: BTreeMap::new(),
             embedding_configuration: BTreeMap::new(),
+            graph_directedness: None,
         }
     }
 
@@ -484,6 +529,31 @@ mod tests {
         assert_eq!(
             WorkspaceConfiguration::from_canonical_json(&configuration_bytes).unwrap(),
             configuration
+        );
+        assert!(
+            !String::from_utf8_lossy(&configuration_bytes).contains("graph_directedness"),
+            "unset directedness must omit the additive field for byte stability"
+        );
+    }
+
+    #[test]
+    fn graph_directedness_round_trips_and_rejects_unknown_values() {
+        let mut configuration = WorkspaceConfiguration::empty();
+        configuration.graph_directedness = Some(GraphDirectedness::Directed);
+        let bytes = configuration.to_canonical_json().unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("\"graph_directedness\":\"directed\""));
+        assert_eq!(
+            WorkspaceConfiguration::from_canonical_json(&bytes).unwrap(),
+            configuration
+        );
+
+        let invalid = br#"{"contract_version":1,"ontology_mode":"none","capability_configuration":{},"embedding_configuration":{},"graph_directedness":"bidirectional"}
+"#;
+        assert_eq!(
+            WorkspaceConfiguration::from_canonical_json(invalid)
+                .unwrap_err()
+                .code(),
+            "GF_PROJECT_CORRUPT"
         );
     }
 

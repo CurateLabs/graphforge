@@ -1,0 +1,49 @@
+{
+  "_links": {
+    "html": {
+      "href": "https://github.com/CurateLabs/graphforge/rules/19988544"
+    },
+    "self": {
+      "href": "https://api.github.com/repos/CurateLabs/graphforge/rulesets/19988544"
+    }
+  },
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ]
+    }
+  },
+  "created_at": "2026-07-29T11:54:20.471-06:00",
+  "current_user_can_bypass": "never",
+  "enforcement": "active",
+  "id": 19988544,
+  "name": "main",
+  "node_id": "RRS_lACqUmVwb3NpdG9yec5OYqL2zgExAEA",
+  "rules": [
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "parameters": {
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "CI Gate"
+          }
+        ],
+        "strict_required_status_checks_policy": true
+      },
+      "type": "required_status_checks"
+    }
+  ],
+  "source": "CurateLabs/graphforge",
+  "source_type": "Repository",
+  "target": "branch",
+  "updated_at": "2026-08-14T16:47:00.795-06:00"
+}

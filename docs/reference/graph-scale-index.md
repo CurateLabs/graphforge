@@ -1,6 +1,6 @@
 # Graph Scale Index (GSI)
 
-**Last updated:** 2026-08-05
+**Last updated:** 2026-08-14
 
 The Graph Scale Index (GSI) is a standardized alphanumeric identifier for
 profiling graph datasets when benchmarking algorithmic performance and
@@ -13,12 +13,15 @@ release [load-matrix taxonomy](../development/release-load-matrix.md)
 (`tests/contracts/load-dataset-taxonomy.json`).
 
 **Nomenclature rule:** when docs discuss profiling, benchmarking, or performance
-classes for a graph, prefer a full GSI (`GU-03-XS-D01` or `GD-05-SM-D00`). Do
-not reuse load-matrix size letters (`S`, `M`, `L`) as if they were GSI Size Tags
-— only GSI Size Tags are `XS`, `SM`, `MD`, `LG`, `XL`, `2XL`–`5XL`, and `BIG`.
+classes for a graph, prefer a full GSI (`GU-03-XS-D01`, `GD-05-SM-D00`, or
+`Gx-00-XS-D00`). Do not reuse load-matrix size letters (`S`, `M`, `L`) as if they
+were GSI Size Tags — only GSI Size Tags are `XS`, `SM`, `MD`, `LG`, `XL`,
+`2XL`–`5XL`, and `BIG`.
 
-Scale **evaluation** (Official Graph500, Graph500-derived density matrix, LDBC
-suite, external harness contract, evidence schema) lives in
+Live workspaces can be graded through the Rust-owned
+[`profile_gsi`](api.md#profile_gsi--graphscaleindexprofile) facade (thin
+Python/Node bindings). Scale **evaluation** (Official Graph500, Graph500-derived
+density matrix, LDBC suite, external harness contract, evidence schema) lives in
 [Scale Evaluation](scale-evaluation.md). Large-graph work is **disk-limited**
 under DataFusion + Parquet — see [Scale Limits](scale-limits.md).
 
@@ -29,13 +32,13 @@ under DataFusion + Parquet — see [Scale Limits](scale-limits.md).
 Every profile identifier follows this hyphenated format:
 
 ```text
-[GD|GU]-[Scale Code]-[Size Tag]-D[Density Integer]
+[GD|GU|Gx]-[Scale Code]-[Size Tag]-D[Density Integer]
 ```
 
 | Component | Meaning |
 |---|---|
-| `GD` / `GU` | Graph **D**irected or Graph **U**ndirected — selects the density formula |
-| Scale Code | Two-character code for the node-count band (`01`–`12`, or `**` overflow) |
+| `GD` / `GU` / `Gx` | Graph **D**irected, Graph **U**ndirected, or unknown (`Gx`) — selects the density formula |
+| Scale Code | Two-character code for the node-count band (`00` empty, `01`–`12`, or `**` overflow) |
 | Size Tag | Structural capacity descriptor tied to infrastructure targets |
 | `D` + density | Density prefix plus a zero-padded integer percent (`00`–`100`) |
 
@@ -43,8 +46,10 @@ Every profile identifier follows this hyphenated format:
 
 | Identifier | Reading |
 |---|---|
+| `Gx-00-XS-D00` | Unknown directedness; empty live graph (`V = 0`); density 0% |
 | `GU-03-XS-D07` | Undirected; 1,000 ≤ V &lt; 10,000; density 7% |
 | `GD-05-SM-D15` | Directed; 100,000 ≤ V &lt; 1,000,000; density 15% |
+| `Gx-01-XS-D50` | Unknown directedness; V &lt; 100; density uses the directed formula |
 | `GD-07-LG-D02` | Directed; 10M ≤ V &lt; 100M; density 2% |
 | `GU-**-BIG-D01` | Undirected; V ≥ 10T (above Level 12); density 1% |
 
@@ -54,7 +59,8 @@ Every profile identifier follows this hyphenated format:
 
 | Scale Code | Size Tag | Node count range (V) | Infrastructure target |
 |---|---|---|---|
-| `01` | XS | V &lt; 100 | L1/L2 cache resident |
+| `00` | XS | V = 0 (empty live graph) | Empty / uninitialized workspace |
+| `01` | XS | 1 ≤ V &lt; 100 | L1/L2 cache resident |
 | `02` | XS | 100 ≤ V &lt; 1,000 | L3 cache / main memory resident |
 | `03` | XS | 1,000 ≤ V &lt; 10,000 | In-memory (standard compute) |
 | `04` | XS | 10,000 ≤ V &lt; 100,000 | In-memory (high compute matrix cap) |
@@ -68,9 +74,9 @@ Every profile identifier follows this hyphenated format:
 | `12` | 5XL | 1,000,000,000,000 ≤ V &lt; 10,000,000,000,000 | Cloud multi-region datastore |
 | `**` | BIG | V ≥ 10,000,000,000,000 | Edge of compute limits (overflow: above Level 12) |
 
-Bands are half-open except the overflow bucket: each numeric level covers up to
-but not including the next decade boundary; `**` / BIG starts at
-V ≥ 10,000,000,000,000 (10T).
+Bands are half-open except the empty and overflow buckets: `00` is exactly
+`V = 0`; each numeric level `01`–`12` covers up to but not including the next
+decade boundary; `**` / BIG starts at V ≥ 10,000,000,000,000 (10T).
 
 Product notebook posture remains roughly GSI Levels **01–06** (`XS`–`MD`,
 V &lt; 10M). Levels **07+** are stretch / progressive-scale territory under the
@@ -81,25 +87,67 @@ V &lt; 10M). Levels **07+** are stretch / progressive-scale territory under the
 ## Density quantification
 
 Density maps standard graph topologies into an integer percent in `00`–`100`.
-Choose `GU` or `GD` first — that choice selects the formula below.
+Choose `GU`, `GD`, or `Gx` first — that choice selects the formula below.
 
 ### Direct calculations
 
 - **`GU` (undirected):** `density = 2|E| / (|V| × (|V| − 1))`
 - **`GD` (directed):** `density = |E| / (|V| × (|V| − 1))`
+- **`Gx` (unknown):** use the **directed** density formula; structured profiler
+  results report `directedness=unknown` so callers are not misled
+
+When `V < 2` (including empty and singleton graphs), density is `D00` — there is
+no complete-graph denominator.
 
 Self-loops are excluded from the complete-graph denominator (same convention as
 the load-matrix density formula).
 
 ### Integer normalization
 
-1. Compute raw density as a floating-point value with the formula for `GD` or `GU`.
+1. Compute raw density as a floating-point value with the formula for `GD`, `GU`,
+   or `Gx`.
 2. Clamp strictly to `[0.0, 1.0]`.
 3. Multiply by 100 and round to the nearest whole integer.
 4. Format with zero-padding for single-digit values (`7` → `07`); `100` stays
    three digits (`100`).
 
 Examples: 0.07 → `D07`; 0.995 → `D100`; 0.0 → `D00`.
+
+---
+
+## Project directedness configuration
+
+`workspace_configuration@1` may include optional `graph_directedness` with
+values `directed` or `undirected`. Absent / unset → GSI prefix `Gx`. The field
+is additive: existing configuration records without it remain valid and omit the
+key when serialized.
+
+Use the public read/write path:
+
+- Rust: `GraphForge::graph_directedness` / `set_graph_directedness`
+- Python / Node: thin wrappers of the same methods
+
+Unknown values are rejected fail-closed. Algorithm `directed=` options remain
+call-scoped and do **not** infer or overwrite this project metadata.
+
+---
+
+## Profiler API
+
+`GraphForge::profile_gsi` grades the **live** nodes `V` and live edges `E` in an
+opened workspace (deleted facts excluded). Empty and tiny graphs succeed without
+error:
+
+| Fixture | Expected GSI |
+|---|---|
+| Empty, unset directedness | `Gx-00-XS-D00` |
+| Empty, `graph_directedness=directed` | `GD-00-XS-D00` |
+| Empty, `graph_directedness=undirected` | `GU-00-XS-D00` |
+| Singleton (`V = 1`), unset | `Gx-01-XS-D00` |
+
+The structured result includes at least: GSI string, `directedness`
+(`directed` / `undirected` / `unknown`), `V`, `E`, raw density, Scale Code,
+Size Tag, and density integer. See [`profile_gsi`](api.md#profile_gsi--graphscaleindexprofile).
 
 ---
 
@@ -146,7 +194,8 @@ Pure size mapping for synthetic Graph500 instances (`V = 2^SCALE`, typical
 SCALE ranges that land in each band (any integer SCALE with
 `2^SCALE` in the band): `01`→1–6, `02`→7–9, `03`→10–13, `04`→14–16,
 `05`→17–19, `06`→20–23, `07`→24–26, `08`→27–29, `09`→30–33, `10`→34–36,
-`11`→37–39, `12`→40–43, `**`→44+.
+`11`→37–39, `12`→40–43, `**`→44+. Empty workspaces use Scale Code `00` and are
+outside the Graph500 SCALE ladder.
 
 Official Graph500 ranking classes (Toy/Mini/Small/Medium/Large/Huge at SCALE
 26/29/32/36/39/42) map to GSI `07`/`08`/`09`/`10`/`11`/`12` respectively —
@@ -183,11 +232,14 @@ with `GU-…`.
 
 When investigating performance:
 
-1. Decide directedness and choose the prefix (`GD` or `GU`).
-2. Count live nodes `V` and live edges `E` (exclude deleted facts if your store
-   distinguishes them).
-3. Assign the Scale Code / Size Tag from the node band table.
-4. Compute density with the matching formula, normalize to `Dxx`.
+1. Set project `graph_directedness` when known (`directed` / `undirected`), or
+   leave it unset for `Gx`.
+2. Call `profile_gsi` on the opened workspace (or count live nodes `V` and live
+   edges `E` yourself, excluding deleted facts).
+3. Confirm the Scale Code / Size Tag from the node band table (including `00`
+   for empty graphs).
+4. Confirm density used the matching formula (`Gx` uses directed math),
+   normalized to `Dxx`.
 5. Record the full GSI on the dataset, benchmark run, and issue notes.
 6. Cross-check the behavioral matrix for likely bottlenecks before changing
    algorithms or hardware assumptions.

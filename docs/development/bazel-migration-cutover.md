@@ -15,6 +15,7 @@ Companion artifacts:
 | Piece | After #4 |
 | --- | --- |
 | Required check name | Exactly **`CI Gate`** (unchanged) |
+| Live GitHub enforcement | Repository ruleset **19988544** (`main`, `~DEFAULT_BRANCH`) requires status check context **`CI Gate`** (#721) |
 | Authoritative Rust compile/test | `Bazel Bootstrap` → `bazelisk test //:ci_rust_tests` (+ libs/CLI/resources/bindings builds) |
 | Retired | Cargo `rust-test` workspace job; PR job-isolated Cargo `target/` sticky disks |
 | Retained Cargo diagnostics | `Rust Quality` (fmt/clippy); Windows `graphforge-storage` lock unit tests; PR maturin/napi binding assembly (no sticky); Binding RC macOS/Windows/cross napi + fuzz / release-certification sticky packaging lanes |
@@ -62,6 +63,8 @@ python3 scripts/ci/cargo-bazel-parity-check.py \
    (update `EXPECTED_STICKY_KEYS` / `EXPECTED_DEPENDENCY_KEYS` in
    `scripts/ci/test-ci-storage-policy.py` in the same change).
 4. Keep required check name **`CI Gate`**. Do not invent a second required context.
+   Live enforcement is ruleset `19988544` (not workflow naming alone); verify with
+   `python3 scripts/ci/verify-ci-gate-enforcement.py --check-live`.
 5. Prefer fixing Bazel root causes; treat this rollback as temporary for one
    release cycle after cutover, then remove again once Bazel is healthy.
 
@@ -83,13 +86,14 @@ Linux addon (`emit-node-loaders`) instead of `napi build` recompile.
 | #4 / #1 AC | Evidence |
 | --- | --- |
 | Bazel authoritative under `CI Gate` | `Bazel Bootstrap` runs `//:ci_rust_tests`; `rust-test` absent from Test Suite / gate |
-| Branch protection still requires exactly `CI Gate` | Job display name unchanged; no second required context |
+| Default branch requires exactly `CI Gate` | Live ruleset **19988544** `required_status_checks` context `CI Gate`; snapshot [ci-gate-ruleset-19988544.json](bazel-migration-evidence/ci-gate-ruleset-19988544.json); `scripts/ci/verify-ci-gate-enforcement.py` (#721) |
 | Cargo sticky disks retired without weakening gates | PR sticky keys gone; Binding RC/fuzz/release-certification retained; storage-policy tests updated |
 | Documented Cargo rollback one release cycle | This document |
 | Path-classified skips remain neutral | `require-gates.sh` still accepts `skipped` |
 
 ## Next
 
-[#3](https://github.com/CurateLabs/graphforge/issues/3) docs/observability/#1
-close-readiness: [bazel.md](bazel.md) and
-[bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+Evidence-map reconciliation after remediations: [#724](https://github.com/CurateLabs/graphforge/issues/724)
+([bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md)). Live
+`CI Gate` enforcement is #721 (ruleset **19988544**); do not treat workflow job
+naming alone as merge-gate proof.

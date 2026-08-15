@@ -68,6 +68,7 @@ mod epistemic_snapshot;
 mod find_execution;
 mod graph_inspection;
 mod graph_snapshot;
+mod gsi_profiler;
 mod hypotheses;
 mod invocation_descriptor;
 mod knowledge;
@@ -139,7 +140,8 @@ pub use graphforge_core::{
 pub use graphforge_exec::validate_embedding_options;
 pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
 pub use graphforge_storage::{
-    WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode, WorkspaceOntologySourceFormat,
+    GraphDirectedness, WorkspaceConfiguration, WorkspaceOntology, WorkspaceOntologyMode,
+    WorkspaceOntologySourceFormat,
 };
 // Query parameter literal type (for `execute_with_params`), re-exported so the
 // language bindings can build params without depending on `graphforge-ir` directly.
@@ -217,6 +219,7 @@ pub use graphforge_storage::{
     EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy,
     ResolvedEmbeddingRefreshPolicy, SearchArtifactError, TokenCountClass, TokenizerIdentity,
 };
+pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
 pub use hypotheses::{
     CreateHypothesisGroupRequest, ListHypothesisGroupsRequest, ListHypothesisMembershipRequest,
     ListHypothesisSelectionRequest, RecordHypothesisMembershipRequest,
@@ -729,8 +732,9 @@ impl GraphForge {
     /// Runs the full pipeline: `parse → bind → lower → execute`. A query
     /// containing `CREATE` writes through [`graphforge_exec::ExecutionSession::execute_create`];
     /// a read query runs through `execute_plan`. The result exposes UUID
-    /// identity columns (`node_uuid`/`edge_uuid`) — never the internal
-    /// surrogate `node_id`/`edge_id` — and carries query metadata on its schema.
+    /// identity columns (`node_uuid`/`edge_uuid`) — never internal surrogate
+    /// scan keys — while preserving legal user aliases such as
+    /// `RETURN id(n) AS node_id` (#703). The schema carries query metadata.
     ///
     /// # Errors
     /// Returns [`GfError::Parse`] on a parse failure, [`GfError::Plan`] on a bind
@@ -1150,9 +1154,10 @@ impl GraphForge {
     /// Execute a read-only openCypher query and return a lazy stream of its
     /// result batches (the streaming counterpart of [`execute`](Self::execute)).
     ///
-    /// Like `execute`, each batch exposes UUID identity columns (never the
-    /// surrogate `node_id`/`edge_id`) and the stream's schema carries query
-    /// metadata. `CREATE`/`MERGE` are not supported on the streaming path — use
+    /// Like `execute`, each batch exposes UUID identity (never internal surrogate
+    /// scan keys) while preserving legal user aliases named `node_id`/`edge_id`
+    /// (#703), and the stream's schema carries query metadata. `CREATE`/`MERGE`
+    /// are not supported on the streaming path — use
     /// [`execute`](Self::execute) for writes.
     ///
     /// # Errors
@@ -3467,12 +3472,9 @@ fn system_time_micros() -> Result<i64, GfError> {
         .map_err(|_| GfError::Execution("system clock exceeds microsecond range".into()))
 }
 
-/// Internal surrogate identity columns that must never appear in public results
-/// (UUIDs are the public identity — see #719).
-const SURROGATE_COLUMNS: [&str; 2] = ["node_id", "edge_id"];
-
 /// Shape an [`ExecutionResult`] for the public API:
-/// - drop the surrogate `node_id`/`edge_id` columns (UUIDs are public identity),
+/// - drop internal surrogate identity columns (provenance-marked / UInt64 scan
+///   keys — never by final field name alone; see #703 / #719),
 /// - attach query metadata (`graphforge.query_id`, `ontology_version`,
 ///   `ir_version`, `ontology_mode`) to the schema.
 fn shape_result(
@@ -3505,24 +3507,33 @@ fn shape_result(
     })
 }
 
-/// Per-batch output shaper: prunes the surrogate identity columns and re-stamps
-/// the public schema (kept fields + query metadata). Built once from the raw
-/// result schema, then applied to each batch — shared by the collected
+/// Per-batch output shaper: prunes internal surrogate identity columns and
+/// re-stamps the public schema (kept fields + query metadata). Built once from
+/// the raw result schema, then applied to each batch — shared by the collected
 /// ([`shape_result`]) and streaming ([`shape_stream`]) paths.
 struct Shaper {
     /// Source-batch column indices to keep, in output order.
     keep: Vec<usize>,
+    /// True when at least one internal surrogate column was dropped from the
+    /// source schema. Distinguishes surrogate-only projections (#703: preserve
+    /// row count) from already-empty schemas such as void `CALL` unit rows
+    /// (public result must stay empty for TCK Call1).
+    dropped_internal_surrogates: bool,
     /// The pruned, metadata-stamped public schema.
     schema: SchemaRef,
 }
 
 impl Shaper {
     fn new(schema: &SchemaRef, mode: OntologyMode, ontology: Option<&OntologyHandle>) -> Self {
+        let dropped_internal_surrogates = schema
+            .fields()
+            .iter()
+            .any(|f| graphforge_storage::is_internal_surrogate_field(f));
         let keep: Vec<usize> = schema
             .fields()
             .iter()
             .enumerate()
-            .filter(|(_, f)| !SURROGATE_COLUMNS.contains(&f.name().as_str()))
+            .filter(|(_, f)| !graphforge_storage::is_internal_surrogate_field(f))
             .map(|(i, _)| i)
             .collect();
         let kept_fields: Vec<_> = keep.iter().map(|&i| schema.field(i).clone()).collect();
@@ -3532,6 +3543,7 @@ impl Shaper {
         ));
         Self {
             keep,
+            dropped_internal_surrogates,
             schema: new_schema,
         }
     }
@@ -3548,17 +3560,18 @@ impl Shaper {
             )));
         }
         let cols: Vec<_> = self.keep.iter().map(|&i| batch.column(i).clone()).collect();
-        // The projected columns line up with `self.schema` by construction.
+        // Surrogate-only projections must keep their logical row count (#703).
+        // Already-empty schemas (void CALL unit rows) must stay publicly empty
+        // so TCK Call1 "yields no results" scenarios do not regress.
+        let row_count = if self.keep.is_empty() && !self.dropped_internal_surrogates {
+            0
+        } else {
+            batch.num_rows()
+        };
         arrow::record_batch::RecordBatch::try_new_with_options(
             self.schema.clone(),
             cols,
-            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(
-                if self.keep.is_empty() {
-                    0
-                } else {
-                    batch.num_rows()
-                },
-            )),
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(row_count)),
         )
     }
 }
@@ -6573,6 +6586,244 @@ mod tests {
 
         let error = shaper.apply(&batch).expect_err("schema mismatch must fail");
         assert!(matches!(error, arrow::error::ArrowError::SchemaError(_)));
+    }
+
+    #[test]
+    fn shaper_preserves_user_aliases_named_like_surrogates() {
+        use arrow::array::{Int64Array, StringArray, UInt64Array};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use graphforge_storage::{INTERNAL_SURROGATE_META_KEY, is_internal_surrogate_field};
+
+        let marked_node = Field::new("node_id", DataType::UInt64, false).with_metadata(
+            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let marked_edge = Field::new("edge_id", DataType::UInt64, false).with_metadata(
+            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(is_internal_surrogate_field(&marked_node));
+        assert!(is_internal_surrogate_field(&marked_edge));
+
+        let source_schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("node_id", DataType::Int64, false),
+            marked_node,
+            Field::new("edge_id", DataType::FixedSizeBinary(16), false),
+            marked_edge,
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            source_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("Alice")])) as arrow::array::ArrayRef,
+                Arc::new(Int64Array::from(vec![42])),
+                Arc::new(UInt64Array::from(vec![7])),
+                Arc::new(
+                    arrow::array::FixedSizeBinaryArray::try_from_iter(std::iter::once(
+                        [0u8; 16].as_slice(),
+                    ))
+                    .unwrap(),
+                ),
+                Arc::new(UInt64Array::from(vec![9])),
+            ],
+        )
+        .unwrap();
+        let shaper = Shaper::new(&source_schema, OntologyMode::Exploratory, None);
+        let shaped = shaper.apply(&batch).expect("shape user aliases");
+        assert_eq!(
+            shaped
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["name", "node_id", "edge_id"]
+        );
+        assert_eq!(shaped.num_rows(), 1);
+        assert_eq!(
+            shaped
+                .column_by_name("node_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            42
+        );
+    }
+
+    #[test]
+    fn shaper_preserves_row_count_when_only_surrogates_remain() {
+        use arrow::array::UInt64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use graphforge_storage::INTERNAL_SURROGATE_META_KEY;
+
+        let marked = Field::new("node_id", DataType::UInt64, false).with_metadata(
+            [(INTERNAL_SURROGATE_META_KEY.to_owned(), "true".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+        let source_schema = Arc::new(Schema::new(vec![marked]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            source_schema.clone(),
+            vec![Arc::new(UInt64Array::from(vec![1, 2, 3])) as arrow::array::ArrayRef],
+        )
+        .unwrap();
+        let shaper = Shaper::new(&source_schema, OntologyMode::Exploratory, None);
+        let shaped = shaper.apply(&batch).expect("zero-column shape");
+        assert_eq!(shaped.num_columns(), 0);
+        assert_eq!(shaped.num_rows(), 3);
+    }
+
+    #[test]
+    fn shaper_collapses_void_unit_row_without_surrogate_drops() {
+        use arrow::datatypes::Schema;
+
+        // Empty-plan / void CALL execution yields a zero-column unit row. Public
+        // shaping must report an empty result (TCK Call1), not preserve the
+        // internal unit row when no surrogate columns were dropped.
+        let source_schema = Arc::new(Schema::empty());
+        let batch = arrow::record_batch::RecordBatch::try_new_with_options(
+            source_schema.clone(),
+            vec![],
+            &arrow::record_batch::RecordBatchOptions::new().with_row_count(Some(1)),
+        )
+        .unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let shaper = Shaper::new(&source_schema, OntologyMode::Exploratory, None);
+        let shaped = shaper.apply(&batch).expect("void shape");
+        assert_eq!(shaped.num_columns(), 0);
+        assert_eq!(shaped.num_rows(), 0);
+    }
+
+    #[test]
+    fn projected_node_id_and_edge_id_aliases_survive_execute() {
+        let gf = GraphForge::new(None).unwrap();
+
+        let node = gf
+            .execute("RETURN 42 AS node_id")
+            .expect("literal node_id alias");
+        assert_eq!(node.stats.rows_produced, 1);
+        assert_eq!(
+            node.schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["node_id"]
+        );
+        assert_eq!(
+            node.batches[0]
+                .column_by_name("node_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            42
+        );
+
+        let edge = gf
+            .execute("RETURN 42 AS edge_id")
+            .expect("literal edge_id alias");
+        assert_eq!(edge.stats.rows_produced, 1);
+        assert_eq!(
+            edge.schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["edge_id"]
+        );
+        assert_eq!(
+            edge.batches[0]
+                .column_by_name("edge_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            42
+        );
+
+        gf.execute("CREATE (p:Person {name: 'Alice', hub: 107})")
+            .expect("seed person");
+        let mixed = gf
+            .execute(
+                "MATCH (p:Person {name: 'Alice'}) \
+                 RETURN p.name AS name, p.node_uuid AS node_id, p.hub AS edge_id, 1 AS keep",
+            )
+            .expect("mixed reserved-looking aliases");
+        assert_eq!(mixed.stats.rows_produced, 1);
+        assert_eq!(
+            mixed
+                .schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["name", "node_id", "edge_id", "keep"]
+        );
+        assert_eq!(
+            mixed.schema.field_with_name("node_id").unwrap().data_type(),
+            &DataType::FixedSizeBinary(16)
+        );
+        assert_eq!(
+            mixed.batches[0]
+                .column_by_name("name")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "Alice"
+        );
+        assert_eq!(
+            mixed.batches[0]
+                .column_by_name("edge_id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            107
+        );
+        assert_eq!(
+            mixed.batches[0]
+                .column_by_name("keep")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            1
+        );
+
+        // Documented network-analysis style: property projected AS node_id.
+        let hubs = gf
+            .execute(
+                "MATCH (p:Person {name: 'Alice'}) \
+                 RETURN p.hub AS node_id, 1 AS degree",
+            )
+            .expect("property AS node_id");
+        assert_eq!(hubs.stats.rows_produced, 1);
+        assert_eq!(
+            hubs.schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>(),
+            ["node_id", "degree"]
+        );
+
+        // Internal scan surrogates still stay private on ordinary projections.
+        let uuid_only = gf
+            .execute("MATCH (p:Person) RETURN p.node_uuid AS node_uuid")
+            .expect("uuid projection");
+        assert!(uuid_only.schema.column_with_name("node_id").is_none());
+        assert!(uuid_only.schema.column_with_name("edge_id").is_none());
     }
 
     #[test]
