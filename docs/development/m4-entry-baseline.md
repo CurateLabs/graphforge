@@ -99,15 +99,19 @@ Exit reconciliation for the final M4 tree lives in
 
 The lower-level **~8M-node / ~128M-edge** local scale report remains
 `discovery_not_public_facade_baseline` for full measured public-product
-baselines (#345). Public persistence itself is no longer blocked by the legacy
+baselines. Public persistence itself is no longer blocked by the legacy
 1/2 GiB Arrow snapshot envelope: #338 publishes `graph`/`files` generations and
 proves reopen through `GraphForge::new` past 2 GiB validated bytes (see
-[`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json);
-regenerate into `build/` with the ignored oversize test).
+[`file-backed-oversize-evidence.json`](file-backed-oversize-evidence.json))
+and densified 8M/128M public reopen
+([`file-backed-128m-evidence.json`](file-backed-128m-evidence.json)).
+Adjacency construction past the former Arrow boundary is proven by
+[`adjacency-200m-evidence.json`](adjacency-200m-evidence.json).
 
 CI proves the path with a small multi-file fixture
 (`--test file_backed_graph_generation`) and does not download 8M/128M data.
-Optional measured 8M/128M public-facade reruns stay under local resource stops.
+Scale-host densified reruns remain hardware-specific and are not a universal
+product ceiling.
 
 ## Citation for M4 implementation issues
 
