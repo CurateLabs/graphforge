@@ -123,6 +123,13 @@ There are three CI surfaces for concurrency and durability contracts:
 3. **Durability/isolation contract ledger** — `graphforge-durability-isolation/1`
    maps crash phases and anomalies to covered evidence or later M6 owner issues
    (#749–#756). Repository Policy validates the ledger without compiling Rust.
+   Persistent-media faults that process kill cannot express (torn `CURRENT` /
+   manifest bytes, lost root-directory flush power-loss subsets) are modeled by
+   the deterministic filesystem fault oracle in
+   `crates/graphforge-storage/src/project_fault_oracle.rs`. Native POSIX and
+   Windows subprocess failpoint matrices remain required for real API and handle
+   behavior; the oracle is reusable by recovery, delta, compaction, and final
+   certification.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by

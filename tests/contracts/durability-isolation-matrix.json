@@ -197,17 +197,32 @@
       "id": "lost_root_directory_flush_power_loss",
       "failpoints": ["project.after_current_replace"],
       "required_authority": "exact_valid_CURRENT_presented_by_filesystem",
-      "coverage": "deferred",
-      "owner_issue": 749,
-      "rationale": "Host subprocess kill after successful flush is not a complete torn-persistence / lost-directory-flush model."
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_fault_oracle.rs",
+          "symbol": "omitting_root_directory_flush_would_violate_acknowledgement_contract"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_fault_oracle.rs",
+          "symbol": "lost_root_flush_subsets_are_exactly_prior_or_new"
+        }
+      ]
     },
     {
       "id": "torn_current_or_manifest_bytes",
       "failpoints": [],
       "required_authority": "GF_PROJECT_CORRUPT_fail_closed",
-      "coverage": "deferred",
-      "owner_issue": 749,
-      "rationale": "Deterministic persistent-media fault oracle is owned by #749."
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_fault_oracle.rs",
+          "symbol": "torn_current_and_manifest_fail_closed"
+        }
+      ]
     },
     {
       "id": "recovery_on_open_interrupted_transaction",

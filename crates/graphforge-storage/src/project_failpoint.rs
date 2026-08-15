@@ -36,12 +36,10 @@ pub(crate) fn hit(
         std::process::exit(EXIT_CODE);
     }
     if active == format!("{name}.error") {
-        let transaction = transaction_uuid
-            .map(|uuid| uuid.hyphenated().to_string())
-            .unwrap_or_else(|| "none".into());
-        let generation = generation_uuid
-            .map(|uuid| uuid.hyphenated().to_string())
-            .unwrap_or_else(|| "none".into());
+        let transaction =
+            transaction_uuid.map_or_else(|| "none".into(), |uuid| uuid.hyphenated().to_string());
+        let generation =
+            generation_uuid.map_or_else(|| "none".into(), |uuid| uuid.hyphenated().to_string());
         return Err(GfError::Project {
             code: ProjectErrorCode::PublicationFailed,
             message: format!(
