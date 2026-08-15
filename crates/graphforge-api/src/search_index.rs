@@ -361,7 +361,18 @@ impl GraphForge {
             )
         };
         graphforge_storage::adjacency::AdjacencyBuildOptions {
-            chunk_rows: graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS,
+            // Scale chunk with the instance memory budget so large Explicit
+            // policies spill fewer runs (agent-host >200M evidence). Cap keeps
+            // a single flush allocation bounded; `effective()` still shrinks
+            // when the budget is tighter than this starting point.
+            chunk_rows: {
+                const MAX_CHUNK_ROWS: u64 = 16_777_216;
+                let budget_entries = policy
+                    .memory_budget_bytes
+                    .saturating_div(24u64.saturating_mul(4));
+                usize::try_from(budget_entries.clamp(1, MAX_CHUNK_ROWS))
+                    .unwrap_or(graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS)
+            },
             batch_size: policy.batch_size.max(1),
             spill_dir,
             spill_max_bytes: policy.spill_max_bytes,

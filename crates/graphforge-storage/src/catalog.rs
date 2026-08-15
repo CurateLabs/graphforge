@@ -1477,9 +1477,16 @@ impl TableProvider for EdgePropertyTable {
 /// Read just the Arrow schema of a Parquet file, or `None` if it is absent or
 /// unreadable.
 pub(crate) fn discover_parquet_schema(path: &Path) -> Option<SchemaRef> {
-    let file = File::open(path).ok()?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
-    Some(builder.schema().clone())
+    discover_parquet_schema_detailed(path).ok()
+}
+
+/// Like [`discover_parquet_schema`], but preserves the underlying I/O / Parquet
+/// error string for scale-host diagnostics.
+pub(crate) fn discover_parquet_schema_detailed(path: &Path) -> Result<SchemaRef, String> {
+    let file = File::open(path).map_err(|error| format!("open failed: {error}"))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|error| format!("parquet footer/schema failed: {error}"))?;
+    Ok(builder.schema().clone())
 }
 
 #[async_trait]
