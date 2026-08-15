@@ -207,6 +207,9 @@ jobs:
         if: steps.policy-suites.outputs.storage == 'true'
         run: python3 scripts/ci/test-ci-storage-policy.py
 
+      - name: Test CI Gate ruleset enforcement contract
+        run: python3 scripts/ci/test-verify-ci-gate-enforcement.py
+
       - name: Validate GitHub Actions workflows
         run: scripts/check-workflows.sh
 

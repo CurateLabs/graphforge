@@ -43,7 +43,7 @@ Developer guide: [bazel.md](bazel.md).
 | Blacksmith cache disablement or eviction produces a correct cold build without repository changes | Met | #5 | `bazel-cache-perf.py --mode cold-correctness`; observations in perf sample |
 | Across ≥10 paired runs: warm PR p50 ≥30% faster and compute ≥25% lower than Cargo baseline; cold p50 regression ≤10% | Met | #5 (#12 baseline) | [bazel-migration-baseline.md](bazel-migration-baseline.md); `perf-sample.json` `status=complete` + strict `evaluate` |
 | No secret, token, signing material, publish credential, or user data in a cacheable Bazel action or build log | Met | #7, #5, #3 | See [Security and supply chain](#security-and-supply-chain) below; publish OIDC/credentials stay in release workflows outside `Bazel Bootstrap` |
-| Required check context remains `CI Gate`; path-classified skips remain neutral | Met | #6, #4 | [bazel-migration-cutover.md](bazel-migration-cutover.md); `scripts/ci/require-gates.sh` |
+| Required check context remains `CI Gate`; path-classified skips remain neutral | Met | #6, #4, #721 | [bazel-migration-cutover.md](bazel-migration-cutover.md); ruleset **19988544** + [ci-gate-ruleset-19988544.json](bazel-migration-evidence/ci-gate-ruleset-19988544.json); `scripts/ci/verify-ci-gate-enforcement.py`; `scripts/ci/require-gates.sh` |
 | Cargo CI compilation and sticky build disks removed only after same-SHA parity and performance gates | Met | #4 (after #6/#5) | PR sticky `target/` keys retired; Cargo `rust-test` removed; Binding RC / fuzz / release-certification retained as justified |
 | Developer, architecture, build, release, troubleshooting, and cache-observability documentation is current | Met | #3 | [bazel.md](bazel.md) + companions listed there; this evidence map |
 
