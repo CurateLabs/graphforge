@@ -149,9 +149,7 @@ def scan_forbidden_claims(path: Path, label: str) -> None:
             match = pattern.search(stripped)
             if match is None:
                 continue
-            window = " ".join(
-                lines[max(0, index - 1) : min(len(lines), index + 2)]
-            )
+            window = " ".join(lines[max(0, index - 1) : min(len(lines), index + 2)])
             if line_is_denial(stripped) or line_is_denial(window):
                 continue
             raise GateError(
@@ -202,7 +200,7 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
 
     deferred_owners = matrix.get("deferred_owner_issues")
     if not isinstance(deferred_owners, list) or set(deferred_owners) != set(range(749, 757)):
-        raise GateError("deferred_owner_issues must be exactly #749–#756")
+        raise GateError("deferred_owner_issues must be exactly #749-#756")
     deferred_owner_set = set(deferred_owners)
 
     m5 = matrix.get("m5_consumer_issues")
@@ -214,7 +212,7 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     api_doc = require_repo_file(matrix.get("api_doc"), "api_doc")
     reconciled = matrix.get("reconciled_adrs")
     if not isinstance(reconciled, list) or len(reconciled) != 3:
-        raise GateError("reconciled_adrs must list ADR 0013–0015 paths")
+        raise GateError("reconciled_adrs must list ADR 0013-0015 paths")
     for entry in reconciled:
         require_repo_file(entry, "reconciled_adrs")
 
@@ -245,7 +243,10 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     if not isinstance(write_modes, dict) or set(write_modes) != REQUIRED_WRITE_MODES:
         raise GateError(f"write_modes must be exactly {sorted(REQUIRED_WRITE_MODES)}")
     optimistic = write_modes["optimistic_multi_writer"]
-    if optimistic.get("ssi_claimed") is not False or optimistic.get("serializable_claimed") is not False:
+    if (
+        optimistic.get("ssi_claimed") is not False
+        or optimistic.get("serializable_claimed") is not False
+    ):
         raise GateError("optimistic mode must not claim SSI or serializability")
     for mode, body in write_modes.items():
         conflicts = body.get("conflicts")
@@ -268,7 +269,9 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         raise GateError("crash_phases must be an array")
     crash_ids = {item.get("id") for item in crash_phases if isinstance(item, dict)}
     if crash_ids != REQUIRED_CRASH_PHASES:
-        raise GateError(f"crash_phases drift: missing/extra {sorted(REQUIRED_CRASH_PHASES ^ crash_ids)}")
+        raise GateError(
+            f"crash_phases drift: missing/extra {sorted(REQUIRED_CRASH_PHASES ^ crash_ids)}"
+        )
     for phase in crash_phases:
         validate_coverage_cell(phase, f"crash_phases.{phase['id']}", deferred_owner_set)
 
@@ -342,9 +345,7 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     guide_text = m5_guide.read_text(encoding="utf-8")
     for term in ("acknowledge", "linearize", "stage", "publish"):
         if term not in guide_text:
-            raise GateError(
-                f"M5 interchange guide must reuse publication vocabulary term {term!r}"
-            )
+            raise GateError(f"M5 interchange guide must reuse publication vocabulary term {term!r}")
 
     return matrix
 

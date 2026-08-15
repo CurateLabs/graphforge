@@ -58,9 +58,7 @@ class DurabilityIsolationGateTests(unittest.TestCase):
                 GATE.validate_matrix(path)
 
             data = copy.deepcopy(GATE.load_matrix())
-            data["anomalies"] = [
-                item for item in data["anomalies"] if item["id"] != "write_skew"
-            ]
+            data["anomalies"] = [item for item in data["anomalies"] if item["id"] != "write_skew"]
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(GATE.GateError):
                 GATE.validate_matrix(path)
@@ -82,9 +80,7 @@ class DurabilityIsolationGateTests(unittest.TestCase):
                 GATE.validate_matrix(path)
 
             data = copy.deepcopy(GATE.load_matrix())
-            covered = next(
-                item for item in data["crash_phases"] if item["coverage"] == "covered"
-            )
+            covered = next(item for item in data["crash_phases"] if item["coverage"] == "covered")
             covered["evidence"][0]["symbol"] = "missing_symbol_for_gate_test"
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(GATE.GateError):
