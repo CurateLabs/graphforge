@@ -121,6 +121,10 @@ jobs:
           python3 scripts/ci/m4-entry-matrix.py validate
           python3 scripts/ci/test-m4-entry-matrix.py
 
+      - name: Test Rust coverage runner and Cucumber loader policy
+        if: steps.policy-suites.outputs.coverage_ledger == 'true'
+        run: bash scripts/ci/test-coverage-rust.sh
+
       - name: Test Rust coverage ledger failure modes
         if: steps.policy-suites.outputs.coverage_ledger == 'true'
         run: python3 scripts/ci/test-rust-coverage-ledger.py
