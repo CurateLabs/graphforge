@@ -134,6 +134,20 @@ impl GraphForge {
         self.ontology = Some(OntologyHandle::new(runtime));
         self.ontology_document = Some(document);
         self.ontology_mode = requested_mode;
+        // Promote same-named tagged exploratory labels onto ontology TypeIds so
+        // algorithms/query see one logical population after adopt (#702/#725).
+        {
+            let catalog = self
+                .runtime_catalog
+                .lock()
+                .expect("runtime catalog lock")
+                .clone();
+            graphforge_storage::reconcile_runtime_entity_label_ids(
+                &self.dir,
+                self.ontology.as_ref(),
+                &catalog,
+            )?;
+        }
         self.adjacency_provider = std::sync::Arc::new(
             graphforge_exec::PersistentAdjacencyProvider::new(self.dir.clone(), self.ontology_mode),
         );
@@ -615,6 +629,90 @@ mod tests {
                 .unwrap()
                 .canonical_bytes(),
             advisory_descriptor
+        );
+    }
+
+    fn scalar_count(result: &crate::ExecutionResult) -> i64 {
+        use arrow::array::{Array, Int64Array};
+        let batch = &result.batches[0];
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[test]
+    fn adoption_promotes_person_keeps_ghost_runtime_tagged() {
+        use arrow::array::{Array, ListArray, UInt32Array};
+
+        let root = tempfile::tempdir().unwrap();
+        let imports = tempfile::tempdir().unwrap();
+        let input = imports.path().join("input.yaml");
+        std::fs::write(&input, ontology_yaml()).unwrap();
+        let mut graph = GraphForge::new(Some(root.path().to_str().unwrap())).unwrap();
+        graph
+            .execute("CREATE (:Person {name: 'Ada'}), (:Ghost {name: 'Casper'})")
+            .unwrap();
+        let person_before = graph
+            .execute("MATCH (n:Person) RETURN count(n) AS c")
+            .unwrap();
+        let ghost_before = graph
+            .execute("MATCH (n:Ghost) RETURN count(n) AS c")
+            .unwrap();
+        assert_eq!(scalar_count(&person_before), 1);
+        assert_eq!(scalar_count(&ghost_before), 1);
+
+        graph
+            .adopt_ontology(AdoptOntologyRequest {
+                context: context(20),
+                path: input,
+                mode: OntologyMode::Advisory,
+            })
+            .unwrap();
+
+        let person_after = graph
+            .execute("MATCH (n:Person) RETURN count(n) AS c")
+            .unwrap();
+        let ghost_after = graph
+            .execute("MATCH (n:Ghost) RETURN count(n) AS c")
+            .unwrap();
+        assert_eq!(
+            scalar_count(&person_after),
+            1,
+            "same-named exploratory Person must remain visible under ontology Person"
+        );
+        assert_eq!(
+            scalar_count(&ghost_after),
+            1,
+            "unknown Ghost must stay queryable as tagged runtime label"
+        );
+
+        let batches = graphforge_storage::read_nodes(&graph.dir).unwrap();
+        let type_ids = batches[0]
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let mut labels = Vec::new();
+        for row in 0..type_ids.len() {
+            let values_array = type_ids.value(row);
+            let values = values_array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            for i in 0..values.len() {
+                labels.push(values.value(i));
+            }
+        }
+        assert!(
+            labels.contains(&0),
+            "Person must remapped to ontology TypeId 0, got {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|id| graphforge_ir::is_runtime_entity_type_id(graphforge_core::TypeId(*id))),
+            "Ghost must remain tagged, got {labels:?}"
         );
     }
 

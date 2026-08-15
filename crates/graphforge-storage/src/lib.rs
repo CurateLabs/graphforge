@@ -183,7 +183,8 @@ pub mod runtime_entity_labels;
 pub use runtime_entity_labels::{
     RUNTIME_ENTITY_LABEL_ENCODING_VERSION, RuntimeEntityLabelReconcile,
     has_runtime_entity_label_encoding_marker, reconcile_runtime_entity_label_ids,
-    runtime_entity_plan_id_is_disjoint_from_ontology, write_runtime_entity_label_encoding_marker,
+    runtime_entity_plan_id_is_disjoint_from_ontology, validate_runtime_entity_label_ids,
+    write_runtime_entity_label_encoding_marker,
 };
 
 pub mod parquet_scan;

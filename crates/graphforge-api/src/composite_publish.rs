@@ -519,7 +519,7 @@ fn reconcile_workspace_to(
     *graph
         .runtime_catalog
         .lock()
-        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir);
+        .expect("runtime catalog poisoned") = crate::load_runtime_catalog(&graph.dir)?;
     *graph
         .current_generation_uuid
         .lock()

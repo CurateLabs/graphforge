@@ -4,6 +4,11 @@
 //! with [`graphforge_ir::RUNTIME_ENTITY_TYPE_TAG`]. Legacy projects may still
 //! store untagged catalog IDs that collide with ontology entity type IDs.
 //!
+//! When an ontology is present, tagged runtime labels whose catalog **name**
+//! matches an ontology entity type are remapped to that ontology [`TypeId`] so
+//! progressive adoption keeps one logical population visible under the adopted
+//! label. True unknowns stay tagged.
+//!
 //! Projects that write or successfully migrate under the tagged encoding record
 //! [`RUNTIME_ENTITY_LABEL_ENCODING_VERSION`] in
 //! `topology/runtime_entity_label_encoding.json`. Unmarked projects that still
@@ -38,7 +43,7 @@ const ENCODING_FILE: &str = "runtime_entity_label_encoding.json";
 /// plan encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RuntimeEntityLabelReconcile {
-    /// Node label membership values rewritten from untagged → tagged.
+    /// Node label membership values rewritten (untagged→tagged or tagged→ontology).
     pub remapped_label_values: u64,
     /// Distinct colliding raw IDs present in the runtime catalog ∩ ontology.
     pub colliding_raw_ids: usize,
@@ -135,6 +140,83 @@ fn migratable_raw_ids(
         .collect()
 }
 
+/// Remap tagged runtime entity plan IDs → ontology TypeIds when catalog names match.
+///
+/// Fail closed when two distinct runtime names would claim the same ontology id
+/// (ambiguous identity).
+fn adoption_name_remaps(
+    ontology: Option<&OntologyHandle>,
+    runtime_catalog: &RuntimeCatalog,
+) -> Result<HashMap<u32, u32>, GfError> {
+    let Some(handle) = ontology else {
+        return Ok(HashMap::new());
+    };
+    let mut remap = HashMap::new();
+    let mut ontology_targets: HashMap<u32, String> = HashMap::new();
+    for (runtime_id, name) in runtime_catalog.entity_type_names_with_ids() {
+        let Some(TypeId(ontology_id)) = handle.entity_type_id(name) else {
+            continue;
+        };
+        let tagged = runtime_entity_type_id(runtime_id).0;
+        if let Some(prior) = ontology_targets.get(&ontology_id)
+            && prior != name
+        {
+            return Err(storage_err(format!(
+                "ambiguous runtime→ontology entity label remapping: \
+                 {prior:?} and {name:?} both claim ontology type id {ontology_id}"
+            )));
+        }
+        ontology_targets.insert(ontology_id, name.to_owned());
+        if tagged != ontology_id {
+            remap.insert(tagged, ontology_id);
+        }
+    }
+    Ok(remap)
+}
+
+fn collect_label_hits(
+    batches: &[RecordBatch],
+    candidates: &HashSet<u32>,
+) -> Result<HashSet<u32>, GfError> {
+    let mut hits = HashSet::new();
+    if candidates.is_empty() {
+        return Ok(hits);
+    }
+    for batch in batches {
+        let type_ids = batch
+            .column_by_name("type_ids")
+            .and_then(|column| column.as_any().downcast_ref::<ListArray>())
+            .ok_or_else(|| storage_err("node topology missing type_ids"))?;
+        let primary = batch
+            .column_by_name("type_id")
+            .and_then(|column| column.as_any().downcast_ref::<UInt32Array>())
+            .ok_or_else(|| storage_err("node topology missing type_id"))?;
+        for row in 0..batch.num_rows() {
+            if !primary.is_null(row) {
+                let value = primary.value(row);
+                if candidates.contains(&value) {
+                    hits.insert(value);
+                }
+            }
+            if type_ids.is_null(row) {
+                continue;
+            }
+            let values_array = type_ids.value(row);
+            let values = values_array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .ok_or_else(|| storage_err("node type_ids are not UInt32"))?;
+            for index in 0..values.len() {
+                let value = values.value(index);
+                if candidates.contains(&value) {
+                    hits.insert(value);
+                }
+            }
+        }
+    }
+    Ok(hits)
+}
+
 fn collect_untagged_label_hits(
     batches: &[RecordBatch],
     candidates: &HashSet<u32>,
@@ -179,12 +261,9 @@ fn collect_untagged_label_hits(
 }
 
 fn remap_label_value(value: u32, remap: &HashMap<u32, u32>) -> (u32, bool) {
-    if is_runtime_entity_type_id(TypeId(value)) {
-        return (value, false);
-    }
     match remap.get(&value) {
-        Some(&tagged) => (tagged, true),
-        None => (value, false),
+        Some(&mapped) if mapped != value => (mapped, true),
+        _ => (value, false),
     }
 }
 
@@ -262,22 +341,64 @@ fn remap_batches(
     Ok((out, remapped))
 }
 
-/// Detect colliding legacy entity IDs and migrate unambiguous untagged runtime
-/// entity label values to the tagged plan encoding.
-///
-/// # Errors
-/// Returns [`GfError::Storage`] when an unmarked project still stores untagged
-/// node labels whose raw IDs are claimed by both ontology and runtime domains.
-/// Also returns storage errors for I/O / Arrow failures while rewriting.
-pub fn reconcile_runtime_entity_label_ids(
+fn merge_remaps(
+    legacy: HashMap<u32, u32>,
+    adoption: HashMap<u32, u32>,
+) -> Result<HashMap<u32, u32>, GfError> {
+    let mut remap = legacy;
+    for (from, to) in adoption {
+        if let Some(existing) = remap.get(&from)
+            && *existing != to
+        {
+            return Err(storage_err(format!(
+                "ambiguous runtime entity label remap for id {from}: {existing} vs {to}"
+            )));
+        }
+        remap.insert(from, to);
+    }
+    Ok(remap)
+}
+
+fn read_topology_batches(dir: &Path) -> Result<Vec<RecordBatch>, GfError> {
+    normalize_topology_nodes(read_nodes(dir).map_err(pq_err)?).map_err(pq_err)
+}
+
+fn reconcile_inner(
     dir: &Path,
     ontology: Option<&OntologyHandle>,
     runtime_catalog: &RuntimeCatalog,
+    rewrite: bool,
 ) -> Result<RuntimeEntityLabelReconcile, GfError> {
     let marked = has_runtime_entity_label_encoding_marker(dir);
     let ontology_ids = ontology_entity_ids(ontology);
     let collisions = colliding_raw_ids(runtime_catalog, &ontology_ids);
-    let batches = normalize_topology_nodes(read_nodes(dir).map_err(pq_err)?).map_err(pq_err)?;
+    let adoption = adoption_name_remaps(ontology, runtime_catalog)?;
+    let legacy = if marked && ontology.is_none() {
+        // Session ontologies are not durable. A marked project may still store
+        // untagged ontology TypeIds (e.g. Person = 0) beside tagged runtime
+        // labels; remapping those untagged values without the ontology handle
+        // would silently reclassify them as runtime entities.
+        HashMap::new()
+    } else {
+        migratable_raw_ids(runtime_catalog, &ontology_ids)
+    };
+    let remap = merge_remaps(legacy, adoption)?;
+
+    // Nothing to validate or rewrite: skip topology I/O entirely. This keeps
+    // non-parquet legacy snapshot placeholders out of the migration path and
+    // avoids a full nodes.parquet scan on already-reconciled projects.
+    if collisions.is_empty() && remap.is_empty() {
+        if rewrite && !marked {
+            write_runtime_entity_label_encoding_marker(dir)?;
+        }
+        return Ok(RuntimeEntityLabelReconcile {
+            remapped_label_values: 0,
+            colliding_raw_ids: 0,
+            encoding_marked: marked || rewrite,
+        });
+    }
+
+    let batches = read_topology_batches(dir)?;
 
     if !marked {
         let collision_hits = collect_untagged_label_hits(&batches, &collisions)?;
@@ -292,20 +413,17 @@ pub fn reconcile_runtime_entity_label_ids(
         }
     }
 
-    let remap = if marked && ontology.is_none() {
-        // Session ontologies are not durable. A marked project may still store
-        // untagged ontology TypeIds (e.g. Person = 0) beside tagged runtime
-        // labels; remapping those untagged values without the ontology handle
-        // would silently reclassify them as runtime entities.
-        HashMap::new()
-    } else {
-        migratable_raw_ids(runtime_catalog, &ontology_ids)
-    };
     let mut remapped_label_values = 0u64;
     if !remap.is_empty() {
         let candidate_keys = remap.keys().copied().collect::<HashSet<_>>();
-        let needs_migration = !collect_untagged_label_hits(&batches, &candidate_keys)?.is_empty();
+        let needs_migration = !collect_label_hits(&batches, &candidate_keys)?.is_empty();
         if needs_migration {
+            if !rewrite {
+                return Err(storage_err(
+                    "runtime entity label IDs require writable reconciliation; \
+                     read-only open cannot rewrite topology",
+                ));
+            }
             let (rewritten, remapped) = remap_batches(batches, &remap)?;
             remapped_label_values = remapped;
             if remapped_label_values > 0 {
@@ -319,15 +437,48 @@ pub fn reconcile_runtime_entity_label_ids(
         }
     }
 
-    if !marked {
+    if rewrite && !marked {
         write_runtime_entity_label_encoding_marker(dir)?;
     }
 
     Ok(RuntimeEntityLabelReconcile {
         remapped_label_values,
         colliding_raw_ids: collisions.len(),
-        encoding_marked: true,
+        encoding_marked: marked || rewrite,
     })
+}
+
+/// Detect colliding legacy entity IDs and migrate unambiguous untagged runtime
+/// entity label values to the tagged plan encoding. When an ontology is present,
+/// also promote same-named tagged runtime labels onto ontology TypeIds.
+///
+/// # Errors
+/// Returns [`GfError::Storage`] when an unmarked project still stores untagged
+/// node labels whose raw IDs are claimed by both ontology and runtime domains,
+/// when adoption remapping is ambiguous, or on I/O / Arrow failures while rewriting.
+pub fn reconcile_runtime_entity_label_ids(
+    dir: &Path,
+    ontology: Option<&OntologyHandle>,
+    runtime_catalog: &RuntimeCatalog,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(dir, ontology, runtime_catalog, true)
+}
+
+/// Validate runtime entity label encoding without rewriting topology.
+///
+/// Used for read-only opens: fail closed on unmarked collisions or pending
+/// remaps that would require a writable migration.
+///
+/// # Errors
+/// Same collision / ambiguity failures as
+/// [`reconcile_runtime_entity_label_ids`], plus rejection when a rewrite is
+/// required.
+pub fn validate_runtime_entity_label_ids(
+    dir: &Path,
+    ontology: Option<&OntologyHandle>,
+    runtime_catalog: &RuntimeCatalog,
+) -> Result<RuntimeEntityLabelReconcile, GfError> {
+    reconcile_inner(dir, ontology, runtime_catalog, false)
 }
 
 /// Pure helper: tagged runtime entity plan IDs stay disjoint from ontology IDs.
@@ -513,5 +664,74 @@ migrations: []
         let row0 = type_ids.value(0);
         let row0 = row0.as_any().downcast_ref::<UInt32Array>().unwrap();
         assert_eq!(row0.value(0), 0, "Person-shaped untagged zero must survive");
+    }
+
+    #[test]
+    fn adoption_promotes_same_named_tagged_person_keeps_ghost_tagged() {
+        let dir = TempDir::new().unwrap();
+        let mut catalog = RuntimeCatalog::new();
+        let person_runtime = catalog.intern_label("Person");
+        let ghost_runtime = catalog.intern_label("Ghost");
+        let person_tagged = runtime_entity_type_id(person_runtime).0;
+        let ghost_tagged = runtime_entity_type_id(ghost_runtime).0;
+        write_nodes(dir.path(), &[&[person_tagged], &[ghost_tagged]]);
+        write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
+        let handle = person_ontology();
+        assert_eq!(handle.entity_type_id("Person"), Some(TypeId(0)));
+
+        let outcome = reconcile_runtime_entity_label_ids(dir.path(), Some(&handle), &catalog)
+            .expect("adoption remap");
+        assert!(outcome.remapped_label_values >= 2);
+
+        let batches = read_nodes(dir.path()).unwrap();
+        let type_ids = batches[0]
+            .column_by_name("type_ids")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let row0_array = type_ids.value(0);
+        let row0 = row0_array.as_any().downcast_ref::<UInt32Array>().unwrap();
+        let row1_array = type_ids.value(1);
+        let row1 = row1_array.as_any().downcast_ref::<UInt32Array>().unwrap();
+        assert_eq!(row0.value(0), 0, "Person must promote to ontology TypeId");
+        assert_eq!(
+            row1.value(0),
+            ghost_tagged,
+            "Ghost must remain tagged runtime"
+        );
+    }
+
+    #[test]
+    fn marked_empty_remap_skips_non_parquet_placeholder() {
+        let dir = TempDir::new().unwrap();
+        let topology = dir.path().join("topology");
+        std::fs::create_dir_all(&topology).unwrap();
+        std::fs::write(topology.join("nodes.parquet"), b"legacy").unwrap();
+        write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
+        let catalog = RuntimeCatalog::new();
+
+        let outcome = reconcile_runtime_entity_label_ids(dir.path(), None, &catalog)
+            .expect("legacy placeholder must not be read as parquet");
+        assert_eq!(outcome.remapped_label_values, 0);
+        assert!(outcome.encoding_marked);
+    }
+
+    #[test]
+    fn validate_read_only_rejects_pending_adoption_remap() {
+        let dir = TempDir::new().unwrap();
+        let mut catalog = RuntimeCatalog::new();
+        let person_runtime = catalog.intern_label("Person");
+        let person_tagged = runtime_entity_type_id(person_runtime).0;
+        write_nodes(dir.path(), &[&[person_tagged]]);
+        write_runtime_entity_label_encoding_marker(dir.path()).unwrap();
+        let handle = person_ontology();
+
+        let err = validate_runtime_entity_label_ids(dir.path(), Some(&handle), &catalog)
+            .expect_err("read-only must reject pending rewrite");
+        assert!(
+            err.to_string().contains("read-only open cannot rewrite"),
+            "{err}"
+        );
     }
 }
