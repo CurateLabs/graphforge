@@ -1,0 +1,55 @@
+{
+  "fixture": {
+    "edge_count": 128000000,
+    "generator": "graphwriter-nodes + streamed-exploratory-parquet-edges + single-file-backed-publish",
+    "node_count": 8000000,
+    "rel_type": "LINK"
+  },
+  "git_sha": "a46f739a4ec3c5e419a1c3a98423eaa0a7963220",
+  "hardware": {
+    "arch": "aarch64",
+    "os": "macos"
+  },
+  "issue": 338,
+  "open": {
+    "api": "GraphForge::new",
+    "bytes_copied": 1071101345,
+    "bytes_validated": 1071101345,
+    "files_copied": 3,
+    "files_opened_in_place": 0,
+    "files_validated": 3,
+    "strategy": "PrivateMaterialize"
+  },
+  "pass": true,
+  "publication": {
+    "inventory_total_byte_length": 1071101345,
+    "path": "capture_graph_files + stage_project_generation_with_graph_tree (one generation)"
+  },
+  "query": {
+    "cypher": "MATCH (a)-[r:LINK]->(b) RETURN b LIMIT 1000",
+    "rows_produced": 1000
+  },
+  "resources": {
+    "disk_used_bytes": 1071105809,
+    "honest_limits": [
+      "Densified synthetic fixture for the measured 8M-node/128M-edge class.",
+      "Writable GraphForge::new materializes file-by-file (PrivateMaterialize).",
+      "Timing/RSS are hardware-specific; no universal graph-size ceiling is claimed."
+    ],
+    "peak_rss_bytes_after_query": 11563171840,
+    "peak_rss_bytes_after_write": 518193152,
+    "peak_rss_bytes_before_open": 519700480,
+    "peak_rss_bytes_before_write": 10469376,
+    "peak_rss_note": "Linux: VmHWM from /proc/self/status. macOS: sampled RSS via ps at each checkpoint (not kernel high-water)."
+  },
+  "schema": "graphforge-file-backed-128m-evidence/1",
+  "schema_version": "1",
+  "strategy": "densified_8m_128m_public_facade",
+  "timing": {
+    "one_hop_limit_wall_time_s": 35.055328167,
+    "publish_wall_time_s": 2.574922417,
+    "reopen_wall_time_s": 1.440500916,
+    "total_wall_time_s": 92.794792,
+    "workspace_write_wall_time_s": 53.7240405
+  }
+}

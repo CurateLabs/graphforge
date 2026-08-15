@@ -1,24 +1,19 @@
-//! Manual/scheduled >200M-edge public adjacency build evidence (#336).
+//! Manual/scheduled densified 8M-node / 128M-edge public file-backed evidence (#338).
 //!
-//! Structural CI seams already prove the streaming/spill builder. This ignored
-//! harness produces densified outcome evidence with a **single** file-backed
-//! project publication (no per-chunk generation amplification):
+//! Structural CI already covers multi-file reopen and sparse >2 GiB padding.
+//! This ignored harness proves the measured discovery-class fixture through the
+//! supported public path:
 //!
-//! 1. Stream nodes via GraphWriter, then stream `_exploratory.parquet` edges.
-//! 2. Capture once via `capture_graph_files` + `stage_project_generation_with_graph_tree`.
-//! 3. `GraphForge::new` → `index_adjacency` → node_count + one-hop LIMIT.
+//! 1. Stream nodes + `_exploratory.parquet` edges into a workspace.
+//! 2. Single `capture_graph_files` + `stage_project_generation_with_graph_tree`.
+//! 3. Close → `GraphForge::new` → one-hop LIMIT query.
 //!
 //! ```bash
-//! CARGO_TARGET_DIR=/tmp/cargo-336-adj \
-//! GF_ADJACENCY_SCALE_EVIDENCE_OUT=docs/development/adjacency-200m-evidence.json \
-//! GF_ADJACENCY_SCALE_WORK=build/adjacency-200m-work \
-//!   make bench-adjacency-200m
+//! CARGO_TARGET_DIR=/tmp/cargo-338-fb \
+//! GF_FILE_BACKED_SCALE_EVIDENCE_OUT=docs/development/file-backed-128m-evidence.json \
+//! GF_FILE_BACKED_SCALE_WORK=build/file-backed-128m-work \
+//!   make bench-file-backed-128m
 //! ```
-//!
-//! Optional knobs:
-//! - `GF_ADJACENCY_SCALE_EDGES` (default `201000000`, must be >200_000_000)
-//! - `GF_ADJACENCY_SCALE_NODES` (default `1048576`)
-//! - `GF_ADJACENCY_SCALE_ALLOW_SMALL=1` (local diagnostics below 200M only)
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -30,15 +25,13 @@ use arrow::array::{
     ArrayRef, FixedSizeBinaryArray, StringArray, TimestampMicrosecondArray, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
-use graphforge_api::{
-    ExecutionResourcePolicy, GraphForge, GraphForgeOptions, ResourcePolicyMode, SpillPolicy,
-};
+use graphforge_api::{GraphForge, GraphForgeOptions};
 use graphforge_core::OntologyMode;
 use graphforge_core::uuid::Uuid;
 use graphforge_storage::{
-    EXPLORATORY_EDGE_SCHEMA, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphWriter,
-    ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome, capture_graph_files,
-    empty_workspace_participants, resolve_project_generation,
+    EXPLORATORY_EDGE_SCHEMA, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphFilesOpenStrategy,
+    GraphWriter, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+    capture_graph_files, empty_workspace_participants, resolve_project_generation,
     stage_project_generation_with_graph_tree,
 };
 use parquet::arrow::ArrowWriter;
@@ -47,43 +40,39 @@ use parquet::file::properties::{WriterProperties, WriterVersion};
 use serde_json::json;
 use tempfile::TempDir;
 
-const EVIDENCE_SCHEMA: &str = "graphforge-adjacency-200m-evidence/1";
-const DEFAULT_EDGES: u64 = 201_000_000;
-const DEFAULT_NODES: u64 = 1_048_576;
-const MIN_EDGES: u64 = 200_000_001;
+const EVIDENCE_SCHEMA: &str = "graphforge-file-backed-128m-evidence/1";
+const DEFAULT_NODES: u64 = 8_000_000;
+const DEFAULT_EDGES: u64 = 128_000_000;
+const MIN_NODES: u64 = 8_000_000;
+const MIN_EDGES: u64 = 128_000_000;
 const BATCH_ROWS: usize = 262_144;
 const REL_TYPE: &str = "LINK";
-const MEMORY_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-const CHUNK_ROWS: usize = 16_777_216;
-const POLICY_BATCH_SIZE: usize = 65_536;
 const BUILD_TS: i64 = 1_700_000_000_000_000;
 
 #[test]
 fn evidence_schema_constant_is_stable() {
-    assert_eq!(EVIDENCE_SCHEMA, "graphforge-adjacency-200m-evidence/1");
-    assert!(MIN_EDGES > 200_000_000);
+    assert_eq!(EVIDENCE_SCHEMA, "graphforge-file-backed-128m-evidence/1");
+    assert!(MIN_NODES >= 8_000_000);
+    assert!(MIN_EDGES >= 128_000_000);
 }
 
 #[test]
-#[ignore = "manual/scheduled >200M public adjacency build; make bench-adjacency-200m"]
-fn adjacency_over_200m_public_build_emits_evidence() {
-    let edge_count = env_u64("GF_ADJACENCY_SCALE_EDGES", DEFAULT_EDGES);
-    let allow_small = std::env::var_os("GF_ADJACENCY_SCALE_ALLOW_SMALL").is_some();
+#[ignore = "manual/scheduled 8M/128M public file-backed reopen; make bench-file-backed-128m"]
+fn densified_8m_128m_public_reopen_emits_evidence() {
+    let edge_count = env_u64("GF_FILE_BACKED_SCALE_EDGES", DEFAULT_EDGES);
+    let node_count = env_u64("GF_FILE_BACKED_SCALE_NODES", DEFAULT_NODES).max(2);
+    let allow_small = std::env::var_os("GF_FILE_BACKED_SCALE_ALLOW_SMALL").is_some();
     assert!(
-        allow_small || edge_count >= MIN_EDGES,
-        "GF_ADJACENCY_SCALE_EDGES={edge_count} must be >= {MIN_EDGES} (or set GF_ADJACENCY_SCALE_ALLOW_SMALL=1 for local diagnostics)"
+        allow_small || (edge_count >= MIN_EDGES && node_count >= MIN_NODES),
+        "need >= {MIN_NODES} nodes and >= {MIN_EDGES} edges (or GF_FILE_BACKED_SCALE_ALLOW_SMALL=1)"
     );
-    let node_count = env_u64("GF_ADJACENCY_SCALE_NODES", DEFAULT_NODES).max(2);
-    let out = env_path("GF_ADJACENCY_SCALE_EVIDENCE_OUT")
-        .unwrap_or_else(|| PathBuf::from("build/adjacency-200m-evidence.json"));
-    let work_root = env_path("GF_ADJACENCY_SCALE_WORK");
+    let out = env_path("GF_FILE_BACKED_SCALE_EVIDENCE_OUT")
+        .unwrap_or_else(|| PathBuf::from("build/file-backed-128m-evidence.json"));
+    let work_root = env_path("GF_FILE_BACKED_SCALE_WORK");
     let (_keep, roots) = work_dirs(work_root.as_deref());
-    let spill_dir = roots.root.join(".adjacency-spill");
     let tmp_dir = roots.root.join("tmp");
     fs::create_dir_all(&tmp_dir).expect("tmp dir");
-    // Keep PrivateMaterialize + adjacency stage on the dedicated work volume so
-    // /var/folders pressure and cross-agent build/ wipes cannot race the run.
-    // SAFETY: single-threaded ignored harness; no other threads yet.
+    // SAFETY: single-threaded ignored harness; pin materialize beside the work root.
     unsafe {
         std::env::set_var("TMPDIR", &tmp_dir);
     }
@@ -98,130 +87,99 @@ fn adjacency_over_200m_public_build_emits_evidence() {
         .join("topology/edges")
         .join("_exploratory.parquet");
     let edges_bytes = fs::metadata(&edges_parquet)
-        .unwrap_or_else(|e| {
-            panic!(
-                "workspace edge parquet metadata {}: {e}",
-                edges_parquet.display()
-            )
-        })
+        .expect("workspace edge parquet")
         .len();
-    eprintln!("workspace write complete in {write_s:.1}s; exploratory parquet bytes={edges_bytes}");
-    assert!(
-        edges_bytes > edge_count,
-        "exploratory parquet too small ({edges_bytes} bytes) for {edge_count} edges — write/capture race?"
-    );
+    eprintln!("workspace write complete in {write_s:.1}s; exploratory bytes={edges_bytes}");
 
     let publish_started = Instant::now();
     let inventory_bytes = publish_file_backed_once(&roots.project, &roots.workspace);
     let publish_s = publish_started.elapsed().as_secs_f64();
-    eprintln!(
-        "single file-backed publish complete in {publish_s:.1}s; inventory bytes={inventory_bytes}"
-    );
-    assert!(
-        inventory_bytes >= edges_bytes,
-        "published inventory ({inventory_bytes}) smaller than workspace parquet ({edges_bytes})"
-    );
-
-    let open_opts = GraphForgeOptions {
-        resource: scale_policy(&spill_dir),
-        ..GraphForgeOptions::default()
-    };
+    eprintln!("publish complete in {publish_s:.1}s; inventory bytes={inventory_bytes}");
 
     let reopen_started = Instant::now();
+    let rss_before_open = peak_rss_bytes();
     let graph = GraphForge::new_with_options(
-        Some(roots.project.to_str().expect("utf8 project path")),
-        open_opts,
+        Some(roots.project.to_str().expect("utf8")),
+        GraphForgeOptions::default(),
     )
-    .unwrap_or_else(|e| panic!("reopen GraphForge for public adjacency build: {e:?}"));
+    .unwrap_or_else(|e| panic!("GraphForge::new reopen: {e:?}"));
     let reopen_s = reopen_started.elapsed().as_secs_f64();
     let open_evidence = graph.graph_open_evidence().clone();
     eprintln!(
-        "reopened GraphForge in {reopen_s:.1}s strategy={:?} bytes_validated={} bytes_copied={}; starting index_adjacency",
+        "reopened in {reopen_s:.1}s strategy={:?} validated={} copied={}",
         open_evidence.strategy, open_evidence.bytes_validated, open_evidence.bytes_copied
     );
-    assert_eq!(
-        open_evidence.bytes_validated, inventory_bytes,
-        "reopen validated bytes must match published inventory"
+    assert_ne!(
+        open_evidence.strategy,
+        GraphFilesOpenStrategy::LegacySnapshotHydrate
     );
-
-    let build_started = Instant::now();
-    let rss_before_build = peak_rss_bytes();
-    let inspection = graph
-        .index_adjacency()
-        .unwrap_or_else(|e| panic!("public index_adjacency must succeed beyond 200M edges: {e:?}"));
-    let build_s = build_started.elapsed().as_secs_f64();
-    eprintln!("index_adjacency complete in {build_s:.1}s");
-    let rss_after_build = peak_rss_bytes();
-
-    let inspect = graph
-        .inspect_adjacency()
-        .expect("inspect adjacency after build");
-    assert_eq!(inspect.state, inspection.state);
-    let fingerprint = inspect
-        .artifact_fingerprint
-        .clone()
-        .expect("fresh adjacency must expose artifact fingerprint");
+    assert_eq!(open_evidence.bytes_validated, inventory_bytes);
 
     let query_started = Instant::now();
     let hop = graph
         .execute("MATCH (a)-[r:LINK]->(b) RETURN b LIMIT 1000")
-        .unwrap_or_else(|e| panic!("one-hop LIMIT after adjacency build: {e:?}"));
+        .unwrap_or_else(|e| panic!("one-hop after densified reopen: {e:?}"));
     let hop_rows = hop.batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-    assert!(
-        hop_rows > 0 && hop_rows <= 1_000,
-        "one-hop LIMIT rows={hop_rows}"
-    );
+    assert!(hop_rows > 0 && hop_rows <= 1_000, "rows={hop_rows}");
     let query_s = query_started.elapsed().as_secs_f64();
+    let rss_after_query = peak_rss_bytes();
     drop(graph);
 
     let disk_used_bytes = directory_bytes(&roots.project).unwrap_or(0);
     let evidence = json!({
         "schema": EVIDENCE_SCHEMA,
         "schema_version": "1",
-        "issue": 336,
+        "issue": 338,
         "pass": true,
         "git_sha": git_head_sha(),
+        "strategy": "densified_8m_128m_public_facade",
         "fixture": {
             "node_count": node_count,
             "edge_count": edge_count,
             "rel_type": REL_TYPE,
             "generator": "graphwriter-nodes + streamed-exploratory-parquet-edges + single-file-backed-publish",
         },
-        "build": {
-            "public_api": "GraphForge::index_adjacency",
-            "publish_path": "capture_graph_files + stage_project_generation_with_graph_tree (one generation)",
-            "chunk_rows": CHUNK_ROWS,
-            "batch_size": POLICY_BATCH_SIZE,
-            "memory_budget_bytes": MEMORY_BUDGET_BYTES,
-            "spill_enabled": true,
+        "publication": {
+            "path": "capture_graph_files + stage_project_generation_with_graph_tree (one generation)",
+            "inventory_total_byte_length": inventory_bytes,
         },
-        "outcomes": {
-            "adjacency_state": format!("{:?}", inspection.state),
-            "artifact_fingerprint": fingerprint,
-            "source_topology_generation": inspection.source_topology_generation,
-            "one_hop_limit_rows": hop_rows,
+        "open": {
+            "api": "GraphForge::new",
+            "strategy": format!("{:?}", open_evidence.strategy),
+            "files_validated": open_evidence.files_validated,
+            "bytes_validated": open_evidence.bytes_validated,
+            "files_copied": open_evidence.files_copied,
+            "bytes_copied": open_evidence.bytes_copied,
+            "files_opened_in_place": open_evidence.files_opened_in_place,
+        },
+        "query": {
+            "cypher": "MATCH (a)-[r:LINK]->(b) RETURN b LIMIT 1000",
+            "rows_produced": hop_rows,
         },
         "resources": {
             "disk_used_bytes": disk_used_bytes,
             "peak_rss_bytes_before_write": rss_before_write,
             "peak_rss_bytes_after_write": rss_after_write,
-            "peak_rss_bytes_before_build": rss_before_build,
-            "peak_rss_bytes_after_build": rss_after_build,
+            "peak_rss_bytes_before_open": rss_before_open,
+            "peak_rss_bytes_after_query": rss_after_query,
             "peak_rss_note": "Linux: VmHWM from /proc/self/status. macOS: sampled RSS via ps at each checkpoint (not kernel high-water).",
+            "honest_limits": [
+                "Densified synthetic fixture for the measured 8M-node/128M-edge class.",
+                "Writable GraphForge::new materializes file-by-file (PrivateMaterialize).",
+                "Timing/RSS are hardware-specific; no universal graph-size ceiling is claimed.",
+            ],
         },
         "timing": {
             "workspace_write_wall_time_s": write_s,
             "publish_wall_time_s": publish_s,
             "reopen_wall_time_s": reopen_s,
-            "adjacency_build_wall_time_s": build_s,
             "one_hop_limit_wall_time_s": query_s,
-            "total_wall_time_s": write_s + publish_s + reopen_s + build_s + query_s,
+            "total_wall_time_s": write_s + publish_s + reopen_s + query_s,
         },
         "hardware": {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
         },
-        "notes": "Densified >200M-edge public adjacency build for #336. Single file-backed generation avoids publish_bulk per-chunk amplification. Timing is hardware-specific; no universal graph-size ceiling is claimed.",
     });
 
     if let Some(parent) = out.parent() {
@@ -229,18 +187,17 @@ fn adjacency_over_200m_public_build_emits_evidence() {
     }
     fs::write(
         &out,
-        serde_json::to_vec_pretty(&evidence).expect("serialize evidence"),
+        serde_json::to_vec_pretty(&evidence).expect("serialize"),
     )
-    .unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+    .expect("write evidence");
     eprintln!(
-        "wrote {} fingerprint={} edges={} disk_bytes={}",
+        "wrote {} edges={} nodes={} disk_bytes={}",
         out.display(),
-        evidence["outcomes"]["artifact_fingerprint"],
         edge_count,
+        node_count,
         disk_used_bytes
     );
     assert_eq!(evidence["pass"], true);
-    assert!(evidence["fixture"]["edge_count"].as_u64().unwrap() >= MIN_EDGES || allow_small);
 }
 
 struct WorkRoots {
@@ -256,9 +213,9 @@ fn work_dirs(work: Option<&Path>) -> (Option<TempDir>, WorkRoots) {
         let workspace = root.join("workspace");
         for path in [&project, &workspace] {
             if path.exists() {
-                fs::remove_dir_all(path).expect("clean prior path");
+                fs::remove_dir_all(path).expect("clean prior");
             }
-            fs::create_dir_all(path).expect("create path");
+            fs::create_dir_all(path).expect("create");
         }
         (
             None,
@@ -269,11 +226,11 @@ fn work_dirs(work: Option<&Path>) -> (Option<TempDir>, WorkRoots) {
             },
         )
     } else {
-        let tmp = TempDir::new().expect("temp work");
+        let tmp = TempDir::new().expect("temp");
         let project = tmp.path().join("project");
         let workspace = tmp.path().join("workspace");
-        fs::create_dir(&project).expect("project dir");
-        fs::create_dir(&workspace).expect("workspace dir");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&workspace).unwrap();
         (
             Some(tmp),
             WorkRoots {
@@ -286,50 +243,52 @@ fn work_dirs(work: Option<&Path>) -> (Option<TempDir>, WorkRoots) {
 }
 
 fn write_workspace(workspace: &Path, node_count: u64, edge_count: u64) {
-    // Exploratory so streamed edges land in `_exploratory.parquet`, matching the
-    // default GraphForge open mode (typed LINK.parquet is invisible to Expand).
+    // Do not retain O(node_count) UUID/id vectors — regenerate deterministic
+    // uuidv7(index+1) / sequential ids when streaming edges (8M-class host RSS).
     let mut writer = GraphWriter::open_at(workspace, OntologyMode::Exploratory, BUILD_TS)
         .expect("open GraphWriter");
-    let mut node_uuids = Vec::with_capacity(usize::try_from(node_count).expect("nodes fit"));
-    let mut node_ids = Vec::with_capacity(usize::try_from(node_count).expect("nodes fit"));
+    let mut first_id = None;
     for index in 0..node_count {
         let uuid = uuidv7(u128::from(index) + 1);
         let id = writer
             .create_node(uuid, graphforge_core::TypeId(0))
             .unwrap_or_else(|e| panic!("create_node {index}: {e}"));
-        node_uuids.push(uuid);
-        node_ids.push(id);
-        if (index + 1) % 100_000 == 0 || index + 1 == node_count {
+        if first_id.is_none() {
+            first_id = Some(id);
+        } else {
+            assert_eq!(
+                id,
+                first_id.unwrap() + index,
+                "GraphWriter node ids must stay sequential for densified edge streaming"
+            );
+        }
+        if (index + 1) % 500_000 == 0 || index + 1 == node_count {
             writer.flush().expect("flush nodes");
             eprintln!("created nodes {}/{}", index + 1, node_count);
         }
     }
     writer.flush().expect("final node flush");
-
+    let u0 = uuidv7(1);
+    let u1 = uuidv7(2);
     writer
-        .create_edge(
-            uuidv7(0xE000_0000_0000u128),
-            REL_TYPE,
-            &node_uuids[0],
-            &node_uuids[1 % node_uuids.len()],
-        )
+        .create_edge(uuidv7(0xE000_0000_0000u128), REL_TYPE, &u0, &u1)
         .expect("seed edge");
     writer.flush().expect("seed edge flush");
     drop(writer);
-
-    stream_exploratory_edge_parquet(workspace, &node_uuids, &node_ids, edge_count);
+    let base_id = first_id.expect("at least one node");
+    stream_exploratory_edge_parquet(workspace, node_count, base_id, edge_count);
 }
 
 fn stream_exploratory_edge_parquet(
     workspace: &Path,
-    node_uuids: &[Uuid],
-    node_ids: &[u64],
+    node_count: u64,
+    base_node_id: u64,
     edge_count: u64,
 ) {
     let edges_path = workspace
         .join("topology/edges")
         .join("_exploratory.parquet");
-    fs::create_dir_all(edges_path.parent().expect("edges parent")).expect("edges dir");
+    fs::create_dir_all(edges_path.parent().unwrap()).unwrap();
     let schema = EXPLORATORY_EDGE_SCHEMA.clone();
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
@@ -339,8 +298,6 @@ fn stream_exploratory_edge_parquet(
     let file = File::create(&edges_path).expect("create edge parquet");
     let mut parquet =
         ArrowWriter::try_new(file, schema.clone(), Some(props)).expect("arrow writer");
-
-    let node_len = node_uuids.len() as u64;
     let mut written = 0u64;
     while written < edge_count {
         let take = ((edge_count - written) as usize).min(BATCH_ROWS);
@@ -353,14 +310,14 @@ fn stream_exploratory_edge_parquet(
         let mut rel_type_name = Vec::with_capacity(take);
         for local in 0..take {
             let ordinal = written + local as u64;
-            let src = (ordinal % node_len) as usize;
-            let dst = ((ordinal + 1) % node_len) as usize;
+            let src = ordinal % node_count;
+            let dst = (ordinal + 1) % node_count;
             edge_uuid.push(uuidv7(0xE000_0000_0000u128 + u128::from(ordinal) + 1));
-            src_uuid.push(node_uuids[src]);
-            dst_uuid.push(node_uuids[dst]);
+            src_uuid.push(uuidv7(u128::from(src) + 1));
+            dst_uuid.push(uuidv7(u128::from(dst) + 1));
             edge_id.push(ordinal + 1);
-            src_id.push(node_ids[src]);
-            dst_id.push(node_ids[dst]);
+            src_id.push(base_node_id + src);
+            dst_id.push(base_node_id + dst);
             rel_type_name.push(REL_TYPE.to_owned());
         }
         let batch = RecordBatch::try_new(
@@ -368,15 +325,15 @@ fn stream_exploratory_edge_parquet(
             vec![
                 Arc::new(
                     FixedSizeBinaryArray::try_from_iter(edge_uuid.iter().map(Uuid::as_bytes))
-                        .expect("edge_uuid"),
+                        .unwrap(),
                 ) as ArrayRef,
                 Arc::new(
                     FixedSizeBinaryArray::try_from_iter(src_uuid.iter().map(Uuid::as_bytes))
-                        .expect("src_uuid"),
+                        .unwrap(),
                 ) as ArrayRef,
                 Arc::new(
                     FixedSizeBinaryArray::try_from_iter(dst_uuid.iter().map(Uuid::as_bytes))
-                        .expect("dst_uuid"),
+                        .unwrap(),
                 ) as ArrayRef,
                 Arc::new(UInt64Array::from(edge_id)) as ArrayRef,
                 Arc::new(UInt64Array::from(src_id)) as ArrayRef,
@@ -386,45 +343,36 @@ fn stream_exploratory_edge_parquet(
                 Arc::new(StringArray::from(rel_type_name)) as ArrayRef,
             ],
         )
-        .expect("edge batch");
-        parquet.write(&batch).expect("write edge batch");
+        .unwrap();
+        parquet.write(&batch).unwrap();
         written += take as u64;
-        if written % (BATCH_ROWS as u64 * 8) == 0 || written == edge_count {
+        if written % (BATCH_ROWS as u64 * 16) == 0 || written == edge_count {
             eprintln!("wrote edge rows {written}/{edge_count}");
         }
     }
-    parquet.close().expect("close edge parquet");
-    let edge_bytes = fs::metadata(&edges_path)
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    parquet.close().unwrap();
     eprintln!(
         "edge parquet ready path={} bytes={}",
         edges_path.display(),
-        edge_bytes
+        fs::metadata(&edges_path).map(|m| m.len()).unwrap_or(0)
     );
 }
 
 fn publish_file_backed_once(project: &Path, workspace: &Path) -> u64 {
     {
-        let _seed = GraphForge::new(Some(project.to_str().expect("utf8 project path")))
-            .expect("seed empty GraphForge project");
+        let _seed = GraphForge::new(Some(project.to_str().unwrap())).expect("seed project");
     }
     let seed = resolve_project_generation(project).expect("seed generation");
     let expected_parent = seed.generation_uuid();
     drop(seed);
     let (inventory, files_participant) =
         capture_graph_files(workspace).expect("capture graph files");
-    assert!(
-        inventory.file_count >= 2,
-        "workspace must contain topology files"
-    );
     let inventory_bytes = inventory.total_byte_length;
-    let mut participants = empty_workspace_participants().expect("workspace participants");
+    let mut participants = empty_workspace_participants().unwrap();
     participants.insert(0, files_participant);
-    let generation_uuid = Uuid::now_v7();
     let request = ProjectGenerationRequest {
         transaction_uuid: Uuid::now_v7(),
-        generation_uuid,
+        generation_uuid: Uuid::now_v7(),
         capabilities: vec![
             ProjectCapability {
                 capability_id: GRAPH_CAPABILITY_ID.into(),
@@ -438,10 +386,9 @@ fn publish_file_backed_once(project: &Path, workspace: &Path) -> u64 {
         participants,
     };
     let ProjectStageOutcome::Staged(staged) =
-        stage_project_generation_with_graph_tree(project, &request, Some(workspace))
-            .expect("stage file-backed generation")
+        stage_project_generation_with_graph_tree(project, &request, Some(workspace)).unwrap()
     else {
-        panic!("publication unexpectedly replayed");
+        panic!("unexpected replay");
     };
     staged
         .validate(
@@ -451,34 +398,10 @@ fn publish_file_backed_once(project: &Path, workspace: &Path) -> u64 {
                 Ok(())
             },
         )
-        .expect("validate staged generation")
+        .unwrap()
         .publish()
-        .expect("publish staged generation");
+        .unwrap();
     inventory_bytes
-}
-
-fn scale_policy(spill_dir: &Path) -> ExecutionResourcePolicy {
-    let spill_dir = if spill_dir.is_absolute() {
-        spill_dir.to_path_buf()
-    } else {
-        std::env::current_dir().expect("cwd").join(spill_dir)
-    };
-    fs::create_dir_all(&spill_dir).expect("spill dir");
-    ExecutionResourcePolicy {
-        mode: ResourcePolicyMode::Explicit,
-        tokio_worker_threads: Some(2),
-        target_partitions: Some(2),
-        io_concurrency: Some(2),
-        compute_threads: Some(2),
-        batch_size: Some(POLICY_BATCH_SIZE),
-        memory_budget_bytes: Some(MEMORY_BUDGET_BYTES),
-        spill: SpillPolicy {
-            enabled: true,
-            directory: Some(spill_dir),
-            max_bytes: Some(128 * 1024 * 1024 * 1024),
-        },
-        max_concurrent_heavy_queries: Some(1),
-    }
 }
 
 fn env_u64(key: &str, default: u64) -> u64 {

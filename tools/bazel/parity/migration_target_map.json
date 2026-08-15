@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 97,
+  "cargo_target_count": 98,
   "targets": [
     {
       "package": "graphforge-api",
@@ -282,6 +282,16 @@
       "bazel_label": "//crates/graphforge-api:file_backed_graph_generation",
       "exception_id": null,
       "notes": "#338"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "file_backed_scale_evidence",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/file_backed_scale_evidence.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:file_backed_scale_evidence",
+      "exception_id": null,
+      "notes": "#338 densified 8M/128M public reopen evidence harness"
     },
     {
       "package": "graphforge-api",

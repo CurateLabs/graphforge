@@ -84,7 +84,7 @@ policy; thread configurations `1`/`2`/`4`/`8`/automatic are executed under
 | Path | What it stores | Open behavior | Size guidance |
 |---|---|---|---|
 | Legacy `graph`/`snapshot` (Arrow IPC) | Whole workspace bytes in one participant | Hydrates every file into a private workspace | Historical envelope: 1 GiB/file and 2 GiB total. Still readable. Do not raise these constants. |
-| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Public reopen past the legacy 2 GiB snapshot envelope is proven by oversize file-backed evidence (#338 / #345). Full 8M/128M densified public-facade reruns remain optional scale-host measurements under local resource stops — not a CI product max. CI uses a small multi-file fixture. |
+| File-backed `graph`/`files` + generation `graph/` tree | Canonical inventory participant; graph files remain on disk | Validates inventory; read-only opens may pin the generation tree; writers materialize file-by-file | No universal GiB ceiling. Public reopen past the legacy 2 GiB snapshot envelope is proven by oversize file-backed evidence (#338 / #345). Densified 8M-node/128M-edge public reopen is proven by [`file-backed-128m-evidence.json`](../development/file-backed-128m-evidence.json) via `make bench-file-backed-128m` (#338). Hardware-specific; not a CI product max. CI uses a small multi-file fixture. |
 
 New publications use the file-backed path. Portable interchange currently returns a
 structured unsupported error for file-backed trees (copy the project directory

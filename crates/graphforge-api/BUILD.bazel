@@ -197,6 +197,16 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "file_backed_scale_evidence",
+    srcs = ["tests/file_backed_scale_evidence.rs"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "file_backed_graph_generation",
     srcs = [
         "tests/file_backed_graph_generation.rs",
@@ -472,6 +482,7 @@ test_suite(
         ":facade_methods",
         ":fixed_hop_limit",
         ":file_backed_graph_generation",
+        ":file_backed_scale_evidence",
         ":adjacency_scale_evidence",
         ":m4_entry_baseline",
         ":graph_internal_metadata",
