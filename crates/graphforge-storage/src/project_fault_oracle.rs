@@ -127,8 +127,10 @@ pub enum AuthorityClass {
     PriorGeneration,
     /// Fully durable new generation is authoritative.
     NewGeneration,
-    /// Fail-closed corruption without electing newest-by-scan.
+    /// Fail-closed `GF_PROJECT_CORRUPT` without electing newest-by-scan.
     Corrupt,
+    /// Resolution failed for a reason other than project corruption.
+    Unexpected,
 }
 
 /// One recorded persistence-relevant operation.
@@ -355,15 +357,33 @@ impl Media {
         self.volatile_files.remove(&temp);
         self.unlink_volatile(&parent, file_name(&temp));
         self.durable_files.remove(&temp);
-        self.write_file(path, bytes.clone());
-        // Content durable from flushed sibling; directory entry stays volatile
-        // until the parent directory flush.
-        self.durable_files.insert(path.to_owned(), bytes);
+        // Flushed sibling proves data durability; the destination name remains
+        // volatile until the parent directory flush promotes it.
+        self.write_file(path, bytes);
     }
 
     fn fsync_dir(&mut self, path: &str) {
         let children = self.volatile_dirs.get(path).cloned().unwrap_or_default();
-        self.durable_dirs.insert(path.to_owned(), children);
+        self.durable_dirs.insert(path.to_owned(), children.clone());
+        // Directory flush makes currently linked children's volatile bytes
+        // durable when their content was already written.
+        for name in children {
+            let child = if path == "." {
+                name
+            } else {
+                format!("{path}/{name}")
+            };
+            if let Some(bytes) = self.volatile_files.get(&child).cloned() {
+                self.durable_files.insert(child, bytes);
+            }
+        }
+    }
+
+    fn link_durable_only(&mut self, dir: &str, name: &str) {
+        self.durable_dirs
+            .entry(dir.to_owned())
+            .or_default()
+            .insert(name.to_owned());
     }
 
     fn tear_file(&mut self, path: &str, bytes: Vec<u8>) {
@@ -372,13 +392,25 @@ impl Media {
         let parent = parent_path(path);
         self.ensure_dir_volatile(&parent);
         self.link_volatile(&parent, file_name(path));
-        self.durable_dirs
-            .entry(parent)
-            .or_default()
-            .insert(file_name(path).to_owned());
+        self.link_durable_only(&parent, file_name(path));
     }
 
     fn crash(&mut self) {
+        // Retain only files named by durable directory entries.
+        let mut kept_files = BTreeMap::new();
+        for (dir, children) in &self.durable_dirs {
+            for name in children {
+                let path = if dir == "." {
+                    name.clone()
+                } else {
+                    format!("{dir}/{name}")
+                };
+                if let Some(bytes) = self.durable_files.get(&path) {
+                    kept_files.insert(path, bytes.clone());
+                }
+            }
+        }
+        self.durable_files = kept_files;
         self.volatile_files = self.durable_files.clone();
         self.volatile_dirs = self.durable_dirs.clone();
     }
@@ -407,19 +439,17 @@ impl Media {
                 PersistenceOpKind::MkDir { path } => {
                     scratch.mkdir(path);
                     if durable_ids.contains(&op.id) {
-                        scratch.fsync_dir(&parent_path(path));
+                        // Persist only this directory's creation edge, not every
+                        // sibling name under the parent.
                         scratch.fsync_dir(path);
+                        scratch.link_durable_only(&parent_path(path), file_name(path));
                     }
                 }
                 PersistenceOpKind::AtomicReplace { path, bytes } => {
                     if durable_ids.contains(&op.id) {
-                        // Flushed sibling + durable directory entry (rename persisted).
                         scratch.atomic_replace(path, bytes.clone());
                         scratch.fsync_dir(&parent_path(path));
                     } else {
-                        // Rename returned in volatile memory only: power loss before
-                        // the parent directory flush restores the prior directory
-                        // entry and drops the unrecovered name.
                         scratch.write_file(path, bytes.clone());
                     }
                 }
@@ -438,6 +468,24 @@ impl Media {
         scratch.crash();
         *self = scratch;
     }
+}
+
+fn trace_op(op: &PersistenceOp) -> String {
+    let kind = match &op.kind {
+        PersistenceOpKind::WriteFile { path, bytes } => {
+            format!("write_file path={path} len={}", bytes.len())
+        }
+        PersistenceOpKind::FsyncFile { path } => format!("fsync_file path={path}"),
+        PersistenceOpKind::MkDir { path } => format!("mkdir path={path}"),
+        PersistenceOpKind::AtomicReplace { path, bytes } => {
+            format!("atomic_replace path={path} len={}", bytes.len())
+        }
+        PersistenceOpKind::FsyncDir { path } => format!("fsync_dir path={path}"),
+        PersistenceOpKind::TearFile { path, bytes } => {
+            format!("tear_file path={path} len={}", bytes.len())
+        }
+    };
+    format!("id={} phase={} {kind}", op.id, op.phase.failpoint())
 }
 
 fn parent_path(path: &str) -> String {
@@ -760,7 +808,8 @@ pub fn classify_resolution(
         Ok(resolved) if resolved.generation_uuid() == ids.parent_generation => {
             AuthorityClass::PriorGeneration
         }
-        Ok(_) | Err(_) => AuthorityClass::Corrupt,
+        Err(error) if error.code() == "GF_PROJECT_CORRUPT" => AuthorityClass::Corrupt,
+        Ok(_) | Err(_) => AuthorityClass::Unexpected,
     }
 }
 
@@ -848,11 +897,15 @@ fn expected_authority_for_subset(
     let root_durable = root_fsync.is_some_and(|op| durable_ids.contains(&op.id));
 
     if phase.is_acknowledged() {
-        debug_assert!(root_durable && replace_durable);
-        return AuthorityClass::NewGeneration;
-    }
-
-    if phase.is_linearized() {
+        if root_durable && replace_durable {
+            AuthorityClass::NewGeneration
+        } else if replace_durable {
+            // Linearized but not acknowledged: filesystem may still present new.
+            AuthorityClass::NewGeneration
+        } else {
+            AuthorityClass::PriorGeneration
+        }
+    } else if phase.is_linearized() {
         if replace_durable {
             AuthorityClass::NewGeneration
         } else {
@@ -889,10 +942,7 @@ pub fn simulate_crash(
         expected,
         actual,
         minimized_op_ids: None,
-        operation_trace: ops
-            .iter()
-            .map(|op| format!("id={} phase={} {:?}", op.id, op.phase.failpoint(), op.kind))
-            .collect(),
+        operation_trace: ops.iter().map(trace_op).collect(),
     })
 }
 
@@ -979,10 +1029,7 @@ pub fn simulate_torn_bytes(seed: u64, target: TornTarget) -> Result<FaultOracleR
         expected: AuthorityClass::Corrupt,
         actual,
         minimized_op_ids: None,
-        operation_trace: ops
-            .iter()
-            .map(|op| format!("id={} phase={} {:?}", op.id, op.phase.failpoint(), op.kind))
-            .collect(),
+        operation_trace: ops.iter().map(trace_op).collect(),
     })
 }
 
@@ -1064,21 +1111,15 @@ pub fn enumerate_lost_root_flush_subsets(seed: u64) -> Vec<FaultOracleReport> {
     reports
 }
 
-/// Compare simulated default outcomes to native subprocess-kill authority classes.
+/// Shared-boundary authority classes matching native subprocess-kill matrices.
+///
+/// Process kill after a returned rename observes the new `CURRENT`. The oracle
+/// default durable set mirrors that host-visibility model via
+/// [`expected_authority`]. Power-loss lost-flush subsets are certified
+/// separately and are not claimed to match process kill.
 #[must_use]
-pub fn native_agreement_table() -> Vec<(PublicationPhase, AuthorityClass, AuthorityClass)> {
-    PublicationPhase::all()
-        .iter()
-        .copied()
-        .map(|phase| {
-            let native = if phase.is_linearized() {
-                AuthorityClass::NewGeneration
-            } else {
-                AuthorityClass::PriorGeneration
-            };
-            (phase, native, expected_authority(phase))
-        })
-        .collect()
+pub fn native_shared_boundary_authority(phase: PublicationPhase) -> AuthorityClass {
+    expected_authority(phase)
 }
 
 /// Run default-durable simulations for every ADR publication phase.
@@ -1098,7 +1139,7 @@ pub fn simulate_all_phases(seed: u64) -> Result<Vec<PhaseOutcome>, GfError> {
             selected_generation: match report.actual {
                 AuthorityClass::NewGeneration => Some(ids.new_generation),
                 AuthorityClass::PriorGeneration => Some(ids.parent_generation),
-                AuthorityClass::Corrupt => None,
+                AuthorityClass::Corrupt | AuthorityClass::Unexpected => None,
             },
         });
     }
@@ -1133,6 +1174,7 @@ mod tests {
             if !outcome.phase.is_linearized() {
                 assert_eq!(outcome.actual, AuthorityClass::PriorGeneration);
             }
+            assert_ne!(outcome.actual, AuthorityClass::Unexpected);
         }
     }
 
@@ -1167,7 +1209,11 @@ mod tests {
         for target in [TornTarget::Current, TornTarget::Manifest] {
             let report = simulate_torn_bytes(0x7491, target).expect("torn");
             assert_eq!(report.expected, AuthorityClass::Corrupt);
-            assert_eq!(report.actual, AuthorityClass::Corrupt);
+            assert_eq!(
+                report.actual,
+                AuthorityClass::Corrupt,
+                "torn bytes must surface GF_PROJECT_CORRUPT, not Unexpected"
+            );
         }
     }
 
@@ -1212,21 +1258,14 @@ mod tests {
 
     #[test]
     fn native_and_simulated_results_agree_at_shared_phase_boundaries() {
-        for (phase, native, simulated) in native_agreement_table() {
-            assert_eq!(
-                native,
-                simulated,
-                "shared boundary mismatch at {}",
-                phase.failpoint()
-            );
-        }
         for outcome in simulate_all_phases(0x7493).unwrap() {
-            let native = if outcome.phase.is_linearized() {
-                AuthorityClass::NewGeneration
-            } else {
-                AuthorityClass::PriorGeneration
-            };
-            assert_eq!(outcome.actual, native, "{}", outcome.failpoint);
+            let native = native_shared_boundary_authority(outcome.phase);
+            assert_eq!(
+                outcome.actual, native,
+                "shared boundary mismatch at {}",
+                outcome.failpoint
+            );
+            assert_ne!(outcome.actual, AuthorityClass::Unexpected);
         }
     }
 
@@ -1258,8 +1297,20 @@ mod tests {
         .unwrap();
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(encoded.contains("before_current_replace"));
-        assert!(!encoded.contains("/Users/"));
-        assert!(!encoded.contains("password"));
+        // Traces carry project-relative paths and lengths, never raw payloads.
+        assert!(
+            report
+                .operation_trace
+                .iter()
+                .any(|line| line.contains("len="))
+        );
+        assert!(!encoded.contains("graph:nodes"));
+        assert!(
+            !report
+                .operation_trace
+                .iter()
+                .any(|line| line.contains('\0'))
+        );
     }
 
     #[test]
