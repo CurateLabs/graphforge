@@ -210,8 +210,9 @@ Short form:
 3. Also builds first-party libs, CLI, resources, release bins, binding smokes.
 4. Fail-closed: drift, ledger, release-platform inventory, cache policy, strict
    perf `evaluate` against the checked-in sample.
-5. Required aggregate remains exactly **`CI Gate`**; path-classified skips stay
-   neutral.
+5. Required aggregate remains exactly **`CI Gate`** (live ruleset **19988544**;
+   verify with `python3 scripts/ci/verify-ci-gate-enforcement.py --check-live`);
+   path-classified skips stay neutral.
 6. PR Cargo sticky `target/` disks are retired; do not re-add without a
    documented rollback.
 
