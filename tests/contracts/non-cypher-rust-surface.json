@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "489b4ddff8728689a29476d5b4927eb6b0b1fb83e7b7be8988f923ea8d09b83d",
+  "public_method_digest": "61136f545830f1ac67d7f8c643e40d83e8b2a5b0b0bea77bde3e0724d03064fa",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -44,6 +44,7 @@
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
       "GraphForge.graph_open_evidence": "introspection",
+      "GraphForge.project_open_recovery": "introspection",
       "GraphForge.resource_diagnostics": "introspection",
       "GraphForge.resource_policy": "introspection",
       "GraphForge.export_portable": "designed-only",
@@ -55,6 +56,7 @@
       "RepositoryContext.validate_infra_target": "release-tested",
       "CheckpointView.checkpoint_uuid": "introspection",
       "CheckpointView.graph_open_evidence": "introspection",
+      "CheckpointView.project_open_recovery": "introspection",
       "CheckpointView.generation_uuid": "introspection",
       "OpenRouterProviderSession.new": "introspection",
       "CheckpointView.add_edge": "designed-only",
