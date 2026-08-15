@@ -5,13 +5,17 @@
 **Build target:** v0.5.0
 
 **Related:** ADR 0012 (domain ownership), ADR 0018 (acknowledged durability and
-isolation)
+isolation), ADR 0019 (authoritative graph delta journal)
 
 The public acknowledgement boundary, isolation honesty rules, and anomaly
 coverage matrix are frozen by
-[ADR 0018](0018-acknowledged-durability-isolation.md). This ADR remains the
-normative publication protocol; semantic changes to acknowledgement or recovery
-authority require an amending ADR rather than silent edits here.
+[ADR 0018](0018-acknowledged-durability-isolation.md). Authoritative small-write
+graph delta runs inside a generation-owned `graph/` tree are frozen by
+[ADR 0019](0019-authoritative-graph-delta-journal.md); they remain ordinary
+inventory-listed generation bytes and never replace `CURRENT` as commit
+authority. This ADR remains the normative publication protocol; semantic
+changes to acknowledgement or recovery authority require an amending ADR rather
+than silent edits here.
 
 ## Context
 
@@ -80,12 +84,19 @@ project/
 │   └── <generation-uuid>/
 │       ├── lease.lock
 │       ├── manifest.json
+│       ├── graph/              # optional generation-owned graph workspace
+│       │   └── deltas/         # optional authoritative delta runs (ADR 0019)
 │       └── participants/
 │           └── <capability-id>/<record-family-id>.<parquet|arrow|json>
 ├── cache/                  # derived, fingerprint-keyed, never authoritative
 └── trash/
     └── <generation-uuid>/
 ```
+
+When a generation includes authoritative graph delta runs, those runs live only
+under that generation's `graph/deltas/` tree and are listed in the `graph`/`files`
+inventory with exact digests. Replay reconstructs graph state from the verified
+base plus ordered runs; recovery never elects a run by directory scan (ADR 0019).
 
 `FORMAT` is immutable and contains exactly:
 

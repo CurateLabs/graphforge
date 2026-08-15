@@ -129,7 +129,9 @@ There are three CI surfaces for concurrency and durability contracts:
    `crates/graphforge-storage/src/project_fault_oracle.rs`. Native POSIX and
    Windows subprocess failpoint matrices remain required for real API and handle
    behavior; the oracle is reusable by recovery, delta, compaction, and final
-   certification.
+   certification. Authoritative graph delta runs (#752 / ADR 0019) publish only
+   through the same `CURRENT` contract; they never recover by scanning newest
+   logs.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by

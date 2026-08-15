@@ -133,6 +133,7 @@ const PAGES = [
   'adr/0016-repository-integration-and-deployment-configuration.md',
   'adr/0017-unified-release-version.md',
   'adr/0018-acknowledged-durability-isolation.md',
+  'adr/0019-authoritative-graph-delta-journal.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',

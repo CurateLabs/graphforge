@@ -34,6 +34,19 @@ pub use graph_files::{
     stage_graph_tree, verify_graph_tree,
 };
 
+pub mod graph_delta_journal;
+pub use graph_delta_journal::{
+    GRAPH_DELTA_DIR, GRAPH_DELTA_RECORD_VERSION, GRAPH_DELTA_RUN_EXTENSION,
+    GRAPH_DELTA_RUN_FORMAT_VERSION, GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind,
+    GraphDeltaPayload, GraphDeltaPublicationReceipt, GraphDeltaPublishRequest,
+    GraphDeltaReplayEvidence, GraphDeltaRun, MAX_GRAPH_DELTA_PAYLOAD_BYTES,
+    MAX_GRAPH_DELTA_RECORDS_PER_RUN, MAX_GRAPH_DELTA_REPLAY_MEMORY_BYTES,
+    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, ReconstructedGraphState, apply_delta_runs,
+    decode_delta_run, delta_run_relative_path, encode_delta_run, list_delta_runs,
+    load_verified_delta_runs, publish_graph_delta, reconstruct_graph_state,
+    stage_base_graph_workspace,
+};
+
 pub mod project_generation;
 pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,

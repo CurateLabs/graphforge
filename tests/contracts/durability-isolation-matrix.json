@@ -414,9 +414,35 @@
     },
     {
       "id": "durable_delta_journal",
-      "coverage": "deferred",
-      "owner_issue": 752,
-      "rationale": "Authoritative small-write deltas are #752."
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_journal.rs",
+          "symbol": "small_write_preserves_unchanged_parquet_and_reopen_replays"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_journal.rs",
+          "symbol": "torn_truncated_reordered_and_checksum_invalid_fail_closed"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_journal.rs",
+          "symbol": "exact_retry_transaction_is_idempotent_and_conflict_is_typed"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/graph_delta_journal.rs",
+          "symbol": "crash_oracle_before_and_after_ack_matches_frozen_contract"
+        },
+        {
+          "kind": "doc",
+          "path": "docs/adr/0019-authoritative-graph-delta-journal.md",
+          "symbol": "sole commit"
+        }
+      ],
+      "rationale": "Authoritative small-write deltas with CURRENT-bound publication, fail-closed runs, and oracle-aligned crash phases."
     },
     {
       "id": "bounded_retention_orphan_gc",

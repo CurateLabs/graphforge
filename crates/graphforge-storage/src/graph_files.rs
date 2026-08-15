@@ -46,6 +46,8 @@ pub enum GraphFileRole {
     Properties,
     /// Derived adjacency CSR and related index files.
     Index,
+    /// Authoritative graph delta journal run (ADR 0019).
+    Delta,
     /// Runtime catalog and similar control files.
     Catalog,
     /// Any other regular workspace file.
@@ -374,8 +376,9 @@ pub fn infer_role(relative: &Path) -> GraphFileRole {
             let first = first.to_string_lossy();
             match first.as_ref() {
                 "topology" => GraphFileRole::Topology,
-                "properties" => GraphFileRole::Properties,
+                "properties" | "edge_properties" => GraphFileRole::Properties,
                 "indexes" | "index" => GraphFileRole::Index,
+                "deltas" => GraphFileRole::Delta,
                 "runtime_catalog.parquet" => GraphFileRole::Catalog,
                 _ if first.starts_with("runtime_catalog") => GraphFileRole::Catalog,
                 _ => GraphFileRole::Other,
