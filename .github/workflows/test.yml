@@ -575,9 +575,19 @@ jobs:
         shell: bash
         run: |
           mkdir -p ~/.graphforge/datasets
-          curl --fail --location \
-            --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
-            https://snap.stanford.edu/data/facebook_combined.txt.gz
+          # snap.stanford.edu is intermittently reset by peer from CI egress;
+          # retry with backoff so an unrelated fixture fetch does not fail the gate.
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+              --connect-timeout 30 --max-time 120 \
+              --output ~/.graphforge/datasets/snap-ego-facebook.txt.gz \
+              https://snap.stanford.edu/data/facebook_combined.txt.gz; then
+              break
+            fi
+            echo "SNAP download attempt ${attempt} failed; sleeping before retry"
+            sleep $((attempt * 5))
+          done
+          test -s ~/.graphforge/datasets/snap-ego-facebook.txt.gz
 
       - name: Run Python unit, integration, and BDD tests
         shell: bash
