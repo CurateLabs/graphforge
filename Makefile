@@ -1,4 +1,4 @@
-.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-g500-scale20 bench-adjacency-200m m4-entry-matrix-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
+.PHONY: help lint format type-check security workflow-lint license-check third-party-notices third-party-notices-check cargo-deny-licenses test pre-push pre-push-clean pre-push-preflight pre-push-fast bazel-test clean test-tck docstring-coverage test-network benchmark test-perf test-perf-xs test-perf-slow test-perf-large coverage coverage-rust coverage-python coverage-node coverage-quick coverage-report coverage-diff coverage-strict check-coverage check-coverage-rust check-coverage-python check-coverage-node check-patch-coverage test-durations test-analytics docs-serve docs-build docs-clean cargo-build codspeed-build codspeed-run bench-traversal bench-fixed-hop-limit bench-fixed-hop-livejournal bench-m4-entry bench-g500-scale20 bench-adjacency-200m bench-file-backed-128m m4-entry-matrix-check native-consumers release-load-matrix-check release-load-matrix bulk-construction-conformance-check bulk-construction-conformance cargo-test cargo-check cargo-clippy cargo-fmt cargo-fmt-check clean-builds clean-builds-all pnpm-install pnpm-build pnpm-test-bdd install build release-version-check package-license-verify publish-dry-run publish-dry-run-npm publish-dry-run-docs publish-dry-run-python publish-dry-run-cargo record-release-artifacts clean-env-verify-check clean-env-verify-preflight clean-env-verify
 
 help:  ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -304,6 +304,13 @@ bench-adjacency-200m:  ## >200M-edge public adjacency build evidence (#336; igno
 	GF_ADJACENCY_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/adjacency-200m-evidence.json" \
 	GF_ADJACENCY_SCALE_WORK="$(CURDIR)/build/adjacency-200m-work" \
 	cargo test -p graphforge-api --release --test adjacency_scale_evidence adjacency_over_200m_public_build_emits_evidence -- --ignored --nocapture --test-threads=1
+
+bench-file-backed-128m:  ## 8M/128M densified public file-backed reopen evidence (#338; ignored, scale-host)
+	GF_FILE_BACKED_SCALE_EVIDENCE_OUT="$(CURDIR)/docs/development/file-backed-128m-evidence.json" \
+	GF_FILE_BACKED_SCALE_WORK="$(CURDIR)/build/file-backed-128m-work" \
+	cargo test -p graphforge-api --release --test file_backed_scale_evidence densified_8m_128m_public_reopen_emits_evidence -- --ignored --nocapture --test-threads=1
+
+
 
 native-consumers:  ## Run audited algorithm/search consumers against the installed native wheel
 	python scripts/ci/run-native-consumers.py

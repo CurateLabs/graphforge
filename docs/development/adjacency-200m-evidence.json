@@ -1,7 +1,7 @@
 {
   "build": {
     "batch_size": 65536,
-    "chunk_rows": 8388608,
+    "chunk_rows": 16777216,
     "memory_budget_bytes": 4294967296,
     "public_api": "GraphForge::index_adjacency",
     "publish_path": "capture_graph_files + stage_project_generation_with_graph_tree (one generation)",
@@ -19,7 +19,7 @@
     "os": "macos"
   },
   "issue": 336,
-  "notes": "Densified >200M-edge public adjacency build for #336. Single file-backed generation avoids publish_bulk per-chunk amplification. Timing is hardware-specific; no universal graph-size ceiling is claimed.",
+  "notes": "Densified >200M-edge public adjacency build for #336. Single file-backed generation avoids publish_bulk per-chunk amplification. Timing is hardware-specific; no universal graph-size ceiling is claimed. Evidence build.chunk_rows corrected to the effective 4 GiB policy cap (16,777,216); prior ledger value 8,388,608 understated the AdjacencyBuildOptions path.",
   "outcomes": {
     "adjacency_state": "Current",
     "artifact_fingerprint": "sha256:775e8e412831617d8590502feaae101064a1c6ae14843932160b4ccd7bad065f",
