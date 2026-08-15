@@ -93,6 +93,7 @@ Linux addon (`emit-node-loaders`) instead of `napi build` recompile.
 
 ## Next
 
-[#3](https://github.com/CurateLabs/graphforge/issues/3) docs/observability/#1
-close-readiness: [bazel.md](bazel.md) and
-[bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md).
+Evidence-map reconciliation after remediations: [#724](https://github.com/CurateLabs/graphforge/issues/724)
+([bazel-migration-ac-evidence.md](bazel-migration-ac-evidence.md)). Live
+`CI Gate` enforcement is #721 (ruleset **19988544**); do not treat workflow job
+naming alone as merge-gate proof.

@@ -27,7 +27,11 @@ Developer guide: [bazel.md](bazel.md).
 | [#6](https://github.com/CurateLabs/graphforge/issues/6) | Release platforms + parity | [#424](https://github.com/CurateLabs/graphforge/pull/424) | `457eb1171cbd240ade30efd63814d9b8748a9934` |
 | [#5](https://github.com/CurateLabs/graphforge/issues/5) | Blacksmith cache + perf | [#425](https://github.com/CurateLabs/graphforge/pull/425), [#426](https://github.com/CurateLabs/graphforge/pull/426) | `c52be21063ea3cc65d7d66c2ae91816c78bb3907`, `bad99f97bd1355b21702a20d464e8a342776353d` |
 | [#4](https://github.com/CurateLabs/graphforge/issues/4) | CI Gate cutover | [#427](https://github.com/CurateLabs/graphforge/pull/427) | `75a33e5cf6d9dab1407eba719e98740c95426d91` |
-| [#3](https://github.com/CurateLabs/graphforge/issues/3) | Docs / observability / this map | *(this PR)* | *(fill at merge)* |
+| [#3](https://github.com/CurateLabs/graphforge/issues/3) | Docs / observability / this map | [#428](https://github.com/CurateLabs/graphforge/pull/428) | `910af15030843d9060c51ec13d9924678aea2eae` |
+| [#720](https://github.com/CurateLabs/graphforge/issues/720) | Bazel binding clean-install acceptance | [#760](https://github.com/CurateLabs/graphforge/pull/760) | `71687b4d377a4293ae6b86176c9876cda4167722` |
+| [#721](https://github.com/CurateLabs/graphforge/issues/721) | Enforce `CI Gate` on default branch | [#759](https://github.com/CurateLabs/graphforge/pull/759) | `747f4af2966f378a8b80ccb695ec23999f066dd8` |
+| [#722](https://github.com/CurateLabs/graphforge/issues/722) | coverage-rust Cucumber loader drift | [#758](https://github.com/CurateLabs/graphforge/pull/758) | `62684b6aa6403d681f2a2cb64d606c6b792be4c9` |
+| [#723](https://github.com/CurateLabs/graphforge/issues/723) | Node feature TypeScript fail-closed check | [#757](https://github.com/CurateLabs/graphforge/pull/757) | `2b38538d029af3c6cda451b3273641848ef6ca1d` |
 
 ## #1 acceptance criteria → evidence
 
@@ -36,16 +40,16 @@ Developer guide: [bazel.md](bazel.md).
 | Checked-in migration ledger for all Cargo targets and every CI/release build command | Met | #12 (+ updates #11–#6) | [bazel-migration-ledger.md](bazel-migration-ledger.md); `tools/bazel/parity/migration_target_map.json`; `scripts/ci/bazel-migration-ledger-check.py` |
 | Bazel builds all 17 first-party packages without shelling out to Cargo for ordinary compilation or tests | Met | #11–#9, #8, #7 | [bazel-bootstrap.md](bazel-bootstrap.md); `//:first_party_libs`, `//:binding_cdylibs`, `//:ci_rust_tests`; merge SHAs above |
 | All 53 Rust integration tests, crate unit tests, doctest equivalents, BDD, snapshots, public-surface gates under mapped Bazel test graph | Met | #8, #6 | Ledger + `//:integration_tests` / `//:unit_tests` / `//:snapshot_tests` / `//:bdd_tests` / `//:ci_rust_tests`; [bazel-migration-parity.md](bazel-migration-parity.md) |
-| Bazel-built Python wheels and Node packages pass clean-install, no-fallback, parity, persistence/reopen, structured-error suites | Met | #7, #6 | `//:python_wheel_smoke` / `//:node_package_smoke`; `scripts/ci/assemble_bazel_binding_packages.py`; Binding RC still consumes natives (no silent Cargo recompile of a different graph) |
+| Bazel-built Python wheels and Node packages pass clean-install, no-fallback, parity, persistence/reopen, structured-error suites | Met | #7, #6, #720 | PEP 427 wheel naming + synthetic Node `version()` loader in `scripts/ci/assemble_bazel_binding_packages.py`; Binding RC `--out dist` (#760 / `71687b4d377a4293ae6b86176c9876cda4167722`); unit proof in `scripts/ci/test-assemble-bazel-binding-packages.py`; `//:python_wheel_smoke` / `//:node_package_smoke` |
 | Linux, macOS, Windows, and supported Node cross-target release evidence remains complete | Met | #6 | `tools/bazel/release/release_platforms.json`; `//platforms:*`; Binding RC contract unchanged |
 | Cargo and Bazel dependency/feature graphs cannot drift silently | Met | #11 | `scripts/ci/cargo-bazel-drift-check.py`; `tools/bazel/drift/cargo_feature_fingerprint.json`; `cargo-bazel-lock.json` |
 | Repeated identical-SHA builds report remote cache hits; source change reruns only actions whose declared inputs changed | Met | #5 | [bazel-migration-perf.md](bazel-migration-perf.md); [perf-sample.json](bazel-migration-evidence/perf-sample.json); `affected-inputs` harness mode |
 | Blacksmith cache disablement or eviction produces a correct cold build without repository changes | Met | #5 | `bazel-cache-perf.py --mode cold-correctness`; observations in perf sample |
 | Across ≥10 paired runs: warm PR p50 ≥30% faster and compute ≥25% lower than Cargo baseline; cold p50 regression ≤10% | Met | #5 (#12 baseline) | [bazel-migration-baseline.md](bazel-migration-baseline.md); `perf-sample.json` `status=complete` + strict `evaluate` |
 | No secret, token, signing material, publish credential, or user data in a cacheable Bazel action or build log | Met | #7, #5, #3 | See [Security and supply chain](#security-and-supply-chain) below; publish OIDC/credentials stay in release workflows outside `Bazel Bootstrap` |
-| Required check context remains `CI Gate`; path-classified skips remain neutral | Met | #6, #4, #721 | [bazel-migration-cutover.md](bazel-migration-cutover.md); ruleset **19988544** + [ci-gate-ruleset-19988544.json](bazel-migration-evidence/ci-gate-ruleset-19988544.json); `scripts/ci/verify-ci-gate-enforcement.py`; `scripts/ci/require-gates.sh` |
+| Required check context remains `CI Gate`; path-classified skips remain neutral | Met | #6, #4, #721 | **Workflow shape:** job display name `CI Gate` + `scripts/ci/require-gates.sh` / `scripts/ci/test-ci-storage-policy.py`. **Live enforcement (distinct):** repository ruleset **19988544** requires status check context exactly `CI Gate` ([ci-gate-ruleset-19988544.json](bazel-migration-evidence/ci-gate-ruleset-19988544.json); `GET /repos/CurateLabs/graphforge/rulesets/19988544`); `scripts/ci/verify-ci-gate-enforcement.py` fails when YAML names the job but the ruleset does not require it. Classic branch-protection API remains unused (`GET …/branches/main/protection` → 404). Merge SHA #759 / `747f4af2966f378a8b80ccb695ec23999f066dd8`. |
 | Cargo CI compilation and sticky build disks removed only after same-SHA parity and performance gates | Met | #4 (after #6/#5) | PR sticky `target/` keys retired; Cargo `rust-test` removed; Binding RC / fuzz / release-certification retained as justified |
-| Developer, architecture, build, release, troubleshooting, and cache-observability documentation is current | Met | #3 | [bazel.md](bazel.md) + companions listed there; this evidence map |
+| Developer, architecture, build, release, troubleshooting, and cache-observability documentation is current | Met | #3, #724 | [bazel.md](bazel.md) + companions listed there; this evidence map reconciled after #720–#723 |
 
 ## #1 Documentation checklist
 
@@ -98,11 +102,23 @@ Confirmed against the post-#4 tree (cutover SHA above):
 
 ## Gate close notes
 
-- Close [#3](https://github.com/CurateLabs/graphforge/issues/3) when this map and
-  [bazel.md](bazel.md) land with green CI on the docs PR and the table’s #3 merge
-  SHA is filled in (or linked from the closing PR).
-- Close [#2](https://github.com/CurateLabs/graphforge/issues/2) only when #13–#3
-  are closed with ordinary AGENTS.md evidence.
+- [#3](https://github.com/CurateLabs/graphforge/issues/3) closed via
+  [#428](https://github.com/CurateLabs/graphforge/pull/428)
+  (`910af15030843d9060c51ec13d9924678aea2eae`); this document’s #3 row records
+  that merge SHA (no remaining `(this PR)` / `(fill at merge)` placeholders).
+- Remediation children [#720](https://github.com/CurateLabs/graphforge/issues/720)–[#723](https://github.com/CurateLabs/graphforge/issues/723)
+  closed via [#760](https://github.com/CurateLabs/graphforge/pull/760),
+  [#759](https://github.com/CurateLabs/graphforge/pull/759),
+  [#758](https://github.com/CurateLabs/graphforge/pull/758), and
+  [#757](https://github.com/CurateLabs/graphforge/pull/757) with the merge SHAs
+  in the child table above. Binding clean-install and live `CI Gate` enforcement
+  claims are marked Met only with those pointers.
+- [#724](https://github.com/CurateLabs/graphforge/issues/724) is this
+  reconciliation of the checked-in map against those remediations (ordinary
+  AGENTS.md docs close; no Binding RC / publish cascade).
+- Close [#2](https://github.com/CurateLabs/graphforge/issues/2) only when every
+  native Bazel child (#3–#13) and remediation blocker (#720–#724) is closed with
+  ordinary AGENTS.md evidence.
 - Close [#1](https://github.com/CurateLabs/graphforge/issues/1) when its AC
   outcomes are met via this map (no release-gate cascade required for ordinary
   close).
