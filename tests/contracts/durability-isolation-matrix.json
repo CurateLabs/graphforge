@@ -420,9 +420,40 @@
     },
     {
       "id": "uniform_transaction_lifecycle_surface",
-      "coverage": "deferred",
-      "owner_issue": 754,
-      "rationale": "One Rust-owned transaction lifecycle across mutation paths is #754."
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "mixed_cypher_and_bulk_commit_as_one_generation"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "rollback_leaves_prior_generation_unchanged_across_reopen"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "exact_commit_retry_is_idempotent_and_changed_content_conflicts"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "optimistic_write_skew_witness_matches_isolation_table"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "drop_rolls_back_without_publication"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "every_mutation_family_has_an_explicit_classification"
+        }
+      ],
+      "rationale": "One Rust-owned begin/stage/validate/commit/rollback lifecycle across supported mutation families."
     },
     {
       "id": "binding_cli_transaction_parity",

@@ -53,9 +53,10 @@ Optimistic merge rules are deliberately finite. Distinct creates and immutable
 ledger identities merge. Changes to different properties of the same graph
 object merge. Reusing an identity with changed content, changing the same
 property, losing a mutation target, and delete or administrative work do not
-merge. Only the composite publication API is replayed optimistically in v0.5.x;
-other mutation APIs keep their established single-writer behavior even when the
-facade selects optimistic mode.
+merge. Only the composite publication API and the uniform `GraphTransaction`
+lifecycle are replayed optimistically in v0.5.x; other one-shot mutation APIs
+keep their established single-writer behavior even when the facade selects
+optimistic mode, unless staged through that lifecycle.
 
 Scalar construction (`add_edge`) acquires the same graph visibility /
 write-admission coordinator as Cypher writes, bulk publication, and other

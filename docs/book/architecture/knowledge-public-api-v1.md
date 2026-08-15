@@ -573,10 +573,12 @@ These are the only knowledge-layer public composites:
 | recorded run start | run identity + `started` event + provenance/lineage |
 | recorded run terminal | one terminal event + result fingerprint + provenance/lineage |
 
-There is no public begin/commit/rollback API, arbitrary participant write,
-arbitrary provenance append, or partially successful composite. Run start and
-terminal are intentionally two separate generations because algorithm
-execution occurs between them.
+Knowledge one-shots remain atomic generations. Mixed graph + knowledge work
+uses `publish_composite_transaction` or the uniform `GraphTransaction`
+lifecycle. There is no arbitrary participant write, arbitrary provenance
+append, or partially successful composite. Run start and terminal are
+intentionally two separate generations because algorithm execution occurs
+between them.
 
 ## Error envelope
 

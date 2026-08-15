@@ -42,11 +42,14 @@ The optimistic conflict matrix is closed:
 | Same operation and same content | Exact idempotent replay |
 | Same operation and changed content | `GF_IDEMPOTENCY_CONFLICT` |
 
-Only `publish_composite_transaction` has optimistic replay semantics in
-v0.5.0. Arbitrary write Cypher, bulk construction, index administration, and
-other mutation APIs remain serialized. After any attempted publication, the
-facade workspace, runtime catalog, and generation UUID reconcile to durable
-`CURRENT`; a committed generation is never reported as rolled back.
+Only `publish_composite_transaction` and the uniform `GraphTransaction`
+lifecycle (`begin_transaction` / stage / validate / commit / rollback) share
+optimistic replay for compatible composite-shaped work in v0.5.x. Arbitrary
+one-shot write Cypher, bulk construction, index administration, and other
+mutation APIs remain serialized unless staged through that lifecycle. After any
+attempted publication, the facade workspace, runtime catalog, and generation UUID
+reconcile to durable `CURRENT`; a committed generation is never reported as
+rolled back.
 
 The modes are local embedded capabilities, not transport protocols. MCP and
 HTTP remain outside core. An optional extension can expose one authenticated

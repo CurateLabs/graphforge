@@ -108,9 +108,10 @@ visible together; mixed generations are corruption.
 | `queued_writer` | pinned immutable snapshot; snapshot reads bypass the queue | bounded FIFO per facade; cancel only unstarted work | one serial writer after dequeue | queue-full / cancel structured errors; no concurrent publish races |
 | `optimistic_multi_writer` | pinned immutable snapshot per attempt | distinct composite transaction identities may stage concurrently | `CURRENT` commit point is serialized; compatible work may rebase | closed matrix in ADR 0015: merge, `GF_WRITE_CONFLICT`, `GF_IDEMPOTENCY_CONFLICT`, `GF_REBASE_EXHAUSTED` |
 
-Only `publish_composite_transaction` has optimistic replay in v0.5.x. Other
-mutation APIs retain single-writer behavior even when the facade selects
-optimistic mode.
+Only `publish_composite_transaction` and the uniform `GraphTransaction`
+lifecycle have optimistic replay in v0.5.x. Other one-shot mutation APIs retain
+single-writer behavior even when the facade selects optimistic mode, unless
+their work is staged through that shared lifecycle.
 
 These modes do **not** claim generic ACID, serializable isolation, or SSI.
 

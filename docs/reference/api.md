@@ -3739,10 +3739,12 @@ structured profile with:
 Empty unset workspaces grade `Gx-00-XS-D00`. `Gx` uses the directed density
 formula. See [Graph Scale Index](graph-scale-index.md).
 
-GraphForge does not expose generic `begin()`, `commit()`, or `rollback()`
-methods. Each `execute()` write publishes atomically; use
-`publish_composite_transaction()` when graph and knowledge mutations must share
-one committed generation.
+GraphForge exposes a Rust-owned `begin_transaction()` / stage / `validate()` /
+`commit()` / `rollback()` lifecycle for supported mutation families. Each
+`execute()` write still publishes atomically as a one-shot; use
+`publish_composite_transaction()` or an explicit `GraphTransaction` when graph
+and knowledge mutations must share one committed generation. Administrative
+operations classified as rejected cannot join a transaction.
 
 ### `explain(query, stage=None)` → `str`
 
