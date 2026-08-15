@@ -1,8 +1,8 @@
 {
-  "build_profile": "debug",
+  "build_profile": "release",
   "contract_schema": "graphforge-m4-entry-matrix/1",
   "dataset": {
-    "edges": 5,
+    "edges": 8,
     "fixture_id": "synthetic-small",
     "nodes": 5,
     "opt_in": false
@@ -13,16 +13,27 @@
       "executed": true,
       "fingerprints": {
         "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
-        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
-        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
-        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
-        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "analyze-maximum-spanning-tree": "13234de5548dd5fa3756b10d8025747847ba47b461220b881d3f42a3c1292eba",
+        "analyze-minimum-k-spanning-tree": "6b4ae6797480959998be7fbb07cd28db9bc881164b1e48d4766868227acd5995",
+        "exact-cosine-knn": "9a435484d4d340c015e13a2da2352850039ff0d90ea571de3bdc87f846e9ace0",
+        "fixed-hop-limit": "0511c328c84f077dde390bc0d5100336e962749d2f4c38f1866039ea5dedff79",
+        "node2vec": "9703c64ba6a523f4959af587b845ba3cf88e673641ed7c302b1794d40cc7c15b",
+        "pagerank": "0d9b89006618bd43bacf80d0b85a67b072fd428cc8b392dc061cbf3cf5b2b59c",
+        "paths-bellman-ford": "9db0281ceae0d12c6ae552864dd6d02f9cdc4fe9652d5fdb8795fda3c3b60b65",
+        "paths-floyd-warshall": "3460a664dd9e1e45c86f31bd212ed6595dcc694d697889a0b3424d40bc0e2b1d",
+        "paths-gomory-hu-tree": "376528bd407383f25a03991fe34f627bb0bf39951c493d603a4d776c7237d143",
+        "paths-max-flow": "1bbc42eb9c486076c39f2f17dd76ca949abceaf0cbbb1250d481a473d28391b2",
+        "paths-min-cost-max-flow": "e27d9c2fee6364d14e9316a3b529be8cbe52a9131664b661dc6deff43efa3125",
+        "paths-min-cut-edges": "439bbc04c4fe2040d1298d83054f76ea9d2efa96560f1e5d7418219f7279ef9c",
+        "paths-min-steiner-tree": "f8d9f385b2a3fcb73fdaedf1d6c6cc2dcc3f18b546d43af1d78058b6b8da2c47",
+        "paths-prize-collecting-steiner-tree": "7e22b9425cb76cf31df9aaee3465d505801716e5e7837ffadbc00f986c811d22",
+        "rank-k-core": "49ff39a72d39f04f2401304701adf3971f434f00e1143bb9e23a6d4b38301785",
         "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
       },
       "id": "threads-1",
       "normalized": {
         "mode": "Explicit",
-        "observed_logical_cpus": 4,
+        "observed_logical_cpus": 10,
         "target_partitions": 1,
         "tokio_worker_threads": 1
       },
@@ -45,16 +56,27 @@
       "executed": true,
       "fingerprints": {
         "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
-        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
-        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
-        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
-        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "analyze-maximum-spanning-tree": "13234de5548dd5fa3756b10d8025747847ba47b461220b881d3f42a3c1292eba",
+        "analyze-minimum-k-spanning-tree": "6b4ae6797480959998be7fbb07cd28db9bc881164b1e48d4766868227acd5995",
+        "exact-cosine-knn": "9a435484d4d340c015e13a2da2352850039ff0d90ea571de3bdc87f846e9ace0",
+        "fixed-hop-limit": "0511c328c84f077dde390bc0d5100336e962749d2f4c38f1866039ea5dedff79",
+        "node2vec": "9703c64ba6a523f4959af587b845ba3cf88e673641ed7c302b1794d40cc7c15b",
+        "pagerank": "0d9b89006618bd43bacf80d0b85a67b072fd428cc8b392dc061cbf3cf5b2b59c",
+        "paths-bellman-ford": "9db0281ceae0d12c6ae552864dd6d02f9cdc4fe9652d5fdb8795fda3c3b60b65",
+        "paths-floyd-warshall": "3460a664dd9e1e45c86f31bd212ed6595dcc694d697889a0b3424d40bc0e2b1d",
+        "paths-gomory-hu-tree": "376528bd407383f25a03991fe34f627bb0bf39951c493d603a4d776c7237d143",
+        "paths-max-flow": "1bbc42eb9c486076c39f2f17dd76ca949abceaf0cbbb1250d481a473d28391b2",
+        "paths-min-cost-max-flow": "e27d9c2fee6364d14e9316a3b529be8cbe52a9131664b661dc6deff43efa3125",
+        "paths-min-cut-edges": "439bbc04c4fe2040d1298d83054f76ea9d2efa96560f1e5d7418219f7279ef9c",
+        "paths-min-steiner-tree": "f8d9f385b2a3fcb73fdaedf1d6c6cc2dcc3f18b546d43af1d78058b6b8da2c47",
+        "paths-prize-collecting-steiner-tree": "7e22b9425cb76cf31df9aaee3465d505801716e5e7837ffadbc00f986c811d22",
+        "rank-k-core": "49ff39a72d39f04f2401304701adf3971f434f00e1143bb9e23a6d4b38301785",
         "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
       },
       "id": "threads-2",
       "normalized": {
         "mode": "Explicit",
-        "observed_logical_cpus": 4,
+        "observed_logical_cpus": 10,
         "target_partitions": 2,
         "tokio_worker_threads": 2
       },
@@ -77,16 +99,27 @@
       "executed": true,
       "fingerprints": {
         "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
-        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
-        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
-        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
-        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "analyze-maximum-spanning-tree": "13234de5548dd5fa3756b10d8025747847ba47b461220b881d3f42a3c1292eba",
+        "analyze-minimum-k-spanning-tree": "6b4ae6797480959998be7fbb07cd28db9bc881164b1e48d4766868227acd5995",
+        "exact-cosine-knn": "9a435484d4d340c015e13a2da2352850039ff0d90ea571de3bdc87f846e9ace0",
+        "fixed-hop-limit": "0511c328c84f077dde390bc0d5100336e962749d2f4c38f1866039ea5dedff79",
+        "node2vec": "9703c64ba6a523f4959af587b845ba3cf88e673641ed7c302b1794d40cc7c15b",
+        "pagerank": "0d9b89006618bd43bacf80d0b85a67b072fd428cc8b392dc061cbf3cf5b2b59c",
+        "paths-bellman-ford": "9db0281ceae0d12c6ae552864dd6d02f9cdc4fe9652d5fdb8795fda3c3b60b65",
+        "paths-floyd-warshall": "3460a664dd9e1e45c86f31bd212ed6595dcc694d697889a0b3424d40bc0e2b1d",
+        "paths-gomory-hu-tree": "376528bd407383f25a03991fe34f627bb0bf39951c493d603a4d776c7237d143",
+        "paths-max-flow": "1bbc42eb9c486076c39f2f17dd76ca949abceaf0cbbb1250d481a473d28391b2",
+        "paths-min-cost-max-flow": "e27d9c2fee6364d14e9316a3b529be8cbe52a9131664b661dc6deff43efa3125",
+        "paths-min-cut-edges": "439bbc04c4fe2040d1298d83054f76ea9d2efa96560f1e5d7418219f7279ef9c",
+        "paths-min-steiner-tree": "f8d9f385b2a3fcb73fdaedf1d6c6cc2dcc3f18b546d43af1d78058b6b8da2c47",
+        "paths-prize-collecting-steiner-tree": "7e22b9425cb76cf31df9aaee3465d505801716e5e7837ffadbc00f986c811d22",
+        "rank-k-core": "49ff39a72d39f04f2401304701adf3971f434f00e1143bb9e23a6d4b38301785",
         "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
       },
       "id": "threads-4",
       "normalized": {
         "mode": "Explicit",
-        "observed_logical_cpus": 4,
+        "observed_logical_cpus": 10,
         "target_partitions": 4,
         "tokio_worker_threads": 4
       },
@@ -105,8 +138,34 @@
       "structured_error_code": "GF_VALIDATION"
     },
     {
-      "executed": false,
+      "cancellation_outcome": "token_cancelled",
+      "executed": true,
+      "fingerprints": {
+        "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
+        "analyze-maximum-spanning-tree": "13234de5548dd5fa3756b10d8025747847ba47b461220b881d3f42a3c1292eba",
+        "analyze-minimum-k-spanning-tree": "6b4ae6797480959998be7fbb07cd28db9bc881164b1e48d4766868227acd5995",
+        "exact-cosine-knn": "9a435484d4d340c015e13a2da2352850039ff0d90ea571de3bdc87f846e9ace0",
+        "fixed-hop-limit": "0511c328c84f077dde390bc0d5100336e962749d2f4c38f1866039ea5dedff79",
+        "node2vec": "9703c64ba6a523f4959af587b845ba3cf88e673641ed7c302b1794d40cc7c15b",
+        "pagerank": "0d9b89006618bd43bacf80d0b85a67b072fd428cc8b392dc061cbf3cf5b2b59c",
+        "paths-bellman-ford": "9db0281ceae0d12c6ae552864dd6d02f9cdc4fe9652d5fdb8795fda3c3b60b65",
+        "paths-floyd-warshall": "3460a664dd9e1e45c86f31bd212ed6595dcc694d697889a0b3424d40bc0e2b1d",
+        "paths-gomory-hu-tree": "376528bd407383f25a03991fe34f627bb0bf39951c493d603a4d776c7237d143",
+        "paths-max-flow": "1bbc42eb9c486076c39f2f17dd76ca949abceaf0cbbb1250d481a473d28391b2",
+        "paths-min-cost-max-flow": "e27d9c2fee6364d14e9316a3b529be8cbe52a9131664b661dc6deff43efa3125",
+        "paths-min-cut-edges": "439bbc04c4fe2040d1298d83054f76ea9d2efa96560f1e5d7418219f7279ef9c",
+        "paths-min-steiner-tree": "f8d9f385b2a3fcb73fdaedf1d6c6cc2dcc3f18b546d43af1d78058b6b8da2c47",
+        "paths-prize-collecting-steiner-tree": "7e22b9425cb76cf31df9aaee3465d505801716e5e7837ffadbc00f986c811d22",
+        "rank-k-core": "49ff39a72d39f04f2401304701adf3971f434f00e1143bb9e23a6d4b38301785",
+        "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
+      },
       "id": "threads-8",
+      "normalized": {
+        "mode": "Explicit",
+        "observed_logical_cpus": 10,
+        "target_partitions": 8,
+        "tokio_worker_threads": 8
+      },
       "owner_issue": 337,
       "parity_assertions": [
         "canonical_arrow_schema",
@@ -116,27 +175,39 @@
         "cancellation_outcome",
         "resource_limit_behavior"
       ],
-      "reason": "validation error: combined tokio/partition concurrency 16 exceeds instance budget 8",
       "requested_workers": 8,
-      "status": "unavailable"
+      "resource_limit_rows": 3,
+      "status": "supported",
+      "structured_error_code": "GF_VALIDATION"
     },
     {
       "cancellation_outcome": "token_cancelled",
       "executed": true,
       "fingerprints": {
         "aggregate-top-n": "8e9605bf74fce66b022b9c84825c76e27953477671417b4e480e5cde982db509",
-        "exact-cosine-knn": "6b12e00c540da6f7b3d7cf4546eb17e6fabf88cbaa7a1cc2c17e41bd1dff6dd5",
-        "fixed-hop-limit": "22668ddcd8294f761fac18f5404884234d9ba5b4a438aade7eb2fb1d95a2d8e4",
-        "node2vec": "98c429c3d4d89f132d5310124657c585118afee786489abe577f90889c47e445",
-        "pagerank": "e3fe6b40aaca585441c2335c857b79ca47b2b3ff9cd8779752d5c18b82c3e88f",
+        "analyze-maximum-spanning-tree": "13234de5548dd5fa3756b10d8025747847ba47b461220b881d3f42a3c1292eba",
+        "analyze-minimum-k-spanning-tree": "6b4ae6797480959998be7fbb07cd28db9bc881164b1e48d4766868227acd5995",
+        "exact-cosine-knn": "9a435484d4d340c015e13a2da2352850039ff0d90ea571de3bdc87f846e9ace0",
+        "fixed-hop-limit": "0511c328c84f077dde390bc0d5100336e962749d2f4c38f1866039ea5dedff79",
+        "node2vec": "9703c64ba6a523f4959af587b845ba3cf88e673641ed7c302b1794d40cc7c15b",
+        "pagerank": "0d9b89006618bd43bacf80d0b85a67b072fd428cc8b392dc061cbf3cf5b2b59c",
+        "paths-bellman-ford": "9db0281ceae0d12c6ae552864dd6d02f9cdc4fe9652d5fdb8795fda3c3b60b65",
+        "paths-floyd-warshall": "3460a664dd9e1e45c86f31bd212ed6595dcc694d697889a0b3424d40bc0e2b1d",
+        "paths-gomory-hu-tree": "376528bd407383f25a03991fe34f627bb0bf39951c493d603a4d776c7237d143",
+        "paths-max-flow": "1bbc42eb9c486076c39f2f17dd76ca949abceaf0cbbb1250d481a473d28391b2",
+        "paths-min-cost-max-flow": "e27d9c2fee6364d14e9316a3b529be8cbe52a9131664b661dc6deff43efa3125",
+        "paths-min-cut-edges": "439bbc04c4fe2040d1298d83054f76ea9d2efa96560f1e5d7418219f7279ef9c",
+        "paths-min-steiner-tree": "f8d9f385b2a3fcb73fdaedf1d6c6cc2dcc3f18b546d43af1d78058b6b8da2c47",
+        "paths-prize-collecting-steiner-tree": "7e22b9425cb76cf31df9aaee3465d505801716e5e7837ffadbc00f986c811d22",
+        "rank-k-core": "49ff39a72d39f04f2401304701adf3971f434f00e1143bb9e23a6d4b38301785",
         "scan-count": "ca521a363e7458a148aba59c43483a2a3d7b0abb5d21cfe3731f07ca9dfe69bc"
       },
       "id": "threads-automatic",
       "normalized": {
         "mode": "Automatic",
-        "observed_logical_cpus": 4,
-        "target_partitions": 2,
-        "tokio_worker_threads": 2
+        "observed_logical_cpus": 10,
+        "target_partitions": 5,
+        "tokio_worker_threads": 5
       },
       "owner_issue": 337,
       "parity_assertions": [
@@ -159,7 +230,7 @@
       "approx_nodes": 8000000,
       "classification": "discovery_not_public_facade_baseline",
       "id": "lower-level-8m-128m",
-      "notes": "Retain as qualified discovery evidence. Public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed graph/files (#338 oversize evidence). Full 8M/128M public-facade reruns remain optional measured evidence under local resource stops for #345.",
+      "notes": "Public persistence beyond the legacy 2 GiB snapshot envelope is accepted via file-backed graph/files. Densified 8M/128M public-facade evidence is checked in as docs/development/file-backed-128m-evidence.json (#338/#763).",
       "path": "lower-level Rust construction/execution (not GraphForge::new public snapshot path)",
       "public_facade_owner_issue": 338
     },
@@ -174,18 +245,18 @@
   ],
   "hardware": {
     "accelerator_identity": null,
-    "arch": "x86_64",
-    "cpu_model": ": Intel(R) Xeon(R) Processor",
-    "logical_cpus": 4,
-    "memory_bytes": 16791945216,
-    "os": "linux",
-    "peak_rss_bytes_process": 104755200
+    "arch": "aarch64",
+    "cpu_model": null,
+    "logical_cpus": 10,
+    "memory_bytes": null,
+    "os": "macos",
+    "peak_rss_bytes_process": null
   },
   "known_limitations": [
+    "Densified 8M-node/128M-edge public reopen and >200M-edge adjacency builds are proven by checked-in scale-host evidence (#338/#336); timings remain hardware-specific and are not a universal product ceiling.",
     "Fresh CSR index hits no longer expand the base CSR into an O(E) HashMap (#340); scan-build / missing / stale / corrupt paths may still use the historical hash-map oracle.",
     "Exact cosine KNN, PageRank, and Node2Vec walk generation may use the instance-owned private compute pool above documented crossovers (#342-#344); one-thread fingerprints remain authoritative.",
     "Portable interchange does not yet encode file-backed graph/files trees (structured GF_UNSUPPORTED_PROJECT_FORMAT); copy the project directory instead (#338).",
-    "Full 8M-node/128M-edge densified public-facade reruns and >200M-edge adjacency RSS remain optional scale-host evidence under local resource stops (#345); do not treat them as a universal product ceiling.",
     "Wall-clock numbers are hardware-specific and never CI pass/fail gates.",
     "Thread-parity cells that exceed the machine-relative concurrency budget are recorded unavailable without fabricating results.",
     "GPU / accelerator backends are intentionally out of scope for M4."
@@ -224,7 +295,7 @@
     "tokio_worker_threads": 2
   },
   "schema": "graphforge-m4-entry-evidence/1",
-  "source_sha": "2b1bfda8145c7f9fe125a75faf695792fc6bbfcb",
+  "source_sha": "53b369598ba748144b531a50dbed34de36bef0f2",
   "spill_bytes": null,
   "workloads": [
     {
@@ -235,15 +306,15 @@
           "surface": "GraphForge::execute"
         },
         "output_rows": 3,
-        "result_fingerprint": "e22a3c912008994478ce05204cd8c6a2e9df7e35e67d9e16a5cba75625255fd0",
+        "result_fingerprint": "531d52b249d69f9df35c8dd8b91c0485d219bf87f8575389b8fa920c75d1a0f4",
         "schema_fields": [
           "id"
         ]
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 99954688,
-        "wall_time_ms": 29.499494000000002
+        "peak_rss_bytes": null,
+        "wall_time_ms": 3.903625
       }
     },
     {
@@ -261,8 +332,8 @@
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 102318080,
-        "wall_time_ms": 20.526748
+        "peak_rss_bytes": null,
+        "wall_time_ms": 9.220667
       }
     },
     {
@@ -280,8 +351,8 @@
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 102850560,
-        "wall_time_ms": 20.620441
+        "peak_rss_bytes": null,
+        "wall_time_ms": 4.850499999999999
       }
     },
     {
@@ -291,19 +362,320 @@
           "surface": "GraphForge::rank"
         },
         "output_rows": 5,
-        "result_fingerprint": "eb80085f870e7505865f4ef1f63d76915ca11506f6d0852c85dcf495601e6b3a",
+        "result_fingerprint": "d518dd867483db78c057b0051d295cc15dda8d18cf8dcb899a4aa1e2cb4ae7f2",
         "schema_fields": [
           "node_uuid",
           "score",
           "age",
           "embedding",
-          "name"
+          "heuristic",
+          "name",
+          "prize"
         ]
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 103190528,
-        "wall_time_ms": 3.564849
+        "peak_rss_bytes": null,
+        "wall_time_ms": 2.005042
+      }
+    },
+    {
+      "id": "paths-gomory-hu-tree",
+      "structural_gates": {
+        "details": {
+          "algorithm": "gomory_hu_tree",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_gomory_hu_parent_updates",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "component_bfs_and_ordered_min_cut_parent_updates"
+        },
+        "output_rows": 4,
+        "result_fingerprint": "cb016fb031f663c95759bda236d7e4b840be2f787a545d29f830480ee9ea8565",
+        "schema_fields": [
+          "source_uuid",
+          "target_uuid",
+          "cut_value"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.194917
+      }
+    },
+    {
+      "id": "paths-max-flow",
+      "structural_gates": {
+        "details": {
+          "algorithm": "max_flow",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_edmonds_karp_augmenting_paths",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "residual_bfs_augmentations"
+        },
+        "output_rows": 1,
+        "result_fingerprint": "fdc6a03978730ba4564bfc8a7a9539c371637910dfdbdbd5bf40e40a7ae0bed1",
+        "schema_fields": [
+          "source_uuid",
+          "sink_uuid",
+          "flow"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.651125
+      }
+    },
+    {
+      "id": "paths-min-cut-edges",
+      "structural_gates": {
+        "details": {
+          "algorithm": "min_cut_edges",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_constrained_min_cut_edge_projection",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "max_flow_oracles_partition_then_edge_projection"
+        },
+        "output_rows": 3,
+        "result_fingerprint": "aacff8a69eb519b6a5ac96ace1479fd501932ad97a7dc16041db158e41018288",
+        "schema_fields": [
+          "edge_uuid",
+          "source_uuid",
+          "target_uuid",
+          "capacity"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.2355420000000001
+      }
+    },
+    {
+      "id": "rank-k-core",
+      "structural_gates": {
+        "details": {
+          "algorithm": "k_core",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_priority_queue_peeling",
+          "surface": "GraphForge::rank",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "heap_pops_and_live_neighbor_decrements"
+        },
+        "output_rows": 5,
+        "result_fingerprint": "7564663842ada4a6a4200f6c60a1702141907b64e25908a94eafa001419e8de5",
+        "schema_fields": [
+          "node_uuid",
+          "score",
+          "age",
+          "embedding",
+          "heuristic",
+          "name",
+          "prize"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.799375
+      }
+    },
+    {
+      "id": "analyze-maximum-spanning-tree",
+      "structural_gates": {
+        "details": {
+          "algorithm": "maximum_spanning_tree",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_kruskal_descending_union_find",
+          "surface": "GraphForge::analyze",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "stable_edge_sort_and_union_find_acceptance"
+        },
+        "output_rows": 4,
+        "result_fingerprint": "6950e6b03a93e3487295349303de097585507ea56b69261d83a9e5567ed5221f",
+        "schema_fields": [
+          "edge_uuid",
+          "source_uuid",
+          "target_uuid",
+          "weight"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.4675829999999999
+      }
+    },
+    {
+      "id": "paths-min-steiner-tree",
+      "structural_gates": {
+        "details": {
+          "algorithm": "min_steiner_tree",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_exact_subset_steiner_search",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "reachable_preflight_and_ordered_subset_search"
+        },
+        "output_rows": 2,
+        "result_fingerprint": "634b8e9486f14707fcc53187299df77ee5b137691e6042d0d4ea074750340d9e",
+        "schema_fields": [
+          "edge_uuid",
+          "source_uuid",
+          "target_uuid",
+          "weight"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.525208
+      }
+    },
+    {
+      "id": "paths-prize-collecting-steiner-tree",
+      "structural_gates": {
+        "details": {
+          "algorithm": "prize_collecting_steiner_tree",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_exact_prize_subset_search",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "state_space_preflight_and_ordered_prize_subset_search"
+        },
+        "output_rows": 3,
+        "result_fingerprint": "2375aa88c03e456c5b42aef95bfaf349909f71e0e226aade5ae8fbf6c7a9f75f",
+        "schema_fields": [
+          "edge_uuid",
+          "source_uuid",
+          "target_uuid",
+          "weight"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.741792
+      }
+    },
+    {
+      "id": "paths-bellman-ford",
+      "structural_gates": {
+        "details": {
+          "algorithm": "bellman_ford",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_ordered_bellman_ford_relaxation",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "ordered_relaxation_rounds_and_negative_cycle_scan"
+        },
+        "output_rows": 5,
+        "result_fingerprint": "f911c9e0d5699993e204ae06220c3280847d5753d13364d736217c8f9bd8035c",
+        "schema_fields": [
+          "source_uuid",
+          "target_uuid",
+          "cost",
+          "path"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.129292
+      }
+    },
+    {
+      "id": "paths-min-cost-max-flow",
+      "structural_gates": {
+        "details": {
+          "algorithm": "min_cost_max_flow",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_bellman_ford_residual_augmentations",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "shortest_residual_augmentations_with_cost_updates"
+        },
+        "output_rows": 1,
+        "result_fingerprint": "bab7951c1dcfd622b2bfba52589a3802dbab3299bf6398e35e9619c6f49e6f1c",
+        "schema_fields": [
+          "source_uuid",
+          "sink_uuid",
+          "flow",
+          "cost"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.4021249999999998
+      }
+    },
+    {
+      "id": "analyze-minimum-k-spanning-tree",
+      "structural_gates": {
+        "details": {
+          "algorithm": "minimum_k_spanning_tree",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_exact_k_spanning_tree_enumeration",
+          "surface": "GraphForge::analyze",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "ordered_combination_search_and_top_k_tree_set"
+        },
+        "output_rows": 8,
+        "result_fingerprint": "ec35aca2f6c481d4aa29e28ef338c2c96451314aa1b0f9ee3c1354e528e65d59",
+        "schema_fields": [
+          "tree_id",
+          "edge_uuid",
+          "source_uuid",
+          "target_uuid",
+          "weight"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.799791
+      }
+    },
+    {
+      "id": "paths-floyd-warshall",
+      "structural_gates": {
+        "details": {
+          "algorithm": "floyd_warshall",
+          "bounded_arrow_sink": true,
+          "csr_native_projection": true,
+          "disposition": "serial_floyd_warshall_dynamic_programming",
+          "surface": "GraphForge::paths",
+          "threads_path": "serial_for_all_policies",
+          "work_units": "ordered_middle_source_target_updates"
+        },
+        "output_rows": 10,
+        "result_fingerprint": "433b268f03b05255dd3b42fe2e17fb05c94b64cbac2f6e7aa511e3b899de5966",
+        "schema_fields": [
+          "source_uuid",
+          "target_uuid",
+          "cost",
+          "path"
+        ]
+      },
+      "timing_is_pass_fail": false,
+      "timing_observation": {
+        "peak_rss_bytes": null,
+        "wall_time_ms": 1.047917
       }
     },
     {
@@ -313,7 +685,7 @@
           "surface": "GraphForge::similar"
         },
         "output_rows": 9,
-        "result_fingerprint": "974bd515cffe9bfec2ff1bf3f22c40ae4bcce49d559a03b467e243af84d2d816",
+        "result_fingerprint": "b1a991477fe3f6bb2f36ae3d1959749247bc1ee4567a01c0c2decd2c8b04cb8d",
         "schema_fields": [
           "node1_uuid",
           "node2_uuid",
@@ -322,8 +694,8 @@
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 103530496,
-        "wall_time_ms": 1.818031
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.35575
       }
     },
     {
@@ -333,7 +705,7 @@
           "surface": "GraphForge::analyze_embedding"
         },
         "output_rows": 5,
-        "result_fingerprint": "f5b1d3d52ed75ef0a44057d553c4e526dbadf8ea5a3117711b9da2c7b5d9d220",
+        "result_fingerprint": "52cf86b2006ff26e06820f52c9cfe68ffb0ed0136dbe24a22422e9fd6c509eee",
         "schema_fields": [
           "node_uuid",
           "embedding"
@@ -341,9 +713,16 @@
       },
       "timing_is_pass_fail": false,
       "timing_observation": {
-        "peak_rss_bytes": 103530496,
-        "wall_time_ms": 2.87057
+        "peak_rss_bytes": null,
+        "wall_time_ms": 0.369459
       }
     }
-  ]
+  ],
+  "exit_reconciliation": {
+    "issue": 345,
+    "frozen_sha": "53b369598ba748144b531a50dbed34de36bef0f2",
+    "adjacency_200m_evidence": "docs/development/adjacency-200m-evidence.json",
+    "file_backed_128m_evidence": "docs/development/file-backed-128m-evidence.json",
+    "ledger": "docs/development/m4-exit-evidence.md"
+  }
 }
