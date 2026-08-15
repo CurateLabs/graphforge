@@ -265,6 +265,10 @@ export default defineConfig({
                   label: '0018 — Durability and Isolation',
                   slug: 'adr/0018-acknowledged-durability-isolation',
                 },
+                {
+                  label: '0019 Authoritative graph delta journal',
+                  slug: 'adr/0019-authoritative-graph-delta-journal',
+                },
               ],
             },
           ],

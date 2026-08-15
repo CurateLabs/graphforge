@@ -117,6 +117,7 @@ project/
 │       ├── lease.lock
 │       ├── manifest.json
 │       ├── graph/              # file-backed graph workspace (optional; with graph/files)
+│       │   └── deltas/         # authoritative mutation runs (ADR 0019; not adjacency)
 │       └── participants/
 │           ├── graph/...       # snapshot.arrow (legacy) or files.json (inventory)
 │           ├── workspace/
@@ -136,7 +137,10 @@ data. New publications store graph workspace files under the generation-owned
 `graph/` tree with a `graph`/`files` inventory participant; legacy
 `graph`/`snapshot` Arrow envelopes remain readable. Root YAML/JSON and
 environment settings are inputs only and cannot override the selected
-generation.
+generation. Authoritative small-write delta runs, when present, live under
+`graph/deltas/` inside the same generation and are inventory-verified
+([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). They are
+distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
 
 Optional capability absence is recorded in the generation manifest; it is not
 inferred by scanning folders. Graph-only readers validate the mandatory

@@ -55,3 +55,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0016 | Repository integration and deployment configuration boundary | Accepted | [`../../adr/0016-repository-integration-and-deployment-configuration.md`](../../adr/0016-repository-integration-and-deployment-configuration.md) |
 | 0017 | One version across core and adapters | Accepted | [`../../adr/0017-unified-release-version.md`](../../adr/0017-unified-release-version.md) |
 | 0018 | Acknowledged durability and isolation contract | Accepted | [`../../adr/0018-acknowledged-durability-isolation.md`](../../adr/0018-acknowledged-durability-isolation.md) |
+| 0019 | Authoritative durable graph delta journal | Accepted | [`../../adr/0019-authoritative-graph-delta-journal.md`](../../adr/0019-authoritative-graph-delta-journal.md) |

@@ -52,6 +52,15 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "graph_delta_journal",
+    srcs = ["tests/graph_delta_journal.rs"],
+    crate = ":graphforge_storage",
+    crate_features = ["test-failpoints"],
+    size = "medium",
+    deps = _STORAGE_DEPS,
+)
+
+gf_rust_integration_test(
     name = "graph_writer",
     srcs = ["tests/graph_writer.rs"],
     crate = ":graphforge_storage",
@@ -74,6 +83,7 @@ test_suite(
     tests = [
         ":adjacency_delta_write",
         ":filtered_read",
+        ":graph_delta_journal",
         ":graph_writer",
         ":io_stats",
     ],
