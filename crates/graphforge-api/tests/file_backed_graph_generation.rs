@@ -112,11 +112,42 @@ fn checkpoint_read_only_open_pins_graph_tree_in_place() {
     assert_eq!(evidence.files_copied, 0);
     assert_eq!(evidence.bytes_copied, 0);
     assert_eq!(evidence.files_opened_in_place, evidence.files_validated);
+    assert_eq!(
+        view.project_open_recovery().kind,
+        graphforge_storage::ProjectOpenRecoveryKind::CheckpointView
+    );
 
     let result = view
         .execute("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS n")
         .unwrap();
     assert_eq!(result.stats.rows_produced, 1);
+}
+
+#[test]
+fn project_open_exposes_recovery_evidence_and_repeat_open_stays_stable() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().to_str().unwrap();
+    let first = GraphForge::new(Some(path)).unwrap();
+    assert_eq!(
+        first.project_open_recovery().kind,
+        graphforge_storage::ProjectOpenRecoveryKind::Initialization
+    );
+    let generation = first.project_open_recovery().selected_generation_uuid;
+    drop(first);
+
+    let second = GraphForge::new(Some(path)).unwrap();
+    let evidence = second.project_open_recovery();
+    assert_eq!(
+        evidence.kind,
+        graphforge_storage::ProjectOpenRecoveryKind::ProjectOpen
+    );
+    assert_eq!(evidence.selected_generation_uuid, generation);
+    assert_eq!(
+        evidence.selected_generation_class,
+        graphforge_storage::ProjectRecoveryGenerationClass::CommittedCurrent
+    );
+    assert!(!evidence.work_detected);
+    assert!(evidence.deferred.is_none());
 }
 
 #[test]

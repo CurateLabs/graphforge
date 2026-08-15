@@ -228,16 +228,34 @@
       "id": "recovery_on_open_interrupted_transaction",
       "failpoints": [],
       "required_authority": "exact_valid_CURRENT_with_advisory_journal_cleanup",
-      "coverage": "partial",
-      "owner_issue": 750,
+      "coverage": "covered",
       "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "open_recovers_pre_publication_kill_to_parent_idempotently"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "open_recovers_post_publication_kill_to_child_and_repairs_journal"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "open_with_live_writer_defers_cleanup_and_pins_valid_current"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "open_corrupt_current_fails_closed_without_fallback_election"
+        },
         {
           "kind": "rust",
           "path": "crates/graphforge-storage/src/project_recovery.rs",
           "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
         }
-      ],
-      "rationale": "Automatic recovery-on-open productization remains #750; existing kill matrices already prove authority selection."
+      ]
     }
   ],
   "anomalies": [

@@ -97,27 +97,44 @@ caller-managed public transactions are outside the v0.5 contract.
 
 ## Interrupted transaction recovery
 
-`recover_project_transactions()` first resolves the exact committed
-generation, then acquires `locks/writer.lock` non-blockingly and resolves it
-again. Successful kernel lock acquisition is the only evidence that an earlier
-writer is gone. PID, owner text, timestamps, heartbeats, and file age never
-permit lock stealing.
+Ordinary project open runs recovery as a first-class lifecycle step.
+`open_or_initialize_project_with_recovery()` (and therefore
+`GraphForge::new` / directory open) first resolves the exact committed
+generation, then uses bounded, link-safe inspection of journals, atomic
+temps, and trash. When candidate work exists it acquires `locks/writer.lock`
+non-blockingly in the established writer/transaction/checkpoint order,
+recovers idempotently, re-resolves `CURRENT`, and opens that pinned
+generation. Successful kernel lock acquisition is the only evidence that an
+earlier writer is gone. PID, owner text, timestamps, heartbeats, and file age
+never permit lock stealing.
 
-While holding that lock, recovery classifies canonical transaction journals in
-bounded lexical order. A journal whose generation and manifest digest match
-`CURRENT` is repaired to `PUBLISHED`. A non-published journal for any other
-generation is marked `ABORTED`; its UUID-named private generation is removed
-only after the current generation and its two verified ancestors are retained,
-an exclusive generation lease is acquired when present, and `CURRENT` is
-rechecked. Published historical journals remain published. Missing journals
-never affect authority, while a torn or ambiguous journal returns
-`GF_PROJECT_CORRUPT` with restore guidance and preserves the evidence.
+When a live writer already owns the recovery locks, open still pins the
+validated `CURRENT` generation and reports recovery as deferred
+(`live_writer_owns_kernel_lock`) instead of failing the snapshot open or
+stealing locks. Explicit `recover_project_transactions()` retains the
+`GF_WRITER_BUSY` contract for callers that require exclusive cleanup.
+
+While holding the recovery lock, cleanup classifies canonical transaction
+journals in bounded lexical order. A journal whose generation and manifest
+digest match `CURRENT` is repaired to `PUBLISHED`. A non-published journal for
+any other generation is marked `ABORTED`; its UUID-named private generation is
+removed only after the current generation and its two verified ancestors are
+retained, an exclusive generation lease is acquired when present, and
+`CURRENT` is rechecked. Published historical journals remain published.
+Missing journals never affect authority, while a torn or ambiguous journal
+returns `GF_PROJECT_CORRUPT` with restore guidance and preserves the evidence.
 
 Cleanup atomically moves an authorized abandoned generation into root
 `trash/`, flushes both directories, then deletes and flushes the trash entry.
 A crash at either cleanup boundary is idempotently completed by the next
 recovery pass. Unknown, linked, noncanonical, or journal-less generation
 entries are counted and preserved rather than traversed or guessed about.
+
+Initialization of an empty or resumable uninitialized container and
+read-only checkpoint opens remain semantically distinct: they do not run the
+recovery cleanup pass. Safe open evidence exposes selected generation class,
+repaired/aborted journal counts, removed/quarantined entries, deferral
+reason, and elapsed phase without payload data or sensitive paths.
 
 New-container interruption after `FORMAT` is durable leaves a supported
 uninitialized container. A later `open_or_initialize_project()` resumes that

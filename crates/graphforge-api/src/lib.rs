@@ -353,6 +353,8 @@ pub struct GraphForge {
     workspace_guard: Arc<tempfile::TempDir>,
     /// Structural evidence for how the graph workspace was opened.
     graph_open_evidence: graphforge_storage::GraphFilesOpenEvidence,
+    /// Safe recovery-on-open summary (cleanup, deferral, or checkpoint skip).
+    project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     /// Keeps an in-memory instance's temp directory alive for the engine's life.
     tempdir: Option<Arc<tempfile::TempDir>>,
     /// Compiled ontology, present in advisory/strict mode.
@@ -470,7 +472,8 @@ impl GraphForge {
         // engine's lifetime.
         let tmp = tempfile::TempDir::new()
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
-        let resolved_generation = graphforge_storage::open_or_initialize_project(tmp.path())?;
+        let (resolved_generation, project_open_recovery) =
+            graphforge_storage::open_or_initialize_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
@@ -507,6 +510,7 @@ impl GraphForge {
             dir,
             workspace_guard: workspace,
             graph_open_evidence,
+            project_open_recovery,
             tempdir: Some(Arc::new(tmp)),
             ontology,
             ontology_document,
@@ -529,6 +533,12 @@ impl GraphForge {
         &self.graph_open_evidence
     }
 
+    /// Safe recovery-on-open summary for this facade instance.
+    #[must_use]
+    pub fn project_open_recovery(&self) -> &graphforge_storage::ProjectOpenRecoveryEvidence {
+        &self.project_open_recovery
+    }
+
     fn open_dir_with_options(
         dir: PathBuf,
         options: GraphForgeOptions,
@@ -541,8 +551,16 @@ impl GraphForge {
             )));
         }
 
-        let resolved_generation = graphforge_storage::open_or_initialize_project(&dir)?;
-        Self::open_resolved_with_options(dir, resolved_generation, false, options, resource_policy)
+        let (resolved_generation, project_open_recovery) =
+            graphforge_storage::open_or_initialize_project_with_recovery(&dir)?;
+        Self::open_resolved_with_options(
+            dir,
+            resolved_generation,
+            false,
+            options,
+            resource_policy,
+            project_open_recovery,
+        )
     }
 
     fn open_resolved_with_mode(
@@ -552,12 +570,22 @@ impl GraphForge {
     ) -> Result<Self, GfError> {
         let options = GraphForgeOptions::default();
         let (_, resource_policy) = options.clone().validate()?;
+        let project_open_recovery = if read_only {
+            graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
+                resolved_generation.generation_uuid(),
+            )
+        } else {
+            graphforge_storage::ProjectOpenRecoveryEvidence::initialization(
+                resolved_generation.generation_uuid(),
+            )
+        };
         Self::open_resolved_with_options(
             container_dir,
             resolved_generation,
             read_only,
             options,
             resource_policy,
+            project_open_recovery,
         )
     }
 
@@ -567,6 +595,7 @@ impl GraphForge {
         read_only: bool,
         write_options: GraphForgeOptions,
         resource_policy: resource_policy::NormalizedResourcePolicy,
+        project_open_recovery: graphforge_storage::ProjectOpenRecoveryEvidence,
     ) -> Result<Self, GfError> {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
@@ -624,6 +653,7 @@ impl GraphForge {
             dir,
             workspace_guard: workspace,
             graph_open_evidence,
+            project_open_recovery,
             tempdir: None,
             ontology,
             ontology_document,
