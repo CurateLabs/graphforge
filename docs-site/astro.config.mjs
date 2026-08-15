@@ -79,6 +79,10 @@ export default defineConfig({
                 },
                 { label: 'Storage', slug: 'book/architecture/storage' },
                 {
+                  label: 'Concurrency and recovery',
+                  slug: 'book/architecture/concurrency-recovery',
+                },
+                {
                   label: 'Pre-v1 Project Compatibility',
                   slug: 'book/architecture/project-format-compatibility',
                 },
@@ -256,6 +260,10 @@ export default defineConfig({
                 {
                   label: '0017 — Unified Release Version',
                   slug: 'adr/0017-unified-release-version',
+                },
+                {
+                  label: '0018 — Durability and Isolation',
+                  slug: 'adr/0018-acknowledged-durability-isolation',
                 },
               ],
             },

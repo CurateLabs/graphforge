@@ -6,13 +6,20 @@
 
 **Contract:** [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json)  
 **Related:** ADR 0012 (domain ownership), ADR 0013 (project generations),
-–
+ADR 0018 (acknowledged durability and isolation)
 
 ## Context
 
 v0.5.0 requires named, Git-like recovery points for the complete embedded
 workspace. A checkpoint is not a DataFusion execution checkpoint, transaction
 rollback, mutable branch, or pointer that can move `CURRENT` backward.
+
+Checkpoint create, delete, and revert publications consume the same
+acknowledged-durable vocabulary frozen by
+[ADR 0018](0018-acknowledged-durability-isolation.md): stage, validate, durable
+generation, linearize (`CURRENT` replacement), acknowledge (including project-
+root directory flush), publish, abort, and recover. Semantic changes to that
+acknowledgement contract require an amending ADR.
 
 ADR 0013 already makes `CURRENT` the sole commit authority and each generation
 a complete immutable snapshot. This decision adds durable names for those

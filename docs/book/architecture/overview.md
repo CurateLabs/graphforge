@@ -282,7 +282,7 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [Algorithm Verbs](algorithms.md) — full algorithm catalog across rank/cluster/paths/analyze/similar
 - [Execution Model](execution-model.md) — DataFusion integration, custom graph operators, Arrow result streams
 - [Storage](storage.md) — StorageProvider trait, Parquet provider
-- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0016`)
+- [ADR Index](../../adr/README.md) — contiguous decision log (`0001`–`0018`)
 - [ADR 0001: Rust Core](../../adr/0001-rust-core.md) — Rust core and binding strategy
 - [ADR 0002: RD+Pratt Parser](../../adr/0002-lr1-grammar.md) — Parser algorithm decision
 - [ADR 0003: Progressive Ontology](../../adr/0003-progressive-ontology.md) — exploration-first ontology modes
@@ -297,4 +297,6 @@ Shipped v0.5.0 expects these surfaces to stay green on `main`:
 - [ADR 0015: Embedded Write Modes](../../adr/0015-embedded-write-modes.md) — single, queued, and optimistic project writes
 - [ADR 0016: Repository integration and deployment configuration](../../adr/0016-repository-integration-and-deployment-configuration.md) — tracked definitions, local data, CLI, skills, and IaC ownership boundaries
 - [ADR 0017: One version across core and adapters](../../adr/0017-unified-release-version.md) — one public version for the Rust core, bindings, CLI, and skills release set
+- [ADR 0018: Acknowledged durability and isolation](../../adr/0018-acknowledged-durability-isolation.md) — acknowledgement boundary, filesystem scope, and isolation honesty
+- [Concurrency and recovery](concurrency-recovery.md) — architecture narrative for write modes, recovery, and the durability matrix
 - [Roadmap](../../releases/roadmap.md) — Milestones and timeline

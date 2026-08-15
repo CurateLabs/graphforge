@@ -2,6 +2,11 @@
 
 **Status:** Accepted for v0.5.0
 
+**Related:** [ADR 0018](0018-acknowledged-durability-isolation.md) freezes the
+public isolation honesty rules, including the write-skew witness that shows
+optimistic mode is not SSI/serializable. Semantic changes to mode isolation
+require an amending ADR.
+
 ## Context
 
 GraphForge is an embedded engine, but one project may be opened by multiple

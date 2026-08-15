@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "contract": "graphforge-durability-isolation/1",
+  "issue": 748,
+  "parent_issue": 747,
+  "adr": "docs/adr/0018-acknowledged-durability-isolation.md",
+  "architecture_doc": "docs/book/architecture/concurrency-recovery.md",
+  "api_doc": "docs/reference/api.md",
+  "reconciled_adrs": [
+    "docs/adr/0013-project-generation-protocol.md",
+    "docs/adr/0014-workspace-checkpoints.md",
+    "docs/adr/0015-embedded-write-modes.md"
+  ],
+  "m5_consumer_issues": [738, 742, 745],
+  "deferred_owner_issues": [749, 750, 751, 752, 753, 754, 755, 756],
+  "acknowledgement": {
+    "name": "acknowledged-durable",
+    "requires": [
+      "participant_file_flushes",
+      "manifest_file_flush",
+      "generation_directory_flushes",
+      "optimistic_promotion_when_applicable",
+      "current_atomic_replace_or_create",
+      "project_root_directory_flush"
+    ],
+    "linearization_point": "current_atomic_replace_or_create",
+    "not_authority": ["journals", "directory_scans", "timestamps", "uuid_order"]
+  },
+  "filesystem_scope": {
+    "supported": [
+      "posix_local_fcntl_flock_rename_fsync_dir_fsync",
+      "windows_local_ntfs_refs_lockfileex_flushfilebuffers_replacefilew"
+    ],
+    "rejected": [
+      "network",
+      "userspace",
+      "removable",
+      "cross_device",
+      "symlink_mediated",
+      "unknown"
+    ],
+    "error": "GF_UNSUPPORTED_FILESYSTEM",
+    "best_effort_allowed": false
+  },
+  "recovery_authority": {
+    "sole": "exact_valid_CURRENT",
+    "advisory": ["journals", "directory_scans"],
+    "corrupt_error": "GF_PROJECT_CORRUPT"
+  },
+  "write_modes": {
+    "single_writer": {
+      "reader_isolation": "pinned_immutable_snapshot",
+      "writer_isolation": "serial_exclusive",
+      "conflicts": [
+        {"concurrent_work": "competing_writer", "outcome": "GF_WRITER_BUSY"}
+      ]
+    },
+    "queued_writer": {
+      "reader_isolation": "pinned_immutable_snapshot_reads_bypass_queue",
+      "writer_isolation": "serial_after_bounded_fifo",
+      "conflicts": [
+        {"concurrent_work": "queue_full", "outcome": "structured_queue_limit_error"},
+        {"concurrent_work": "cancel_unstarted", "outcome": "GF_CANCELLED"},
+        {"concurrent_work": "cancel_started", "outcome": "not_removable_from_queue"}
+      ]
+    },
+    "optimistic_multi_writer": {
+      "reader_isolation": "pinned_immutable_snapshot_per_attempt",
+      "writer_isolation": "optimistic_snapshot_with_serialized_CURRENT",
+      "conflicts": [
+        {"concurrent_work": "distinct_graph_creates", "outcome": "rebase_and_merge"},
+        {"concurrent_work": "distinct_immutable_ledger_identities", "outcome": "rebase_and_merge"},
+        {"concurrent_work": "different_properties_same_object", "outcome": "rebase_and_merge"},
+        {"concurrent_work": "same_property_or_removed_target", "outcome": "GF_WRITE_CONFLICT"},
+        {"concurrent_work": "delete_or_administrative", "outcome": "GF_WRITE_CONFLICT"},
+        {"concurrent_work": "retry_budget_exhausted", "outcome": "GF_REBASE_EXHAUSTED"},
+        {"concurrent_work": "same_operation_same_content", "outcome": "exact_idempotent_replay"},
+        {"concurrent_work": "same_operation_changed_content", "outcome": "GF_IDEMPOTENCY_CONFLICT"}
+      ],
+      "ssi_claimed": false,
+      "serializable_claimed": false
+    }
+  },
+  "claims": {
+    "forbidden_positive": ["ACID", "serializable isolation", "SSI"],
+    "required_honest": [
+      "acknowledged-durable",
+      "write-skew",
+      "GF_UNSUPPORTED_FILESYSTEM",
+      "exact valid CURRENT"
+    ]
+  },
+  "publication_vocabulary": [
+    "stage",
+    "validate",
+    "durable generation",
+    "linearize",
+    "acknowledge",
+    "publish",
+    "abort",
+    "recover"
+  ],
+  "bdd_scenarios": [
+    {
+      "id": "acknowledged-success",
+      "given": "caller_receives_success",
+      "then": "durable_state_and_crash_assumptions_unambiguous",
+      "matrix_refs": ["acknowledgement", "crash_phases"]
+    },
+    {
+      "id": "write-skew-honesty",
+      "given": "two_optimistic_transactions_form_write_skew",
+      "then": "docs_classify_not_serializable",
+      "matrix_refs": ["anomalies.write_skew"]
+    },
+    {
+      "id": "unsupported-filesystem-fail-closed",
+      "given": "unsupported_filesystem",
+      "then": "fail_closed_preflight",
+      "matrix_refs": ["filesystem_scope"]
+    }
+  ],
+  "crash_phases": [
+    {
+      "id": "before_current_replace",
+      "failpoints": [
+        "project.after_writer_lock",
+        "project.after_journal_preparing",
+        "project.after_participant_write",
+        "project.after_participant_fsync",
+        "project.after_participant_dir_fsync",
+        "project.after_journal_staged",
+        "project.after_domain_validation",
+        "project.after_composite_validation",
+        "project.after_journal_validated",
+        "project.after_manifest_write",
+        "project.after_manifest_fsync",
+        "project.after_generation_dir_fsync",
+        "project.after_optimistic_commit_lock",
+        "project.after_optimistic_promotion",
+        "project.after_journal_durable",
+        "project.after_current_temp_write",
+        "project.after_current_temp_fsync",
+        "project.before_current_replace"
+      ],
+      "required_authority": "parent_or_uninitialized",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/composite_recovery_tests.rs",
+          "symbol": "composite_kill_reopen_matrix_never_exposes_mixed_state"
+        }
+      ]
+    },
+    {
+      "id": "after_current_replace",
+      "failpoints": [
+        "project.after_current_replace",
+        "project.after_root_fsync",
+        "project.after_journal_published"
+      ],
+      "required_authority": "new_generation",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "injected_operation_errors_report_exact_commit_state"
+        }
+      ]
+    },
+    {
+      "id": "post_linearization_api_error",
+      "failpoints": ["project.after_current_replace.error"],
+      "required_authority": "new_generation_committed_true",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "injected_operation_errors_report_exact_commit_state"
+        }
+      ]
+    },
+    {
+      "id": "lost_root_directory_flush_power_loss",
+      "failpoints": ["project.after_current_replace"],
+      "required_authority": "exact_valid_CURRENT_presented_by_filesystem",
+      "coverage": "deferred",
+      "owner_issue": 749,
+      "rationale": "Host subprocess kill after successful flush is not a complete torn-persistence / lost-directory-flush model."
+    },
+    {
+      "id": "torn_current_or_manifest_bytes",
+      "failpoints": [],
+      "required_authority": "GF_PROJECT_CORRUPT_fail_closed",
+      "coverage": "deferred",
+      "owner_issue": 749,
+      "rationale": "Deterministic persistent-media fault oracle is owned by #749."
+    },
+    {
+      "id": "recovery_on_open_interrupted_transaction",
+      "failpoints": [],
+      "required_authority": "exact_valid_CURRENT_with_advisory_journal_cleanup",
+      "coverage": "partial",
+      "owner_issue": 750,
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
+        }
+      ],
+      "rationale": "Automatic recovery-on-open productization remains #750; existing kill matrices already prove authority selection."
+    }
+  ],
+  "anomalies": [
+    {
+      "id": "dirty_read",
+      "modes": {
+        "single_writer": "prevented",
+        "queued_writer": "prevented",
+        "optimistic_multi_writer": "prevented"
+      },
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/shared_directory_semantics_tests.rs",
+          "symbol": "shared_directory_reads_pin_complete_generations_and_reopen_sees_commit"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/multi_process_publication_tests.rs",
+          "symbol": "published_child_is_visible_only_to_fresh_current_reader"
+        }
+      ]
+    },
+    {
+      "id": "non_repeatable_read_within_pinned_facade",
+      "modes": {
+        "single_writer": "prevented",
+        "queued_writer": "prevented",
+        "optimistic_multi_writer": "prevented"
+      },
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/shared_directory_semantics_tests.rs",
+          "symbol": "shared_directory_reads_pin_complete_generations_and_reopen_sees_commit"
+        }
+      ]
+    },
+    {
+      "id": "lost_update_same_property",
+      "modes": {
+        "single_writer": "prevented_by_serial_writer",
+        "queued_writer": "prevented_by_serial_writer",
+        "optimistic_multi_writer": "GF_WRITE_CONFLICT"
+      },
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/composite_publish.rs",
+          "symbol": "optimistic_same_property_change_is_a_write_conflict"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/shared_directory_semantics_tests.rs",
+          "symbol": "competing_writer_fails_before_its_staging_or_publication"
+        }
+      ]
+    },
+    {
+      "id": "write_skew",
+      "modes": {
+        "single_writer": "prevented_by_serial_writer",
+        "queued_writer": "prevented_by_serial_writer",
+        "optimistic_multi_writer": "allowed_documented_not_ssi"
+      },
+      "coverage": "documented",
+      "evidence": [
+        {
+          "kind": "doc",
+          "path": "docs/adr/0018-acknowledged-durability-isolation.md",
+          "symbol": "Write-skew witness"
+        },
+        {
+          "kind": "doc",
+          "path": "docs/book/architecture/concurrency-recovery.md",
+          "symbol": "Write-skew witness"
+        }
+      ],
+      "owner_issue": 756,
+      "rationale": "Honesty of the classification is frozen now; seeded certification histories that exercise the witness remain #756. SSI prevention is explicitly out of M6."
+    },
+    {
+      "id": "phantom_read_across_fresh_opens",
+      "modes": {
+        "single_writer": "expected_new_open_sees_new_generation",
+        "queued_writer": "expected_new_open_sees_new_generation",
+        "optimistic_multi_writer": "expected_new_open_sees_new_generation"
+      },
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/multi_process_publication_tests.rs",
+          "symbol": "published_child_is_visible_only_to_fresh_current_reader"
+        }
+      ]
+    }
+  ],
+  "lifecycle": [
+    {
+      "id": "idempotent_exact_retry",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_publication.rs",
+          "symbol": "identical_published_transaction_is_idempotent"
+        }
+      ]
+    },
+    {
+      "id": "idempotency_conflict",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_publication.rs",
+          "symbol": "changed_content_under_same_transaction_conflicts"
+        }
+      ]
+    },
+    {
+      "id": "cancellation_isolation",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/stream_cancellation_isolation_tests.rs",
+          "symbol": "early_stream_drop_does_not_truncate_concurrent_peer"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/stream_cancellation_isolation_tests.rs",
+          "symbol": "cooperative_token_cancellation_does_not_cancel_concurrent_peer"
+        }
+      ]
+    },
+    {
+      "id": "unknown_outcome_before_ack",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "injected_operation_errors_report_exact_commit_state"
+        }
+      ]
+    },
+    {
+      "id": "post_linearization_error",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "injected_operation_errors_report_exact_commit_state"
+        }
+      ]
+    },
+    {
+      "id": "uniform_transaction_lifecycle_surface",
+      "coverage": "deferred",
+      "owner_issue": 754,
+      "rationale": "One Rust-owned transaction lifecycle across mutation paths is #754."
+    },
+    {
+      "id": "binding_cli_transaction_parity",
+      "coverage": "deferred",
+      "owner_issue": 755,
+      "rationale": "Python/Node/CLI parity for transaction and maintenance surfaces is #755."
+    },
+    {
+      "id": "durable_delta_journal",
+      "coverage": "deferred",
+      "owner_issue": 752,
+      "rationale": "Authoritative small-write deltas are #752."
+    },
+    {
+      "id": "bounded_retention_orphan_gc",
+      "coverage": "deferred",
+      "owner_issue": 751,
+      "rationale": "First-class retention/GC productization is #751."
+    }
+  ],
+  "filesystem_evidence": [
+    {
+      "kind": "rust",
+      "path": "crates/graphforge-storage/src/project_portable.rs",
+      "symbol": "linked_ancestor_is_rejected_for_source_export_and_target"
+    },
+    {
+      "kind": "rust",
+      "path": "crates/graphforge-storage/src/embedding_publication.rs",
+      "symbol": "publication_filesystem_and_error_boundaries_are_fail_closed"
+    }
+  ]
+}

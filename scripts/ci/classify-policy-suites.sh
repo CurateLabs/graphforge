@@ -94,6 +94,8 @@ while IFS= read -r -d '' path; do
       scripts/ci/test-concurrency-recovery-gate.py | \
       tests/contracts/concurrency-short-matrix.json | \
       tests/contracts/concurrency-recovery-matrix.json | \
+      scripts/ci/durability-isolation-gate.py | scripts/ci/test-durability-isolation-gate.py | \
+      tests/contracts/durability-isolation-matrix.json | \
       scripts/ci/non-cypher-surface-gate.py | scripts/ci/test-non-cypher-surface-gate.py | \
       tests/contracts/non-cypher-rust-surface.json)
       contracts=true

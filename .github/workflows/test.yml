@@ -99,6 +99,12 @@ jobs:
         if: steps.policy-suites.outputs.contracts == 'true'
         run: python3 scripts/ci/test-concurrency-recovery-gate.py
 
+      - name: Test durability and isolation contract
+        if: steps.policy-suites.outputs.contracts == 'true'
+        run: |
+          python3 scripts/ci/durability-isolation-gate.py validate
+          python3 scripts/ci/test-durability-isolation-gate.py
+
       - name: Test concurrency short matrix gate
         if: steps.policy-suites.outputs.contracts == 'true'
         run: |
