@@ -132,9 +132,8 @@ fn render_property_read(query: &str) -> String {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use graphforge_core::TypeId;
     use graphforge_core::uuid::new_v7;
-    use graphforge_ir::{Binder, IrLiteral, RuntimeCatalog};
+    use graphforge_ir::{Binder, IrLiteral, RuntimeCatalog, RuntimeTypeId, runtime_entity_type_id};
     use graphforge_storage::{GraphCatalog, GraphWriter};
 
     let rc = Arc::new(Mutex::new(RuntimeCatalog::new()));
@@ -145,11 +144,13 @@ fn render_property_read(query: &str) -> String {
         .unwrap_or_else(|_| panic!("bind {query:?}"));
 
     // Write one node with a `name` property so `properties/_untyped.parquet`
-    // exists with a `name` column for the JOIN to discover.
+    // exists with a `name` column for the JOIN to discover. Seed the tagged
+    // runtime entity TypeId (bit-30) to match binder exploratory encoding (#702).
     let dir = tempfile::tempdir().expect("tempdir");
     let mut writer = GraphWriter::open(dir.path(), OntologyMode::Exploratory).expect("writer");
     let uuid = new_v7();
-    writer.create_node(uuid, TypeId(0)).expect("create_node");
+    let person = runtime_entity_type_id(RuntimeTypeId(0));
+    writer.create_node(uuid, person).expect("create_node");
     let mut props = HashMap::new();
     props.insert("name".to_owned(), IrLiteral::Str("Alice".to_owned()));
     writer

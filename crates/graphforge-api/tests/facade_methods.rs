@@ -244,6 +244,69 @@ fn advisory_unknown_relation_does_not_collide_with_ontology_type_id() {
 }
 
 #[test]
+fn advisory_unknown_entity_label_does_not_collide_with_ontology_type_id() {
+    let dir = TempDir::new().unwrap();
+    let onto = dir.path().join("people.yaml");
+    std::fs::write(&onto, MINIMAL_ONTOLOGY).unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+
+    let mut gf = GraphForge::new(Some(project.to_str().unwrap())).expect("persistent instance");
+    gf.load_ontology(onto.to_str().unwrap())
+        .expect("load ontology");
+
+    gf.add_node(
+        "Person",
+        &HashMap::from([("name".into(), PropValue::Str("Ada".into()))]),
+    )
+    .expect("create ontology Person");
+    gf.add_node("Ghost", &HashMap::new())
+        .expect("create advisory Ghost");
+
+    let assert_reads = |graph: &GraphForge| {
+        assert_eq!(
+            graph
+                .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
+                .expect("Person match")
+                .stats
+                .rows_produced,
+            1,
+            "Person query must not absorb Ghost nodes"
+        );
+        assert_eq!(
+            graph
+                .execute("MATCH (n:Ghost) RETURN n.node_uuid AS id")
+                .expect("Ghost match")
+                .stats
+                .rows_produced,
+            1,
+            "Ghost query must not absorb Person nodes"
+        );
+    };
+    assert_reads(&gf);
+
+    {
+        let catalog = gf.runtime_catalog();
+        let guard = catalog.lock().expect("catalog lock");
+        assert_eq!(
+            guard
+                .entity_type_names_with_ids()
+                .find(|(_, name)| *name == "Ghost")
+                .map(|(id, _)| id.0),
+            Some(0),
+            "first advisory label still uses catalog-local id 0"
+        );
+    }
+    drop(gf);
+
+    let mut reopened = GraphForge::new(Some(project.to_str().unwrap())).expect("reopen project");
+    reopened
+        .load_ontology(onto.to_str().unwrap())
+        .expect("reload session ontology");
+    assert_reads(&reopened);
+}
+
+#[test]
 fn load_ontology_missing_file_is_ontology_error() {
     let mut gf = GraphForge::new(None).expect("in-memory instance");
     let err = gf
