@@ -76,7 +76,12 @@ pub use project_publication::{
 };
 
 pub mod project_recovery;
-pub use project_recovery::{ProjectRecoveryReport, recover_project_transactions};
+pub use project_recovery::{
+    ProjectOpenRecoveryEvidence, ProjectOpenRecoveryKind, ProjectRecoveryDeferral,
+    ProjectRecoveryGenerationClass, ProjectRecoveryReport,
+    open_or_initialize_project_with_recovery, recover_project_on_open,
+    recover_project_transactions,
+};
 
 pub mod project_portable;
 pub use project_portable::{

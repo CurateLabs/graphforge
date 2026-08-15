@@ -794,8 +794,14 @@ fn revert_receipt(
 }
 
 pub(crate) struct CheckpointRetentionRoots {
-    _checkpoint_lock: File,
+    checkpoint_lock: File,
     pub(crate) roots: Vec<(Uuid, [u8; 32])>,
+}
+
+impl Drop for CheckpointRetentionRoots {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.checkpoint_lock);
+    }
 }
 
 pub(crate) fn checkpoint_retention_roots_after_writer_lock(
@@ -821,7 +827,7 @@ pub(crate) fn checkpoint_retention_roots_after_writer_lock(
         })
         .collect::<Result<Vec<_>, GfError>>()?;
     Ok(CheckpointRetentionRoots {
-        _checkpoint_lock: checkpoint_lock,
+        checkpoint_lock,
         roots,
     })
 }

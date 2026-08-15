@@ -166,6 +166,11 @@ impl CheckpointView {
     pub fn graph_open_evidence(&self) -> &graphforge_storage::GraphFilesOpenEvidence {
         self.graph.graph_open_evidence()
     }
+    /// Recovery evidence for this read-only checkpoint open (cleanup skipped).
+    #[must_use]
+    pub fn project_open_recovery(&self) -> &graphforge_storage::ProjectOpenRecoveryEvidence {
+        self.graph.project_open_recovery()
+    }
     /// Execute a read-only Cypher statement against the pinned generation.
     pub fn execute(&self, cypher: &str) -> Result<ExecutionResult, GfError> {
         self.graph.execute_read_only(cypher)
@@ -767,6 +772,9 @@ impl GraphForge {
                     true,
                     write_options.clone(),
                     resource_policy.clone(),
+                    graphforge_storage::ProjectOpenRecoveryEvidence::checkpoint_view(
+                        generation.generation_uuid(),
+                    ),
                 )?));
                 Ok(())
             },
@@ -783,6 +791,10 @@ impl GraphForge {
             .expect("generation UUID lock poisoned") =
             reopened.resolved_generation.generation_uuid();
         reopened.read_only = false;
+        reopened.project_open_recovery =
+            graphforge_storage::ProjectOpenRecoveryEvidence::clean_open(
+                reopened.resolved_generation.generation_uuid(),
+            );
         let procedures = Arc::clone(&self.procedures);
         let provider_refresh_runtimes = Arc::clone(&self.provider_refresh_runtimes);
         let provider_find_runtimes = Arc::clone(&self.provider_find_runtimes);
