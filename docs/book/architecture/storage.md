@@ -95,7 +95,9 @@ GraphForge organises a project as immutable, complete generations. `CURRENT` is
 the only publication authority; graph, provenance, and knowledge participants
 become visible together through one atomic pointer replacement. The normative
 layout, fsync order, reader leases, recovery rules, and failpoints are frozen in
-[ADR 0013](../../adr/0013-project-generation-protocol.md).
+[ADR 0013](../../adr/0013-project-generation-protocol.md). The public
+acknowledged-durable boundary and isolation honesty rules are frozen in
+[ADR 0018](../../adr/0018-acknowledged-durability-isolation.md).
 
 Named checkpoints, lease-pinned historical reads, logical diff, and
 complete-workspace revert are defined by

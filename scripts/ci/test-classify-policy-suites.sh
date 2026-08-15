@@ -42,6 +42,7 @@ assert_classification "$none" docs/guide.md
 assert_classification "$contracts" tests/contracts/knowledge-contract-matrix.json
 assert_classification "$contracts" tests/contracts/epistemic-contract-matrix.json
 assert_classification "$contracts" tests/contracts/m4-entry-matrix.json
+assert_classification "$contracts" tests/contracts/durability-isolation-matrix.json
 assert_classification "$coverage_ledger" scripts/coverage_rust_ledger.py
 assert_classification "$coverage_ledger" scripts/coverage-rust.sh
 assert_classification "$coverage_ledger" scripts/ci/test-coverage-rust.sh

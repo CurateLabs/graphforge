@@ -23,6 +23,7 @@ are not retained in this tree.
 | 0015 | [Three embedded project-write modes](0015-embedded-write-modes.md) | `0015-embedded-write-modes.md` |
 | 0016 | [Repository integration and deployment configuration boundary](0016-repository-integration-and-deployment-configuration.md) | `0016-repository-integration-and-deployment-configuration.md` |
 | 0017 | [One version across core and adapters](0017-unified-release-version.md) | `0017-unified-release-version.md` |
+| 0018 | [Acknowledged durability and isolation contract](0018-acknowledged-durability-isolation.md) | `0018-acknowledged-durability-isolation.md` |
 
 ## Numbering
 

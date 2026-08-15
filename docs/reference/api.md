@@ -6,6 +6,12 @@
 > [ADR 0014](../adr/0014-workspace-checkpoints.md), with exact request and Arrow
 > schema inventory in
 > [`graphforge-checkpoint-api/1`](../contracts/checkpoint-api-v1.json).
+>
+> **Durability and isolation (v0.5.x / M6):** Acknowledged-durable writes,
+> filesystem preflight, recovery authority, write-mode isolation tables, and the
+> optimistic write-skew witness are frozen by
+> [ADR 0018](../adr/0018-acknowledged-durability-isolation.md). The modes do not
+> claim generic ACID, serializable isolation, or SSI.
 
 !!! note "v0.5.0 unified API"
 This page documents the **v0.5.0 API**. **Data-returning** operations —
@@ -64,7 +70,11 @@ second options object using `writeMode`, `writeQueueCapacity`, and
 `maxRebaseAttempts`. Queue capacity is bounded to 1–65,536 and optimistic
 rebase attempts to 0–32. Only composite transactions use optimistic replay;
 other mutation APIs retain their single-writer behavior. See
-[ADR 0015](../adr/0015-embedded-write-modes.md).
+[ADR 0015](../adr/0015-embedded-write-modes.md) and the isolation honesty rules
+in [ADR 0018](../adr/0018-acknowledged-durability-isolation.md) (including why
+optimistic mode admits write-skew and is not SSI). Success on a persistent
+project means the write is acknowledged-durable only after participant/manifest
+flushes, `CURRENT` replacement, and the project-root directory flush.
 
 ---
 

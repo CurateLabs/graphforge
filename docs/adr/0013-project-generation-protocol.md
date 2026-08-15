@@ -4,7 +4,14 @@
 **Date:** 2026-07-24
 **Build target:** v0.5.0
 
-**Related:** ADR 0012 (domain ownership)
+**Related:** ADR 0012 (domain ownership), ADR 0018 (acknowledged durability and
+isolation)
+
+The public acknowledgement boundary, isolation honesty rules, and anomaly
+coverage matrix are frozen by
+[ADR 0018](0018-acknowledged-durability-isolation.md). This ADR remains the
+normative publication protocol; semantic changes to acknowledgement or recovery
+authority require an amending ADR rather than silent edits here.
 
 ## Context
 

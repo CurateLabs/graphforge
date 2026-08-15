@@ -1,5 +1,14 @@
 # Concurrency and recovery contract
 
+Normative acknowledgement, filesystem scope, isolation tables, and anomaly
+classification live in
+[ADR 0018](../../adr/0018-acknowledged-durability-isolation.md). The machine-
+readable coverage matrix is
+[`tests/contracts/durability-isolation-matrix.json`](../../../tests/contracts/durability-isolation-matrix.json)
+(`graphforge-durability-isolation/1`). This page is the architecture narrative
+that reconciles ADR 0013 publication, ADR 0014 checkpoints, and ADR 0015 write
+modes with that frozen public contract.
+
 GraphForge supports concurrent, read-only operations on one facade, across
 facades in one process, and across sessions opened on the same project. Results
 are complete, canonically ordered Arrow data. A facade pins the generation it
@@ -10,24 +19,43 @@ Dropping a stream or cancelling one request affects only that operation. A peer
 continues to a complete result, while cooperative cancellation reports
 `GF_CANCELLED`.
 
-Project mutation has three explicit embedded modes. `single_writer` is the
-default and rejects a competing writer with `GF_WRITER_BUSY` before it creates
-staging or publication state. `queued_writer` adds a bounded, first-in-first-out
-queue per facade; snapshot reads do not enter that queue, and cancellation can
-remove only work that has not started. `optimistic_multi_writer` lets distinct
-composite transaction identities stage concurrently, serializes only the
-`CURRENT` commit point, and rebases compatible work against the winning
-generation. Cross-process publication always exposes one complete generation,
-never a partially staged one.
+## Acknowledged-durable writes
+
+Caller-visible success means the write is **acknowledged-durable** only after
+participant and manifest file flushes, generation-tree directory flushes,
+atomic `CURRENT` replacement or creation, **and** the project-root directory
+flush. Atomic `CURRENT` replacement is the visibility linearization point for
+new readers; acknowledgement against power loss additionally requires that root
+directory flush. Journals never select authority.
+
+Supported filesystems are the fail-closed local POSIX and Windows classes named
+by ADR 0013. Network, userspace, removable, cross-device, symlink-mediated, and
+unknown filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root
+or `CURRENT` changes. There is no best-effort durability mode.
+
+Recovery resolves an exact valid `CURRENT` only. Journals and directory scans
+are advisory cleanup input. Corrupt or ambiguous pointers fail closed as
+`GF_PROJECT_CORRUPT` without electing a newest generation.
+
+## Write modes and isolation
+
+Project mutation has three explicit embedded modes. Every mode gives readers
+pinned immutable snapshot isolation. The modes do not claim generic ACID,
+serializable isolation, or SSI.
+
+| Mode | Writer semantics | Isolation / conflict table |
+| --- | --- | --- |
+| `single_writer` (default) | Competing writers receive `GF_WRITER_BUSY` before staging or publication | One serial writer; no concurrent publish races |
+| `queued_writer` | Bounded FIFO per facade; snapshot reads bypass the queue; cancellation removes only unstarted work | One serial writer after dequeue; queue-limit and cancel errors are structured |
+| `optimistic_multi_writer` | Distinct composite transaction identities may stage concurrently; only the `CURRENT` commit point is serialized; compatible work may rebase | Closed merge/conflict matrix in [ADR 0015](../../adr/0015-embedded-write-modes.md): merge, `GF_WRITE_CONFLICT`, `GF_IDEMPOTENCY_CONFLICT`, or `GF_REBASE_EXHAUSTED` |
 
 Optimistic merge rules are deliberately finite. Distinct creates and immutable
 ledger identities merge. Changes to different properties of the same graph
 object merge. Reusing an identity with changed content, changing the same
 property, losing a mutation target, and delete or administrative work do not
-merge. Stable outcomes are `GF_IDEMPOTENCY_CONFLICT`, `GF_WRITE_CONFLICT`, or
-`GF_REBASE_EXHAUSTED`. Only the composite publication API is replayed
-optimistically in v0.5.0; other mutation APIs keep their established
-single-writer behavior even when the facade selects optimistic mode.
+merge. Only the composite publication API is replayed optimistically in v0.5.x;
+other mutation APIs keep their established single-writer behavior even when the
+facade selects optimistic mode.
 
 Scalar construction (`add_edge`) acquires the same graph visibility /
 write-admission coordinator as Cypher writes, bulk publication, and other
@@ -41,14 +69,44 @@ GraphForge core does not include an MCP or HTTP server. A separately packaged
 extension may expose one authenticated remote authority without changing the
 storage engine into a distributed database.
 
+### Write-skew witness
+
+Optimistic mode is **not** SSI. Because different properties of one object may
+merge, the following history is admitted:
+
+1. Object `Account` starts with `credit=0`, `debit=0`.
+2. T1 reads both fields, sees `debit=0`, and stages `credit=1`.
+3. T2 concurrently reads both fields, sees `credit=0`, and stages `debit=1`.
+4. Both publish after rebase under `optimistic_multi_writer`.
+5. The committed generation can contain `credit=1` and `debit=1`, breaking an
+   application invariant `credit + debit <= 1` that neither writer observed the
+   other violate.
+
+Docs therefore classify optimistic mode as optimistic snapshot / conflict
+semantics. Preventing write-skew requires a separately approved SSI design
+outside Milestone 6.
+
+## Recovery and lifecycle
+
 Recovery after a writer is killed selects either the previous complete
 generation or the newly published complete generation according to the durable
 publication phase. Graph, provenance, knowledge-layer, and epistemic state move together; mixed
 generations are unsupported and treated as corruption.
 
+Exact retry after acknowledgement returns the prior receipt without restaging.
+Same-identity content changes return `GF_IDEMPOTENCY_CONFLICT`. Failures before
+`CURRENT` replacement report `committed: false`. Failures after replacement
+reread validated `CURRENT` and report `committed: true`; the generation is not
+rolled back.
+
+Import/export and other interchange surfaces that publish a generation reuse
+the same publication vocabulary: stage, validate, durable generation,
+linearize, acknowledge, publish, abort, and recover. See ADR 0018 and the
+[repository integration guide](../../guides/repository-integration.md).
+
 ## Correctness gates versus stress observations
 
-There are two CI surfaces:
+There are three CI surfaces for concurrency and durability contracts:
 
 1. **Required short concurrency matrix** (`Test Suite / Concurrency Matrix`) —
    deterministic Rust, Python, and Node cases from
@@ -62,6 +120,9 @@ There are two CI surfaces:
    diagnostic only; they cannot turn a failed required short matrix green.
    Throughput or latency figures from stress are non-blocking performance
    observations, not correctness evidence.
+3. **Durability/isolation contract ledger** — `graphforge-durability-isolation/1`
+   maps crash phases and anomalies to covered evidence or later M6 owner issues
+   (#749–#756). Repository Policy validates the ledger without compiling Rust.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by
@@ -71,6 +132,12 @@ Local short-matrix execution after native artifacts are built:
 
 ```text
 python3 scripts/ci/concurrency-short-gate.py run --output /tmp/gf-concurrency-short
+```
+
+Local durability/isolation contract validation:
+
+```text
+python3 scripts/ci/durability-isolation-gate.py validate
 ```
 
 Local stress reproduction from an artifact uses the recorded command lines in
