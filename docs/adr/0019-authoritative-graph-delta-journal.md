@@ -86,7 +86,34 @@ A small-write publication may:
 
 It must not re-encode unchanged Parquet files solely to incorporate the
 mutation. Compaction of base+deltas back into canonical Parquet is a separate
-generation transaction (#753).
+generation transaction implemented by `compact_graph_delta` /
+`preview_graph_delta_compaction` (#753).
+
+### Compaction checkpoint (#753)
+
+Compaction is a normal project-generation transaction:
+
+1. Pin CURRENT and select a verified contiguous run prefix
+   (`1..=through_run_sequence`, or all runs).
+2. Merge base + prefix under explicit memory, spill, disk, and cancellation
+   budgets into a new canonical Parquet base (plus `.base_state.json`).
+3. Re-encode any later suffix runs contiguously onto the child generation so
+   post-snapshot deltas remain visible.
+4. Verify counts/schemas/ordering/checksums and the canonical graph fingerprint
+   against the pre-compaction full chain before CURRENT publication.
+5. Reclaim subsumed input generations only through the shared retention
+   reachability oracle (`inspect_project_reachability` /
+   `preview_project_cleanup` / `execute_project_cleanup`). Delta runs stay
+   protected with their generation; GC never deletes individual `.gfdr` files
+   out from under a reachable generation.
+6. Policy triggers (`graph_delta_compaction_status`) are caller-driven by run
+   count, run bytes, or estimated replay work — there is no unbounded
+   background compaction daemon.
+
+Crash before CURRENT leaves the prior base/deltas authoritative; after
+acknowledgement the compacted generation is authoritative. Named checkpoints
+and live reader leases retain exact prior bytes because the parent generation
+remains reachable until the shared oracle proves otherwise.
 
 Unsupported mutation kinds are rejected **before** acknowledgement. Supported
 kinds cover the create / update / delete surfaces required by current graph
@@ -132,8 +159,9 @@ Absence or corruption of an inventory-listed authoritative run fails open.
   remaining one immutable generation under `CURRENT`.
 - Crash cases before/after acknowledgement continue to follow ADR 0018 and the
   frozen fault oracle (#749).
-- Compaction (#753) can later fold a verified prefix into a new Parquet base
-  without inventing a side WAL.
+- Compaction (#753) folds a verified prefix into a new Parquet base through the
+  same CURRENT publication path, preserves suffix runs and leases, and reclaims
+  unreachable inputs only via the shared GC oracle.
 - Pre-delta v1 projects remain readable; delta-bearing generations remain v1
   containers with an explicit run-format version gate.
 
@@ -155,3 +183,5 @@ Absence or corruption of an inventory-listed authoritative run fails open.
 - Crash before/after acknowledgement matches the frozen durability oracle.
 - Resource limits bound replay and tiny-run accumulation.
 - Legacy v1 projects without deltas remain readable.
+- Compaction preserves fingerprint parity, suffix visibility, checkpoint bytes,
+  crash authority, and shared-oracle cleanup.

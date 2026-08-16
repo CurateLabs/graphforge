@@ -141,6 +141,9 @@ There are three CI surfaces for concurrency and durability contracts:
    reachability oracle as recovery: CURRENT, configured ancestors, and checkpoint
    roots. Live leases skip without waiting; concurrent publication returns
    `GF_WRITER_BUSY`; unknown or linked paths are quarantined and never deleted.
+   Graph delta compaction (`compact_graph_delta` / `preview_graph_delta_compaction`)
+   publishes a new Parquet generation through the same CURRENT path and reclaims
+   subsumed inputs only after acknowledgement via that shared oracle.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by

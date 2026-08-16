@@ -529,6 +529,38 @@
         }
       ],
       "rationale": "First-class retention/GC productization with shared reachability oracle, lease/checkpoint safety, bounds, and crash idempotence."
+    },
+    {
+      "id": "delta_parquet_compaction",
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
+          "symbol": "compacted_parquet_matches_base_plus_deltas_fingerprint"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
+          "symbol": "concurrent_suffix_runs_survive_prefix_compaction"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
+          "symbol": "checkpoint_retains_exact_prior_bytes_after_compaction_and_cleanup"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
+          "symbol": "cleanup_reclaims_unreachable_inputs_after_compaction"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/graph_delta_compaction.rs",
+          "symbol": "crash_oracle_before_and_after_ack_matches_frozen_contract"
+        }
+      ],
+      "rationale": "Deterministic bounded compaction of authoritative delta prefixes into Parquet generations with shared-oracle cleanup."
     }
   ],
   "filesystem_evidence": [

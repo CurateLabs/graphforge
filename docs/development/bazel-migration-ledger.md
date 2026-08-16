@@ -13,14 +13,14 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Inventory SHA | `6e8b8e3fdc1ecd960eacf14a73e5be7b54fcef3c` |
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
 | Workspace packages | 17 |
-| Cargo metadata targets | **99** |
-| Bazel modeling claimed complete? | **Yes** — all 99 Cargo targets mapped (#10–#6 + #338 + #336 + #752); retained tools justified in exceptions |
+| Cargo metadata targets | **100** |
+| Bazel modeling claimed complete? | **Yes** — all 100 Cargo targets mapped (#10–#6 + #338 + #336 + #752 + #753); retained tools justified in exceptions |
 | Machine-readable map | `tools/bazel/parity/migration_target_map.json` (fail-closed via `scripts/ci/bazel-migration-ledger-check.py`) |
 | Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); parity evidence [bazel-migration-parity.md](bazel-migration-parity.md) |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
-This freeze uses the **current authoritative** metadata count (**99** targets;
-**65** integration-test binaries). Later slices must update rows,
+This freeze uses the **current authoritative** metadata count (**100** targets;
+**66** integration-test binaries). Later slices must update rows,
 not silently ignore new targets.
 
 ## Target class summary
@@ -28,12 +28,12 @@ not silently ignore new targets.
 | Class | Count | Notes |
 | --- | ---: | --- |
 | `lib` | 15 | First-party libraries (unit/doctest surface rides these targets under `cargo test --lib` / doctests) |
-| `integration-test` | 65 | `tests/*.rs` integration binaries |
+| `integration-test` | 66 | `tests/*.rs` integration binaries |
 | `cdylib` | 2 | PyO3 + napi-rs native libs |
 | `bin` | 1 | CLI (`gf`) |
 | `custom-build` | 2 | `build.rs` scripts |
 | `example` | 11 | API examples mapped as `//crates/graphforge-api:<name>` (#6) |
-| **Total** | **99** | |
+| **Total** | **100** | |
 
 ### Unit tests and doctests
 
@@ -152,6 +152,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | `//crates/graphforge-storage:adjacency_delta_write` | `mapped` | #8 |
 | `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | `//crates/graphforge-storage:filtered_read` | `mapped` | #8 |
 | `graphforge-storage` | `graph_delta_journal` | `integration-test` | `crates/graphforge-storage/tests/graph_delta_journal.rs` | `//crates/graphforge-storage:graph_delta_journal` | `mapped` | #8 / #752 |
+| `graphforge-storage` | `graph_delta_compaction` | `integration-test` | `crates/graphforge-storage/tests/graph_delta_compaction.rs` | `//crates/graphforge-storage:graph_delta_compaction` | `mapped` | #8 / #753 |
 | `graphforge-storage` | `graph_writer` | `integration-test` | `crates/graphforge-storage/tests/graph_writer.rs` | `//crates/graphforge-storage:graph_writer` | `mapped` | #8 |
 | `graphforge-storage` | `io_stats` | `integration-test` | `crates/graphforge-storage/tests/io_stats.rs` | `//crates/graphforge-storage:io_stats` | `mapped` | #8 |
 

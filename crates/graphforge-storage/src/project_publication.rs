@@ -166,6 +166,18 @@ enum PublicationLock {
     Optimistic(File),
 }
 
+impl Drop for PublicationLock {
+    fn drop(&mut self) {
+        // Every error path that abandons a held publication lock must release it.
+        // Closing the fd alone is not enough on every supported lock backend.
+        match self {
+            Self::Exclusive(lock) | Self::Optimistic(lock) => {
+                let _ = crate::file_lock::unlock(lock);
+            }
+        }
+    }
+}
+
 /// Canonical revert metadata persisted in every ADR 0015 journal phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -280,6 +292,9 @@ fn stage_project_generation_inner(
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    // Reject malformed contracts before taking the writer lock so concurrent
+    // readers/writers are never blocked by validation-only failures.
+    validate_request(request)?;
     let root = canonical_supported_root(container_root)?;
     let writer_lock = acquire_writer_lock(&root, request)?;
     project_failpoint::hit(
@@ -299,6 +314,7 @@ fn stage_project_generation_optimistic_inner(
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    validate_request(request)?;
     let root = canonical_supported_root(container_root)?;
     let transaction_lock = acquire_transaction_lock(&root, request)?;
     let parent = resolve_project_generation(&root)?;
@@ -1276,16 +1292,6 @@ fn finish_published_generation(
         ));
     }
     Ok(())
-}
-
-impl Drop for StagedProjectGeneration {
-    fn drop(&mut self) {
-        match &self.publication_lock {
-            PublicationLock::Exclusive(lock) | PublicationLock::Optimistic(lock) => {
-                let _ = crate::file_lock::unlock(lock);
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

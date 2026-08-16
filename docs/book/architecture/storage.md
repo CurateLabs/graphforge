@@ -139,7 +139,10 @@ data. New publications store graph workspace files under the generation-owned
 environment settings are inputs only and cannot override the selected
 generation. Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
-([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). They are
+([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). Compaction
+folds a verified contiguous prefix back into canonical Parquet via a new
+immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
+only through the shared retention/GC oracle. They are
 distinct from rebuildable `indexes/adjacency/deltas/` accelerators.
 
 Optional capability absence is recorded in the generation manifest; it is not

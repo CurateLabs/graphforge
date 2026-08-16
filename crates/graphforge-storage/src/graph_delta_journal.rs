@@ -310,7 +310,9 @@ impl ReconstructedGraphState {
         hasher.finalize().into()
     }
 
-    fn estimated_memory(&self) -> usize {
+    /// Estimated logical memory for resource-limit enforcement.
+    #[must_use]
+    pub fn estimated_memory(&self) -> usize {
         let nodes = self.nodes.len().saturating_mul(64);
         let edges = self.edges.len().saturating_mul(128);
         let nprops = self.node_properties.len().saturating_mul(96);
