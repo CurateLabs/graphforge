@@ -47,6 +47,15 @@ pub use graph_delta_journal::{
     stage_base_graph_workspace,
 };
 
+pub mod graph_delta_compaction;
+pub use graph_delta_compaction::{
+    DEFAULT_COMPACTION_MAX_DISK_BYTES, DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
+    DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
+    GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
+    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
+    graph_delta_compaction_status, preview_graph_delta_compaction,
+};
+
 pub mod project_generation;
 pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
