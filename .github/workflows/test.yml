@@ -832,8 +832,9 @@ jobs:
           scripts/ci/concurrency-short-gate.py run
           --output "${{ runner.temp }}/concurrency-short-evidence"
 
-  # #[cfg(windows)] project-root lock unit tests in graphforge-storage do not run on
-  # Linux Bazel CI. Host them here — not on Binding RC python-windows (#2700).
+  # Windows API/handle semantics cannot be inferred from Linux Bazel CI. Host
+  # the real project-root lock and publication-kill matrices here — not on
+  # Binding RC python-windows (#2700).
   windows-graphforge-storage-locks:
     name: Windows graphforge-storage Locks
     runs-on: blacksmith-4vcpu-windows-2025
@@ -865,11 +866,50 @@ jobs:
           cargo test -p graphforge-storage project_generation::tests:: --lib
           --no-fail-fast
 
+      - name: Cross-check Windows publication-kill results against the fault oracle
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints
+          project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
+          --lib --no-fail-fast -- --exact --nocapture
+
       - name: Run Windows durability certification unit tests
         shell: bash
         run: >-
           cargo test -p graphforge-storage --features test-failpoints
           project_certification --lib --no-fail-fast
+
+  macos-graphforge-storage-durability:
+    name: macOS graphforge-storage Durability
+    runs-on: blacksmith-12vcpu-macos-15
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Cross-check macOS publication-kill results against the fault oracle
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints
+          project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
+          --lib --no-fail-fast -- --exact --nocapture
 
   bazel-bootstrap:
     # Job display name kept for continuity; this is the authoritative Rust
@@ -1149,6 +1189,7 @@ jobs:
       - node-binding
       - concurrency-matrix
       - windows-graphforge-storage-locks
+      - macos-graphforge-storage-durability
       - bazel-bootstrap
     steps:
       - name: Checkout gate implementation
@@ -1168,4 +1209,5 @@ jobs:
           "${{ needs.node-binding.result }}"
           "${{ needs.concurrency-matrix.result }}"
           "${{ needs.windows-graphforge-storage-locks.result }}"
+          "${{ needs.macos-graphforge-storage-durability.result }}"
           "${{ needs.bazel-bootstrap.result }}"

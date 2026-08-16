@@ -83,6 +83,19 @@ impl PublicationPhase {
         }
     }
 
+    /// Resolve a native publication failpoint to its modeled ADR phase.
+    ///
+    /// Failpoints for writer-lock acquisition, journal preparation, and domain
+    /// validation have no persistent-filesystem operation of their own and
+    /// therefore intentionally return `None`.
+    #[must_use]
+    pub fn from_failpoint(failpoint: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|phase| phase.failpoint() == failpoint)
+    }
+
     /// Every modeled publication phase in protocol order.
     #[must_use]
     pub const fn all() -> &'static [Self] {
@@ -1111,17 +1124,6 @@ pub fn enumerate_lost_root_flush_subsets(seed: u64) -> Vec<FaultOracleReport> {
     reports
 }
 
-/// Shared-boundary authority classes matching native subprocess-kill matrices.
-///
-/// Process kill after a returned rename observes the new `CURRENT`. The oracle
-/// default durable set mirrors that host-visibility model via
-/// [`expected_authority`]. Power-loss lost-flush subsets are certified
-/// separately and are not claimed to match process kill.
-#[must_use]
-pub fn native_shared_boundary_authority(phase: PublicationPhase) -> AuthorityClass {
-    expected_authority(phase)
-}
-
 /// Run default-durable simulations for every ADR publication phase.
 pub fn simulate_all_phases(seed: u64) -> Result<Vec<PhaseOutcome>, GfError> {
     let ids = PublicationIds::from_seed(seed);
@@ -1254,19 +1256,6 @@ mod tests {
             !minimized.contains(&replace_id),
             "minimal prior-generation trace must omit durable CURRENT replace"
         );
-    }
-
-    #[test]
-    fn native_and_simulated_results_agree_at_shared_phase_boundaries() {
-        for outcome in simulate_all_phases(0x7493).unwrap() {
-            let native = native_shared_boundary_authority(outcome.phase);
-            assert_eq!(
-                outcome.actual, native,
-                "shared boundary mismatch at {}",
-                outcome.failpoint
-            );
-            assert_ne!(outcome.actual, AuthorityClass::Unexpected);
-        }
     }
 
     #[test]

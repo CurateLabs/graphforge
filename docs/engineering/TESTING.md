@@ -113,11 +113,11 @@ artifacts are publication evidence — see `AGENTS.md` § Issue close.
 - PR native binding acceptance is **Linux-only** and uses Cargo’s `dev` profile.
   That is fast feedback, not multi-OS certification.
 - When Rust surfaces change, Test Suite runs authoritative Bazel tests
-  (`Bazel Bootstrap` → `//:ci_rust_tests`) plus Cargo fmt/clippy, and also runs
-  `Windows graphforge-storage Locks`
-  (`cargo test -p graphforge-storage project_generation::tests:: --lib` on
-  `blacksmith-4vcpu-windows-2025`) for the `#[cfg(windows)]` project-root lock
-  unit tests that Linux Bazel CI cannot execute.
+  (`Bazel Bootstrap` → `//:ci_rust_tests`) plus Cargo fmt/clippy. The real
+  publication-kill matrix cross-checks native recovery authority against the
+  fault oracle on Linux (Bazel), macOS, and Windows. `Windows graphforge-storage
+  Locks` additionally runs the `#[cfg(windows)]` project-root lock unit tests
+  that Linux Bazel CI cannot execute.
 - Repository policy always validates workflow syntax, the classifier, domain
   dependency directions, license compliance, and the ledgers that back later
   release gates (without running those heavy matrices on every PR).

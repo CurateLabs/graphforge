@@ -897,6 +897,10 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::project_fault_oracle::{
+        AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, publication_ops,
+        simulate_crash,
+    };
     use crate::{
         ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
         ProjectParticipantEncoding, ProjectStageOutcome, open_or_initialize_project,
@@ -907,6 +911,7 @@ mod tests {
     const WRITER_HELPER: &str = "project_recovery::tests::subprocess_publication_writer";
     const RECOVERY_HELPER: &str = "project_recovery::tests::subprocess_recovery_runner";
     const INITIALIZER_HELPER: &str = "project_recovery::tests::subprocess_initializer";
+    const NATIVE_ORACLE_SEED: u64 = 0x7493;
     const PRE_COMMIT_FAILPOINTS: &[&str] = &[
         "project.after_writer_lock",
         "project.after_journal_preparing",
@@ -1125,6 +1130,39 @@ mod tests {
                 Some(crate::project_failpoint::exit_code()),
                 "{failpoint} did not terminate at the named boundary"
             );
+
+            if let Some(phase) = PublicationPhase::from_failpoint(failpoint) {
+                let native = match resolve_project_generation(root.path()) {
+                    Ok(resolved) if resolved.generation_uuid() == parent => {
+                        AuthorityClass::PriorGeneration
+                    }
+                    Ok(resolved) if resolved.generation_uuid() == generation_uuid => {
+                        AuthorityClass::NewGeneration
+                    }
+                    Err(error) if error.code() == "GF_PROJECT_CORRUPT" => AuthorityClass::Corrupt,
+                    Ok(_) | Err(_) => AuthorityClass::Unexpected,
+                };
+                let ids = PublicationIds::from_seed(NATIVE_ORACLE_SEED);
+                let ops = publication_ops(ids, phase);
+                let durable = default_durable_ids(&ops, phase);
+                let simulated = simulate_crash(NATIVE_ORACLE_SEED, phase, &durable).unwrap();
+
+                eprintln!(
+                    "native_oracle_crosscheck platform={} seed={} phase={} native={native:?} simulated={:?}",
+                    std::env::consts::OS,
+                    NATIVE_ORACLE_SEED,
+                    phase.failpoint(),
+                    simulated.actual,
+                );
+                assert_eq!(
+                    native, simulated.actual,
+                    "native process-kill result disagreed with simulator at {failpoint}"
+                );
+                assert_eq!(
+                    simulated.actual, simulated.expected,
+                    "simulator disagreed with its contract at {failpoint}"
+                );
+            }
             assert_reopen(
                 root.path(),
                 if committed { generation_uuid } else { parent },

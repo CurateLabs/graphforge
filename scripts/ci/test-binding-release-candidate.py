@@ -589,7 +589,21 @@ def main() -> None:
         "needs: changes",
         "if: needs.changes.outputs.rust == 'true'",
         "cargo test -p graphforge-storage project_generation::tests:: --lib",
+        "project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation",
         "--no-fail-fast",
+    )
+    macos_durability_job = required_section(
+        test_workflow_text,
+        "  macos-graphforge-storage-durability:\n",
+        "  bazel-bootstrap:\n",
+    )
+    assert_active_lines(
+        macos_durability_job,
+        "runs-on: blacksmith-12vcpu-macos-15",
+        "needs: changes",
+        "if: needs.changes.outputs.rust == 'true'",
+        "project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation",
+        "--lib --no-fail-fast -- --exact --nocapture",
     )
     _, ci_gate_found, ci_gate = test_workflow_text.partition("  ci-gate:\n")
     assert ci_gate_found, "missing workflow marker:   ci-gate:"
@@ -597,6 +611,8 @@ def main() -> None:
         ci_gate,
         "- windows-graphforge-storage-locks",
         '"${{ needs.windows-graphforge-storage-locks.result }}"',
+        "- macos-graphforge-storage-durability",
+        '"${{ needs.macos-graphforge-storage-durability.result }}"',
     )
     assert "macos-latest" not in rc_workflow_text
     assert "macos-15-intel" not in rc_workflow_text

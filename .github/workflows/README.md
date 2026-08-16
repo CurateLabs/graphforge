@@ -68,9 +68,11 @@ only when the platform supports them.
   native bindings.
 - Rust changes run Cargo formatting/Clippy (`Rust Quality`) and authoritative
   Bazel tests (`Bazel Bootstrap` → `//:ci_rust_tests`, including API BDD). The
-  same Rust classification also runs the Windows `graphforge-storage`
-  `project_generation` lock unit tests on `blacksmith-4vcpu-windows-2025`
-  (Linux Bazel CI cannot execute those `#[cfg(windows)]` cases).
+  same Rust classification runs the real `graphforge-storage` publication-kill
+  matrix on macOS and Windows and compares the observed recovery authority with
+  the deterministic fault oracle. Windows also runs its `project_generation`
+  lock unit tests on `blacksmith-4vcpu-windows-2025`; Linux Bazel CI cannot
+  execute those `#[cfg(windows)]` cases.
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
   static-validation gates run only when their owned surfaces change. Shared
   GraphForge configuration and infrastructure contract fixtures run both IaC
@@ -97,10 +99,13 @@ Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
 native binding acceptance is Linux-only and uses Cargo's `dev` profile for
 maturin/napi assembly. Authoritative Rust compile/test is Bazel
 (`//:ci_rust_tests`) under `Bazel Bootstrap`.
-When Rust surfaces change, `Windows graphforge-storage Locks` runs
-`cargo test -p graphforge-storage project_generation::tests:: --lib` on
-`blacksmith-4vcpu-windows-2025` so the `#[cfg(windows)]` project-root lock unit
-tests stay covered outside Binding RC.
+When Rust surfaces change, `Windows graphforge-storage Locks` runs the
+`project_generation` lock tests plus the real subprocess publication-kill/oracle
+cross-check on `blacksmith-4vcpu-windows-2025`. `macOS graphforge-storage
+Durability` runs that same publication-kill/oracle cross-check on
+`blacksmith-12vcpu-macos-15`. Linux executes the matrix through the
+authoritative `//:ci_rust_tests` Bazel target. These are native filesystem API
+tests, not binding-release substitutes.
 
 ### Behavioral acceptance
 
