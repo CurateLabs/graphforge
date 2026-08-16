@@ -1111,17 +1111,7 @@ impl RepositoryContext {
         }
         let removed = if target.exists() {
             reject_symlink_components(&self.root, &target)?;
-            let admission = storage::filesystem_admission::admit_project_lifecycle(
-                &target,
-                storage::filesystem_admission::ProjectLifecycleMode::Durable,
-                storage::filesystem_admission::ProjectRootRequirement::Existing,
-            )?;
-            if admission.root() != target {
-                return Err(validation(
-                    "admitted repository state does not match the contained remove target",
-                ));
-            }
-            admission.remove_project_root()?;
+            storage::remove_durable_project_root(&target)?;
             true
         } else {
             false

@@ -168,15 +168,16 @@ enum PublicationLock {
 }
 
 enum StagedAdmission {
-    Exclusive(crate::filesystem_admission::ProjectLifecycleAdmission),
+    Exclusive(crate::filesystem_admission::ProjectRootIdentity),
     Optimistic(Option<crate::filesystem_admission::ProjectRootIdentity>),
 }
 
 impl StagedAdmission {
     fn revalidate_identity(&self) -> Result<(), GfError> {
         match self {
-            Self::Exclusive(admission) => admission.revalidate_identity(),
-            Self::Optimistic(Some(identity)) => identity.revalidate_identity(),
+            Self::Exclusive(identity) | Self::Optimistic(Some(identity)) => {
+                identity.revalidate_identity()
+            }
             Self::Optimistic(None) => Err(project_error(
                 ProjectErrorCode::PublicationFailed,
                 "optimistic project identity was already consumed",
@@ -188,8 +189,8 @@ impl StagedAdmission {
         &mut self,
     ) -> Result<Option<crate::filesystem_admission::ProjectLifecycleAdmission>, GfError> {
         match self {
-            Self::Exclusive(admission) => {
-                admission.revalidate_identity()?;
+            Self::Exclusive(identity) => {
+                identity.revalidate_identity()?;
                 Ok(None)
             }
             Self::Optimistic(identity) => identity
@@ -351,8 +352,9 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
+    let identity = admission.into_identity()?;
     stage_project_generation_inner_with_locks(
-        StagedAdmission::Exclusive(admission),
+        StagedAdmission::Exclusive(identity),
         root,
         PublicationLock::Exclusive(writer_lock),
         parent,
@@ -398,7 +400,7 @@ fn stage_project_generation_optimistic_inner(
 /// Pass `graph_tree` when the request's `graph`/`files` inventory must be
 /// staged from a non-parent source (for example a pinned checkpoint generation).
 pub(crate) fn stage_project_generation_with_lock(
-    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    identity: crate::filesystem_admission::ProjectRootIdentity,
     root: PathBuf,
     writer_lock: File,
     parent: ResolvedProjectGeneration,
@@ -406,9 +408,9 @@ pub(crate) fn stage_project_generation_with_lock(
     revert: Option<RevertJournalExtension>,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
-    admission.revalidate_identity()?;
+    identity.revalidate_identity()?;
     stage_project_generation_inner_with_locks(
-        StagedAdmission::Exclusive(admission),
+        StagedAdmission::Exclusive(identity),
         root,
         PublicationLock::Exclusive(writer_lock),
         parent,

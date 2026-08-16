@@ -433,6 +433,31 @@ pub fn recover_project_transactions(
     recover_project_transactions_admitted(admission.root())
 }
 
+/// Remove an explicitly selected durable project only while no writer owns the
+/// project mutation lock.
+///
+/// Lifecycle admission remains held after the nonblocking writer-idle check,
+/// so no new admitted mutator can enter between that check and exact-root
+/// removal. The writer handle is released before deletion for Windows
+/// compatibility; retained lifecycle identity still prevents root substitution.
+///
+/// # Errors
+/// Returns `GF_WRITER_BUSY` when a live writer exists, or the same typed
+/// admission/removal failures as the shared filesystem lifecycle.
+pub fn remove_durable_project_root(container_root: impl AsRef<Path>) -> Result<(), GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let writer_lock = acquire_recovery_lock(admission.root())?;
+    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
+    drop(writer_lock);
+    admission.revalidate_identity()?;
+    admission.remove_project_root()
+}
+
 fn recover_project_transactions_admitted(root: &Path) -> Result<ProjectRecoveryReport, GfError> {
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let root = selected.container_root().to_owned();
@@ -1524,6 +1549,40 @@ mod tests {
         let error = recover_project_transactions(root.path()).unwrap_err();
 
         assert_eq!(error.code(), "GF_WRITER_BUSY");
+    }
+
+    #[test]
+    fn live_writer_lock_blocks_project_removal_until_the_writer_is_idle() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("project");
+        open_or_initialize_project(&root).unwrap();
+        let lock_dir = ensure_machine_directory(&root, Path::new(LOCKS_DIR)).unwrap();
+        let lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE)).unwrap();
+        crate::file_lock::lock_exclusive(&lock).unwrap();
+
+        let error = remove_durable_project_root(&root).unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        assert!(root.exists());
+        crate::file_lock::unlock(&lock).unwrap();
+        drop(lock);
+
+        remove_durable_project_root(&root).unwrap();
+        assert!(!root.exists());
+        assert_eq!(
+            std::fs::read_dir(parent.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".graphforge-admission-")
+                })
+                .count(),
+            1,
+            "the persistent parent-scoped admission lock must survive removal"
+        );
     }
 
     #[test]

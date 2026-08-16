@@ -652,6 +652,7 @@ where
         })
         .collect::<BTreeSet<_>>();
     let writer = locks.transfer_writer_for_revert_publication();
+    let identity = admission.into_identity()?;
     // Revert must stage graph bytes from the pinned source generation. Using
     // the parent's tree (CURRENT) would verify the restored inventory against
     // post-checkpoint mutations and fail closed with length/digest mismatch.
@@ -665,7 +666,7 @@ where
         })
         .then_some(source_graph_tree.as_path());
     let receipt = match stage_project_generation_with_lock(
-        admission,
+        identity,
         root.clone(),
         writer,
         prior_current,
