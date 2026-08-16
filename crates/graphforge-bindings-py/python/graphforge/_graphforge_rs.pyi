@@ -44,6 +44,34 @@ class CancellationToken:
     @property
     def is_cancelled(self) -> bool: ...
 
+class GraphTransaction:
+    def status(self) -> dict[str, Any]: ...
+    def stage_cypher(self, query: str, params: dict[str, Any] | None = None) -> None: ...
+    def stage_add_node(
+        self,
+        node_uuid: str,
+        label: str,
+        properties: dict[str, Any] | None = None,
+    ) -> None: ...
+    def stage_add_edge(
+        self,
+        edge_uuid: str,
+        rel_type: str,
+        source_uuid: str,
+        target_uuid: str,
+        properties: dict[str, Any] | None = None,
+    ) -> None: ...
+    def validate(self) -> None: ...
+    def commit(self, *, cancellation: CancellationToken | None = None) -> str: ...
+    def rollback(self) -> None: ...
+    def __enter__(self) -> GraphTransaction: ...
+    def __exit__(
+        self,
+        exc_type: Any = None,
+        _exc: Any = None,
+        _tb: Any = None,
+    ) -> bool: ...
+
 class CheckpointView:
     @property
     def checkpoint_uuid(self) -> str: ...
@@ -841,6 +869,64 @@ class GraphForge:
     ) -> dict[str, Any]: ...
     def add_node(self, label: str, **props: Any) -> NodeHandle: ...
     def add_edge(self, src: Any, rel_type: str, dst: Any, **props: Any) -> EdgeHandle: ...
+    def begin_transaction(
+        self, *, operation_uuid: str, actor_uuid: str | None = None
+    ) -> GraphTransaction: ...
+    def project_open_recovery(self) -> dict[str, Any]: ...
+    def inspect_project_reachability(
+        self,
+        *,
+        retained_ancestors: int | None = None,
+        max_entries: int | None = None,
+        max_bytes_scanned: int | None = None,
+        max_work_units: int | None = None,
+        cleanup_batch: int | None = None,
+    ) -> dict[str, Any]: ...
+    def preview_project_cleanup(
+        self,
+        *,
+        retained_ancestors: int | None = None,
+        max_entries: int | None = None,
+        max_bytes_scanned: int | None = None,
+        max_work_units: int | None = None,
+        cleanup_batch: int | None = None,
+    ) -> dict[str, Any]: ...
+    def execute_project_cleanup(
+        self,
+        *,
+        retained_ancestors: int | None = None,
+        max_entries: int | None = None,
+        max_bytes_scanned: int | None = None,
+        max_work_units: int | None = None,
+        cleanup_batch: int | None = None,
+    ) -> dict[str, Any]: ...
+    def graph_delta_compaction_status(
+        self,
+        *,
+        compact_when_runs: int | None = None,
+        compact_when_run_bytes: int | None = None,
+        compact_when_replay_memory_bytes: int | None = None,
+    ) -> dict[str, Any]: ...
+    def preview_graph_delta_compaction(
+        self,
+        *,
+        transaction_uuid: str,
+        generation_uuid: str,
+        through_run_sequence: int | None = None,
+        cleanup_after_commit: bool = False,
+        retained_ancestors: int | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    def compact_graph_delta(
+        self,
+        *,
+        transaction_uuid: str,
+        generation_uuid: str,
+        through_run_sequence: int | None = None,
+        cleanup_after_commit: bool = False,
+        retained_ancestors: int | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
     def publish_composite_transaction(
         self,
         *,

@@ -11,8 +11,21 @@
     "docs/adr/0014-workspace-checkpoints.md",
     "docs/adr/0015-embedded-write-modes.md"
   ],
-  "m5_consumer_issues": [738, 742, 745],
-  "deferred_owner_issues": [749, 750, 751, 752, 753, 754, 755, 756],
+  "m5_consumer_issues": [
+    738,
+    742,
+    745
+  ],
+  "deferred_owner_issues": [
+    749,
+    750,
+    751,
+    752,
+    753,
+    754,
+    755,
+    756
+  ],
   "acknowledgement": {
     "name": "acknowledged-durable",
     "requires": [
@@ -24,7 +37,12 @@
       "project_root_directory_flush"
     ],
     "linearization_point": "current_atomic_replace_or_create",
-    "not_authority": ["journals", "directory_scans", "timestamps", "uuid_order"]
+    "not_authority": [
+      "journals",
+      "directory_scans",
+      "timestamps",
+      "uuid_order"
+    ]
   },
   "filesystem_scope": {
     "supported": [
@@ -44,7 +62,10 @@
   },
   "recovery_authority": {
     "sole": "exact_valid_CURRENT",
-    "advisory": ["journals", "directory_scans"],
+    "advisory": [
+      "journals",
+      "directory_scans"
+    ],
     "corrupt_error": "GF_PROJECT_CORRUPT"
   },
   "write_modes": {
@@ -52,37 +73,77 @@
       "reader_isolation": "pinned_immutable_snapshot",
       "writer_isolation": "serial_exclusive",
       "conflicts": [
-        {"concurrent_work": "competing_writer", "outcome": "GF_WRITER_BUSY"}
+        {
+          "concurrent_work": "competing_writer",
+          "outcome": "GF_WRITER_BUSY"
+        }
       ]
     },
     "queued_writer": {
       "reader_isolation": "pinned_immutable_snapshot_reads_bypass_queue",
       "writer_isolation": "serial_after_bounded_fifo",
       "conflicts": [
-        {"concurrent_work": "queue_full", "outcome": "structured_queue_limit_error"},
-        {"concurrent_work": "cancel_unstarted", "outcome": "GF_CANCELLED"},
-        {"concurrent_work": "cancel_started", "outcome": "not_removable_from_queue"}
+        {
+          "concurrent_work": "queue_full",
+          "outcome": "structured_queue_limit_error"
+        },
+        {
+          "concurrent_work": "cancel_unstarted",
+          "outcome": "GF_CANCELLED"
+        },
+        {
+          "concurrent_work": "cancel_started",
+          "outcome": "not_removable_from_queue"
+        }
       ]
     },
     "optimistic_multi_writer": {
       "reader_isolation": "pinned_immutable_snapshot_per_attempt",
       "writer_isolation": "optimistic_snapshot_with_serialized_CURRENT",
       "conflicts": [
-        {"concurrent_work": "distinct_graph_creates", "outcome": "rebase_and_merge"},
-        {"concurrent_work": "distinct_immutable_ledger_identities", "outcome": "rebase_and_merge"},
-        {"concurrent_work": "different_properties_same_object", "outcome": "rebase_and_merge"},
-        {"concurrent_work": "same_property_or_removed_target", "outcome": "GF_WRITE_CONFLICT"},
-        {"concurrent_work": "delete_or_administrative", "outcome": "GF_WRITE_CONFLICT"},
-        {"concurrent_work": "retry_budget_exhausted", "outcome": "GF_REBASE_EXHAUSTED"},
-        {"concurrent_work": "same_operation_same_content", "outcome": "exact_idempotent_replay"},
-        {"concurrent_work": "same_operation_changed_content", "outcome": "GF_IDEMPOTENCY_CONFLICT"}
+        {
+          "concurrent_work": "distinct_graph_creates",
+          "outcome": "rebase_and_merge"
+        },
+        {
+          "concurrent_work": "distinct_immutable_ledger_identities",
+          "outcome": "rebase_and_merge"
+        },
+        {
+          "concurrent_work": "different_properties_same_object",
+          "outcome": "rebase_and_merge"
+        },
+        {
+          "concurrent_work": "same_property_or_removed_target",
+          "outcome": "GF_WRITE_CONFLICT"
+        },
+        {
+          "concurrent_work": "delete_or_administrative",
+          "outcome": "GF_WRITE_CONFLICT"
+        },
+        {
+          "concurrent_work": "retry_budget_exhausted",
+          "outcome": "GF_REBASE_EXHAUSTED"
+        },
+        {
+          "concurrent_work": "same_operation_same_content",
+          "outcome": "exact_idempotent_replay"
+        },
+        {
+          "concurrent_work": "same_operation_changed_content",
+          "outcome": "GF_IDEMPOTENCY_CONFLICT"
+        }
       ],
       "ssi_claimed": false,
       "serializable_claimed": false
     }
   },
   "claims": {
-    "forbidden_positive": ["ACID", "serializable isolation", "SSI"],
+    "forbidden_positive": [
+      "ACID",
+      "serializable isolation",
+      "SSI"
+    ],
     "required_honest": [
       "acknowledged-durable",
       "write-skew",
@@ -105,19 +166,26 @@
       "id": "acknowledged-success",
       "given": "caller_receives_success",
       "then": "durable_state_and_crash_assumptions_unambiguous",
-      "matrix_refs": ["acknowledgement", "crash_phases"]
+      "matrix_refs": [
+        "acknowledgement",
+        "crash_phases"
+      ]
     },
     {
       "id": "write-skew-honesty",
       "given": "two_optimistic_transactions_form_write_skew",
       "then": "docs_classify_not_serializable",
-      "matrix_refs": ["anomalies.write_skew"]
+      "matrix_refs": [
+        "anomalies.write_skew"
+      ]
     },
     {
       "id": "unsupported-filesystem-fail-closed",
       "given": "unsupported_filesystem",
       "then": "fail_closed_preflight",
-      "matrix_refs": ["filesystem_scope"]
+      "matrix_refs": [
+        "filesystem_scope"
+      ]
     }
   ],
   "crash_phases": [
@@ -182,7 +250,9 @@
     },
     {
       "id": "post_linearization_api_error",
-      "failpoints": ["project.after_current_replace.error"],
+      "failpoints": [
+        "project.after_current_replace.error"
+      ],
       "required_authority": "new_generation_committed_true",
       "coverage": "covered",
       "evidence": [
@@ -195,7 +265,9 @@
     },
     {
       "id": "lost_root_directory_flush_power_loss",
-      "failpoints": ["project.after_current_replace"],
+      "failpoints": [
+        "project.after_current_replace"
+      ],
       "required_authority": "exact_valid_CURRENT_presented_by_filesystem",
       "coverage": "covered",
       "evidence": [
@@ -457,9 +529,40 @@
     },
     {
       "id": "binding_cli_transaction_parity",
-      "coverage": "deferred",
-      "owner_issue": 755,
-      "rationale": "Python/Node/CLI parity for transaction and maintenance surfaces is #755."
+      "coverage": "covered",
+      "rationale": "Python/Node/CLI thin-wrap the Rust transaction and maintenance facade with parity tests and public docs for acknowledgement/retry/cancellation.",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "mixed_cypher_and_bulk_commit_as_one_generation"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "drop_rolls_back_without_publication"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "rollback_leaves_prior_generation_unchanged_across_reopen"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "dry_run_and_execute_share_reachability_oracle"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
+          "symbol": "cleanup_reclaims_unreachable_inputs_after_compaction"
+        },
+        {
+          "kind": "doc",
+          "path": "docs/reference/api.md",
+          "symbol": "transaction and maintenance parity"
+        }
+      ]
     },
     {
       "id": "durable_delta_journal",

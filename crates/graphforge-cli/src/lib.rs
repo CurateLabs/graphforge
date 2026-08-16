@@ -19,6 +19,8 @@ use uuid::Uuid;
 
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
+mod maintenance_cli;
+
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SKILL_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
@@ -269,6 +271,18 @@ enum Command {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+    /// Explicit multi-mutation transactions (Rust-owned lifecycle).
+    Transaction {
+        #[command(subcommand)]
+        command: maintenance_cli::TransactionCommand,
+    },
+    /// Retention/GC and graph-delta compaction maintenance.
+    Maintenance {
+        #[command(subcommand)]
+        command: maintenance_cli::MaintenanceCommand,
+    },
+    /// Emit safe recovery-on-open evidence for the project.
+    Recovery,
 }
 
 #[derive(Args)]
@@ -484,7 +498,7 @@ struct ImportArgs {
     idempotency_key: String,
 }
 
-fn canonical_uuid(value: &str) -> Result<Uuid, graphforge_api::GfError> {
+pub(crate) fn canonical_uuid(value: &str) -> Result<Uuid, graphforge_api::GfError> {
     let parsed = Uuid::parse_str(value)
         .map_err(|_| graphforge_api::GfError::Validation("expected canonical UUID".into()))?;
     if parsed.hyphenated().to_string() != value {
@@ -1019,6 +1033,7 @@ fn is_repository_command(command: &Command) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines)] // CLI command dispatch table
 fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError> {
     if cli.info {
         writeln!(output, "graphforge {}", env!("CARGO_PKG_VERSION"))
@@ -1053,6 +1068,15 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
     let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
         Command::Export(args) => return run_export(&graph, args, cli.json, output).map(|()| 0),
+        Command::Recovery => {
+            return maintenance_cli::run_recovery(&graph, cli.json, output).map(|()| 0);
+        }
+        Command::Transaction { command } => {
+            return maintenance_cli::run_transaction(&graph, command, cli.json, output).map(|()| 0);
+        }
+        Command::Maintenance { command } => {
+            return maintenance_cli::run_maintenance(&graph, command, cli.json, output).map(|()| 0);
+        }
         command => command,
     };
     let command = match command {

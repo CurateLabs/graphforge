@@ -174,8 +174,13 @@ function checkRemovedSurfaceIsAbsent() {
     new URL("../index.d.ts", import.meta.url),
     "utf8",
   );
+  // Forbid GraphForge-level stubs only; GraphTransaction may expose commit/rollback.
+  const forgeClass = declarations.match(
+    /export declare class GraphForge \{[\s\S]*?\n\}/,
+  )?.[0];
+  assert.ok(forgeClass, "GraphForge declaration missing");
   assert.doesNotMatch(
-    declarations,
+    forgeClass,
     /^\s+(?:begin|commit|rollback|addNodes|addEdges)\([^)]*\):/m,
   );
 }

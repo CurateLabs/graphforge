@@ -181,6 +181,13 @@ impl CancellationToken {
         self.0.load(Ordering::Acquire)
     }
 
+    /// Borrow the underlying cancellation flag for Rust-owned ops that observe
+    /// cooperative cancellation via [`std::sync::atomic::AtomicBool`].
+    #[must_use]
+    pub fn flag(&self) -> &AtomicBool {
+        self.0.as_ref()
+    }
+
     pub(crate) fn checkpoint(&self) -> Result<(), GfError> {
         if self.is_cancelled() {
             Err(page_error(

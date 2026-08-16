@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 184,
-  "releaseSurfaceDigest": "98bf3c9277a0cf13146ce4ecfe98e4e213c94e21edc0e8e48536783ffd02bc7e",
+  "releaseSurfaceCount": 192,
+  "releaseSurfaceDigest": "7b10db80d4bd05e21a94c57a7c4218e54f0d464a27dab127bdec59903afc66a0",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -24,7 +24,8 @@
     "knowledge": "knowledge",
     "epistemic": "epistemic",
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
-    "compatibility": "arrowIpc"
+    "compatibility": "arrowIpc",
+    "transaction-maintenance": "transactionMaintenance"
   },
   "classification": {
     "equivalent": [
@@ -44,11 +45,13 @@
       "GraphForge.assess_confidence",
       "GraphForge.attach_evidence",
       "GraphForge.attach_resolved_run",
+      "GraphForge.begin_transaction",
       "GraphForge.bind_embedding_space_alias",
       "GraphForge.checkpoint",
       "GraphForge.clear",
       "GraphForge.clear_ontology",
       "GraphForge.cluster",
+      "GraphForge.compact_graph_delta",
       "GraphForge.confidence_assessment",
       "GraphForge.confidence_inputs",
       "GraphForge.create_assertion",
@@ -65,19 +68,22 @@
       "GraphForge.epistemic_snapshot",
       "GraphForge.evidence_link",
       "GraphForge.execute",
+      "GraphForge.execute_project_cleanup",
       "GraphForge.explain",
       "GraphForge.export_ontology",
       "GraphForge.find",
+      "GraphForge.graph_delta_compaction_status",
       "GraphForge.graph_directedness",
       "GraphForge.hypothesis_members",
       "GraphForge.hypothesis_selection",
       "GraphForge.index",
       "GraphForge.index_adjacency",
       "GraphForge.inspect_adjacency",
-      "GraphForge.inspect_runtime_catalog",
       "GraphForge.inspect_embedding_refresh",
       "GraphForge.inspect_embedding_space_freshness",
+      "GraphForge.inspect_project_reachability",
       "GraphForge.inspect_provider_embedding_plan",
+      "GraphForge.inspect_runtime_catalog",
       "GraphForge.inspect_text_index",
       "GraphForge.invoke_descriptor",
       "GraphForge.invoke_descriptor_bytes",
@@ -102,19 +108,22 @@
       "GraphForge.ontology_mode",
       "GraphForge.open_checkpoint",
       "GraphForge.paths",
-      "GraphForge.prepare_rank_invocation",
+      "GraphForge.prepare_analyze_invocation",
       "GraphForge.prepare_cluster_invocation",
       "GraphForge.prepare_paths_invocation",
-      "GraphForge.prepare_analyze_invocation",
+      "GraphForge.prepare_rank_invocation",
       "GraphForge.prepare_similar_invocation",
+      "GraphForge.preview_graph_delta_compaction",
+      "GraphForge.preview_project_cleanup",
       "GraphForge.profile_gsi",
       "GraphForge.project_capabilities",
+      "GraphForge.project_open_recovery",
       "GraphForge.provenance_event",
+      "GraphForge.publish_algorithm_embeddings",
       "GraphForge.publish_bulk_edges",
       "GraphForge.publish_bulk_nodes",
       "GraphForge.publish_caller_embeddings",
       "GraphForge.publish_composite_transaction",
-      "GraphForge.publish_algorithm_embeddings",
       "GraphForge.publish_provider_embeddings",
       "GraphForge.rank",
       "GraphForge.reasoning",
@@ -136,38 +145,57 @@
       "GraphForge.set_embedding_refresh_space_policy",
       "GraphForge.set_graph_directedness",
       "GraphForge.similar",
-      "GraphForge.supersede_assertion",
       "GraphForge.suggest_ontology",
+      "GraphForge.supersede_assertion",
       "GraphForge.validate_ontology",
       "GraphForge.workspace_ontology"
     ],
     "languageSpecific": {
       "GraphForge.execute_stream": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_owned": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node uses Promise-delivered IPC instead of exposing Rust streams."
       },
       "GraphForge.execute_stream_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.collectIpc"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
         "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
       },
       "GraphForge.execute_to_parquet": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
         "reason": "Node uses the asynchronous PlanHandle Parquet sink."
       },
       "GraphForge.execute_to_parquet_with_params": {
-        "nodeMembers": ["GraphForge.plan", "PlanHandle.sinkParquet"],
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
       },
       "GraphForge.configure_provider_find_runtime": {
-        "nodeMembers": ["GraphForge.configureOpenrouter"],
+        "nodeMembers": [
+          "GraphForge.configureOpenrouter"
+        ],
         "reason": "Node exposes a bounded OpenRouter adapter instead of Rust runtime injection."
       },
       "crate.algorithm_descriptor_contracts": {
-        "nodeMembers": ["GraphForge.algorithmDescriptorContracts"],
+        "nodeMembers": [
+          "GraphForge.algorithmDescriptorContracts"
+        ],
         "reason": "Node projects the live Rust registry as a thin GraphForge method without opening knowledge or epistemic storage."
       }
     },
@@ -197,8 +225,13 @@
       ]
     },
     "lifecycleConstruction": {
-      "core.test.mjs": ["add node", "graph inspection surface"],
-      "smoke.test.mjs": ["lifecycle"]
+      "core.test.mjs": [
+        "add node",
+        "graph inspection surface"
+      ],
+      "smoke.test.mjs": [
+        "lifecycle"
+      ]
     },
     "gsiProfiler": {
       "gsi-profiler.test.mjs": [
@@ -221,11 +254,21 @@
         "live registry contracts are catalog-exhaustive and descriptor reachable",
         "registry discovery and descriptor preparation stay knowledge isolated"
       ],
-      "rank-centrality.test.mjs": ["degree rank"],
-      "cluster-connectivity.test.mjs": ["components cluster"],
-      "paths-shortest.test.mjs": ["dijkstra paths"],
-      "analyze.test.mjs": ["is dag"],
-      "similar-knn.test.mjs": ["knn"]
+      "rank-centrality.test.mjs": [
+        "degree rank"
+      ],
+      "cluster-connectivity.test.mjs": [
+        "components cluster"
+      ],
+      "paths-shortest.test.mjs": [
+        "dijkstra paths"
+      ],
+      "analyze.test.mjs": [
+        "is dag"
+      ],
+      "similar-knn.test.mjs": [
+        "knn"
+      ]
     },
     "m19ProviderRerank": {
       "search-index.test.mjs": [
@@ -280,11 +323,24 @@
       ]
     },
     "persistenceErrorsCancellation": {
-      "core.test.mjs": ["pre-v1 project error", "parse error", "graph inspection surface"],
+      "core.test.mjs": [
+        "pre-v1 project error",
+        "parse error",
+        "graph inspection surface"
+      ],
       "checkpoints.test.mjs": [
         "checkpoint pagination and diff cancellation use the shared adapter"
       ],
-      "cluster-vector.test.mjs": ["k means cluster"]
+      "cluster-vector.test.mjs": [
+        "k means cluster"
+      ]
+    },
+    "transactionMaintenance": {
+      "transaction-parity.test.mjs": [
+        "mixed transaction commit and explicit rollback have parity",
+        "dropped wrapper handles roll back and never commit",
+        "maintenance preview and execution reconcile candidate identities"
+      ]
     }
   }
 }
