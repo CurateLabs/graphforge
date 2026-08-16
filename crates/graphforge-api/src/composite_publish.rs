@@ -61,6 +61,18 @@ impl GraphForge {
         cancellation: Option<crate::CancellationToken>,
     ) -> Result<RecordBatch, GfError> {
         let _visibility = self.graph_visibility.acquire(cancellation.as_ref())?;
+        self.publish_composite_transaction_admitted(request)
+    }
+
+    /// Publish a composite transaction after write admission has already been granted.
+    ///
+    /// Used by the uniform transaction lifecycle so deferred Cypher and composite
+    /// participants share one visibility permit without nested lock acquisition.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn publish_composite_transaction_admitted(
+        &self,
+        request: CompositeTransactionRequest,
+    ) -> Result<RecordBatch, GfError> {
         let root = self.resolved_generation.container_root();
         let content_fingerprint = request.canonical_fingerprint()?;
         let generation_uuid =
@@ -161,6 +173,17 @@ impl GraphForge {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    /// Authorize a composite request against the currently pinned generation.
+    pub(crate) fn authorize_composite_against_current(
+        &self,
+        request: &CompositeTransactionRequest,
+    ) -> Result<RecordBatch, GfError> {
+        let root = self.resolved_generation.container_root();
+        let parent = graphforge_storage::resolve_project_generation(root)?;
+        let snapshot = build_validation_snapshot(self, &parent)?;
+        authorize_composite_transaction(request, &snapshot, None)
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

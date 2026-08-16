@@ -89,8 +89,10 @@ chmod 600 mydata.db
 
 Every `execute()` write publishes atomically. When graph and knowledge mutations
 must share one committed generation, validate and submit one
-`publish_composite_transaction()` request. GraphForge does not expose generic
-`begin()`, `commit()`, or `rollback()` methods.
+`publish_composite_transaction()` request, or stage supported mutation families
+through `begin_transaction()` / `commit()` / `rollback()` on a
+`GraphTransaction` handle. Administrative families classified as rejected cannot
+join an explicit transaction.
 
 ### Dependency Security
 

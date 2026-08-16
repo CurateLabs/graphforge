@@ -344,8 +344,9 @@ The example below simulates an end-to-end extraction pipeline without calling a 
 
 > **Atomic publication:** Every `execute()` write publishes atomically. If the whole
 > ingestion must become visible as one committed generation, construct one
-> `publish_composite_transaction()` request. GraphForge does not expose generic
-> `begin()`, `commit()`, or `rollback()` methods.
+> `publish_composite_transaction()` request, or stage supported families through
+> an explicit `GraphTransaction`. Administrative families classified as rejected
+> cannot join a transaction.
 
 ```python
 from __future__ import annotations

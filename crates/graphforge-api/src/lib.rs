@@ -97,6 +97,7 @@ mod search_output;
 mod shared_directory_semantics_tests;
 #[cfg(test)]
 mod stream_cancellation_isolation_tests;
+mod transaction;
 mod valid_time;
 mod workspace_ontology;
 mod write_modes;
@@ -250,6 +251,10 @@ pub use resource_policy::{
     ResourcePolicyMode, SpillPolicy,
 };
 pub use search_index::{AdjacencyInspection, TextIndexInspection};
+pub use transaction::{
+    GraphTransaction, MutationFamily, TransactionCommitReceipt, TransactionPhase,
+    TransactionStatus, TransactionSupport, transaction_support,
+};
 pub use valid_time::{
     ApplyValidTimeRequest, ListAssertionValidityRequest, RecordAssertionValidityRequest,
     VALID_TIME_POLICY_VERSION,
@@ -385,7 +390,8 @@ pub struct GraphForge {
     /// Cross-publication stability comes from `resolved_generation`; this lock
     /// closes the remaining window for mutation APIs that still operate through
     /// this exact facade instance.
-    graph_visibility: Arc<write_modes::WriteCoordinator>,
+    /// Same-instance write admission and visibility coordinator.
+    pub(crate) graph_visibility: Arc<write_modes::WriteCoordinator>,
     /// Validated embedded write behavior for this facade.
     write_options: GraphForgeOptions,
     /// Normalized execution resource policy applied to runtime and sessions (#337).
@@ -830,6 +836,26 @@ impl GraphForge {
         cypher: &str,
         params: &HashMap<String, IrLiteral>,
     ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_publish(cypher, params, true)
+    }
+
+    /// Execute a write Cypher statement against the private workspace without
+    /// moving `CURRENT`. Used by the uniform transaction lifecycle so multiple
+    /// staged writers share one later publication.
+    pub(crate) fn execute_write_without_publish(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_query_with_publish(cypher, params, false)
+    }
+
+    fn run_query_with_publish(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        publish: bool,
+    ) -> Result<ExecutionResult, GfError> {
         let _admission = self.admit_heavy_query()?;
         if cypher.trim().is_empty() {
             return Err(GfError::Validation("empty query".into()));
@@ -872,7 +898,7 @@ impl GraphForge {
         validate_call_params(&plan, params)?;
 
         let result = self
-            .run_plan(&plan, params)
+            .run_plan_with_publish(&plan, params, publish)
             .map_err(publicize_query_error)?;
         shape_result(result, self.ontology_mode, self.ontology.as_ref())
             .map_err(publicize_query_error)
@@ -885,6 +911,15 @@ impl GraphForge {
         &self,
         plan: &GraphPlan,
         params: &HashMap<String, IrLiteral>,
+    ) -> Result<ExecutionResult, GfError> {
+        self.run_plan_with_publish(plan, params, true)
+    }
+
+    fn run_plan_with_publish(
+        &self,
+        plan: &GraphPlan,
+        params: &HashMap<String, IrLiteral>,
+        publish: bool,
     ) -> Result<ExecutionResult, GfError> {
         use graphforge_exec::ExecutionSession;
 
@@ -906,7 +941,10 @@ impl GraphForge {
             })
             .count();
         let is_write = write_ops > 0;
-        let _write_visibility = is_write.then(|| self.graph_visibility.lock()).transpose()?;
+        // Transaction commit already holds write admission when publish is false.
+        let _write_visibility = (is_write && publish)
+            .then(|| self.graph_visibility.lock())
+            .transpose()?;
         let _read_visibility = (!is_write)
             .then(|| self.graph_visibility.read())
             .transpose()?;
@@ -917,7 +955,7 @@ impl GraphForge {
         // File-backed generations restore from the still-authoritative parent
         // generation on publish failure instead of capturing a whole-workspace
         // Arrow snapshot envelope.
-        let rollback_generation = is_write
+        let rollback_generation = (is_write && publish)
             .then(|| {
                 graphforge_storage::resolve_project_generation(
                     self.resolved_generation.container_root(),
@@ -965,10 +1003,11 @@ impl GraphForge {
                 .expect("runtime catalog poisoned");
             persist_runtime_catalog(&self.dir, &rc)?;
         }
-        if let Some(receipt) = result
-            .mutation_receipt
-            .as_ref()
-            .filter(|receipt| !receipt.is_empty())
+        if publish
+            && let Some(receipt) = result
+                .mutation_receipt
+                .as_ref()
+                .filter(|receipt| !receipt.is_empty())
         {
             let rollback_generation = rollback_generation
                 .as_ref()
@@ -1006,7 +1045,7 @@ impl GraphForge {
         self.publish_graph_mutation_with_context(receipt, operation_uuid, None, recorded_at_micros)
     }
 
-    fn publish_graph_mutation_with_context(
+    pub(crate) fn publish_graph_mutation_with_context(
         &self,
         receipt: &graphforge_exec::MutationReceipt,
         operation_uuid: uuid::Uuid,
