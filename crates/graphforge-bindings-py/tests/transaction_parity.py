@@ -13,8 +13,10 @@ OP_COMMIT = "018f0f4e-7b8c-7000-8000-000000007501"
 OP_ROLLBACK = "018f0f4e-7b8c-7000-8000-000000007502"
 OP_DROP = "018f0f4e-7b8c-7000-8000-000000007503"
 OP_CLI = "018f0f4e-7b8c-7000-8000-000000007504"
+OP_CERT = "018f0f4e-7b8c-7000-8000-000000007560"
 NODE_BULK = "018f0f4e-7b8c-7000-8000-000000007511"
 NODE_GHOST = "018f0f4e-7b8c-7000-8000-000000007512"
+NODE_CERT = "018f0f4e-7b8c-7000-8000-000000007561"
 
 
 def check_mixed_commit_and_rollback(project: Path) -> None:
@@ -113,6 +115,31 @@ def check_cli_parity(project: Path) -> None:
     assert "selected_generation_uuid" in recovery
 
 
+def check_certification_observation_parity(project: Path) -> None:
+    """Public surface observation agreement for #756 (generation + recovery)."""
+    forge = g.GraphForge(str(project))
+    tx = forge.begin_transaction(operation_uuid=OP_CERT)
+    tx.stage_add_node(NODE_CERT, "Person", {"name": "Cert"})
+    generation = tx.commit()
+    recovery = forge.project_open_recovery()
+    assert recovery["selected_generation_uuid"] == generation
+    reopened = g.GraphForge(str(project))
+    again = reopened.project_open_recovery()
+    assert again["selected_generation_uuid"] == generation
+    code, stdout, _stderr = _cli_execute(
+        [
+            "gf",
+            "--project",
+            str(project),
+            "--json",
+            "recovery",
+        ]
+    )
+    assert code == 0, stdout
+    cli_recovery = json.loads(stdout.decode())
+    assert cli_recovery["selected_generation_uuid"] == generation
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
         project = Path(directory)
@@ -120,6 +147,7 @@ def main() -> None:
         check_dropped_handle_never_commits(project)
         check_maintenance_preview_execute_reconcile(project)
         check_cli_parity(project)
+        check_certification_observation_parity(project)
     print("transaction_parity: ok")
 
 

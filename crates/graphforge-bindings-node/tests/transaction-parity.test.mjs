@@ -10,8 +10,10 @@ const OP_COMMIT = "018f0f4e-7b8c-7000-8000-000000007501";
 const OP_ROLLBACK = "018f0f4e-7b8c-7000-8000-000000007502";
 const OP_DROP = "018f0f4e-7b8c-7000-8000-000000007503";
 const OP_SEED = "018f0f4e-7b8c-7000-8000-000000007504";
+const OP_CERT = "018f0f4e-7b8c-7000-8000-000000007560";
 const NODE_BULK = "018f0f4e-7b8c-7000-8000-000000007511";
 const NODE_GHOST = "018f0f4e-7b8c-7000-8000-000000007512";
+const NODE_CERT = "018f0f4e-7b8c-7000-8000-000000007561";
 
 async function withProject(run) {
   const root = await mkdtemp(join(tmpdir(), "gf-755-"));
@@ -80,5 +82,19 @@ test("maintenance preview and execution reconcile candidate identities", async (
     const status = forge.graphDeltaCompactionStatus({});
     assert.equal(typeof status.runCount, "bigint");
     assert.equal(typeof status.runBytes, "bigint");
+  });
+});
+
+test("certification observations agree across reopen", async () => {
+  await withProject(async (root) => {
+    const forge = new GraphForge(root);
+    const tx = forge.beginTransaction(OP_CERT);
+    tx.stageAddNode(NODE_CERT, "Person", { name: "Cert" });
+    const generation = tx.commit();
+    const recovery = forge.projectOpenRecovery();
+    assert.equal(recovery.selectedGenerationUuid, generation);
+    const reopened = new GraphForge(root);
+    const again = reopened.projectOpenRecovery();
+    assert.equal(again.selectedGenerationUuid, generation);
   });
 });

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "contract": "graphforge-durability-certification/1",
+  "issue": 756,
+  "parent_issue": 747,
+  "seed": 7560,
+  "required_ci": {
+    "histories": 8,
+    "ops_per_history": 12
+  },
+  "scheduled": {
+    "histories": 64,
+    "ops_per_history": 32
+  },
+  "versions": {
+    "durability_isolation": "graphforge-durability-isolation/1",
+    "durability_certification": "graphforge-durability-certification/1",
+    "delta_journal": "adr-0019",
+    "fault_oracle": "project_fault_oracle"
+  },
+  "forbidden_positive_claims": [
+    "ACID",
+    "SSI",
+    "serializable isolation",
+    "serializable snapshot isolation",
+    "universal filesystem",
+    "distributed durability"
+  ],
+  "write_skew_classification": "allowed_documented_not_ssi",
+  "native_surfaces": [
+    "posix_subprocess_failpoints",
+    "windows_subprocess_failpoints",
+    "fault_oracle_simulator"
+  ],
+  "public_surfaces": [
+    "rust",
+    "python",
+    "node",
+    "cli"
+  ]
+}
