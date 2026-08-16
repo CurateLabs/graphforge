@@ -149,6 +149,7 @@ pub enum ProjectStageOutcome {
 pub struct StagedProjectGeneration {
     root: PathBuf,
     publication_lock: PublicationLock,
+    admission: StagedAdmission,
     parent: ResolvedProjectGeneration,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
@@ -164,6 +165,45 @@ pub struct StagedProjectGeneration {
 enum PublicationLock {
     Exclusive(File),
     Optimistic(File),
+}
+
+enum StagedAdmission {
+    Exclusive(crate::filesystem_admission::ProjectLifecycleAdmission),
+    Optimistic(Option<crate::filesystem_admission::ProjectRootIdentity>),
+}
+
+impl StagedAdmission {
+    fn revalidate_identity(&self) -> Result<(), GfError> {
+        match self {
+            Self::Exclusive(admission) => admission.revalidate_identity(),
+            Self::Optimistic(Some(identity)) => identity.revalidate_identity(),
+            Self::Optimistic(None) => Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "optimistic project identity was already consumed",
+            )),
+        }
+    }
+
+    fn readmit_for_publish(
+        &mut self,
+    ) -> Result<Option<crate::filesystem_admission::ProjectLifecycleAdmission>, GfError> {
+        match self {
+            Self::Exclusive(admission) => {
+                admission.revalidate_identity()?;
+                Ok(None)
+            }
+            Self::Optimistic(identity) => identity
+                .take()
+                .ok_or_else(|| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "optimistic project identity was already consumed",
+                    )
+                })?
+                .readmit()
+                .map(Some),
+        }
+    }
 }
 
 impl Drop for PublicationLock {
@@ -295,7 +335,13 @@ fn stage_project_generation_inner(
     // Reject malformed contracts before taking the writer lock so concurrent
     // readers/writers are never blocked by validation-only failures.
     validate_request(request)?;
-    let root = canonical_supported_root(container_root)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = canonical_supported_root(admission.root())?;
     let writer_lock = acquire_writer_lock(&root, request)?;
     project_failpoint::hit(
         "project.after_writer_lock",
@@ -305,7 +351,16 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
-    stage_project_generation_with_lock(root, writer_lock, parent, request, None, graph_tree)
+    stage_project_generation_inner_with_locks(
+        StagedAdmission::Exclusive(admission),
+        root,
+        PublicationLock::Exclusive(writer_lock),
+        parent,
+        request,
+        None,
+        None,
+        graph_tree,
+    )
 }
 
 fn stage_project_generation_optimistic_inner(
@@ -315,10 +370,18 @@ fn stage_project_generation_optimistic_inner(
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
-    let root = canonical_supported_root(container_root)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = canonical_supported_root(admission.root())?;
     let transaction_lock = acquire_transaction_lock(&root, request)?;
     let parent = resolve_project_generation(&root)?;
+    let identity = admission.into_identity()?;
     stage_project_generation_inner_with_locks(
+        StagedAdmission::Optimistic(Some(identity)),
         root,
         PublicationLock::Optimistic(transaction_lock),
         parent,
@@ -335,6 +398,7 @@ fn stage_project_generation_optimistic_inner(
 /// Pass `graph_tree` when the request's `graph`/`files` inventory must be
 /// staged from a non-parent source (for example a pinned checkpoint generation).
 pub(crate) fn stage_project_generation_with_lock(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
     root: PathBuf,
     writer_lock: File,
     parent: ResolvedProjectGeneration,
@@ -342,7 +406,9 @@ pub(crate) fn stage_project_generation_with_lock(
     revert: Option<RevertJournalExtension>,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    admission.revalidate_identity()?;
     stage_project_generation_inner_with_locks(
+        StagedAdmission::Exclusive(admission),
         root,
         PublicationLock::Exclusive(writer_lock),
         parent,
@@ -353,7 +419,12 @@ pub(crate) fn stage_project_generation_with_lock(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared staging kernel keeps admission, lock, parent, request, revert, optimistic identity, and graph-tree authority explicit"
+)]
 fn stage_project_generation_inner_with_locks(
+    admission: StagedAdmission,
     root: PathBuf,
     publication_lock: PublicationLock,
     parent: ResolvedProjectGeneration,
@@ -438,6 +509,7 @@ fn stage_project_generation_inner_with_locks(
 
     Ok(ProjectStageOutcome::Staged(Box::new(
         StagedProjectGeneration {
+            admission,
             root,
             publication_lock,
             parent,
@@ -884,6 +956,7 @@ impl StagedProjectGeneration {
         D: FnOnce(&[StagedParticipant]) -> Result<(), GfError>,
         C: FnOnce(&ResolvedProjectGeneration, &[StagedParticipant]) -> Result<(), GfError>,
     {
+        self.admission.revalidate_identity()?;
         for participant in &self.participants {
             verify_participant_file(
                 &self
@@ -968,8 +1041,15 @@ impl ValidatedProjectGeneration {
     /// # Errors
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
-    pub fn publish(self) -> Result<ProjectPublicationReceipt, GfError> {
+    pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
+        self.0.admission.revalidate_identity()?;
+        let lifecycle_admission = self.0.admission.readmit_for_publish()?;
         let commit_lock = self.prepare_commit_lock()?;
+        if let Some(admission) = &lifecycle_admission {
+            admission.revalidate_identity()?;
+        } else {
+            self.0.admission.revalidate_identity()?;
+        }
         let result = self.publish_inner().map_err(|error| {
             if matches!(error, GfError::Project { .. }) {
                 error
@@ -984,6 +1064,7 @@ impl ValidatedProjectGeneration {
             }
         });
         drop(commit_lock);
+        drop(lifecycle_admission);
         result
     }
 

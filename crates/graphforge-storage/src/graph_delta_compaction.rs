@@ -183,7 +183,13 @@ pub fn preview_graph_delta_compaction(
     cancel: Option<&AtomicBool>,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
     let started = Instant::now();
-    let prepared = prepare_compaction(container_root.as_ref(), request, cancel)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let prepared = prepare_compaction(admission.root(), request, cancel)?;
     Ok(report_from_prepared(
         &prepared,
         true,
@@ -205,7 +211,14 @@ pub fn compact_graph_delta(
     cancel: Option<&AtomicBool>,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
     let started = Instant::now();
-    let root = container_root.as_ref();
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let admitted_root = admission.root().to_owned();
+    let root = admitted_root.as_path();
     let limits = request.limits.validate()?;
 
     if let Some(publication) = published_project_transaction(root, request.transaction_uuid)? {
@@ -251,6 +264,7 @@ pub fn compact_graph_delta(
     };
 
     check_cancel(cancel)?;
+    drop(admission);
     let publication = match stage_project_generation_with_graph_tree(
         root,
         &generation_request,

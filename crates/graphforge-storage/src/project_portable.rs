@@ -15,10 +15,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::open_or_initialize_project;
+use crate::project_generation::open_or_initialize_project_admitted;
 use crate::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectPublicationReceipt, ProjectStageOutcome, ResolvedProjectGeneration,
-    open_or_initialize_project, resolve_project_generation, stage_project_generation,
+    resolve_project_generation, stage_project_generation,
 };
 
 const MAGIC: &[u8; 16] = b"graphforge-exp\0\n";
@@ -239,12 +242,19 @@ pub fn import_portable_project(
 ) -> Result<PortableImportReceipt, GfError> {
     let validated = validate_envelope(envelope, supported_capabilities, limits)?;
     let target = target.as_ref();
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        target,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
+    )?;
+    admission.revalidate_identity()?;
+    let target = admission.root();
     let existing_parent = prepare_import_target(target)?;
     let initialized_parent;
     let _parent = if let Some(parent) = existing_parent {
         parent
     } else {
-        initialized_parent = open_or_initialize_project(target)?;
+        initialized_parent = open_or_initialize_project_admitted(target)?;
         initialized_parent
     };
     let request = ProjectGenerationRequest {
@@ -253,7 +263,9 @@ pub fn import_portable_project(
         capabilities: validated.capabilities,
         participants: validated.participants,
     };
-    let publication = match stage_project_generation(target, &request)? {
+    let target = target.to_owned();
+    drop(admission);
+    let publication = match stage_project_generation(&target, &request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => {
             staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
@@ -527,12 +539,10 @@ fn prepare_import_target(target: &Path) -> Result<Option<ResolvedProjectGenerati
                 ))
             }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(target).map_err(|error| {
-                GfError::Storage(format!("failed to create portable import target: {error}"))
-            })?;
-            Ok(None)
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(project_error(
+            ProjectErrorCode::UnsupportedFilesystem,
+            "portable import target was not admitted before target preparation",
+        )),
         Err(error) => Err(GfError::Storage(format!(
             "failed to inspect portable import target: {error}"
         ))),

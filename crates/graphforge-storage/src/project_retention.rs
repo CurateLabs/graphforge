@@ -242,9 +242,15 @@ pub fn inspect_project_reachability(
     limits: ProjectRetentionLimits,
 ) -> Result<ProjectReachabilityReport, GfError> {
     let started = Instant::now();
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
     let policy = policy.validate()?;
     let limits = limits.validate()?;
-    let root = container_root.as_ref();
+    let root = admission.root();
     let writer_lock = acquire_recovery_lock(root)?;
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let checkpoint_roots = checkpoint_retention_roots_after_writer_lock(root)?;
@@ -340,6 +346,13 @@ fn run_cleanup(
     dry_run: bool,
 ) -> Result<ProjectCleanupReport, GfError> {
     let started = Instant::now();
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = admission.root();
     let policy = policy.validate()?;
     let limits = limits.validate()?;
     let writer_lock = acquire_recovery_lock(root)?;

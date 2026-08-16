@@ -714,6 +714,14 @@ pub fn publish_graph_delta(
     container_root: &Path,
     request: &GraphDeltaPublishRequest,
 ) -> Result<GraphDeltaPublicationReceipt, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let admitted_root = admission.root().to_owned();
+    let container_root = admitted_root.as_path();
     for op in &request.operations {
         if op.payload.expected_kind() != op.kind {
             return Err(validation(
@@ -862,6 +870,7 @@ pub fn publish_graph_delta(
         participants,
     };
 
+    drop(admission);
     let publication = match stage_project_generation_with_graph_tree(
         container_root,
         &generation_request,

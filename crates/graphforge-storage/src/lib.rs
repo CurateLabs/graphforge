@@ -62,7 +62,7 @@ pub mod project_generation;
 pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
     ProjectParticipantDescriptor, ProjectParticipantSnapshot, ResolvedProjectGeneration,
-    open_or_initialize_project, resolve_project_generation,
+    open_or_initialize_ephemeral_project, open_or_initialize_project, resolve_project_generation,
 };
 
 mod project_failpoint;
@@ -93,7 +93,8 @@ pub mod project_recovery;
 pub use project_recovery::{
     DEFAULT_RETAINED_ANCESTORS, MAX_RETAINED_ANCESTORS, ProjectOpenRecoveryEvidence,
     ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
-    ProjectRecoveryReport, open_or_initialize_project_with_recovery, recover_project_on_open,
+    ProjectRecoveryReport, open_or_initialize_ephemeral_project_with_recovery,
+    open_or_initialize_project_with_recovery, recover_project_on_open,
     recover_project_transactions,
 };
 

@@ -239,7 +239,8 @@ pub fn create_checkpoint(
 ) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
     validate_description(request.description.as_deref())?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref())?;
+    let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -332,7 +333,8 @@ pub fn delete_checkpoint(
     request: &CheckpointDeleteRequest,
 ) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref())?;
+    let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -418,7 +420,8 @@ pub fn delete_checkpoint(
 pub fn list_checkpoints(
     container_root: impl AsRef<Path>,
 ) -> Result<Vec<CheckpointRecord>, GfError> {
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref())?;
+    let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
     Ok(registry.active)
@@ -430,7 +433,8 @@ pub fn open_checkpoint_generation(
     name: &str,
 ) -> Result<(CheckpointRecord, crate::ResolvedProjectGeneration), GfError> {
     let name = validate_name(name)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref())?;
+    let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
     let row = registry
@@ -478,7 +482,8 @@ where
 {
     let requested_name = validate_name(&request.name)?;
     let requested_reason = validate_reason(&request.reason)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref())?;
+    let root = canonical_project_root(admission.root())?;
     let transaction_uuid = revert_transaction_uuid(request.operation_uuid);
     let mut locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
@@ -660,6 +665,7 @@ where
         })
         .then_some(source_graph_tree.as_path());
     let receipt = match stage_project_generation_with_lock(
+        admission,
         root.clone(),
         writer,
         prior_current,
@@ -883,6 +889,18 @@ fn canonical_project_root(path: &Path) -> Result<PathBuf, GfError> {
         ));
     }
     std::fs::canonicalize(path).map_err(storage_io)
+}
+
+fn admit_existing_project(
+    root: &Path,
+) -> Result<crate::filesystem_admission::ProjectLifecycleAdmission, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    Ok(admission)
 }
 
 fn checkpoint_root(root: &Path) -> Result<PathBuf, GfError> {
@@ -2853,8 +2871,9 @@ mod tests {
         symlink(&project, &linked).unwrap();
         assert_eq!(
             list_checkpoints(&linked).unwrap_err().code(),
-            "GF_UNSUPPORTED_PROJECT_FORMAT"
+            "GF_UNSUPPORTED_FILESYSTEM"
         );
+        assert!(!project.join(CHECKPOINTS_DIR).exists());
     }
 
     #[test]
