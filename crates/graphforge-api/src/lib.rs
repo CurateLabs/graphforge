@@ -3786,6 +3786,80 @@ mod tests {
     };
     use arrow::datatypes::DataType;
     use std::collections::HashSet;
+    use std::io::Read as _;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const ABSENT_TARGET_CHILD: &str = "tests::absent_target_open_child";
+    const ABSENT_TARGET_COOKIE: &str = "graphforge-absent-target-open-v1";
+    const ABSENT_TARGET_DEADLINE: Duration = Duration::from_secs(10);
+
+    fn spawn_absent_target_child(parent: &Path, child_id: &str) -> Child {
+        Command::new(std::env::current_exe().expect("absent-target current test executable"))
+            .args(["--exact", ABSENT_TARGET_CHILD, "--nocapture"])
+            .env("GF_ABSENT_TARGET_COOKIE", ABSENT_TARGET_COOKIE)
+            .env("GF_ABSENT_TARGET_PARENT", parent)
+            .env("GF_ABSENT_TARGET_CHILD_ID", child_id)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("absent-target child={child_id} spawn error={error}"))
+    }
+
+    fn wait_for_paths(paths: &[PathBuf], phase: &str) {
+        let deadline = Instant::now() + ABSENT_TARGET_DEADLINE;
+        while paths.iter().any(|path| !path.is_file()) {
+            assert!(
+                Instant::now() < deadline,
+                "phase={phase} timed out waiting for subprocess barrier"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn wait_for_absent_target_child(mut child: Child, child_id: &str) -> uuid::Uuid {
+        let deadline = Instant::now() + ABSENT_TARGET_DEADLINE;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("absent-target child try_wait") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("absent-target child={child_id} timed out");
+            }
+            std::thread::yield_now();
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("absent-target child stdout")
+            .read_to_string(&mut stdout)
+            .expect("read absent-target child stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("absent-target child stderr")
+            .read_to_string(&mut stderr)
+            .expect("read absent-target child stderr");
+        assert!(
+            status.success(),
+            "absent-target child={child_id} failed: status={status} stdout={stdout:?} stderr={stderr:?}"
+        );
+        let generation = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("GF_ABSENT_TARGET_UUID "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "absent-target child={child_id} omitted generation marker: stdout={stdout:?}"
+                )
+            });
+        uuid::Uuid::parse_str(generation).unwrap_or_else(|error| {
+            panic!("absent-target child={child_id} invalid generation={generation:?}: {error}")
+        })
+    }
 
     #[test]
     fn facade_debug_empty_batch_and_procedure_width_contracts_are_exact() {
@@ -5914,6 +5988,96 @@ mod tests {
             reopened.resolved_generation.generation_uuid(),
             generation_uuid
         );
+    }
+
+    #[test]
+    fn absent_target_open_child() {
+        if std::env::var("GF_ABSENT_TARGET_COOKIE").as_deref() != Ok(ABSENT_TARGET_COOKIE) {
+            return;
+        }
+        let parent = PathBuf::from(
+            std::env::var_os("GF_ABSENT_TARGET_PARENT")
+                .expect("absent-target child canonical parent"),
+        );
+        let child_id =
+            std::env::var("GF_ABSENT_TARGET_CHILD_ID").expect("absent-target child identifier");
+        std::fs::write(parent.join(format!("ready-{child_id}")), b"ready\n")
+            .expect("absent-target child publish readiness");
+        wait_for_paths(&[parent.join("go")], "child-open-release");
+
+        let root = parent.join("project");
+        let graph = GraphForge::new(root.to_str()).expect("absent-target child open project");
+        println!(
+            "GF_ABSENT_TARGET_UUID {}",
+            graph.resolved_generation.generation_uuid()
+        );
+    }
+
+    #[test]
+    fn concurrent_processes_open_one_absent_target_generation() {
+        let fixture = tempfile::tempdir().expect("absent-target parent fixture");
+        let parent = fixture.path().canonicalize().unwrap();
+        let root = parent.join("project");
+        assert!(!root.exists());
+
+        let first = spawn_absent_target_child(&parent, "first");
+        let second = spawn_absent_target_child(&parent, "second");
+        wait_for_paths(
+            &[parent.join("ready-first"), parent.join("ready-second")],
+            "children-ready",
+        );
+        std::fs::write(parent.join("go"), b"open\n").expect("release absent-target children");
+
+        let first_uuid = wait_for_absent_target_child(first, "first");
+        let second_uuid = wait_for_absent_target_child(second, "second");
+        assert_eq!(first_uuid, second_uuid);
+
+        let current_before_reopen = std::fs::read(root.join(graphforge_storage::CURRENT_FILE))
+            .expect("read CURRENT after concurrent admission");
+        let current_record: serde_json::Value =
+            serde_json::from_slice(&current_before_reopen).expect("CURRENT is canonical JSON");
+        assert_eq!(
+            current_record["generation_uuid"].as_str(),
+            Some(first_uuid.hyphenated().to_string().as_str())
+        );
+        let generations = std::fs::read_dir(root.join("generations"))
+            .expect("read admitted generations")
+            .map(|entry| {
+                entry
+                    .expect("read admitted generation entry")
+                    .file_name()
+                    .into_string()
+                    .expect("generation UUID is UTF-8")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generations, [first_uuid.to_string()]);
+
+        let admission_locks = std::fs::read_dir(&parent)
+            .expect("read canonical parent")
+            .filter_map(|entry| {
+                let entry = entry.expect("read canonical parent entry");
+                let name = entry.file_name().into_string().ok()?;
+                (name.starts_with(".graphforge-admission-") && name.ends_with(".lock"))
+                    .then_some(entry.path())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(admission_locks.len(), 1);
+        assert!(
+            std::fs::symlink_metadata(&admission_locks[0])
+                .expect("inspect persistent admission lock")
+                .file_type()
+                .is_file()
+        );
+
+        let reopened = GraphForge::new(root.to_str()).expect("reopen concurrently admitted root");
+        assert_eq!(reopened.resolved_generation.generation_uuid(), first_uuid);
+        drop(reopened);
+        assert_eq!(
+            std::fs::read(root.join(graphforge_storage::CURRENT_FILE))
+                .expect("read stable CURRENT after reopen"),
+            current_before_reopen
+        );
+        assert!(admission_locks[0].is_file());
     }
 
     #[test]
