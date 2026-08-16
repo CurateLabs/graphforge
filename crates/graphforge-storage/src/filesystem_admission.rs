@@ -40,6 +40,526 @@ pub struct FilesystemAdmissionEvidence {
     pub elapsed_ms: u64,
 }
 
+/// Whether a project lifecycle requires the durable-filesystem contract.
+///
+/// Ephemeral mode is an explicit escape hatch for in-memory instances whose
+/// temporary workspace is not presented as durable project storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLifecycleMode {
+    /// Probe and retain the supported durable-filesystem identity.
+    Durable,
+    /// Skip durability probing while retaining link and identity checks.
+    Ephemeral,
+}
+
+/// Whether lifecycle admission may create an absent final project directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectRootRequirement {
+    /// The final project directory must already exist.
+    Existing,
+    /// Create the final project directory after successful durable probing.
+    CreateIfMissing,
+}
+
+/// Short-lived, storage-owned admission guard for one project lifecycle.
+///
+/// Durable guards own the persistent parent-scoped creation lock until drop.
+/// The lock file itself is intentionally never unlinked. Both durable and
+/// ephemeral guards retain opened parent/root identities so callers can
+/// revalidate the namespace immediately before mutation.
+#[derive(Debug)]
+pub struct ProjectLifecycleAdmission {
+    mode: ProjectLifecycleMode,
+    root: PathBuf,
+    parent: LifecycleDirectory,
+    project: LifecycleDirectory,
+    lifecycle_lock: Option<LifecycleLock>,
+    evidence: Option<FilesystemAdmissionEvidence>,
+    created_root: bool,
+}
+
+/// Retained identity for an admitted project root without a lifecycle lock.
+///
+/// This token is suitable for optimistic work that must not serialize every
+/// stager. Call [`Self::readmit`] before durable publication to reacquire the
+/// lifecycle lock and prove the namespace still names the retained root.
+#[derive(Debug)]
+pub struct ProjectRootIdentity {
+    root: PathBuf,
+    parent: LifecycleDirectory,
+    project: LifecycleDirectory,
+}
+
+impl ProjectLifecycleAdmission {
+    /// Canonical project-root path admitted by this guard.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Lifecycle mode selected by the caller.
+    #[must_use]
+    pub const fn mode(&self) -> ProjectLifecycleMode {
+        self.mode
+    }
+
+    /// Native durability evidence, present only for durable admission.
+    #[must_use]
+    pub fn evidence(&self) -> Option<&FilesystemAdmissionEvidence> {
+        self.evidence.as_ref()
+    }
+
+    /// Whether this admission created the previously absent final directory.
+    #[must_use]
+    pub const fn created_root(&self) -> bool {
+        self.created_root
+    }
+
+    /// Revalidate the retained parent, persistent lock, and project identity.
+    ///
+    /// # Errors
+    /// Returns `GF_UNSUPPORTED_FILESYSTEM` when any named object no longer
+    /// resolves to the exact opened identity retained by this guard.
+    pub fn revalidate_identity(&self) -> Result<(), GfError> {
+        self.parent
+            .revalidate("IDENTITY", "parent_identity_changed")?;
+        if let Some(lock) = &self.lifecycle_lock {
+            lock.revalidate()?;
+        }
+        self.project
+            .revalidate("IDENTITY", "project_identity_changed")?;
+        if self.project.identity.volume_serial != self.parent.identity.volume_serial {
+            return Err(unsupported("IDENTITY", "project_cross_volume"));
+        }
+        Ok(())
+    }
+
+    /// Retain parent/root identity while releasing the lifecycle lock.
+    ///
+    /// # Errors
+    /// Returns `GF_UNSUPPORTED_FILESYSTEM` if namespace identity changed
+    /// before the lock-release transition.
+    pub fn into_identity(self) -> Result<ProjectRootIdentity, GfError> {
+        self.revalidate_identity()?;
+        let Self {
+            root,
+            parent,
+            project,
+            lifecycle_lock,
+            ..
+        } = self;
+        drop(lifecycle_lock);
+        let identity = ProjectRootIdentity {
+            root,
+            parent,
+            project,
+        };
+        identity.revalidate_identity()?;
+        Ok(identity)
+    }
+
+    /// Remove the exact project root retained by this admission.
+    ///
+    /// The lifecycle lock remains held while the root identity is checked and
+    /// removed. The retained root handle is released only after that check so
+    /// Windows can delete a directory opened without delete sharing. A second
+    /// named-identity check immediately before removal prevents deleting a
+    /// replacement root.
+    ///
+    /// # Errors
+    /// Returns `GF_UNSUPPORTED_FILESYSTEM` if the admitted namespace identity
+    /// changed or the exact root cannot be removed durably.
+    pub fn remove_project_root(self) -> Result<(), GfError> {
+        self.revalidate_identity()?;
+        let Self {
+            root,
+            parent,
+            project,
+            lifecycle_lock,
+            ..
+        } = self;
+        let project_identity = project.identity;
+        drop(project);
+
+        let named = std::fs::symlink_metadata(&root)
+            .map_err(|_| unsupported("REMOVE", "project_identity_unavailable"))?;
+        if is_link_or_reparse(&named)
+            || !named.is_dir()
+            || graphforge_filesystem::path_identity(&root)
+                .map_err(|_| unsupported("REMOVE", "project_identity_unavailable"))?
+                != project_identity
+        {
+            return Err(unsupported("REMOVE", "project_identity_changed"));
+        }
+        std::fs::remove_dir_all(&root)
+            .map_err(|_| unsupported("REMOVE", "project_remove_failed"))?;
+        complete_namespace_barrier(&parent.path)
+            .map_err(|_| unsupported("REMOVE", "parent_namespace_barrier_failed"))?;
+        parent.revalidate("REMOVE", "parent_identity_changed")?;
+        if let Some(lock) = &lifecycle_lock {
+            lock.revalidate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ProjectRootIdentity {
+    /// Canonical project-root path retained by this token.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Revalidate the retained parent and project identities.
+    ///
+    /// # Errors
+    /// Returns `GF_UNSUPPORTED_FILESYSTEM` when the named root or parent no
+    /// longer resolves to the exact opened identity retained by this token.
+    pub fn revalidate_identity(&self) -> Result<(), GfError> {
+        self.parent
+            .revalidate("IDENTITY", "parent_identity_changed")?;
+        self.project
+            .revalidate("IDENTITY", "project_identity_changed")?;
+        if self.project.identity.volume_serial != self.parent.identity.volume_serial {
+            return Err(unsupported("IDENTITY", "project_cross_volume"));
+        }
+        Ok(())
+    }
+
+    /// Reacquire durable lifecycle admission for the exact retained root.
+    ///
+    /// The newly opened parent/root identities must equal this token's
+    /// identities. A namespace replacement therefore fails closed even when
+    /// it occurs while the lifecycle lock was intentionally released.
+    ///
+    /// # Errors
+    /// Returns `GF_UNSUPPORTED_FILESYSTEM` if durable readmission fails or the
+    /// retained namespace identity changed.
+    pub fn readmit(self) -> Result<ProjectLifecycleAdmission, GfError> {
+        self.revalidate_identity()?;
+        let admission = admit_project_lifecycle(
+            &self.root,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::Existing,
+        )?;
+        if admission.parent.identity != self.parent.identity
+            || admission.project.identity != self.project.identity
+        {
+            return Err(unsupported("IDENTITY", "project_identity_changed"));
+        }
+        admission.revalidate_identity()?;
+        Ok(admission)
+    }
+}
+
+/// Admit one project lifecycle before initialization, recovery, or mutation.
+///
+/// Durable admission creates and exclusively owns a deterministic lock file in
+/// the canonical target parent, runs the native publication probe, and only
+/// then creates an absent final project directory. The lock file persists after
+/// the guard releases its kernel lock so crash/retry and independent processes
+/// always rendezvous on the same inode.
+///
+/// # Errors
+/// Returns `GF_UNSUPPORTED_FILESYSTEM` before final-root creation when the
+/// durable contract, link policy, namespace identity, or target shape cannot
+/// be proven.
+pub fn admit_project_lifecycle(
+    proposed_project_root: impl AsRef<Path>,
+    mode: ProjectLifecycleMode,
+    requirement: ProjectRootRequirement,
+) -> Result<ProjectLifecycleAdmission, GfError> {
+    admit_project_lifecycle_inner(
+        proposed_project_root.as_ref(),
+        mode,
+        requirement,
+        ProbeFault::None,
+    )
+}
+
+fn admit_project_lifecycle_inner(
+    proposed_project_root: &Path,
+    mode: ProjectLifecycleMode,
+    requirement: ProjectRootRequirement,
+    fault: ProbeFault,
+) -> Result<ProjectLifecycleAdmission, GfError> {
+    let ephemeral_root = if mode == ProjectLifecycleMode::Ephemeral {
+        match std::fs::symlink_metadata(proposed_project_root) {
+            Ok(metadata) if !is_link_or_reparse(&metadata) && metadata.is_dir() => Some(
+                proposed_project_root
+                    .canonicalize()
+                    .map_err(|_| unsupported("CLASSIFY", "target_unavailable"))?,
+            ),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let proposed_project_root = ephemeral_root.as_deref().unwrap_or(proposed_project_root);
+    let (parent_path, target_name) = canonical_parent_and_name(proposed_project_root)?;
+    let parent = LifecycleDirectory::open(&parent_path, "LOCK", "parent_identity_unavailable")?;
+    let lifecycle_lock = match mode {
+        ProjectLifecycleMode::Durable => Some(LifecycleLock::acquire(&parent, &target_name)?),
+        ProjectLifecycleMode::Ephemeral => None,
+    };
+    crate::project_failpoint::hit(
+        "filesystem_admission.after_lifecycle_lock",
+        None,
+        None,
+        "LIFECYCLE_LOCK",
+        false,
+    )?;
+    parent.revalidate("LOCK", "parent_identity_changed")?;
+
+    let evidence = match mode {
+        ProjectLifecycleMode::Durable => Some(filesystem_durability_preflight_inner(
+            proposed_project_root,
+            fault,
+        )?),
+        ProjectLifecycleMode::Ephemeral => None,
+    };
+    crate::project_failpoint::hit(
+        "filesystem_admission.after_probe",
+        None,
+        None,
+        "PROBE",
+        false,
+    )?;
+    parent.revalidate("IDENTITY", "parent_identity_changed")?;
+    if let Some(lock) = &lifecycle_lock {
+        lock.revalidate()?;
+    }
+
+    let root = parent_path.join(&target_name);
+    let mut created_root = false;
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => {
+            if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err(unsupported("IDENTITY", "target_link_or_special"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if requirement == ProjectRootRequirement::Existing {
+                return Err(unsupported("IDENTITY", "target_missing"));
+            }
+            graphforge_filesystem::create_private_directory(&root)
+                .map_err(|_| unsupported("CREATE", "project_directory_create_failed"))?;
+            complete_namespace_barrier(&parent_path)
+                .map_err(|_| unsupported("CREATE", "parent_namespace_barrier_failed"))?;
+            created_root = true;
+        }
+        Err(_) => return Err(unsupported("IDENTITY", "target_metadata_unavailable")),
+    }
+
+    let project = LifecycleDirectory::open(&root, "IDENTITY", "project_identity_unavailable")?;
+    let admission = ProjectLifecycleAdmission {
+        mode,
+        root,
+        parent,
+        project,
+        lifecycle_lock,
+        evidence,
+        created_root,
+    };
+    admission.revalidate_identity()?;
+    crate::project_failpoint::hit(
+        "filesystem_admission.after_root_identity",
+        None,
+        None,
+        "ROOT_IDENTITY",
+        false,
+    )?;
+    Ok(admission)
+}
+
+#[derive(Debug)]
+struct LifecycleDirectory {
+    path: PathBuf,
+    handle: File,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+impl LifecycleDirectory {
+    fn open(path: &Path, phase: &'static str, cause: &'static str) -> Result<Self, GfError> {
+        let named = std::fs::symlink_metadata(path).map_err(|_| unsupported(phase, cause))?;
+        if is_link_or_reparse(&named) || !named.is_dir() {
+            return Err(unsupported(phase, cause));
+        }
+        let handle = open_directory_handle(path).map_err(|_| unsupported(phase, cause))?;
+        let identity =
+            graphforge_filesystem::path_identity(path).map_err(|_| unsupported(phase, cause))?;
+        let opened = handle.metadata().map_err(|_| unsupported(phase, cause))?;
+        if !opened.is_dir() || file_identity(&handle)? != identity {
+            return Err(unsupported(phase, cause));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            handle,
+            identity,
+        })
+    }
+
+    fn revalidate(&self, phase: &'static str, cause: &'static str) -> Result<(), GfError> {
+        let named = std::fs::symlink_metadata(&self.path).map_err(|_| unsupported(phase, cause))?;
+        let opened = self
+            .handle
+            .metadata()
+            .map_err(|_| unsupported(phase, cause))?;
+        if is_link_or_reparse(&named)
+            || !named.is_dir()
+            || !opened.is_dir()
+            || graphforge_filesystem::path_identity(&self.path)
+                .map_err(|_| unsupported(phase, cause))?
+                != self.identity
+            || file_identity(&self.handle)? != self.identity
+        {
+            return Err(unsupported(phase, cause));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct LifecycleLock {
+    path: PathBuf,
+    file: File,
+    identity: graphforge_filesystem::FileIdentity,
+    parent_identity: graphforge_filesystem::FileIdentity,
+}
+
+impl LifecycleLock {
+    fn acquire(
+        parent: &LifecycleDirectory,
+        target_name: &std::ffi::OsStr,
+    ) -> Result<Self, GfError> {
+        let name = lifecycle_lock_name(&parent.path, target_name);
+        let path = parent.path.join(&name);
+        let file = open_lifecycle_lock_file(parent, &name)
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_open_failed"))?;
+        file.sync_all()
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_flush_failed"))?;
+        complete_namespace_barrier(&parent.path)
+            .map_err(|_| unsupported("LOCK", "parent_namespace_barrier_failed"))?;
+        crate::file_lock::lock_exclusive(&file)
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_failed"))?;
+        let identity = graphforge_filesystem::file_identity(&file)
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_identity_unavailable"))?;
+        let lock = Self {
+            path,
+            file,
+            identity,
+            parent_identity: parent.identity,
+        };
+        lock.revalidate()?;
+        Ok(lock)
+    }
+
+    fn revalidate(&self) -> Result<(), GfError> {
+        let named = std::fs::symlink_metadata(&self.path)
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_missing"))?;
+        let opened = self
+            .file
+            .metadata()
+            .map_err(|_| unsupported("LOCK", "lifecycle_lock_unreadable"))?;
+        if is_link_or_reparse(&named)
+            || !named.is_file()
+            || !opened.is_file()
+            || graphforge_filesystem::path_link_count(&self.path)
+                .map_err(|_| unsupported("LOCK", "lifecycle_lock_link_count_unavailable"))?
+                != 1
+            || graphforge_filesystem::file_link_count(&self.file)
+                .map_err(|_| unsupported("LOCK", "lifecycle_lock_link_count_unavailable"))?
+                != 1
+            || graphforge_filesystem::path_identity(&self.path)
+                .map_err(|_| unsupported("LOCK", "lifecycle_lock_identity_unavailable"))?
+                != self.identity
+            || graphforge_filesystem::file_identity(&self.file)
+                .map_err(|_| unsupported("LOCK", "lifecycle_lock_identity_unavailable"))?
+                != self.identity
+            || self.identity.volume_serial != self.parent_identity.volume_serial
+        {
+            return Err(unsupported("LOCK", "lifecycle_lock_identity_changed"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LifecycleLock {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.file);
+    }
+}
+
+fn lifecycle_lock_name(parent: &Path, target_name: &std::ffi::OsStr) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"graphforge-project-lifecycle-lock/v1\0");
+    digest.update(path_bytes(parent.as_os_str()));
+    digest.update([0]);
+    digest.update(path_bytes(target_name));
+    let digest: [u8; 32] = digest.finalize().into();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!(".graphforge-admission-{encoded}.lock")
+}
+
+#[cfg(unix)]
+fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let open_existing = || {
+        openat(
+            &parent.handle,
+            name,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(std::io::Error::from)
+    };
+    match open_existing() {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match openat(
+            &parent.handle,
+            name,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        ) {
+            Ok(file) => Ok(File::from(file)),
+            Err(error) if error == rustix::io::Errno::EXIST => open_existing(),
+            Err(error) => Err(std::io::Error::from(error)),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn open_lifecycle_lock_file(parent: &LifecycleDirectory, name: &str) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+        .open(parent.path.join(name))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_lifecycle_lock_file(_parent: &LifecycleDirectory, _name: &str) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "persistent lifecycle locks are unsupported",
+    ))
+}
+
 /// Prove that the proposed project location provides GraphForge's required
 /// local publication primitives.
 ///
@@ -233,11 +753,35 @@ fn reject_ancestor_links(parent: &Path) -> Result<(), GfError> {
         }
         let metadata = std::fs::symlink_metadata(&current)
             .map_err(|_| unsupported("CLASSIFY", "ancestor_unavailable"))?;
-        if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+        if is_link_or_reparse(&metadata) {
+            if trusted_macos_system_alias(&current) {
+                continue;
+            }
+            return Err(unsupported("CLASSIFY", "ancestor_link_or_special"));
+        }
+        if !metadata.is_dir() {
             return Err(unsupported("CLASSIFY", "ancestor_link_or_special"));
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn trusted_macos_system_alias(path: &Path) -> bool {
+    let expected = if path == Path::new("/var") {
+        Path::new("/private/var")
+    } else if path == Path::new("/tmp") {
+        Path::new("/private/tmp")
+    } else {
+        return false;
+    };
+    path.canonicalize()
+        .is_ok_and(|resolved| resolved == expected)
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn trusted_macos_system_alias(_path: &Path) -> bool {
+    false
 }
 
 fn classify_supported_local_volume(parent: &Path) -> Result<String, GfError> {
@@ -842,6 +1386,311 @@ mod tests {
         assert_eq!(evidence.bytes_written, MAX_PROBE_BYTES);
         assert!(!target.exists());
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn durable_lifecycle_rejects_before_target_mutation_and_retries_on_persistent_lock() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let target_name = target.file_name().unwrap();
+        let lock = parent
+            .path()
+            .join(lifecycle_lock_name(parent.path(), target_name));
+
+        let error = admit_project_lifecycle_inner(
+            &target,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+            ProbeFault::Classify,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(
+            !target.exists(),
+            "failed admission must not create the root"
+        );
+        assert!(lock.is_file(), "the rendezvous lock persists after failure");
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 1);
+
+        let admission = admit_project_lifecycle(
+            &target,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap();
+        assert!(admission.created_root());
+        assert!(admission.evidence().is_some());
+        admission.revalidate_identity().unwrap();
+        drop(admission);
+        assert!(target.is_dir());
+        assert!(lock.is_file(), "unlock must never unlink the lock file");
+    }
+
+    #[test]
+    fn durable_lifecycle_preserves_existing_current_bytes() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        graphforge_filesystem::create_private_directory(&target).unwrap();
+        let current = target.join("CURRENT");
+        let expected = b"existing-current-authority\n";
+        std::fs::write(&current, expected).unwrap();
+
+        let admission = admit_project_lifecycle(
+            &target,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::Existing,
+        )
+        .unwrap();
+        assert!(!admission.created_root());
+        admission.revalidate_identity().unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), expected);
+    }
+
+    #[test]
+    fn concurrent_first_admissions_create_exactly_one_root_and_share_identity() {
+        use std::sync::{Arc, Barrier};
+
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let target = target.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let admission = admit_project_lifecycle(
+                    &target,
+                    ProjectLifecycleMode::Durable,
+                    ProjectRootRequirement::CreateIfMissing,
+                )
+                .unwrap();
+                admission.revalidate_identity().unwrap();
+                (admission.created_root(), admission.project.identity)
+            }));
+        }
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|(created, _)| *created).count(), 1);
+        assert_eq!(results[0].1, results[1].1);
+        assert_eq!(
+            graphforge_filesystem::path_identity(&target).unwrap(),
+            results[0].1
+        );
+        let lock = parent.path().join(lifecycle_lock_name(
+            parent.path(),
+            target.file_name().unwrap(),
+        ));
+        assert!(lock.is_file());
+    }
+
+    #[test]
+    fn ephemeral_lifecycle_is_an_explicit_probe_and_lock_bypass() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("ephemeral");
+        let admission = admit_project_lifecycle_inner(
+            &target,
+            ProjectLifecycleMode::Ephemeral,
+            ProjectRootRequirement::CreateIfMissing,
+            ProbeFault::Classify,
+        )
+        .unwrap();
+        assert_eq!(admission.mode(), ProjectLifecycleMode::Ephemeral);
+        assert!(admission.evidence().is_none());
+        assert!(admission.created_root());
+        admission.revalidate_identity().unwrap();
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 1);
+    }
+
+    const LIFECYCLE_TEST_COOKIE: &str = "graphforge-780-lifecycle-test";
+
+    #[test]
+    fn subprocess_lifecycle_admission() {
+        if std::env::var("GF_780_LIFECYCLE_COOKIE").as_deref() != Ok(LIFECYCLE_TEST_COOKIE) {
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("GF_780_PROJECT_ROOT").unwrap());
+        let admission = admit_project_lifecycle(
+            root,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap();
+        admission.revalidate_identity().unwrap();
+    }
+
+    #[test]
+    fn lifecycle_phase_crashes_retry_to_one_bounded_root_and_lock() {
+        for phase in [
+            "filesystem_admission.after_lifecycle_lock",
+            "filesystem_admission.after_probe",
+            "filesystem_admission.after_root_identity",
+        ] {
+            let parent = canonical_tempdir();
+            let root = parent.path().join("project");
+            let lock = parent.path().join(lifecycle_lock_name(
+                parent.path(),
+                root.file_name().unwrap(),
+            ));
+            let crashed = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "filesystem_admission::tests::subprocess_lifecycle_admission",
+                    "--nocapture",
+                ])
+                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_780_PROJECT_ROOT", &root)
+                .env(
+                    "GRAPHFORGE_PROJECT_FAILPOINTS",
+                    "graphforge-internal-subprocess-v1",
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", phase)
+                .status()
+                .unwrap();
+            assert_eq!(
+                crashed.code(),
+                Some(crate::project_failpoint::exit_code()),
+                "{phase}"
+            );
+            assert!(lock.is_file(), "{phase}");
+            assert!(
+                std::fs::read_dir(parent.path()).unwrap().count() <= 2,
+                "{phase} left unbounded admission artifacts"
+            );
+
+            let retry = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "filesystem_admission::tests::subprocess_lifecycle_admission",
+                    "--nocapture",
+                ])
+                .env("GF_780_LIFECYCLE_COOKIE", LIFECYCLE_TEST_COOKIE)
+                .env("GF_780_PROJECT_ROOT", &root)
+                .status()
+                .unwrap();
+            assert!(retry.success(), "retry after {phase} failed: {retry}");
+
+            let admission = admit_project_lifecycle(
+                &root,
+                ProjectLifecycleMode::Durable,
+                ProjectRootRequirement::Existing,
+            )
+            .unwrap();
+            admission.revalidate_identity().unwrap();
+            assert!(root.is_dir(), "{phase}");
+            assert!(lock.is_file(), "{phase}");
+            assert_eq!(
+                std::fs::read_dir(parent.path()).unwrap().count(),
+                2,
+                "{phase} did not converge to exactly one root and one lock"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_root_can_be_removed_without_unlinking_the_lifecycle_lock() {
+        let parent = canonical_tempdir();
+        let root = parent.path().join("project");
+        let admission = admit_project_lifecycle(
+            &root,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap();
+        let lock = parent.path().join(lifecycle_lock_name(
+            parent.path(),
+            root.file_name().unwrap(),
+        ));
+        std::fs::write(root.join("owned"), b"data").unwrap();
+
+        admission.remove_project_root().unwrap();
+
+        assert!(!root.exists());
+        assert!(lock.is_file());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_removal_rejects_namespace_substitution_without_deleting_either_tree() {
+        let parent = canonical_tempdir();
+        let root = parent.path().join("project");
+        let moved = parent.path().join("moved");
+        let admission = admit_project_lifecycle(
+            &root,
+            ProjectLifecycleMode::Ephemeral,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        graphforge_filesystem::create_private_directory(&root).unwrap();
+
+        let error = admission.remove_project_root().unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(root.is_dir());
+        assert!(moved.is_dir());
+    }
+
+    #[test]
+    fn existing_ephemeral_root_is_canonicalized_before_ancestor_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let admission = admit_project_lifecycle(
+            root.path(),
+            ProjectLifecycleMode::Ephemeral,
+            ProjectRootRequirement::Existing,
+        )
+        .unwrap();
+        assert_eq!(admission.root(), root.path().canonicalize().unwrap());
+        admission.revalidate_identity().unwrap();
+    }
+
+    #[test]
+    fn identity_token_releases_and_readmits_the_same_durable_root() {
+        let parent = canonical_tempdir();
+        let root = parent.path().join("project");
+        let admission = admit_project_lifecycle(
+            &root,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap();
+        let expected = admission.project.identity;
+
+        let identity = admission.into_identity().unwrap();
+        identity.revalidate_identity().unwrap();
+        assert_eq!(identity.root(), root);
+        let readmitted = identity.readmit().unwrap();
+
+        assert_eq!(readmitted.project.identity, expected);
+        readmitted.revalidate_identity().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_token_readmission_rejects_a_replacement_root() {
+        let parent = canonical_tempdir();
+        let root = parent.path().join("project");
+        let moved = parent.path().join("moved");
+        let identity = admit_project_lifecycle(
+            &root,
+            ProjectLifecycleMode::Durable,
+            ProjectRootRequirement::CreateIfMissing,
+        )
+        .unwrap()
+        .into_identity()
+        .unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        graphforge_filesystem::create_private_directory(&root).unwrap();
+
+        let error = identity.readmit().unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(root.is_dir());
+        assert!(moved.is_dir());
     }
 
     #[test]
