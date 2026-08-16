@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
+import tempfile
 
 import graphforge as g
 from graphforge._graphforge_rs import _cli_execute
@@ -30,17 +30,21 @@ def check_mixed_commit_and_rollback(project: Path) -> None:
     tx.validate()
     generation = tx.commit()
     assert generation != before
-    names = forge.execute(
-        "MATCH (n:Person) RETURN n.name AS name ORDER BY name"
-    ).column("name").to_pylist()
+    names = (
+        forge.execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+        .column("name")
+        .to_pylist()
+    )
     assert names == ["Bulk", "Cypher"]
 
     rolled = forge.begin_transaction(operation_uuid=OP_ROLLBACK)
     rolled.stage_add_node(NODE_GHOST, "Person", {"name": "Ghost"})
     rolled.rollback()
-    names = forge.execute(
-        "MATCH (n:Person) RETURN n.name AS name ORDER BY name"
-    ).column("name").to_pylist()
+    names = (
+        forge.execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+        .column("name")
+        .to_pylist()
+    )
     assert names == ["Bulk", "Cypher"]
 
 
@@ -53,9 +57,11 @@ def check_dropped_handle_never_commits(project: Path) -> None:
     after = forge.execute("MATCH (n:Person) RETURN count(n) AS c").column("c").to_pylist()[0]
     assert after == before
     reopened = g.GraphForge(str(project))
-    names = reopened.execute(
-        "MATCH (n:Person) RETURN n.name AS name ORDER BY name"
-    ).column("name").to_pylist()
+    names = (
+        reopened.execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+        .column("name")
+        .to_pylist()
+    )
     assert "Dropped" not in names
 
 

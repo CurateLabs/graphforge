@@ -46,9 +46,7 @@ class CancellationToken:
 
 class GraphTransaction:
     def status(self) -> dict[str, Any]: ...
-    def stage_cypher(
-        self, query: str, params: dict[str, Any] | None = None
-    ) -> None: ...
+    def stage_cypher(self, query: str, params: dict[str, Any] | None = None) -> None: ...
     def stage_add_node(
         self,
         node_uuid: str,
