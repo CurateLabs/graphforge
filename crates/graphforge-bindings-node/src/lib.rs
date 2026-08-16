@@ -49,6 +49,7 @@ use napi_derive::napi;
 
 mod composite;
 mod error;
+mod transaction;
 use composite::CompositeTransactionInput;
 use error::{NodeError, to_napi_err, type_error};
 
@@ -5841,6 +5842,84 @@ impl GraphForge {
         self.ensure_open()?;
         let graph = self.open_guard()?;
         composite::publish_composite_transaction(&graph, request)
+    }
+
+    /// Begin an explicit multi-mutation transaction (Rust-owned lifecycle).
+    #[napi]
+    pub fn begin_transaction(
+        &self,
+        operation_uuid: String,
+        actor_uuid: Option<String>,
+    ) -> Result<transaction::GraphTransaction> {
+        self.ensure_open()?;
+        transaction::begin_transaction(Arc::clone(&self.inner), operation_uuid, actor_uuid)
+    }
+
+    /// Safe recovery-on-open evidence for this instance.
+    #[napi]
+    pub fn project_open_recovery(&self) -> Result<transaction::ProjectOpenRecoveryOutput> {
+        let graph = self.open_guard()?;
+        Ok(transaction::recovery_output(graph.project_open_recovery()))
+    }
+
+    /// Inspect verified generation reachability for retention/GC planning.
+    #[napi]
+    pub fn inspect_project_reachability(
+        &self,
+        request: Option<transaction::ProjectRetentionInput>,
+    ) -> Result<transaction::ProjectReachabilityReportOutput> {
+        let graph = self.open_guard()?;
+        transaction::inspect_reachability(&graph, request)
+    }
+
+    /// Preview retention/GC candidates without removing anything.
+    #[napi]
+    pub fn preview_project_cleanup(
+        &self,
+        request: Option<transaction::ProjectRetentionInput>,
+    ) -> Result<transaction::ProjectCleanupReportOutput> {
+        let graph = self.open_guard()?;
+        transaction::preview_cleanup(&graph, request)
+    }
+
+    /// Execute retention/GC for unreachable generations.
+    #[napi]
+    pub fn execute_project_cleanup(
+        &self,
+        request: Option<transaction::ProjectRetentionInput>,
+    ) -> Result<transaction::ProjectCleanupReportOutput> {
+        let graph = self.open_write_guard()?;
+        transaction::execute_cleanup(&graph, request)
+    }
+
+    /// Report whether CURRENT's verified delta chain should compact.
+    #[napi]
+    pub fn graph_delta_compaction_status(
+        &self,
+        request: Option<transaction::GraphDeltaCompactionStatusInput>,
+    ) -> Result<transaction::GraphDeltaCompactionStatusOutput> {
+        let graph = self.open_guard()?;
+        transaction::compaction_status(&graph, request)
+    }
+
+    /// Preview delta compaction without publishing CURRENT.
+    #[napi]
+    pub fn preview_graph_delta_compaction(
+        &self,
+        request: transaction::GraphDeltaCompactionInput,
+    ) -> Result<transaction::GraphDeltaCompactionReportOutput> {
+        let graph = self.open_guard()?;
+        transaction::preview_compaction(&graph, request, None)
+    }
+
+    /// Compact a contiguous verified delta prefix into a new Parquet generation.
+    #[napi]
+    pub fn compact_graph_delta(
+        &self,
+        request: transaction::GraphDeltaCompactionInput,
+    ) -> Result<transaction::GraphDeltaCompactionReportOutput> {
+        let graph = self.open_write_guard()?;
+        transaction::compact(&graph, request, None)
     }
 
     /// Remove all nodes and edges (in-memory instances only).

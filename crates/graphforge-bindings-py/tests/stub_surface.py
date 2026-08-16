@@ -102,7 +102,11 @@ def _native_members(source: str) -> dict[str, set[str]]:
         assert matches, f"missing PyO3 receiver {rust}"
         for match in matches:
             body = source[match.end() : _matching_brace(source, match.end() - 1)]
-            for name in re.findall(r"^\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", body, re.M):
+            for name in re.findall(
+                r"^\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(",
+                body,
+                re.M,
+            ):
                 members[public].add("__init__" if name == "new" else name)
     return members
 

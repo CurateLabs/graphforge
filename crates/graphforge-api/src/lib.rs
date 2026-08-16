@@ -72,6 +72,7 @@ mod gsi_profiler;
 mod hypotheses;
 mod invocation_descriptor;
 mod knowledge;
+mod maintenance;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
@@ -219,6 +220,14 @@ pub use graphforge_storage::{
     ChunkingIdentity, EmbeddingRefreshFailureClass, EmbeddingRefreshOutcomeRecord,
     EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy,
     ResolvedEmbeddingRefreshPolicy, SearchArtifactError, TokenCountClass, TokenizerIdentity,
+};
+pub use graphforge_storage::{
+    GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
+    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, GraphDeltaJournalLimits,
+    ProjectCleanupDisposition, ProjectCleanupEntry, ProjectCleanupLocation, ProjectCleanupReport,
+    ProjectOpenRecoveryEvidence, ProjectOpenRecoveryKind, ProjectReachabilityReport,
+    ProjectRecoveryDeferral, ProjectRecoveryGenerationClass, ProjectRetentionLimits,
+    ProjectRetentionPolicy,
 };
 pub use gsi_profiler::{GraphScaleIndexProfile, GsiDirectedness, grade_gsi};
 pub use hypotheses::{

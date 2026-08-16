@@ -162,8 +162,11 @@ fn knowledge_row_count(knowledge: &CompositeKnowledgeParticipants) -> usize {
 /// owning thread must drive stage/validate/commit/rollback. Drop rolls back
 /// any still-open staged work without holding project writer locks across the
 /// handle lifetime (locks are acquired only around commit admission).
-pub struct GraphTransaction<'a> {
-    graph: &'a GraphForge,
+///
+/// The handle does not borrow [`GraphForge`]: callers pass `&GraphForge` into
+/// [`Self::validate`] / [`Self::commit`] so language bindings can keep the
+/// facade and transaction as separately owned wrappers.
+pub struct GraphTransaction {
     context: WriteContext,
     base_generation_uuid: Uuid,
     write_mode: ProjectWriteMode,
@@ -173,7 +176,7 @@ pub struct GraphTransaction<'a> {
     started_at: Instant,
 }
 
-impl GraphTransaction<'_> {
+impl GraphTransaction {
     fn ensure_owner(&self) -> Result<(), GfError> {
         if std::thread::current().id() != self.owner {
             return Err(validation(
@@ -394,7 +397,7 @@ impl GraphTransaction<'_> {
     }
 
     /// Validate staged content against the pinned base generation without publishing.
-    pub fn validate(&self) -> Result<(), GfError> {
+    pub fn validate(&self, graph: &GraphForge) -> Result<(), GfError> {
         self.ensure_open()?;
         let mut state = self
             .state
@@ -410,7 +413,7 @@ impl GraphTransaction<'_> {
             knowledge: state.knowledge.clone(),
         };
         if state.cypher.is_empty() {
-            let _ = self.graph.authorize_composite_against_current(&request)?;
+            let _ = graph.authorize_composite_against_current(&request)?;
         } else if !request.graph_mutations.is_empty() || knowledge_row_count(&request.knowledge) > 0
         {
             request.validate_request_shape()?;
@@ -421,13 +424,14 @@ impl GraphTransaction<'_> {
     }
 
     /// Publish every staged supported participant as one generation.
-    pub fn commit(&self) -> Result<TransactionCommitReceipt, GfError> {
-        self.commit_with_cancellation(None)
+    pub fn commit(&self, graph: &GraphForge) -> Result<TransactionCommitReceipt, GfError> {
+        self.commit_with_cancellation(graph, None)
     }
 
     /// Commit with cooperative queued-write cancellation observed only before admission.
     pub fn commit_with_cancellation(
         &self,
+        graph: &GraphForge,
         cancellation: Option<CancellationToken>,
     ) -> Result<TransactionCommitReceipt, GfError> {
         self.ensure_open()?;
@@ -451,7 +455,7 @@ impl GraphTransaction<'_> {
             )
         };
 
-        let result = self.commit_state(state, cancellation);
+        let result = self.commit_state(graph, state, cancellation);
         if result.is_ok() {
             if let Ok(mut state) = self.state.lock() {
                 state.phase = TransactionPhase::Committed;
@@ -465,6 +469,7 @@ impl GraphTransaction<'_> {
 
     fn commit_state(
         &self,
+        graph: &GraphForge,
         state: TransactionState,
         cancellation: Option<CancellationToken>,
     ) -> Result<TransactionCommitReceipt, GfError> {
@@ -473,9 +478,8 @@ impl GraphTransaction<'_> {
         let request = state.into_composite_request(self.context.clone());
 
         if !has_cypher {
-            let receipt = self
-                .graph
-                .publish_composite_transaction_with_cancellation(request, cancellation)?;
+            let receipt =
+                graph.publish_composite_transaction_with_cancellation(request, cancellation)?;
             let generation_uuid = generation_from_receipt(&receipt)?;
             return Ok(TransactionCommitReceipt {
                 generation_uuid,
@@ -483,9 +487,9 @@ impl GraphTransaction<'_> {
             });
         }
 
-        let _visibility = self.graph.graph_visibility.acquire(cancellation.as_ref())?;
+        let _visibility = graph.graph_visibility.acquire(cancellation.as_ref())?;
         let prior = graphforge_storage::resolve_project_generation(
-            self.graph.resolved_generation.container_root(),
+            graph.resolved_generation.container_root(),
         )?;
         if prior.generation_uuid() != self.base_generation_uuid
             && self.write_mode != ProjectWriteMode::OptimisticMultiWriter
@@ -497,24 +501,23 @@ impl GraphTransaction<'_> {
         }
 
         for (query, params) in &cypher {
-            self.graph
+            graph
                 .execute_write_without_publish(query, params)
                 .inspect_err(|_| {
-                    let _ = crate::rematerialize_graph_workspace(&prior, &self.graph.dir);
+                    let _ = crate::rematerialize_graph_workspace(&prior, &graph.dir);
                 })?;
         }
 
         if request.graph_mutations.is_empty() && knowledge_row_count(&request.knowledge) == 0 {
-            let recorded_at = (self.graph.clock.lock().expect("clock lock poisoned"))()?;
+            let recorded_at = (graph.clock.lock().expect("clock lock poisoned"))()?;
             let receipt = graphforge_exec::MutationReceipt::default();
-            self.graph.publish_graph_mutation_with_context(
+            graph.publish_graph_mutation_with_context(
                 &receipt,
                 self.context.operation_uuid.0,
                 self.context.actor_uuid,
                 recorded_at,
             )?;
-            let generation = *self
-                .graph
+            let generation = *graph
                 .current_generation_uuid
                 .lock()
                 .expect("generation UUID lock poisoned");
@@ -524,11 +527,10 @@ impl GraphTransaction<'_> {
             });
         }
 
-        let receipt = self
-            .graph
+        let receipt = graph
             .publish_composite_transaction_admitted(request)
             .inspect_err(|_| {
-                let _ = crate::rematerialize_graph_workspace(&prior, &self.graph.dir);
+                let _ = crate::rematerialize_graph_workspace(&prior, &graph.dir);
             })?;
         let generation_uuid = generation_from_receipt(&receipt)?;
         Ok(TransactionCommitReceipt {
@@ -570,7 +572,7 @@ impl GraphTransaction<'_> {
     }
 }
 
-impl Drop for GraphTransaction<'_> {
+impl Drop for GraphTransaction {
     fn drop(&mut self) {
         if !self.finished.swap(true, Ordering::AcqRel)
             && let Ok(mut state) = self.state.lock()
@@ -590,10 +592,7 @@ impl GraphForge {
     /// The handle stages supported mutations in memory and publishes them
     /// atomically on commit. Administrative families classified as rejected are
     /// refused by [`GraphTransaction::reject_admin`] before mutation.
-    pub fn begin_transaction(
-        &self,
-        context: WriteContext,
-    ) -> Result<GraphTransaction<'_>, GfError> {
+    pub fn begin_transaction(&self, context: WriteContext) -> Result<GraphTransaction, GfError> {
         if self.read_only {
             return Err(GfError::Project {
                 code: ProjectErrorCode::ReadOnlyView,
@@ -608,7 +607,6 @@ impl GraphForge {
             .lock()
             .expect("generation UUID lock poisoned");
         Ok(GraphTransaction {
-            graph: self,
             context,
             base_generation_uuid,
             write_mode: self.write_options.write_mode,
@@ -776,7 +774,7 @@ mod tests {
             row_ordinal: 0,
         }])
         .unwrap();
-        let receipt = tx.commit().unwrap();
+        let receipt = tx.commit(&graph).unwrap();
         assert_ne!(receipt.generation_uuid, before);
         assert_eq!(
             *graph
@@ -813,7 +811,7 @@ mod tests {
             HashMap::from([("name".into(), PropValue::Str("Ghost".into()))]),
         )
         .unwrap();
-        tx.validate().unwrap();
+        tx.validate(&graph).unwrap();
         tx.rollback().unwrap();
         assert_eq!(
             *graph
@@ -878,7 +876,7 @@ mod tests {
                 HashMap::from([("name".into(), PropValue::Str("Ada".into()))]),
             )
             .unwrap();
-        let first_receipt = first.commit().unwrap();
+        let first_receipt = first.commit(&graph).unwrap();
 
         let retry = graph.begin_transaction(ctx.clone()).unwrap();
         retry
@@ -888,7 +886,7 @@ mod tests {
                 HashMap::from([("name".into(), PropValue::Str("Ada".into()))]),
             )
             .unwrap();
-        let retry_receipt = retry.commit().unwrap();
+        let retry_receipt = retry.commit(&graph).unwrap();
         assert_eq!(first_receipt.generation_uuid, retry_receipt.generation_uuid);
 
         let conflict = graph.begin_transaction(ctx).unwrap();
@@ -899,7 +897,7 @@ mod tests {
                 HashMap::from([("name".into(), PropValue::Str("Other".into()))]),
             )
             .unwrap();
-        let error = conflict.commit().unwrap_err();
+        let error = conflict.commit(&graph).unwrap_err();
         assert_eq!(error.code(), "GF_IDEMPOTENCY_CONFLICT");
     }
 
@@ -930,7 +928,7 @@ mod tests {
         let tx = graph.begin_transaction(context(15)).unwrap();
         tx.stage_add_node(uuid7(25), "Person", HashMap::new())
             .unwrap();
-        tx.commit().unwrap();
+        tx.commit(&graph).unwrap();
         let error = tx
             .stage_add_node(uuid7(26), "Person", HashMap::new())
             .unwrap_err();
@@ -986,8 +984,8 @@ mod tests {
                 CompositeKnowledgeParticipants::default(),
             )
             .unwrap();
-        left.commit().unwrap();
-        right.commit().unwrap();
+        left.commit(&graph).unwrap();
+        right.commit(&right_graph).unwrap();
 
         let reopened = GraphForge::new(directory.path().to_str()).unwrap();
         let rows = reopened
@@ -1016,7 +1014,7 @@ mod tests {
         seeded
             .stage_add_node(target, "Person", HashMap::new())
             .unwrap();
-        seeded.commit().unwrap();
+        seeded.commit(&graph).unwrap();
 
         let tx = graph.begin_transaction(context(41)).unwrap();
         let status = tx.status().unwrap();
@@ -1036,7 +1034,9 @@ mod tests {
         }])
         .unwrap();
         let cancelled = CancellationToken::new();
-        let receipt = tx.commit_with_cancellation(Some(cancelled)).unwrap();
+        let receipt = tx
+            .commit_with_cancellation(&graph, Some(cancelled))
+            .unwrap();
         assert_ne!(receipt.generation_uuid, Uuid::nil());
     }
 }

@@ -3746,6 +3746,34 @@ GraphForge exposes a Rust-owned `begin_transaction()` / stage / `validate()` /
 and knowledge mutations must share one committed generation. Administrative
 operations classified as rejected cannot join a transaction.
 
+### transaction and maintenance parity
+
+Python, Node, and CLI thin-wrap the same Rust facade for transactions,
+recovery-on-open evidence, retention/GC preview/execute, and graph-delta
+compaction preview/run/status. Bindings never implement recovery, reachability,
+delta replay, or compaction logic, never accept arbitrary cleanup paths, and
+never silently commit when a wrapper handle is dropped—finalization rolls back
+or releases staged work.
+
+Acknowledgement follows the frozen durability contract: commit returns only
+after CURRENT publication succeeds; exact idempotent retries replay the same
+generation; cancellation is observed before writer admission; optimistic
+multi-writer remains non-serializable (write-skew is possible and documented).
+Busy writers, resource limits, and conflicts map to the same typed project
+error codes across surfaces. Node reports 64-bit counts and sizes as `bigint`
+so values above `Number.MAX_SAFE_INTEGER` stay exact.
+
+```text
+gf --project PATH --json recovery
+gf --project PATH --json transaction commit --operation-uuid UUID --cypher 'CREATE (:Person {name: "A"})'
+gf --project PATH --json transaction rollback --operation-uuid UUID --add-node UUID:Person:{"name":"Ghost"}
+gf --project PATH --json maintenance cleanup-preview [--retained-ancestors N]
+gf --project PATH --json maintenance cleanup-execute --yes [--retained-ancestors N]
+gf --project PATH --json maintenance compaction-status
+gf --project PATH --json maintenance compaction-preview --transaction-uuid UUID --generation-uuid UUID
+gf --project PATH --json maintenance compaction-run --yes --transaction-uuid UUID --generation-uuid UUID
+```
+
 ### `explain(query, stage=None)` → `str`
 
 Compiler plan for a Cypher query. `stage`: `"ast"`, `"ir"`, `"logical"`, `"physical"`,

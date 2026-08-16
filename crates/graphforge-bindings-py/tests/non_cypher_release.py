@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "fa206ee0082ce40a4729ddb79b4b65fe26f458d6e1ca7356f0526dd47d525a03"
-EXPECTED_RELEASE_DIGEST = "98bf3c9277a0cf13146ce4ecfe98e4e213c94e21edc0e8e48536783ffd02bc7e"
+EXPECTED_RUST_DIGEST = "51fd33865c0866530edac0f1c3e735ba72354774de93966883b5020e1a1655fb"
+EXPECTED_RELEASE_DIGEST = "7b10db80d4bd05e21a94c57a7c4218e54f0d464a27dab127bdec59903afc66a0"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -118,6 +118,14 @@ EVIDENCE = {
     },
     "streaming-errors-maintenance": {
         "smoke.py": ["check_execute_stream", "check_lifecycle", "check_parse_error_span"],
+    },
+    "transaction-maintenance": {
+        "transaction_parity.py": [
+            "check_mixed_commit_and_rollback",
+            "check_dropped_handle_never_commits",
+            "check_maintenance_preview_execute_reconcile",
+            "check_cli_parity",
+        ],
     },
     "compatibility": {
         "non_cypher_release.py": ["check_native_artifact_and_no_fallback"],
@@ -229,7 +237,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 184
+    assert len(release_methods) == 192
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 

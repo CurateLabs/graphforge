@@ -3,6 +3,7 @@
 #![warn(unsafe_code)]
 
 mod composite;
+mod transaction;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
@@ -2297,9 +2298,9 @@ fn py_rerank_options(
 /// analyst verbs (`rank`/`cluster`/…) are exposed in a follow-up binding-surface PR.
 #[pyclass(module = "graphforge")]
 pub struct GraphForge {
-    inner: graphforge_api::GraphForge,
+    pub(crate) inner: graphforge_api::GraphForge,
     provider: Option<ConfiguredProviderBinding>,
-    closed: bool,
+    pub(crate) closed: bool,
 }
 
 /// Read-only native facade pinned to one checkpoint generation.
@@ -2351,7 +2352,7 @@ impl PyCheckpointView {
 /// Native cloneable cooperative cancellation token.
 #[pyclass(name = "CancellationToken", module = "graphforge")]
 pub struct PyCancellationToken {
-    inner: graphforge_api::CancellationToken,
+    pub(crate) inner: graphforge_api::CancellationToken,
 }
 
 #[pymethods]
@@ -5340,6 +5341,163 @@ impl GraphForge {
             .map_err(|error| to_pyerr(py, &error))
     }
 
+    /// Begin an explicit multi-mutation transaction (Rust-owned lifecycle).
+    #[pyo3(signature = (*, operation_uuid, actor_uuid=None))]
+    fn begin_transaction(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        operation_uuid: &str,
+        actor_uuid: Option<&str>,
+    ) -> PyResult<Py<transaction::PyGraphTransaction>> {
+        transaction::begin_transaction(slf, py, operation_uuid, actor_uuid)
+    }
+
+    /// Safe recovery-on-open evidence for this instance.
+    fn project_open_recovery<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::project_open_recovery(self, py)
+    }
+
+    /// Inspect verified generation reachability for retention/GC planning.
+    #[pyo3(signature = (*, retained_ancestors=None, max_entries=None, max_bytes_scanned=None, max_work_units=None, cleanup_batch=None))]
+    fn inspect_project_reachability<'py>(
+        &self,
+        py: Python<'py>,
+        retained_ancestors: Option<usize>,
+        max_entries: Option<usize>,
+        max_bytes_scanned: Option<u64>,
+        max_work_units: Option<usize>,
+        cleanup_batch: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::inspect_project_reachability(
+            self,
+            py,
+            retained_ancestors,
+            max_entries,
+            max_bytes_scanned,
+            max_work_units,
+            cleanup_batch,
+        )
+    }
+
+    /// Preview retention/GC candidates without removing anything.
+    #[pyo3(signature = (*, retained_ancestors=None, max_entries=None, max_bytes_scanned=None, max_work_units=None, cleanup_batch=None))]
+    fn preview_project_cleanup<'py>(
+        &self,
+        py: Python<'py>,
+        retained_ancestors: Option<usize>,
+        max_entries: Option<usize>,
+        max_bytes_scanned: Option<u64>,
+        max_work_units: Option<usize>,
+        cleanup_batch: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::preview_project_cleanup(
+            self,
+            py,
+            retained_ancestors,
+            max_entries,
+            max_bytes_scanned,
+            max_work_units,
+            cleanup_batch,
+        )
+    }
+
+    /// Execute retention/GC for unreachable generations.
+    #[pyo3(signature = (*, retained_ancestors=None, max_entries=None, max_bytes_scanned=None, max_work_units=None, cleanup_batch=None))]
+    fn execute_project_cleanup<'py>(
+        &self,
+        py: Python<'py>,
+        retained_ancestors: Option<usize>,
+        max_entries: Option<usize>,
+        max_bytes_scanned: Option<u64>,
+        max_work_units: Option<usize>,
+        cleanup_batch: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::execute_project_cleanup(
+            self,
+            py,
+            retained_ancestors,
+            max_entries,
+            max_bytes_scanned,
+            max_work_units,
+            cleanup_batch,
+        )
+    }
+
+    /// Report whether CURRENT's verified delta chain should compact.
+    #[pyo3(signature = (*, compact_when_runs=None, compact_when_run_bytes=None, compact_when_replay_memory_bytes=None))]
+    fn graph_delta_compaction_status<'py>(
+        &self,
+        py: Python<'py>,
+        compact_when_runs: Option<u64>,
+        compact_when_run_bytes: Option<u64>,
+        compact_when_replay_memory_bytes: Option<u64>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::graph_delta_compaction_status(
+            self,
+            py,
+            compact_when_runs,
+            compact_when_run_bytes,
+            compact_when_replay_memory_bytes,
+        )
+    }
+
+    /// Preview delta compaction without publishing CURRENT.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, transaction_uuid, generation_uuid, through_run_sequence=None, cleanup_after_commit=false, retained_ancestors=None, cancellation=None))]
+    fn preview_graph_delta_compaction<'py>(
+        &self,
+        py: Python<'py>,
+        transaction_uuid: &str,
+        generation_uuid: &str,
+        through_run_sequence: Option<u64>,
+        cleanup_after_commit: bool,
+        retained_ancestors: Option<usize>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::preview_graph_delta_compaction(
+            self,
+            py,
+            transaction_uuid,
+            generation_uuid,
+            through_run_sequence,
+            cleanup_after_commit,
+            retained_ancestors,
+            cancellation,
+        )
+    }
+
+    /// Compact a contiguous verified delta prefix into a new Parquet generation.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (*, transaction_uuid, generation_uuid, through_run_sequence=None, cleanup_after_commit=false, retained_ancestors=None, cancellation=None))]
+    fn compact_graph_delta<'py>(
+        &self,
+        py: Python<'py>,
+        transaction_uuid: &str,
+        generation_uuid: &str,
+        through_run_sequence: Option<u64>,
+        cleanup_after_commit: bool,
+        retained_ancestors: Option<usize>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.ensure_open()?;
+        transaction::ops::compact_graph_delta(
+            self,
+            py,
+            transaction_uuid,
+            generation_uuid,
+            through_run_sequence,
+            cleanup_after_commit,
+            retained_ancestors,
+            cancellation,
+        )
+    }
+
     /// Publish one composite graph + knowledge/epistemic transaction through Rust.
     ///
     /// Python only converts the request; validation, staging, publication,
@@ -5801,6 +5959,7 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_test_release_writer_hold, m)?)?;
     m.add_function(wrap_pyfunction!(_cli_execute, m)?)?;
     m.add_class::<GraphForge>()?;
+    m.add_class::<transaction::PyGraphTransaction>()?;
     m.add_class::<PyCheckpointView>()?;
     m.add_class::<PyCancellationToken>()?;
     m.add_class::<PyNodeHandle>()?;
