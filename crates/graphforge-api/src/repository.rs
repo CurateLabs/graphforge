@@ -357,14 +357,13 @@ impl RepositoryContext {
             true
         };
         let ignore_changed = Self::write_gitignore(ignore)?;
-        fs::create_dir_all(&self.state_path)
-            .map_err(|error| GfError::Storage(error.to_string()))?;
         let state = self
             .state_path
             .to_str()
             .ok_or_else(|| validation("project path must be valid UTF-8"))?;
-        // GraphForge::new creates or reopens the v1 container. Opening it a second
-        // time proves that the published project can be resolved immediately.
+        // Storage admission creates or reopens the v1 container. Repository
+        // setup must not create the final state target before that gate. Opening
+        // it a second time proves that the published project resolves immediately.
         super::GraphForge::new(Some(state))?;
         super::GraphForge::new(Some(state))?;
         Ok(RepositoryInitReceipt {
@@ -1109,7 +1108,17 @@ impl RepositoryContext {
         }
         let removed = if target.exists() {
             reject_symlink_components(&self.root, &target)?;
-            fs::remove_dir_all(&target).map_err(|error| GfError::Storage(error.to_string()))?;
+            let admission = storage::filesystem_admission::admit_project_lifecycle(
+                &target,
+                storage::filesystem_admission::ProjectLifecycleMode::Durable,
+                storage::filesystem_admission::ProjectRootRequirement::Existing,
+            )?;
+            if admission.root() != target {
+                return Err(validation(
+                    "admitted repository state does not match the contained remove target",
+                ));
+            }
+            admission.remove_project_root()?;
             true
         } else {
             false
@@ -3053,6 +3062,19 @@ mod tests {
     }
 
     #[test]
+    fn repository_init_delegates_state_target_creation_to_storage_admission() {
+        let root = tempdir().unwrap();
+        let mut context = RepositoryContext::discover(root.path()).unwrap();
+        fs::create_dir_all(root.path().join(".graphforge/hop")).unwrap();
+        context.state_path = root.path().join(".graphforge/hop/../state");
+
+        let error = context.init_without_skills().unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(!root.path().join(".graphforge/state").exists());
+    }
+
+    #[test]
     fn containment_and_symlinks_fail_closed() {
         let root = tempdir().unwrap();
         let context = RepositoryContext::discover(root.path()).unwrap();
@@ -3092,6 +3114,25 @@ mod tests {
         assert!(context.remove(true).unwrap().removed);
         assert!(root.path().join(".graphforge/ontology/keep.yaml").is_file());
         assert!(!root.path().join(".graphforge/state").exists());
+    }
+
+    #[test]
+    fn remove_rejects_traversal_without_deleting_the_project() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+        let current = fs::read(context.state_path.join(storage::CURRENT_FILE)).unwrap();
+        fs::create_dir(root.path().join("hop")).unwrap();
+        let mut traversed = context.clone();
+        traversed.root = context.root.join("hop/..");
+
+        let error = traversed.remove(true).unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert_eq!(
+            fs::read(context.state_path.join(storage::CURRENT_FILE)).unwrap(),
+            current
+        );
     }
 
     #[test]

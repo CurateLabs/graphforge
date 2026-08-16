@@ -22,7 +22,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -451,9 +451,11 @@ impl std::fmt::Debug for GraphForge {
 impl GraphForge {
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
     ///
-    /// For a persistent instance, the directory must exist. Ontology authority
-    /// and enforcement mode are resolved from the committed workspace ontology
-    /// and configuration participants in the selected project generation.
+    /// For a persistent instance, the directory may be absent when its parent
+    /// exists; storage admission owns creation of the final project directory.
+    /// Ontology authority and enforcement mode are resolved from the committed
+    /// workspace ontology and configuration participants in the selected
+    /// project generation.
     /// Loose `graphforge.yaml` or `ontology.yaml` files are not authority and
     /// are not loaded implicitly. An existing runtime-catalog participant seeds
     /// the runtime catalog.
@@ -461,10 +463,10 @@ impl GraphForge {
     /// An in-memory instance is exploratory and backed by a temp directory.
     ///
     /// # Errors
-    /// Returns [`GfError::Storage`] if `path` does not exist or the temp dir
-    /// cannot be created, [`GfError::Validation`] for malformed committed
-    /// workspace records, and [`GfError::Ontology`] if the adopted ontology
-    /// cannot be decoded or compiled.
+    /// Returns [`GfError::Storage`] if the persistent path's parent does not
+    /// exist or the temp dir cannot be created, [`GfError::Validation`] for
+    /// malformed committed workspace records, and [`GfError::Ontology`] if the
+    /// adopted ontology cannot be decoded or compiled.
     /// Opening a persistent project can also return structured knowledge,
     /// provenance, or publication errors while reconciling an interrupted
     /// recorded algorithm run.
@@ -490,7 +492,7 @@ impl GraphForge {
         let tmp = tempfile::TempDir::new()
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
         let (resolved_generation, project_open_recovery) =
-            graphforge_storage::open_or_initialize_project_with_recovery(tmp.path())?;
+            graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
@@ -561,10 +563,14 @@ impl GraphForge {
         options: GraphForgeOptions,
         resource_policy: resource_policy::NormalizedResourcePolicy,
     ) -> Result<Self, GfError> {
-        if !dir.exists() {
+        let parent = dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
             return Err(GfError::Storage(format!(
-                "path does not exist: {}",
-                dir.display()
+                "project parent does not exist or is not a directory: {}",
+                parent.display()
             )));
         }
 
@@ -5892,6 +5898,25 @@ mod tests {
     }
 
     #[test]
+    fn persistent_open_creates_an_absent_final_target_through_storage() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().canonicalize().unwrap().join("project");
+        assert!(!root.exists());
+
+        let first = GraphForge::new(root.to_str()).expect("admit and create v1 project");
+        let generation_uuid = first.resolved_generation.generation_uuid();
+        assert_eq!(first.path(), Some(root.as_path()));
+        assert!(root.is_dir());
+        drop(first);
+
+        let reopened = GraphForge::new(root.to_str()).expect("reopen admitted project");
+        assert_eq!(
+            reopened.resolved_generation.generation_uuid(),
+            generation_uuid
+        );
+    }
+
+    #[test]
     fn persistent_open_rejects_pre_v1_without_mutation() {
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("topology/nodes.parquet");
@@ -5907,7 +5932,8 @@ mod tests {
 
     #[test]
     fn graphforge_new_bad_path() {
-        let result = GraphForge::new(Some("/nonexistent/path/xyz"));
+        let parent = tempfile::tempdir().unwrap();
+        let result = GraphForge::new(parent.path().join("missing/project").to_str());
         assert!(matches!(result, Err(GfError::Storage(_))));
     }
 
