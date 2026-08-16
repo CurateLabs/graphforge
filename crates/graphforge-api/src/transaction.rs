@@ -998,6 +998,23 @@ mod tests {
                 .sum::<usize>(),
             1
         );
+        let batch = &rows.batches[0];
+        let credit = batch
+            .column_by_name("credit")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::Int64Array>())
+            .expect("credit column");
+        let debit = batch
+            .column_by_name("debit")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::Int64Array>())
+            .expect("debit column");
+        assert_eq!(credit.value(0), 1);
+        assert_eq!(debit.value(0), 1);
+        // Application invariant credit + debit <= 1 is broken → not SSI/serializable.
+        assert_eq!(credit.value(0) + debit.value(0), 2);
+        assert_eq!(
+            graphforge_storage::project_certification::WRITE_SKEW_CLASSIFICATION,
+            "allowed_documented_not_ssi"
+        );
     }
 
     #[test]

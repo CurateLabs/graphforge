@@ -60,6 +60,8 @@ pub mod concurrency_test_support;
 mod construction;
 #[cfg(test)]
 mod construction_concurrency_tests;
+#[cfg(test)]
+mod durability_certification_tests;
 mod embedding_freshness;
 mod embedding_publication;
 mod embedding_refresh;

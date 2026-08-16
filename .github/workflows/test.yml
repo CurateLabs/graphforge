@@ -105,6 +105,12 @@ jobs:
           python3 scripts/ci/durability-isolation-gate.py validate
           python3 scripts/ci/test-durability-isolation-gate.py
 
+      - name: Test durability certification gate config
+        if: steps.policy-suites.outputs.contracts == 'true'
+        run: |
+          python3 scripts/ci/durability-certification-gate.py validate
+          python3 scripts/ci/test-durability-certification-gate.py
+
       - name: Test concurrency short matrix gate
         if: steps.policy-suites.outputs.contracts == 'true'
         run: |
@@ -858,6 +864,12 @@ jobs:
         run: >-
           cargo test -p graphforge-storage project_generation::tests:: --lib
           --no-fail-fast
+
+      - name: Run Windows durability certification unit tests
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints
+          project_certification --lib --no-fail-fast
 
   bazel-bootstrap:
     # Job display name kept for continuity; this is the authoritative Rust

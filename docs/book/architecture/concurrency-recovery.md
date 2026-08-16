@@ -107,7 +107,7 @@ linearize, acknowledge, publish, abort, and recover. See ADR 0018 and the
 
 ## Correctness gates versus stress observations
 
-There are three CI surfaces for concurrency and durability contracts:
+There are four CI surfaces for concurrency and durability contracts:
 
 1. **Required short concurrency matrix** (`Test Suite / Concurrency Matrix`) —
    deterministic Rust, Python, and Node cases from
@@ -122,8 +122,8 @@ There are three CI surfaces for concurrency and durability contracts:
    Throughput or latency figures from stress are non-blocking performance
    observations, not correctness evidence.
 3. **Durability/isolation contract ledger** — `graphforge-durability-isolation/1`
-   maps crash phases and anomalies to covered evidence or later M6 owner issues
-   (#749–#756). Repository Policy validates the ledger without compiling Rust.
+   maps crash phases and anomalies to covered evidence. Repository Policy
+   validates the ledger without compiling Rust.
    Persistent-media faults that process kill cannot express (torn `CURRENT` /
    manifest bytes, lost root-directory flush power-loss subsets) are modeled by
    the deterministic filesystem fault oracle in
@@ -144,6 +144,16 @@ There are three CI surfaces for concurrency and durability contracts:
    Graph delta compaction (`compact_graph_delta` / `preview_graph_delta_compaction`)
    publishes a new Parquet generation through the same CURRENT path and reclaims
    subsumed inputs only after acknowledgement via that shared oracle.
+4. **Seeded durability/isolation certification** (`Durability Certification Gate`)
+   — integrated reference state machine in
+   `crates/graphforge-storage/src/project_certification.rs`
+   (`graphforge-durability-certification/1`, published seed `7560`). Required CI
+   runs the bounded history budget; the scheduled/manual lane raises
+   `GRAPHFORGE_CERT_HISTORIES` / `GRAPHFORGE_CERT_OPS`, records declared counts,
+   minimized traces, commands, platform/tool versions, and artifact digests, and
+   fails closed on the first untriaged invariant (no seed retries). Evidence and
+   docs make no SSI, universal-filesystem, or distributed-durability claim;
+   optimistic write-skew remains `allowed_documented_not_ssi`.
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by
@@ -159,6 +169,23 @@ Local durability/isolation contract validation:
 
 ```text
 python3 scripts/ci/durability-isolation-gate.py validate
+```
+
+Local seeded certification (required budget):
+
+```text
+python3 scripts/ci/durability-certification-gate.py validate
+python3 scripts/ci/durability-certification-gate.py run \
+  --output /tmp/gf-durability-cert
+```
+
+Scheduled-lane reproduction:
+
+```text
+GRAPHFORGE_CERT_HISTORIES=64 GRAPHFORGE_CERT_OPS=32 \
+  python3 scripts/ci/durability-certification-gate.py run \
+  --histories 64 --ops 32 \
+  --output /tmp/gf-durability-cert-scheduled
 ```
 
 Local stress reproduction from an artifact uses the recorded command lines in

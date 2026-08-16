@@ -298,6 +298,11 @@ durability-isolation-check:  ## Validate acknowledged durability/isolation contr
 	python3 scripts/ci/durability-isolation-gate.py validate
 	python3 scripts/ci/test-durability-isolation-gate.py
 
+.PHONY: durability-certification-check
+durability-certification-check:  ## Validate seeded durability certification gate (#756)
+	python3 scripts/ci/durability-certification-gate.py validate
+	python3 scripts/ci/test-durability-certification-gate.py
+
 bench-m4-entry:  ## Emit the M4 entry large/manual evidence envelope (#334; hardware-specific)
 	cargo test -p graphforge-api --release --test m4_entry_baseline large_manual_matrix_emits_hardware_dataset_evidence -- --ignored --nocapture --test-threads=1
 

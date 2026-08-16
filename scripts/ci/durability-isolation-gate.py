@@ -39,6 +39,10 @@ REQUIRED_BDD = {
     "acknowledged-success",
     "write-skew-honesty",
     "unsupported-filesystem-fail-closed",
+    "seeded-crash-replay-matches-model",
+    "pinned-readers-survive-compaction-gc",
+    "minimized-trace-reproduces-failure",
+    "optimistic-write-skew-classified",
 }
 REQUIRED_VOCABULARY = {
     "stage",

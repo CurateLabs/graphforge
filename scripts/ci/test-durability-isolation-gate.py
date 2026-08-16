@@ -45,8 +45,13 @@ class DurabilityIsolationGateTests(unittest.TestCase):
                     cell["coverage"] == "documented" and "owner_issue" in cell
                 ):
                     owners.add(cell["owner_issue"])
-        self.assertTrue(owners)
+        # After #756 closes the final certification cell, owners may be empty.
         self.assertTrue(owners <= set(range(749, 757)))
+        for section in ("crash_phases", "anomalies", "lifecycle"):
+            for cell in matrix[section]:
+                self.assertIn(cell["coverage"], {"covered", "documented", "partial", "deferred"})
+                if cell["coverage"] == "covered":
+                    self.assertNotIn("owner_issue", cell)
 
     def test_mutations_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

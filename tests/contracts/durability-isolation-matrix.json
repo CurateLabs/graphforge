@@ -186,6 +186,39 @@
       "matrix_refs": [
         "filesystem_scope"
       ]
+    },
+    {
+      "id": "seeded-crash-replay-matches-model",
+      "given": "seeded_history_with_crashes_around_acknowledgement",
+      "then": "reopened_state_matches_reference_model",
+      "matrix_refs": [
+        "lifecycle.seeded_model_certification"
+      ]
+    },
+    {
+      "id": "pinned-readers-survive-compaction-gc",
+      "given": "concurrent_pinned_readers_writers_compaction_gc",
+      "then": "each_reader_remains_on_one_complete_snapshot",
+      "matrix_refs": [
+        "lifecycle.seeded_model_certification",
+        "anomalies.non_repeatable_read_within_pinned_facade"
+      ]
+    },
+    {
+      "id": "minimized-trace-reproduces-failure",
+      "given": "failing_randomized_history",
+      "then": "deterministic_minimized_trace_reproduces_invariant",
+      "matrix_refs": [
+        "lifecycle.seeded_model_certification"
+      ]
+    },
+    {
+      "id": "optimistic-write-skew-classified",
+      "given": "optimistic_write_skew",
+      "then": "documented_si_limitation_without_serializability_claim",
+      "matrix_refs": [
+        "anomalies.write_skew"
+      ]
     }
   ],
   "crash_phases": [
@@ -396,7 +429,7 @@
         "queued_writer": "prevented_by_serial_writer",
         "optimistic_multi_writer": "allowed_documented_not_ssi"
       },
-      "coverage": "documented",
+      "coverage": "covered",
       "evidence": [
         {
           "kind": "doc",
@@ -407,10 +440,19 @@
           "kind": "doc",
           "path": "docs/book/architecture/concurrency-recovery.md",
           "symbol": "Write-skew witness"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/transaction.rs",
+          "symbol": "optimistic_write_skew_witness_matches_isolation_table"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "optimistic_write_skew_witness_is_classified_not_serializable"
         }
       ],
-      "owner_issue": 756,
-      "rationale": "Honesty of the classification is frozen now; seeded certification histories that exercise the witness remain #756. SSI prevention is explicitly out of M6."
+      "rationale": "Seeded certification histories exercise the witness; optimistic mode remains allowed_documented_not_ssi. SSI prevention is explicitly out of M6."
     },
     {
       "id": "phantom_read_across_fresh_opens",
@@ -664,6 +706,58 @@
         }
       ],
       "rationale": "Deterministic bounded compaction of authoritative delta prefixes into Parquet generations with shared-oracle cleanup."
+    },
+    {
+      "id": "seeded_model_certification",
+      "coverage": "covered",
+      "rationale": "Integrated seeded reference state machine certifies acknowledgement, restart, pinned readers, write modes, checkpoints, deltas, compaction, GC, cancellation, process-death boundaries, and media faults against one exact model; required CI is bounded and the scheduled lane raises history/seed counts.",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "bounded_ci_state_space_passes_without_untriaged_failures"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "acknowledged_commits_survive_every_modeled_restart"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "pinned_readers_never_see_mixed_or_drifting_generations"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "recovery_compaction_and_gc_preserve_protected_inputs"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_certification.rs",
+          "symbol": "failing_history_minimizes_to_deterministic_reproducing_trace"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/durability_certification_tests.rs",
+          "symbol": "seeded_certification_suite_is_clean_at_required_budget"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-api/src/durability_certification_tests.rs",
+          "symbol": "native_shared_boundaries_agree_with_oracle_authority"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_recovery.rs",
+          "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
+        },
+        {
+          "kind": "doc",
+          "path": "docs/book/architecture/concurrency-recovery.md",
+          "symbol": "Seeded durability/isolation certification"
+        }
+      ]
     }
   ],
   "filesystem_evidence": [
