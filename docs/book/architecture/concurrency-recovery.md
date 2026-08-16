@@ -41,6 +41,18 @@ Network, userspace, removable, cross-device, symlink-mediated, ReFS, and unknown
 filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root or
 `CURRENT` changes. There is no best-effort durability mode.
 
+Every durable lifecycle enters one Rust-owned parent-scoped admission before
+project mutation. A deterministic sibling lock file persists across unlock and
+process death; it coordinates absent-root initialization before `FORMAT`,
+`generations/`, project locks, or `CURRENT` exist. Existing roots retain opened
+parent/root identities. Ordinary publication, recovery, checkpoints and revert,
+delta publication and compaction spill, retention cleanup, portable import, and
+repository state initialization/removal all use that authority. Optimistic
+staging retains identity without serializing peer stagers, then readmits the
+same root before acquiring the commit writer lock. Python, Node, and CLI calls
+remain thin adapters over these Rust outcomes, including
+`GF_UNSUPPORTED_FILESYSTEM`.
+
 Recovery resolves an exact valid `CURRENT` only. Journals and directory scans
 are advisory cleanup input. Corrupt or ambiguous pointers fail closed as
 `GF_PROJECT_CORRUPT` without electing a newest generation.

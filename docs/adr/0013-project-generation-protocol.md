@@ -169,15 +169,29 @@ results.
 ### Container creation
 
 An absent path, or an explicitly supplied empty directory, may become a new
-container. Creation performs the filesystem preflight, creates the tree, writes
-and flushes `FORMAT`, and completes platform-native namespace barriers for each
-created entry bottom-up. For an
-absent path, the complete private root is atomically installed from a sibling.
-For an explicitly empty existing directory, initialization occurs in place
-while holding an exclusive parent-scoped creation lock whose name is the
-SHA-256 of the canonical target path. That lock uses the same OS-lock rules as
-`writer.lock`; its file name contains no caller text. `CURRENT` does not exist
-yet.
+container. Before the final root, `FORMAT`, `generations/`, `CURRENT`, or any
+project lock is created or changed, GraphForge creates or opens a deterministic
+parent-sibling lifecycle lock, flushes its file and parent namespace, and takes
+its exclusive kernel lock. The lock name is a domain-separated SHA-256 over the
+canonical parent and final target component; it contains no caller text. The
+lock file is a persistent rendezvous inode and is never unlinked after unlock.
+
+While holding that lock GraphForge performs the filesystem preflight. Only a
+successful preflight may create an absent final root. Creation flushes the new
+root entry, writes and flushes `FORMAT`, and completes platform-native namespace
+barriers for each created entry bottom-up. A process death before `CURRENT`
+may leave only the persistent sibling lock and a bounded empty or resumable
+uninitialized root; the next admitted opener validates that exact shape and
+resumes it. `CURRENT` does not exist until one complete first generation is
+durable. Concurrent first openers therefore initialize exactly once and all
+select the same committed generation.
+
+Existing projects pass through the same lifecycle admission without changing
+the selected `CURRENT` generation. The retained parent/root identities are
+revalidated before project-lock mutation. Optimistic stagers may release the
+lifecycle lock after retaining those identities, but must reacquire admission
+and prove the same root identity before taking the commit writer lock. The
+lifecycle lock remains ordered before project writer/checkpoint/recovery locks.
 
 Such a container is *uninitialized*, not generation zero. Project APIs return
 `GF_PROJECT_UNINITIALIZED` until the first complete generation is published.
