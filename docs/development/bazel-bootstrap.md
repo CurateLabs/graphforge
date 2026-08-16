@@ -83,11 +83,11 @@ Credentials / OIDC stay outside cacheable Bazel actions (publish workflows uncha
 `project-skills/` remains a pure distribution tree (no `BUILD.bazel` payload);
 skills are declared via root `//:project_skills_bundle` / `//:project-skills/manifest.json`.
 
-### Package coverage (17 workspace members)
+### Package coverage (18 workspace members)
 
 | Class | Count | Status after #8 |
 | --- | ---: | --- |
-| Ordinary `lib` mapped | 15 | foundation + runtime + CLI |
+| Ordinary `lib` mapped | 16 | foundation + runtime + CLI |
 | Binding cdylibs mapped | 2 | PyO3 + napi-rs (#7) |
 | Integration-test mapped | 59 | `//:integration_tests` (+ BDD harness) |
 | CLI `bin` mapped | 1 | `//crates/graphforge-cli:gf` |

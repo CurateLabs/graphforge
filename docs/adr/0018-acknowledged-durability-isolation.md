@@ -4,7 +4,8 @@
 **Date:** 2026-08-15
 **Build target:** v0.5.x (M6 foundations)
 **Related:** ADR 0013 (publication protocol), ADR 0014 (checkpoints),
-ADR 0015 (write modes), issues #747–#756, adjacent M5 interchange #738/#742/#745
+ADR 0015 (write modes), ADR 0020 (NTFS write-through namespace durability
+amendment), issues #747–#756, adjacent M5 interchange #738/#742/#745
 
 ## Context
 
@@ -34,7 +35,8 @@ project writes. Machine-readable coverage lives in
 
 Semantic changes to acknowledgement, recovery authority, filesystem scope, or
 isolation outcomes require a new ADR that amends or supersedes this one. Silent
-doc or code drift is forbidden.
+doc or code drift is forbidden. ADR 0020 is that explicit amendment for the
+Windows filesystem scope and platform-native namespace durability barrier.
 
 ### Acknowledgement boundary
 
@@ -43,25 +45,26 @@ all of the following have completed on a supported filesystem:
 
 1. every staged participant file has been written, closed, and file-flushed;
 2. `manifest.json` has been written and file-flushed, and the generation tree
-   (participants directories upward through the generation directory) has been
-   directory-flushed;
+   has completed its platform-native namespace durability barriers;
 3. for optimistic attempts, the private attempt directory has been atomically
    promoted into `generations/<generation-uuid>/` with the required parent
-   directory flushes;
+   namespace durability barriers;
 4. the exact new `CURRENT` bytes have been written to a sibling, file-flushed,
-   atomically replaced or created, **and** the project-root directory entry has
-   been flushed.
+   atomically replaced or created through the supported platform primitive,
+   **and** the project-root platform-native namespace durability barrier has
+   completed.
 
-Step 4's project-root directory flush is part of acknowledgement. Atomic
-`CURRENT` replacement alone is the visibility linearization point for new
-readers, but acknowledgement of durability against power loss additionally
-requires that root directory flush. Journals are never acknowledgement
-authority.
+Step 4's platform-native namespace durability barrier is part of
+acknowledgement. Atomic `CURRENT` replacement alone is the visibility
+linearization point for new readers. POSIX additionally requires project-root
+directory `fsync(2)`; Windows NTFS performs the rename through the flushed
+`FILE_FLAG_WRITE_THROUGH` staging handle and does not claim a directory-handle
+`FlushFileBuffers` barrier. Journals are never acknowledgement authority.
 
-If the process dies after `CURRENT` replacement but before the root directory
-flush, reopen accepts whichever exact valid `CURRENT` the filesystem presents.
-It does not infer intent from journals, directory scans, timestamps, or UUID
-order.
+If the process dies after `CURRENT` replacement but before the applicable
+barrier completes, reopen accepts whichever exact valid `CURRENT` the
+filesystem presents. It does not infer intent from journals, directory scans,
+timestamps, or UUID order.
 
 ### Platform and filesystem scope
 
@@ -70,14 +73,14 @@ Durable projects may be created or mutated only after fail-closed preflight of:
 1. exclusive and shared advisory locks released by the OS on process exit;
 2. same-directory atomic file creation and replacement;
 3. file data-and-metadata flush;
-4. directory-entry flush for every changed directory; and
+4. a platform-native namespace durability barrier for every changed entry; and
 5. stable file identity while an open handle is locked.
 
-Supported implementations remain those named by ADR 0013: POSIX local
-filesystems with `fcntl`/`flock`, same-filesystem `rename(2)`, and file plus
-directory `fsync(2)`; and Windows local NTFS/ReFS with `LockFileEx`,
-`FlushFileBuffers`, atomic same-volume replacement, and a flushable directory
-handle.
+Supported implementations, as amended by ADR 0020, are POSIX local filesystems
+with `fcntl`/`flock`, same-filesystem `rename(2)`, and file plus directory
+`fsync(2)`; and fixed writable Windows local NTFS with `LockFileEx`, flushed
+`FILE_FLAG_WRITE_THROUGH` staging handles, and same-handle
+`SetFileInformationByHandle` rename. ReFS is unsupported/unproven.
 
 Network, userspace, removable, cross-device, symlink-mediated, or unknown
 filesystems are rejected with `GF_UNSUPPORTED_FILESYSTEM` before the project
@@ -158,10 +161,12 @@ generation MUST use this vocabulary:
 - **stage** — write private participants without moving `CURRENT`;
 - **validate** — domain and composite checks against pinned parent plus staged
   bytes;
-- **durable generation** — flushed participants + flushed manifest + flushed
-  generation tree (and optimistic promotion when applicable);
+- **durable generation** — flushed participants + flushed manifest + completed
+  platform-native namespace barriers for the generation tree (and optimistic
+  promotion when applicable);
 - **linearize** — atomic `CURRENT` replacement or first creation;
-- **acknowledge** — linearize plus project-root directory flush;
+- **acknowledge** — linearize plus the project-root platform-native namespace
+  durability barrier;
 - **publish / published** — acknowledged-durable success visible to new opens;
 - **abort** — abandon staged work without moving `CURRENT`;
 - **recover** — reopen/classification that never elects authority from journals
@@ -190,7 +195,7 @@ lock metadata beyond machine-owned IDs.
 
 | Alternative | Reason |
 | --- | --- |
-| Treat `CURRENT` replacement alone as acknowledgement | Omits the root directory flush required against power loss |
+| Treat `CURRENT` replacement alone as acknowledgement | Omits the platform-native namespace durability barrier required against power loss |
 | Claim SSI because readers pin snapshots | Write-skew remains possible under optimistic property merge |
 | Best-effort mode on network filesystems | Flush and replacement semantics are not proven |
 | Let journals elect authority after crash | Turns advisory cleanup into an election protocol |

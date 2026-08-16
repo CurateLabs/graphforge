@@ -32,7 +32,7 @@ the exact retained bytes must pass:
 - complete archive inventory and required-file validation;
 - one-version and first-party dependency validation;
 - Python, Node/native, CLI, and agent-skills offline consumers;
-- all 15 crate package and dependency checks; and
+- all 16 crate package and dependency checks; and
 - license and notice validation.
 
 A checksum match proves byte identity, not artifact completeness.
@@ -68,7 +68,7 @@ Publication is planner-driven:
 - Crates publish in their checked dependency order.
 - Every lane re-observes public registry truth immediately before a write.
 - Accepted or ambiguous write attempts never authorize a duplicate write.
-- The final reconciliation always runs and covers all 24 public nodes.
+- The final reconciliation always runs and covers all 25 public nodes.
 
 Job history is operator context only. Recovery state comes from the immutable
 candidate, durable write evidence, retained artifacts, and live registry truth.

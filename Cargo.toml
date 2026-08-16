@@ -9,6 +9,7 @@ members = [
   "crates/graphforge-exec",
   "crates/graphforge-search",
   "crates/graphforge-storage",
+  "crates/graphforge-filesystem",
   "crates/graphforge-io",
   "crates/graphforge-provenance",
   "crates/graphforge-knowledge",

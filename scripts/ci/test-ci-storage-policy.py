@@ -37,6 +37,17 @@ from collections import Counter
 from pathlib import Path
 import re
 
+from workflow_policy import (
+    job_needs,
+    job_required_run_scalars,
+    job_run_contains,
+    job_run_scalars,
+    job_runs_exact,
+    job_scalar,
+    normalize_run,
+    workflow_jobs,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
@@ -108,9 +119,10 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        # test.yml: policy + rust-lint + python/node binding + windows locks (5);
+        # test.yml: policy + rust-lint + python/node binding + Windows/macOS
+        # durability (6);
         # Binding RC: 3. PR Cargo sticky disks retired after #4 cutover.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 8,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 9,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
@@ -435,83 +447,67 @@ def validate_test_suite_trigger(text: str) -> None:
     )
 
 
-def workflow_jobs(text: str) -> dict[str, str]:
-    """Split a workflow into top-level job_id -> job body (after the job key line)."""
-    lines = text.splitlines()
-    try:
-        jobs_index = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
-    except StopIteration as exc:
-        raise AssertionError("workflow is missing a top-level jobs: mapping") from exc
-    jobs: dict[str, str] = {}
-    current: str | None = None
-    body: list[str] = []
-    for line in lines[jobs_index + 1 :]:
-        if not line.strip() or line.lstrip().startswith("#"):
-            if current is not None:
-                body.append(line)
+def validate_required_run_negative_fixtures() -> None:
+    """Required command matching rejects common shell failure suppression."""
+    command = "python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory"
+    fixture = f"""jobs:
+  probe:
+    steps:
+      - run: >-
+          {command}
+"""
+    assert job_run_contains(workflow_jobs(fixture)["probe"], command)
+    for suffix in (" &> command.log", " 2>&1"):
+        allowed = fixture.replace(command, f"{command}{suffix}")
+        assert job_run_contains(workflow_jobs(allowed)["probe"], command)
+    for suffix, prefix in (
+        (" || true", ""),
+        (" || echo ignored", ""),
+        (" ; true", ""),
+        ("", "! "),
+        (" &", ""),
+        (" ; set +o errexit", ""),
+        (" ; set +o pipefail", ""),
+        ("", "set +o errexit\n          "),
+        (" && true; echo ignored", ""),
+        (" ok && false; echo ignored && true", ""),
+        ("; exit 0", ""),
+    ):
+        hostile = fixture.replace(command, f"{prefix}{command}{suffix}")
+        try:
+            accepted = job_run_contains(workflow_jobs(hostile)["probe"], command)
+        except AssertionError:
             continue
-        indent = len(line) - len(line.lstrip())
-        if indent == 2 and line.rstrip().endswith(":") and not line.lstrip().startswith("- "):
-            if current is not None:
-                jobs[current] = "\n".join(body)
-            current = line.strip()[:-1]
-            body = []
+        if not accepted:
             continue
-        if current is None:
+        raise AssertionError("required run policy accepted failure suppression")
+    for wrapper in (
+        f"if false; then\n          {command}\n          fi",
+        f"if ! true; then\n          {command}\n          fi",
+        f"while false; do\n          {command}\n          done",
+        f"until true; do\n          {command}\n          done",
+        f"for item in one; do\n          {command}\n          done",
+        f"run_gate() {{\n          {command}\n          }}",
+        f"cat <<'EOF'\n          {command}\n          EOF",
+    ):
+        hostile = fixture.replace(command, wrapper)
+        try:
+            accepted = job_run_contains(workflow_jobs(hostile)["probe"], command)
+        except AssertionError:
             continue
-        if indent < 2:
-            break
-        body.append(line)
-    if current is not None:
-        jobs[current] = "\n".join(body)
-    assert jobs, "workflow jobs: mapping is empty"
-    return jobs
+        assert not accepted
 
+    separated_jobs = f"""jobs:
+  first:
+    steps:
+      - run: echo first
+# A top-level comment must not hide later jobs.
 
-def job_display_name(job_body: str) -> str | None:
-    for line in job_body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("name:"):
-            return stripped.split(":", 1)[1].strip().strip("'\"")
-    return None
-
-
-def job_needs(job_body: str) -> set[str]:
-    lines = job_body.splitlines()
-    needed: set[str] = set()
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped.startswith("needs:"):
-            continue
-        value = stripped.split(":", 1)[1].strip()
-        if value.startswith("[") and value.endswith("]"):
-            inner = value[1:-1]
-            needed.update(part.strip().strip("'\"") for part in inner.split(",") if part.strip())
-            break
-        if value and value not in {"|", ">"}:
-            needed.add(value.strip("'\""))
-            break
-        indent = len(line) - len(line.lstrip())
-        for follow in lines[index + 1 :]:
-            if not follow.strip():
-                continue
-            follow_indent = len(follow) - len(follow.lstrip())
-            if follow_indent <= indent:
-                break
-            item = follow.strip()
-            if item.startswith("- "):
-                needed.add(item[2:].strip().strip("'\""))
-            elif item.startswith("[") and item.endswith("]"):
-                inner = item[1:-1]
-                needed.update(
-                    part.strip().strip("'\"") for part in inner.split(",") if part.strip()
-                )
-        break
-    return {item for item in needed if item}
-
-
-def job_runs_command(job_body: str, needle: str) -> bool:
-    return needle in job_body
+  probe:
+    steps:
+      - run: {command}
+"""
+    assert job_run_contains(workflow_jobs(separated_jobs)["probe"], command)
 
 
 def validate_ci_gate_cutover(text: str) -> None:
@@ -521,7 +517,7 @@ def validate_ci_gate_cutover(text: str) -> None:
         "Cargo rust-test job must stay retired after CI Gate cutover (#4)"
     )
     for job_id, body in jobs.items():
-        assert job_display_name(body) != "Rust Tests", (
+        assert job_scalar(body, "name") != "Rust Tests", (
             f"job {job_id!r} must not restore retired Cargo Rust Tests display name"
         )
         sticky, _ = sticky_contracts(body)
@@ -530,15 +526,15 @@ def validate_ci_gate_cutover(text: str) -> None:
     authoritative = [
         job_id
         for job_id, body in jobs.items()
-        if job_runs_command(body, "bazelisk test //:ci_rust_tests")
-        or job_runs_command(body, "bazelisk test --config=ci //:ci_rust_tests")
+        if job_run_contains(body, "bazelisk test //:ci_rust_tests")
+        or job_run_contains(body, "bazelisk test --config=ci //:ci_rust_tests")
     ]
     assert len(authoritative) == 1, (
         "exactly one Test Suite job must run authoritative bazelisk test //:ci_rust_tests"
     )
     auth_job = authoritative[0]
 
-    gate_jobs = [job_id for job_id, body in jobs.items() if job_display_name(body) == "CI Gate"]
+    gate_jobs = [job_id for job_id, body in jobs.items() if job_scalar(body, "name") == "CI Gate"]
     assert len(gate_jobs) == 1, "required check context must remain exactly one CI Gate job"
     gate_id = gate_jobs[0]
     gate_body = jobs[gate_id]
@@ -550,32 +546,40 @@ def validate_ci_gate_cutover(text: str) -> None:
     assert "bazel-diagnostics" not in needed, (
         "CI Gate must not require bazel-diagnostics (non-required diagnostic lane)"
     )
-    assert f"needs.{auth_job}.result" in gate_body, (
+    gate_runs = [
+        normalize_run(scalar)
+        for scalar in job_required_run_scalars(gate_body, "scripts/ci/require-gates.sh")
+        if normalize_run(scalar).startswith("scripts/ci/require-gates.sh ")
+    ]
+    assert len(gate_runs) == 1, "CI Gate must have one active require-gates.sh run scalar"
+    gate_run = gate_runs[0]
+    assert f"needs.{auth_job}.result" in gate_run, (
         f"CI Gate must require {auth_job}.result via require-gates.sh"
     )
-    assert "needs.rust-test.result" not in gate_body, (
+    assert "needs.rust-test.result" not in gate_run, (
         "CI Gate must not reference needs.rust-test.result"
     )
-    assert "needs.bazel-diagnostics.result" not in gate_body, (
+    assert "needs.bazel-diagnostics.result" not in gate_run, (
         "CI Gate must not reference needs.bazel-diagnostics.result"
     )
     assert "bazel-diagnostics" in jobs, "diagnostic dual-build/cache observe job must exist"
     diag_body = jobs["bazel-diagnostics"]
-    assert job_runs_command(diag_body, "cargo-bazel-parity-check.py"), (
+    assert job_run_contains(diag_body, "python3 scripts/ci/cargo-bazel-parity-check.py"), (
         "bazel-diagnostics must run dual-build parity"
     )
     assert "|| echo" not in diag_body, (
         "bazel-diagnostics must fail closed; no fabricated zero-hit JSON fallback"
     )
-    assert not job_runs_command(jobs[auth_job], "cargo-bazel-parity-check.py --mode all"), (
-        "authoritative bazel-bootstrap must not run dual-build parity"
-    )
-    assert job_runs_command(jobs[auth_job], "cargo-bazel-parity-check.py --mode inventory"), (
-        "authoritative bazel-bootstrap must run live suite-membership inventory"
-    )
+    assert not job_run_contains(
+        jobs[auth_job], "python3 scripts/ci/cargo-bazel-parity-check.py --mode all"
+    ), "authoritative bazel-bootstrap must not run dual-build parity"
+    assert job_run_contains(
+        jobs[auth_job], "python3 scripts/ci/cargo-bazel-parity-check.py --mode inventory"
+    ), "authoritative bazel-bootstrap must run live suite-membership inventory"
     inventory_lines = [
         line
-        for line in jobs[auth_job].splitlines()
+        for scalar in job_run_scalars(jobs[auth_job])
+        for line in scalar.splitlines()
         if "cargo-bazel-parity-check.py --mode inventory" in line
     ]
     assert inventory_lines, "live inventory command line must be present in bazel-bootstrap"
@@ -586,8 +590,37 @@ def validate_ci_gate_cutover(text: str) -> None:
 
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
-    validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
-    validate_ci_gate_cutover(texts[WORKFLOWS / "test.yml"])
+    test_suite = texts[WORKFLOWS / "test.yml"]
+    validate_test_suite_trigger(test_suite)
+    validate_required_run_negative_fixtures()
+    validate_ci_gate_cutover(test_suite)
+    jobs = workflow_jobs(test_suite)
+    for job_id, runner in (
+        ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),
+        ("macos-graphforge-storage-durability", "blacksmith-12vcpu-macos-15"),
+    ):
+        body = jobs[job_id]
+        assert job_scalar(body, "runs-on") == runner
+        assert job_runs_exact(body, "cargo test -p graphforge-filesystem --lib --no-fail-fast")
+        assert job_runs_exact(
+            body,
+            "cargo test -p graphforge-storage filesystem_admission::tests:: --lib --no-fail-fast",
+        )
+    gate = jobs["ci-gate"]
+    gate_dependencies = job_needs(gate)
+    native_jobs = (
+        "windows-graphforge-storage-locks",
+        "macos-graphforge-storage-durability",
+    )
+    gate_runs = [
+        normalize_run(scalar)
+        for scalar in job_required_run_scalars(gate, "scripts/ci/require-gates.sh")
+        if normalize_run(scalar).startswith("scripts/ci/require-gates.sh ")
+    ]
+    assert len(gate_runs) == 1
+    for job_id in native_jobs:
+        assert job_id in gate_dependencies
+        assert f"needs.{job_id}.result" in gate_runs[0]
 
     artifact_uploads: list[str] = []
     artifact_downloads: list[str] = []

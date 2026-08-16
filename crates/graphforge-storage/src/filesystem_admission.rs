@@ -1,0 +1,1052 @@
+//! Native filesystem admission for the immutable-generation durability model.
+//!
+//! The probe is deliberately independent of project contents. It operates in
+//! one private sibling below the canonical target parent and proves the same
+//! replacement primitive used by durable publication.
+//!
+//! This admission check is a capability probe, not a sandbox boundary against
+//! another process already running as the same OS principal. Private directory
+//! permissions and the per-target parent lock coordinate GraphForge processes;
+//! retained directory identity plus post-operation reconciliation ensure a
+//! concurrent namespace change cannot produce a successful admission.
+
+use std::fs::File;
+#[cfg(any(test, windows))]
+use std::fs::OpenOptions;
+use std::io::{Read as _, Write as _};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use graphforge_core::{GfError, ProjectErrorCode};
+use sha2::{Digest as _, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use sysinfo::Disks;
+
+const PROBE_BYTES_A: &[u8] = b"graphforge-filesystem-probe/a\n";
+const PROBE_BYTES_B: &[u8] = b"graphforge-filesystem-probe/b\n";
+const MAX_PROBE_FILES: u64 = 3;
+const MAX_PROBE_BYTES: u64 = (PROBE_BYTES_A.len() * 2 + PROBE_BYTES_B.len()) as u64;
+
+/// Content-free evidence from one successful native durability admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemAdmissionEvidence {
+    /// Stable, non-device-specific filesystem class (`apfs`, `ext4`, ...).
+    pub filesystem_class: String,
+    /// Number of private regular files created by the probe.
+    pub files_created: u64,
+    /// Maximum fixed payload bytes written by the probe.
+    pub bytes_written: u64,
+    /// Wall-clock duration used only for safe operational diagnostics.
+    pub elapsed_ms: u64,
+}
+
+/// Prove that the proposed project location provides GraphForge's required
+/// local publication primitives.
+///
+/// The target itself is never created or mutated. The nearest parent must
+/// already exist. Caller-controlled final-component links are rejected; an
+/// ancestor aliases and traversal components are rejected before the canonical
+/// parent is opened.
+///
+/// # Errors
+/// Every inability to prove the contract returns
+/// `GF_UNSUPPORTED_FILESYSTEM`. The diagnostic contains only a phase and safe
+/// cause class, never the supplied path.
+pub fn filesystem_durability_preflight(
+    proposed_project_root: impl AsRef<Path>,
+) -> Result<FilesystemAdmissionEvidence, GfError> {
+    filesystem_durability_preflight_inner(proposed_project_root.as_ref(), ProbeFault::None)
+}
+
+fn filesystem_durability_preflight_inner(
+    proposed_project_root: &Path,
+    fault: ProbeFault,
+) -> Result<FilesystemAdmissionEvidence, GfError> {
+    let started = Instant::now();
+    let (parent, target_name) = canonical_parent_and_name(proposed_project_root)?;
+    let _probe_lock = lock_probe_parent(&parent, &target_name)?;
+    let parent_metadata = std::fs::metadata(&parent)
+        .map_err(|_| unsupported("CLASSIFY", "parent_metadata_unavailable"))?;
+    if !parent_metadata.is_dir() {
+        return Err(unsupported("CLASSIFY", "parent_not_directory"));
+    }
+    if let Ok(target_metadata) = std::fs::symlink_metadata(parent.join(&target_name)) {
+        if is_link_or_reparse(&target_metadata) || !target_metadata.is_dir() {
+            return Err(unsupported("CLASSIFY", "target_link_or_special"));
+        }
+        if !same_volume_paths(&parent, &parent.join(&target_name))? {
+            return Err(unsupported("CLASSIFY", "target_cross_volume"));
+        }
+    }
+    hit(fault, ProbeFault::Classify, "CLASSIFY")?;
+    let filesystem_class = classify_supported_local_volume(&parent)?;
+
+    let probe_name = stable_probe_name(&parent, &target_name);
+    let probe_root = parent.join(&probe_name);
+    if probe_root.exists() {
+        let stale = open_probe_directory(&probe_root)?;
+        cleanup_probe(&parent, stale, ProbeFault::None)?;
+    }
+    let probe = match create_private_probe_directory(&parent, &probe_name, &probe_root) {
+        Ok(probe) => probe,
+        Err(create_error) => {
+            if probe_root.exists() {
+                let partial = open_probe_directory(&probe_root)?;
+                cleanup_probe(&parent, partial, ProbeFault::None)?;
+            }
+            return Err(create_error);
+        }
+    };
+
+    let probe_result = run_probe(&parent, &probe, fault);
+    let cleanup_result = cleanup_probe(&parent, probe, fault);
+    probe_result?;
+    cleanup_result?;
+
+    Ok(FilesystemAdmissionEvidence {
+        filesystem_class,
+        files_created: MAX_PROBE_FILES,
+        bytes_written: MAX_PROBE_BYTES,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    })
+}
+
+fn stable_probe_name(parent: &Path, target_name: &std::ffi::OsStr) -> String {
+    let mut digest = Sha256::new();
+    digest.update(path_bytes(parent.as_os_str()));
+    digest.update([0]);
+    digest.update(path_bytes(target_name));
+    let digest: [u8; 32] = digest.finalize().into();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    format!(".graphforge-probe-{encoded}")
+}
+
+#[cfg(unix)]
+fn path_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    value.as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn path_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt as _;
+    value
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn path_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.to_string_lossy().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+struct ProbeParentLock(File);
+
+#[cfg(unix)]
+impl Drop for ProbeParentLock {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn lock_probe_parent(
+    parent: &Path,
+    _target_name: &std::ffi::OsStr,
+) -> Result<ProbeParentLock, GfError> {
+    let handle = File::open(parent).map_err(|_| unsupported("LOCK", "parent_open_failed"))?;
+    crate::file_lock::lock_exclusive(&handle)
+        .map_err(|_| unsupported("LOCK", "parent_lock_failed"))?;
+    Ok(ProbeParentLock(handle))
+}
+
+#[cfg(windows)]
+fn lock_probe_parent(
+    parent: &Path,
+    target_name: &std::ffi::OsStr,
+) -> Result<named_lock::NamedLockGuard, GfError> {
+    let name = stable_probe_name(parent, target_name);
+    let lock = named_lock::NamedLock::create(&format!("GraphForge.{name}"))
+        .map_err(|_| unsupported("LOCK", "parent_lock_create_failed"))?;
+    lock.lock()
+        .map_err(|_| unsupported("LOCK", "parent_lock_failed"))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn lock_probe_parent(_parent: &Path, _target_name: &std::ffi::OsStr) -> Result<(), GfError> {
+    Err(unsupported("LOCK", "parent_lock_unsupported"))
+}
+
+fn canonical_parent_and_name(root: &Path) -> Result<(PathBuf, std::ffi::OsString), GfError> {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| unsupported("CLASSIFY", "working_directory_unavailable"))?
+            .join(root)
+    };
+    if absolute.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(unsupported("CLASSIFY", "path_traversal"));
+    }
+    let name = absolute
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| unsupported("CLASSIFY", "target_name_invalid"))?
+        .to_owned();
+    let supplied_parent = absolute
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    reject_ancestor_links(supplied_parent)?;
+    let parent = supplied_parent
+        .canonicalize()
+        .map_err(|_| unsupported("CLASSIFY", "parent_unavailable"))?;
+    let target = parent.join(&name);
+    if let Ok(metadata) = std::fs::symlink_metadata(&target)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(unsupported("CLASSIFY", "target_link"));
+    }
+    Ok((parent, name))
+}
+
+fn reject_ancestor_links(parent: &Path) -> Result<(), GfError> {
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|_| unsupported("CLASSIFY", "ancestor_unavailable"))?;
+        if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+            return Err(unsupported("CLASSIFY", "ancestor_link_or_special"));
+        }
+    }
+    Ok(())
+}
+
+fn classify_supported_local_volume(parent: &Path) -> Result<String, GfError> {
+    classify_supported_local_volume_platform(parent)
+}
+
+#[cfg(target_os = "macos")]
+fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfError> {
+    let stat = rustix::fs::statfs(parent)
+        .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
+    let class = stat
+        .f_fstypename
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .map(|byte| u8::try_from(byte).unwrap_or_default())
+        .collect::<Vec<_>>();
+    let class = std::str::from_utf8(&class)
+        .map_err(|_| unsupported("CLASSIFY", "filesystem_class_invalid"))?
+        .to_ascii_lowercase();
+    if class != "apfs" {
+        return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
+    }
+    let flags = stat.f_flags;
+    if (flags & u32::try_from(libc::MNT_LOCAL).unwrap_or(u32::MAX)) == 0 {
+        return Err(unsupported("CLASSIFY", "volume_not_local"));
+    }
+    if (flags & u32::try_from(libc::MNT_RDONLY).unwrap_or(u32::MAX)) != 0 {
+        return Err(unsupported("CLASSIFY", "volume_read_only"));
+    }
+    reject_removable_volume(parent)?;
+    Ok(class)
+}
+
+#[cfg(target_os = "linux")]
+fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfError> {
+    let stat = rustix::fs::statfs(parent)
+        .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
+    let class = match u64::try_from(stat.f_type).unwrap_or_default() {
+        0xEF53 => "ext",
+        0x5846_5342 => "xfs",
+        0x9123_683E => "btrfs",
+        _ => return Err(unsupported("CLASSIFY", "filesystem_class_unproven")),
+    };
+    let vfs = rustix::fs::statvfs(parent)
+        .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
+    if vfs.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
+        return Err(unsupported("CLASSIFY", "volume_read_only"));
+    }
+    reject_removable_volume(parent)?;
+    Ok(class.into())
+}
+
+#[cfg(target_os = "windows")]
+fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfError> {
+    let information = graphforge_filesystem::windows_volume_information(parent)
+        .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
+    classify_windows_volume(
+        &information.filesystem_name,
+        information.read_only,
+        information.fixed,
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn classify_windows_volume(
+    filesystem_name: &str,
+    read_only: bool,
+    fixed: bool,
+) -> Result<String, GfError> {
+    if read_only {
+        return Err(unsupported("CLASSIFY", "volume_read_only"));
+    }
+    if !fixed {
+        return Err(unsupported("CLASSIFY", "volume_not_fixed_local"));
+    }
+    let class = filesystem_name.to_ascii_lowercase();
+    if class != "ntfs" {
+        return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
+    }
+    Ok(class)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn classify_supported_local_volume_platform(_parent: &Path) -> Result<String, GfError> {
+    Err(unsupported("CLASSIFY", "platform_unsupported"))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn reject_removable_volume(parent: &Path) -> Result<(), GfError> {
+    let disks = Disks::new_with_refreshed_list();
+    let disk = disks
+        .list()
+        .iter()
+        .filter(|disk| parent.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .ok_or_else(|| unsupported("CLASSIFY", "device_identity_unknown"))?;
+    if disk.is_removable() {
+        return Err(unsupported("CLASSIFY", "volume_removable"));
+    }
+    Ok(())
+}
+
+struct ProbeDirectory {
+    path: PathBuf,
+    handle: File,
+    identity: graphforge_filesystem::FileIdentity,
+}
+
+impl ProbeDirectory {
+    fn revalidate(&self, phase: &'static str) -> Result<(), GfError> {
+        let named = std::fs::symlink_metadata(&self.path)
+            .map_err(|_| unsupported(phase, "private_directory_missing"))?;
+        let opened = self
+            .handle
+            .metadata()
+            .map_err(|_| unsupported(phase, "private_directory_handle_unreadable"))?;
+        if is_link_or_reparse(&named)
+            || !named.is_dir()
+            || !opened.is_dir()
+            || graphforge_filesystem::path_identity(&self.path)
+                .map_err(|_| unsupported(phase, "private_directory_identity_unavailable"))?
+                != self.identity
+            || file_identity(&self.handle)? != self.identity
+        {
+            return Err(unsupported(phase, "private_directory_identity_changed"));
+        }
+        Ok(())
+    }
+}
+
+fn open_probe_directory(path: &Path) -> Result<ProbeDirectory, GfError> {
+    let named = std::fs::symlink_metadata(path)
+        .map_err(|_| unsupported("CREATE", "private_directory_missing"))?;
+    if is_link_or_reparse(&named) || !named.is_dir() {
+        return Err(unsupported("CREATE", "private_directory_substituted"));
+    }
+    let handle = open_directory_handle(path)
+        .map_err(|_| unsupported("CREATE", "private_directory_open_failed"))?;
+    let opened = handle
+        .metadata()
+        .map_err(|_| unsupported("CREATE", "private_directory_handle_unreadable"))?;
+    let identity = graphforge_filesystem::path_identity(path)
+        .map_err(|_| unsupported("CREATE", "private_directory_identity_unavailable"))?;
+    if !opened.is_dir() || file_identity(&handle)? != identity {
+        return Err(unsupported(
+            "CREATE",
+            "private_directory_substituted_during_open",
+        ));
+    }
+    Ok(ProbeDirectory {
+        path: path.to_path_buf(),
+        handle,
+        identity,
+    })
+}
+
+#[cfg(unix)]
+fn open_directory_handle(path: &Path) -> std::io::Result<File> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let handle = open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(File::from(handle))
+}
+
+#[cfg(windows)]
+fn open_directory_handle(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_directory_handle(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "directory identity handles are unsupported",
+    ))
+}
+
+fn create_private_probe_directory(
+    parent: &Path,
+    _probe_name: &str,
+    probe_root: &Path,
+) -> Result<ProbeDirectory, GfError> {
+    graphforge_filesystem::create_private_directory(probe_root)
+        .map_err(|_| unsupported("CREATE", "private_directory_create_failed"))?;
+    let probe = open_probe_directory(probe_root)?;
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("CREATE", "parent_namespace_barrier_failed"))?;
+    probe.revalidate("CREATE")?;
+    Ok(probe)
+}
+
+fn run_probe(parent: &Path, probe: &ProbeDirectory, fault: ProbeFault) -> Result<(), GfError> {
+    probe.revalidate("CREATE")?;
+    if !same_volume_paths(parent, &probe.path)? {
+        return Err(unsupported("CREATE", "private_directory_cross_volume"));
+    }
+
+    let lock_path = probe.path.join("lock");
+    let mut lock = create_new_file(probe, "lock")?;
+    lock.write_all(PROBE_BYTES_A)
+        .map_err(|_| unsupported("WRITE", "lock_file_write_failed"))?;
+    hit(fault, ProbeFault::Write, "WRITE")?;
+    lock.sync_all()
+        .map_err(|_| unsupported("FILE_FLUSH", "lock_file_flush_failed"))?;
+    hit(fault, ProbeFault::FileFlush, "FILE_FLUSH")?;
+    verify_stable_identity(&lock, &lock_path, parent)?;
+
+    crate::file_lock::lock_exclusive(&lock)
+        .map_err(|_| unsupported("LOCK", "exclusive_lock_failed"))?;
+    let contender = open_regular_non_link(probe, "lock")?;
+    if crate::file_lock::try_lock_shared(&contender)
+        .map_err(|_| unsupported("LOCK", "contention_check_failed"))?
+    {
+        let _ = crate::file_lock::unlock(&contender);
+        return Err(unsupported("LOCK", "exclusive_lock_not_enforced"));
+    }
+    verify_stable_identity(&lock, &lock_path, parent)?;
+    crate::file_lock::unlock(&lock).map_err(|_| unsupported("LOCK", "exclusive_unlock_failed"))?;
+
+    crate::file_lock::lock_shared(&lock).map_err(|_| unsupported("LOCK", "shared_lock_failed"))?;
+    crate::file_lock::lock_shared(&contender)
+        .map_err(|_| unsupported("LOCK", "second_shared_lock_failed"))?;
+    let exclusive_contender = open_regular_non_link(probe, "lock")?;
+    if crate::file_lock::try_lock_exclusive(&exclusive_contender)
+        .map_err(|_| unsupported("LOCK", "shared_contention_check_failed"))?
+    {
+        let _ = crate::file_lock::unlock(&exclusive_contender);
+        return Err(unsupported("LOCK", "shared_lock_not_enforced"));
+    }
+    crate::file_lock::unlock(&contender)
+        .and_then(|()| crate::file_lock::unlock(&lock))
+        .map_err(|_| unsupported("LOCK", "shared_unlock_failed"))?;
+    hit(fault, ProbeFault::Lock, "LOCK")?;
+
+    let (target, target_identity, target_path) = replace_probe_file(probe, fault)?;
+    probe.revalidate("NAMESPACE_DURABILITY")?;
+    complete_namespace_barrier(&probe.path)
+        .map_err(|_| unsupported("NAMESPACE_DURABILITY", "probe_namespace_barrier_failed"))?;
+    hit(
+        fault,
+        ProbeFault::NamespaceDurability,
+        "NAMESPACE_DURABILITY",
+    )?;
+
+    // The open handle must keep the old identity while the pathname now names
+    // the replacement. This proves stable locked/open file identity across the
+    // exact replacement primitive publication will consume.
+    probe.revalidate("IDENTITY")?;
+    hit(fault, ProbeFault::Identity, "IDENTITY")?;
+    if file_identity(&target)? != target_identity {
+        return Err(unsupported("IDENTITY", "open_identity_changed"));
+    }
+    let mut published = open_regular_non_link(probe, "published")?;
+    if file_identity(&published)? == target_identity {
+        return Err(unsupported("IDENTITY", "pathname_identity_not_replaced"));
+    }
+    let mut bytes = Vec::new();
+    published
+        .read_to_end(&mut bytes)
+        .map_err(|_| unsupported("IDENTITY", "replacement_read_failed"))?;
+    if bytes != PROBE_BYTES_B {
+        return Err(unsupported("IDENTITY", "replacement_bytes_mismatch"));
+    }
+    verify_stable_identity(&published, &target_path, parent)?;
+    drop(target);
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("NAMESPACE_DURABILITY", "parent_namespace_barrier_failed"))
+}
+
+fn replace_probe_file(
+    probe: &ProbeDirectory,
+    fault: ProbeFault,
+) -> Result<(File, graphforge_filesystem::FileIdentity, PathBuf), GfError> {
+    probe.revalidate("REPLACE")?;
+    let mut initial = create_new_file(probe, "initial")?;
+    initial
+        .write_all(PROBE_BYTES_A)
+        .and_then(|()| initial.sync_all())
+        .map_err(|_| unsupported("REPLACE", "initial_file_flush_failed"))?;
+    drop(initial);
+    graphforge_filesystem::install_new_file(
+        &probe.handle,
+        std::ffi::OsStr::new("initial"),
+        std::ffi::OsStr::new("published"),
+    )
+    .map_err(|_| unsupported("REPLACE", "atomic_create_failed"))?;
+
+    let target_path = probe.path.join("published");
+    let target = open_regular_non_link(probe, "published")?;
+    let target_identity = file_identity(&target)?;
+    let replacement_path = probe.path.join("replacement");
+    let mut replacement = create_new_file(probe, "replacement")?;
+    replacement
+        .write_all(PROBE_BYTES_B)
+        .and_then(|()| replacement.sync_all())
+        .map_err(|_| unsupported("REPLACE", "replacement_file_flush_failed"))?;
+    drop(replacement);
+    hit(fault, ProbeFault::Replace, "REPLACE")?;
+
+    let replacement_result = if fault == ProbeFault::ReplaceUnknown {
+        let source_before = graphforge_filesystem::path_identity(&replacement_path)
+            .map_err(|_| unsupported("REPLACE", "source_identity_unavailable"))?;
+        let target_before = graphforge_filesystem::path_identity(&target_path)
+            .map_err(|_| unsupported("REPLACE", "target_identity_unavailable"))?;
+        graphforge_filesystem::replace_file(
+            &probe.handle,
+            std::ffi::OsStr::new("replacement"),
+            std::ffi::OsStr::new("published"),
+        )
+        .map_err(|_| unsupported("REPLACE", "fault_setup_replace_failed"))?;
+        Err(graphforge_filesystem::classify_failed_replacement(
+            std::io::Error::other("injected OS failure after namespace mutation"),
+            source_before,
+            target_before,
+            graphforge_filesystem::path_identity(&replacement_path).ok(),
+            graphforge_filesystem::path_identity(&target_path).ok(),
+        ))
+    } else {
+        graphforge_filesystem::replace_file(
+            &probe.handle,
+            std::ffi::OsStr::new("replacement"),
+            std::ffi::OsStr::new("published"),
+        )
+    };
+    match replacement_result {
+        Ok(()) => Ok((target, target_identity, target_path)),
+        Err(graphforge_filesystem::ReplaceFileError::NotReplaced(_)) => {
+            Err(unsupported("REPLACE", "atomic_replace_not_applied"))
+        }
+        Err(graphforge_filesystem::ReplaceFileError::StateUnknown(_)) => {
+            Err(unsupported("REPLACE", "atomic_replace_state_unknown"))
+        }
+    }
+}
+
+fn create_new_file(probe: &ProbeDirectory, name: &str) -> Result<File, GfError> {
+    let file = open_probe_file(probe, name, true)
+        .map_err(|_| unsupported("CREATE", "exclusive_file_create_failed"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| unsupported("CREATE", "created_file_metadata_failed"))?;
+    if !metadata.is_file()
+        || graphforge_filesystem::file_link_count(&file)
+            .map_err(|_| unsupported("CREATE", "created_file_link_count_unavailable"))?
+            != 1
+    {
+        return Err(unsupported("CREATE", "created_file_identity_invalid"));
+    }
+    Ok(file)
+}
+
+fn open_regular_non_link(probe: &ProbeDirectory, name: &str) -> Result<File, GfError> {
+    let path = probe.path.join(name);
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| unsupported("IDENTITY", "path_metadata_failed"))?;
+    if is_link_or_reparse(&metadata)
+        || !metadata.is_file()
+        || graphforge_filesystem::path_link_count(&path)
+            .map_err(|_| unsupported("IDENTITY", "path_link_count_unavailable"))?
+            != 1
+    {
+        return Err(unsupported("IDENTITY", "path_link_or_special"));
+    }
+    let file = open_probe_file(probe, name, false)
+        .map_err(|_| unsupported("IDENTITY", "file_open_failed"))?;
+    if file_identity(&file)?
+        != graphforge_filesystem::path_identity(&path)
+            .map_err(|_| unsupported("IDENTITY", "path_identity_unavailable"))?
+    {
+        return Err(unsupported("IDENTITY", "file_substituted_during_open"));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io::Result<File> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let mut flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    if create {
+        flags |= OFlags::CREATE | OFlags::EXCL;
+    }
+    openat(&probe.handle, name, flags, Mode::RUSR | Mode::WUSR)
+        .map(File::from)
+        .map_err(std::io::Error::from)
+}
+
+#[cfg(windows)]
+fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH);
+    if create {
+        options.create_new(true);
+    }
+    options.open(probe.path.join(name))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn open_probe_file(_probe: &ProbeDirectory, _name: &str, _create: bool) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "probe files are unsupported",
+    ))
+}
+
+fn verify_stable_identity(file: &File, path: &Path, parent: &Path) -> Result<(), GfError> {
+    let named = std::fs::symlink_metadata(path)
+        .map_err(|_| unsupported("IDENTITY", "named_metadata_failed"))?;
+    if is_link_or_reparse(&named)
+        || !named.is_file()
+        || graphforge_filesystem::file_link_count(file)
+            .map_err(|_| unsupported("IDENTITY", "opened_link_count_unavailable"))?
+            != 1
+        || graphforge_filesystem::path_link_count(path)
+            .map_err(|_| unsupported("IDENTITY", "named_link_count_unavailable"))?
+            != 1
+        || file_identity(file)?
+            != graphforge_filesystem::path_identity(path)
+                .map_err(|_| unsupported("IDENTITY", "path_identity_unavailable"))?
+        || !same_volume_paths(parent, path)?
+    {
+        return Err(unsupported("IDENTITY", "stable_identity_unproven"));
+    }
+    Ok(())
+}
+
+fn cleanup_probe(parent: &Path, probe: ProbeDirectory, fault: ProbeFault) -> Result<(), GfError> {
+    hit(fault, ProbeFault::Cleanup, "CLEANUP")?;
+    probe.revalidate("CLEANUP")?;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&probe.path)
+        .map_err(|_| unsupported("CLEANUP", "private_directory_unreadable"))?
+    {
+        if entries.len() >= usize::try_from(MAX_PROBE_FILES).unwrap_or(usize::MAX) {
+            return Err(unsupported("CLEANUP", "private_entry_limit_exceeded"));
+        }
+        entries.push(entry.map_err(|_| unsupported("CLEANUP", "private_entry_unreadable"))?);
+    }
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        if name != "lock" && name != "initial" && name != "published" && name != "replacement" {
+            return Err(unsupported("CLEANUP", "private_entry_unknown"));
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|_| unsupported("CLEANUP", "private_entry_metadata_failed"))?;
+        if is_link_or_reparse(&metadata)
+            || !metadata.is_file()
+            || graphforge_filesystem::path_link_count(&entry.path())
+                .map_err(|_| unsupported("CLEANUP", "entry_link_count_unavailable"))?
+                != 1
+        {
+            return Err(unsupported("CLEANUP", "private_entry_link_or_special"));
+        }
+        let size_limit = if name == "lock" || name == "initial" {
+            PROBE_BYTES_A.len()
+        } else if name == "replacement" {
+            PROBE_BYTES_B.len()
+        } else {
+            PROBE_BYTES_A.len().max(PROBE_BYTES_B.len())
+        };
+        if metadata.len() > u64::try_from(size_limit).unwrap_or(u64::MAX) {
+            return Err(unsupported("CLEANUP", "private_entry_size_exceeded"));
+        }
+        std::fs::remove_file(entry.path())
+            .map_err(|_| unsupported("CLEANUP", "private_entry_remove_failed"))?;
+    }
+    probe.revalidate("CLEANUP")?;
+    let path = probe.path.clone();
+    drop(probe.handle);
+    std::fs::remove_dir(path)
+        .map_err(|_| unsupported("CLEANUP", "private_directory_remove_failed"))?;
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("CLEANUP", "parent_namespace_barrier_failed"))
+}
+
+#[cfg(unix)]
+fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
+    // NTFS persists rename metadata through the write-through staging handle.
+    // Directory FlushFileBuffers is not a documented Windows durability
+    // barrier; here we only revalidate that the namespace parent is ordinary.
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !is_link_or_reparse(&metadata) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "namespace parent is linked or not a directory",
+        ))
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn complete_namespace_barrier(_path: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "namespace durability barrier is unsupported",
+    ))
+}
+
+#[cfg(windows)]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_type().is_symlink()
+        || (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn file_identity(file: &File) -> Result<graphforge_filesystem::FileIdentity, GfError> {
+    graphforge_filesystem::file_identity(file)
+        .map_err(|_| unsupported("IDENTITY", "opened_identity_unavailable"))
+}
+
+fn same_volume_paths(left: &Path, right: &Path) -> Result<bool, GfError> {
+    let left = graphforge_filesystem::path_identity(left)
+        .map_err(|_| unsupported("IDENTITY", "left_volume_identity_unavailable"))?;
+    let right = graphforge_filesystem::path_identity(right)
+        .map_err(|_| unsupported("IDENTITY", "right_volume_identity_unavailable"))?;
+    Ok(left.volume_serial == right.volume_serial)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFault {
+    None,
+    Classify,
+    Lock,
+    Write,
+    FileFlush,
+    Replace,
+    ReplaceUnknown,
+    NamespaceDurability,
+    Identity,
+    Cleanup,
+}
+
+fn hit(actual: ProbeFault, expected: ProbeFault, phase: &'static str) -> Result<(), GfError> {
+    if actual == expected {
+        Err(unsupported(phase, "injected_failure"))
+    } else {
+        Ok(())
+    }
+}
+
+fn unsupported(phase: &'static str, cause: &'static str) -> GfError {
+    GfError::Project {
+        code: ProjectErrorCode::UnsupportedFilesystem,
+        message: format!("phase={phase} outcome=rejected cause={cause}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn canonical_tempdir() -> tempfile::TempDir {
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        tempfile::tempdir_in(base).unwrap()
+    }
+
+    #[test]
+    fn native_probe_is_bounded_content_free_and_cleans_up() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let evidence = filesystem_durability_preflight(&target).unwrap();
+        assert!(matches!(
+            evidence.filesystem_class.as_str(),
+            "apfs" | "ext" | "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "ntfs"
+        ));
+        assert_eq!(evidence.files_created, 3);
+        assert_eq!(evidence.bytes_written, MAX_PROBE_BYTES);
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_classifier_accepts_only_fixed_writable_ntfs() {
+        assert_eq!(
+            classify_windows_volume("NTFS", false, true).unwrap(),
+            "ntfs"
+        );
+        for (class, read_only, fixed, cause) in [
+            ("ReFS", false, true, "filesystem_class_unproven"),
+            ("FAT32", false, true, "filesystem_class_unproven"),
+            ("NTFS", true, true, "volume_read_only"),
+            ("NTFS", false, false, "volume_not_fixed_local"),
+        ] {
+            let error = classify_windows_volume(class, read_only, fixed).unwrap_err();
+            assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+            assert!(error.to_string().contains(cause), "{error}");
+        }
+    }
+
+    #[test]
+    fn every_injected_phase_is_typed_and_never_mutates_target() {
+        for fault in [
+            ProbeFault::Classify,
+            ProbeFault::Lock,
+            ProbeFault::Write,
+            ProbeFault::FileFlush,
+            ProbeFault::Replace,
+            ProbeFault::ReplaceUnknown,
+            ProbeFault::NamespaceDurability,
+            ProbeFault::Identity,
+            ProbeFault::Cleanup,
+        ] {
+            let parent = canonical_tempdir();
+            let target = parent.path().join("project");
+            let error = filesystem_durability_preflight_inner(&target, fault).unwrap_err();
+            assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM", "{fault:?}");
+            assert!(!target.exists(), "{fault:?}");
+            let entries = std::fs::read_dir(parent.path()).unwrap().count();
+            if fault == ProbeFault::Cleanup {
+                assert_eq!(entries, 1, "cleanup failure retains one bounded sibling");
+                filesystem_durability_preflight(&target).unwrap();
+                assert_eq!(
+                    std::fs::read_dir(parent.path()).unwrap().count(),
+                    0,
+                    "a later admission reconciles the bounded stale probe"
+                );
+            } else {
+                assert_eq!(entries, 0, "{fault:?}");
+            }
+        }
+    }
+
+    const LOCK_TEST_COOKIE: &str = "graphforge-779-native-lock-test";
+
+    #[test]
+    fn subprocess_lock_contender() {
+        if std::env::var("GF_779_LOCK_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+            return;
+        }
+        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        assert!(!crate::file_lock::try_lock_shared(&file).unwrap());
+    }
+
+    #[test]
+    fn subprocess_crash_lock_holder() {
+        if std::env::var("GF_779_CRASH_COOKIE").as_deref() != Ok(LOCK_TEST_COOKIE) {
+            return;
+        }
+        let path = PathBuf::from(std::env::var_os("GF_779_LOCK_PATH").unwrap());
+        let ready = PathBuf::from(std::env::var_os("GF_779_READY_PATH").unwrap());
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        crate::file_lock::lock_exclusive(&file).unwrap();
+        let mut signal = File::create(ready).unwrap();
+        signal.write_all(b"locked").unwrap();
+        signal.sync_all().unwrap();
+        std::process::abort();
+    }
+
+    #[test]
+    fn exclusive_lock_excludes_a_separate_process() {
+        let directory = canonical_tempdir();
+        let path = directory.path().join("lock");
+        let file = File::create(&path).unwrap();
+        crate::file_lock::lock_exclusive(&file).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "filesystem_admission::tests::subprocess_lock_contender",
+                "--nocapture",
+            ])
+            .env("GF_779_LOCK_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_779_LOCK_PATH", &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        crate::file_lock::unlock(&file).unwrap();
+    }
+
+    #[test]
+    fn operating_system_releases_lock_after_process_crash() {
+        use wait_timeout::ChildExt as _;
+
+        let directory = canonical_tempdir();
+        let path = directory.path().join("lock");
+        let ready = directory.path().join("ready");
+        File::create(&path).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "filesystem_admission::tests::subprocess_crash_lock_holder",
+                "--nocapture",
+            ])
+            .env("GF_779_CRASH_COOKIE", LOCK_TEST_COOKIE)
+            .env("GF_779_LOCK_PATH", &path)
+            .env("GF_779_READY_PATH", &ready)
+            .spawn()
+            .unwrap();
+        let status = child
+            .wait_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .expect("crash helper must terminate");
+        assert!(!status.success());
+        assert_eq!(std::fs::read(ready).unwrap(), b"locked");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&file).unwrap());
+        crate::file_lock::unlock(&file).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_target_link_is_rejected_without_touching_its_destination() {
+        use std::os::unix::fs::symlink;
+
+        let parent = canonical_tempdir();
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let target = parent.path().join("project");
+        symlink(&destination, &target).unwrap();
+        let error = filesystem_durability_preflight(&target).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ancestor_junction_is_rejected_without_touching_its_destination() {
+        let parent = canonical_tempdir();
+        let destination = parent.path().join("destination");
+        let junction = parent.path().join("junction");
+        std::fs::create_dir(&destination).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&destination)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let error = filesystem_durability_preflight(junction.join("project")).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(error.to_string().contains("ancestor_link_or_special"));
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_extended_drive_path_completes_full_native_admission() {
+        use std::path::{Component, Prefix};
+
+        let parent = canonical_tempdir();
+        assert!(matches!(
+            parent.path().components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ));
+        let target = parent.path().join("project");
+        let evidence = filesystem_durability_preflight(&target).unwrap();
+        assert_eq!(evidence.filesystem_class, "ntfs");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn ambiguous_replacement_state_is_typed_and_reconciled_by_cleanup() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let error =
+            filesystem_durability_preflight_inner(&target, ProbeFault::ReplaceUnknown).unwrap_err();
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(error.to_string().contains("atomic_replace_state_unknown"));
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+        filesystem_durability_preflight(&target).unwrap();
+    }
+}

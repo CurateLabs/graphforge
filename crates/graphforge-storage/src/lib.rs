@@ -11,6 +11,8 @@
 #![forbid(unsafe_code)]
 
 mod file_lock;
+#[doc(hidden)]
+pub mod filesystem_admission;
 
 pub mod adjacency;
 pub mod adjacency_delta;

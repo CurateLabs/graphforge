@@ -865,11 +865,56 @@ jobs:
           cargo test -p graphforge-storage project_generation::tests:: --lib
           --no-fail-fast
 
+      - name: Run Windows exact filesystem primitive tests
+        shell: bash
+        run: >-
+          cargo test -p graphforge-filesystem --lib --no-fail-fast
+
+      - name: Run Windows native filesystem admission tests
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage
+          filesystem_admission::tests:: --lib --no-fail-fast
+
       - name: Run Windows durability certification unit tests
         shell: bash
         run: >-
           cargo test -p graphforge-storage --features test-failpoints
           project_certification --lib --no-fail-fast
+
+  macos-graphforge-storage-durability:
+    name: macOS graphforge-storage Durability
+    runs-on: blacksmith-12vcpu-macos-15
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run macOS native filesystem admission tests
+        run: >-
+          cargo test -p graphforge-storage
+          filesystem_admission::tests:: --lib --no-fail-fast
+
+      - name: Run macOS exact filesystem primitive tests
+        run: >-
+          cargo test -p graphforge-filesystem --lib --no-fail-fast
 
   bazel-bootstrap:
     # Job display name kept for continuity; this is the authoritative Rust
@@ -928,11 +973,13 @@ jobs:
           python3 scripts/ci/bazel-cache-perf.py --mode policy
           python3 scripts/ci/test-bazel-cache-perf.py
 
+      - name: Prepare Bazel evidence directory
+        run: mkdir -p dist
+
       - name: Authoritative Bazel Rust tests + first-party libs/CLI/resources
+        shell: bash
         run: |
-          set -euo pipefail
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          mkdir -p dist
           bazelisk test --config=ci //:ci_rust_tests 2>&1 | tee dist/bazel-ci-rust-tests.log
           bazelisk build --config=ci \
             //:bazel_smoke \
@@ -980,12 +1027,14 @@ jobs:
           sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
           bazelisk version
 
+      - name: Prepare Bazel diagnostic evidence directory
+        run: mkdir -p dist
+
       - name: Same-SHA Cargo/Bazel dual-build parity (diagnostic, one release cycle)
         run: |
           # Cargo is no longer authoritative under CI Gate (#4). Keep same-SHA
           # parity as a diagnostic for one release cycle; see cutover rollback doc.
           # Do not set --remote_cache; Blacksmith injects repository cache.
-          mkdir -p dist
           python3 scripts/ci/cargo-bazel-parity-check.py \
             --mode all \
             --write-evidence "dist/cargo-bazel-parity-evidence.json"
@@ -1149,6 +1198,7 @@ jobs:
       - node-binding
       - concurrency-matrix
       - windows-graphforge-storage-locks
+      - macos-graphforge-storage-durability
       - bazel-bootstrap
     steps:
       - name: Checkout gate implementation
@@ -1168,4 +1218,5 @@ jobs:
           "${{ needs.node-binding.result }}"
           "${{ needs.concurrency-matrix.result }}"
           "${{ needs.windows-graphforge-storage-locks.result }}"
+          "${{ needs.macos-graphforge-storage-durability.result }}"
           "${{ needs.bazel-bootstrap.result }}"

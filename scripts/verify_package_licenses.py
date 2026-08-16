@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Crates intended for crates.io (bindings ship via PyPI/npm).
 CARGO_PUBLISH_CRATES = (
     "graphforge-core",
+    "graphforge-filesystem",
     "graphforge-ast",
     "graphforge-knowledge",
     "graphforge-ontology",

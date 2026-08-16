@@ -8,6 +8,7 @@ package(default_visibility = ["//visibility:public"])
 
 _STORAGE_DEPS = [
     "//crates/graphforge-core:graphforge_core",
+    "//crates/graphforge-filesystem:graphforge_filesystem",
     "//crates/graphforge-ir:graphforge_ir",
     "//crates/graphforge-ontology:graphforge_ontology",
 ]

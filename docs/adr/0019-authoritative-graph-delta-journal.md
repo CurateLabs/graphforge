@@ -73,8 +73,8 @@ Each `.gfdr` file is one immutable run. Records are length-prefixed frames with:
 
 Acknowledged runs are durable only through the ADR 0013 / ADR 0018 publication
 contract (participant and generation flushes, atomic `CURRENT` replacement, and
-project-root directory flush). The journal never becomes a second commit
-pointer.
+the project-root platform-native namespace durability barrier as amended by ADR
+0020). The journal never becomes a second commit pointer.
 
 ### Publication and small-write rule
 

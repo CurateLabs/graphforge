@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised on supported Python 3.10
+    import tomli as tomllib
+
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "set_release_version.py"
 SPEC = importlib.util.spec_from_file_location("set_release_version", SCRIPT)
 assert SPEC and SPEC.loader
@@ -38,7 +43,13 @@ def test_expected_mapping() -> None:
 
 
 def test_current_tree_is_aligned() -> None:
-    assert len(set_release_version.cargo_lock_versions()) == 17
+    lock_versions = set_release_version.cargo_lock_versions()
+    manifest_packages = {
+        tomllib.loads(path.read_text(encoding="utf-8"))["package"]["name"]
+        for path in set_release_version.crate_manifests()
+    }
+    assert len(lock_versions) == len(manifest_packages)
+    assert set(lock_versions) == manifest_packages
     assert set_release_version.check_aligned() == []
     compatibility = json.loads(set_release_version.SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
     current = set_release_version.read_current()

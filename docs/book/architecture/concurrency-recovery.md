@@ -22,16 +22,24 @@ continues to a complete result, while cooperative cancellation reports
 ## Acknowledged-durable writes
 
 Caller-visible success means the write is **acknowledged-durable** only after
-participant and manifest file flushes, generation-tree directory flushes,
-atomic `CURRENT` replacement or creation, **and** the project-root directory
-flush. Atomic `CURRENT` replacement is the visibility linearization point for
-new readers; acknowledgement against power loss additionally requires that root
-directory flush. Journals never select authority.
+participant and manifest file flushes, generation-tree platform-native namespace
+durability barriers, atomic `CURRENT` replacement or creation, **and** the
+project-root platform-native namespace durability barrier. Atomic `CURRENT`
+replacement is the visibility linearization point for new readers;
+acknowledgement against power loss additionally requires that final namespace
+barrier. Journals never select authority.
 
-Supported filesystems are the fail-closed local POSIX and Windows classes named
-by ADR 0013. Network, userspace, removable, cross-device, symlink-mediated, and
-unknown filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root
-or `CURRENT` changes. There is no best-effort durability mode.
+POSIX supplies the namespace barrier with directory `fsync(2)`. Windows support
+is limited to fixed writable local NTFS whose storage honestly honors
+write-through completion: GraphForge flushes a `FILE_FLAG_WRITE_THROUGH`
+staging handle and renames through that same handle with
+`SetFileInformationByHandle`. Directory `FlushFileBuffers` is not claimed as a
+durability barrier, and ReFS remains unsupported/unproven. See
+[ADR 0020](../../adr/0020-ntfs-write-through-namespace-durability.md).
+
+Network, userspace, removable, cross-device, symlink-mediated, ReFS, and unknown
+filesystems return `GF_UNSUPPORTED_FILESYSTEM` before the project root or
+`CURRENT` changes. There is no best-effort durability mode.
 
 Recovery resolves an exact valid `CURRENT` only. Journals and directory scans
 are advisory cleanup input. Corrupt or ambiguous pointers fail closed as
@@ -125,8 +133,8 @@ There are four CI surfaces for concurrency and durability contracts:
    maps crash phases and anomalies to covered evidence. Repository Policy
    validates the ledger without compiling Rust.
    Persistent-media faults that process kill cannot express (torn `CURRENT` /
-   manifest bytes, lost root-directory flush power-loss subsets) are modeled by
-   the deterministic filesystem fault oracle in
+   manifest bytes, lost platform-native namespace durability barrier power-loss
+   subsets) are modeled by the deterministic filesystem fault oracle in
    `crates/graphforge-storage/src/project_fault_oracle.rs`. Native POSIX and
    Windows subprocess failpoint matrices remain required for real API and handle
    behavior; the oracle is reusable by recovery, delta, compaction, and final

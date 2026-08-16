@@ -14,7 +14,7 @@ in [`publication-order.md`](publication-order.md).
 `graphforge-release-candidate-v2` has one root `version` and no per-node version
 field. The public node set is fixed:
 
-- 15 `graphforge-*` crates on crates.io;
+- 16 `graphforge-*` crates on crates.io;
 - `graphforge` on PyPI (three tested wheels and one source distribution);
 - five native npm packages and `@curatelabs/graphforge`;
 - `@curatelabs/graphforge-cli` and
@@ -39,7 +39,7 @@ Candidate bytes are routed into four non-overlapping groups:
 | --- | --- |
 | `python` | Three tested wheels and one sdist |
 | `npm` | Five native packages, main package, CLI, and agent skills |
-| `crates` | All 15 `.crate` archives |
+| `crates` | All 16 `.crate` archives |
 | `evidence` | Five tested Node addons plus dry-run and legal reports |
 
 The small manifest lives beside those partitions. Each group declares its
@@ -135,7 +135,7 @@ imports the native Python module, validates the full eight-package npm
 inventory, then installs only the host-compatible native tarball with
 main/CLI/skills offline, loads the Node native binding through the main
 package, executes the CLI and agent-skills entrypoints, and validates all
-15 crate archives and their exact dependency graph. Only a passing report is
+16 crate archives and their exact dependency graph. Only a passing report is
 added to the evidence partition;
 the temporary manifest is then removed and the final manifest is recorded over
 the now-complete inventory.
@@ -172,7 +172,7 @@ Historical v0.5.0 records remain immutable.
 ## Sequential recovery proof
 
 `scripts/ci/release_rehearsal.py` also produces a stable reconciliation report
-for all 24 public nodes. Its sequential simulator accepts only actions emitted
+for all 25 public nodes. Its sequential simulator accepts only actions emitted
 by the pure recovery planner, applies one supplied live observation at a time,
 and re-plans from the updated registry truth. This proves dependency order and
 partial recovery before workflow parallelism is introduced.
@@ -200,7 +200,7 @@ Before a write the lane persists a sanitized immutable attempt record; after a
 successful registry response it persists an accepted receipt and performs one
 public observation. Later recovery runs load both, so cancellation, timeout,
 or propagation delay cannot become permission for a second write. There is no polling loop. The `always()`
-reconciliation job then observes all 24 nodes and combines those states with
+reconciliation job then observes all 25 nodes and combines those states with
 job conclusions for operator context. See
 [`publication-order.md`](publication-order.md) for the recovery and human stop
 decisions.

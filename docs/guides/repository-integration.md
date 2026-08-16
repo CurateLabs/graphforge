@@ -183,10 +183,14 @@ type, every integrity hash, and every required capability version. Any failure
 leaves the target without a newly published `CURRENT` (abort before linearize).
 A successful import stages and verifies all participants into a durable
 generation, then linearizes by atomically replacing or creating `CURRENT`, and
-acknowledges only after the project-root directory flush so reopen recovers the
-published generation. Import does not merge into or overwrite an existing
-project. These stage / validate / durable generation / linearize / acknowledge /
-publish / abort / recover terms are the shared publication vocabulary frozen by
+acknowledges only after the project-root platform-native namespace durability
+barrier so reopen recovers the published generation. POSIX uses directory
+`fsync(2)`; fixed writable local NTFS uses the write-through same-handle rename
+contract in [ADR 0020](../adr/0020-ntfs-write-through-namespace-durability.md),
+while ReFS is unsupported/unproven. Import does not merge into or overwrite an
+existing project. These stage / validate / durable generation / linearize /
+acknowledge / publish / abort / recover terms are the shared publication
+vocabulary frozen by
 [ADR 0018](../adr/0018-acknowledged-durability-isolation.md); M5 interchange
 issues (#738, #742, #745) consume that vocabulary rather than redefining it.
 

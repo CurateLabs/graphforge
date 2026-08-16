@@ -31,7 +31,7 @@ REQUIRED_CRASH_PHASES = {
     "before_current_replace",
     "after_current_replace",
     "post_linearization_api_error",
-    "lost_root_directory_flush_power_loss",
+    "lost_namespace_durability_barrier_power_loss",
     "torn_current_or_manifest_bytes",
     "recovery_on_open_interrupted_transaction",
 }
@@ -53,6 +53,19 @@ REQUIRED_VOCABULARY = {
     "publish",
     "abort",
     "recover",
+}
+REQUIRED_FILESYSTEM_SUPPORTED = {
+    "posix_local_fcntl_flock_rename_fsync_dir_fsync",
+    "windows_local_ntfs_lockfileex_write_through_setfileinformationbyhandle",
+}
+REQUIRED_FILESYSTEM_REJECTED = {
+    "network",
+    "userspace",
+    "removable",
+    "cross_device",
+    "symlink_mediated",
+    "windows_refs_unproven",
+    "unknown",
 }
 FORBIDDEN_POSITIVE_PATTERNS = [
     re.compile(r"\bACID\b"),
@@ -219,6 +232,11 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         raise GateError("reconciled_adrs must list ADR 0013-0015 paths")
     for entry in reconciled:
         require_repo_file(entry, "reconciled_adrs")
+    amending = matrix.get("amending_adrs")
+    if amending != ["docs/adr/0020-ntfs-write-through-namespace-durability.md"]:
+        raise GateError("amending_adrs must list ADR 0020")
+    for entry in amending:
+        require_repo_file(entry, "amending_adrs")
 
     acknowledgement = matrix.get("acknowledgement")
     if not isinstance(acknowledgement, dict):
@@ -226,8 +244,9 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
     if acknowledgement.get("name") != "acknowledged-durable":
         raise GateError("acknowledgement.name must be acknowledged-durable")
     requires = acknowledgement.get("requires")
-    if not isinstance(requires, list) or "project_root_directory_flush" not in requires:
-        raise GateError("acknowledgement must require project_root_directory_flush")
+    barrier = "project_root_platform_native_namespace_durability_barrier"
+    if not isinstance(requires, list) or barrier not in requires:
+        raise GateError(f"acknowledgement must require {barrier}")
     if acknowledgement.get("linearization_point") != "current_atomic_replace_or_create":
         raise GateError("linearization_point must be current_atomic_replace_or_create")
 
@@ -238,6 +257,12 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         raise GateError("filesystem_scope.error must be GF_UNSUPPORTED_FILESYSTEM")
     if filesystem.get("best_effort_allowed") is not False:
         raise GateError("filesystem_scope.best_effort_allowed must be false")
+    if set(filesystem.get("supported", [])) != REQUIRED_FILESYSTEM_SUPPORTED:
+        raise GateError(
+            "filesystem_scope.supported must be exactly the proven POSIX and NTFS classes"
+        )
+    if set(filesystem.get("rejected", [])) != REQUIRED_FILESYSTEM_REJECTED:
+        raise GateError("filesystem_scope.rejected must include ReFS and every unproven class")
 
     recovery = matrix.get("recovery_authority")
     if not isinstance(recovery, dict) or recovery.get("sole") != "exact_valid_CURRENT":
@@ -310,11 +335,12 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         adr,
         [
             "acknowledged-durable",
-            "project-root directory flush",
+            "project-root platform-native namespace durability barrier",
             "GF_UNSUPPORTED_FILESYSTEM",
             "Write-skew witness",
             "exact, valid `CURRENT`",
             "Publication vocabulary",
+            "ADR 0020",
         ],
         "adr",
     )
@@ -328,6 +354,8 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
             "queued_writer",
             "optimistic_multi_writer",
             "graphforge-durability-isolation/1",
+            "platform-native namespace durability barrier",
+            "ADR 0020",
         ],
         "architecture_doc",
     )
@@ -335,8 +363,10 @@ def validate_matrix(path: Path = MATRIX_PATH) -> dict[str, Any]:
         api_doc,
         [
             "ADR 0018",
+            "ADR 0020",
             "acknowledged-durable",
             "write-skew",
+            "platform-native namespace durability barrier",
         ],
         "api_doc",
     )

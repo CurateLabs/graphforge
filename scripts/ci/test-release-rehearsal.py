@@ -111,7 +111,7 @@ def test_artifact_rehearsal() -> None:
             )
             assert report["status"] == "passed"
             assert report["registry_writes"] == 0
-            assert report["checks"]["candidate_completeness"]["nodes"] == 24
+            assert report["checks"]["candidate_completeness"]["nodes"] == 25
             node_check = report["checks"]["node_cli_skills_clean_consumer"]
             assert node_check["loaded_version"] == candidate_fixture.VERSION
             host_native = rehearsal._compatible_native_npm_name()
@@ -122,7 +122,7 @@ def test_artifact_rehearsal() -> None:
                 "@curatelabs/graphforge-agent-skills",
                 host_native,
             ]
-            assert len(report["checks"]["rust_packages"]["packages"]) == 15
+            assert len(report["checks"]["rust_packages"]["packages"]) == 16
             assert not any(word in json.dumps(report).lower() for word in rehearsal.FORBIDDEN_TEXT)
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -168,14 +168,14 @@ def test_sequential_reconciliation() -> None:
     availability = _availability()
     absent = _all(manifest, {"status": 404})
     transitions = _sequential_happy_path(manifest)
-    assert len(transitions) == 24
+    assert len(transitions) == 25
     report = rehearsal.simulate_sequential(
         manifest, absent, availability, transitions, simulated_at=NOW
     )
     assert report["complete"] is True
-    assert report["summary"]["nodes"] == 24
-    assert report["summary"]["verified"] == 24
-    assert len(report["events"]) == 24
+    assert report["summary"]["nodes"] == 25
+    assert report["summary"]["verified"] == 25
+    assert len(report["events"]) == 25
     assert all(event["sequence"] == index for index, event in enumerate(report["events"], 1))
 
     all_verified = registry_fixture.observation_set(manifest)
