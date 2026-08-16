@@ -36,6 +36,7 @@ CARGO_PACKAGE_DIRS = tuple(
         "graphforge-core",
         "graphforge-cypher",
         "graphforge-exec",
+        "graphforge-filesystem",
         "graphforge-io",
         "graphforge-ir",
         "graphforge-knowledge",

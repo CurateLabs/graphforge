@@ -72,7 +72,7 @@ pnpm docs:build
 # Publication tooling — authoritative order:
 # docs/development/publication-order.md
 python3 scripts/ci/crate-publish-plan.py check
-# Cargo: package the complete 15-crate graph in dependency order.
+# Cargo: package the complete 16-crate graph in dependency order.
 make publish-dry-run-cargo
 # Python: maturin / TestPyPI clean-install checks
 # Node / CLI / skills: npm publish --dry-run

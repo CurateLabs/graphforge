@@ -29,10 +29,11 @@ EVIDENCE_SCHEMA = "graphforge-clean-env-evidence-v1"
 RELEASE_RECORD_SCHEMA = "graphforge-release-record-v1"
 RELEASE_CANDIDATE_SCHEMA = "graphforge-release-candidate-v2"
 RELEASE_RECORD_SCHEMAS = (RELEASE_RECORD_SCHEMA, RELEASE_CANDIDATE_SCHEMA)
-DEFAULT_VERSION = "0.5.0"
+DEFAULT_VERSION = "0.5.2"
 DEFAULT_DOCS_BASE = "https://docs.graphforge.sh"
 DEFAULT_CRATES = (
     "graphforge-core",
+    "graphforge-filesystem",
     "graphforge-ast",
     "graphforge-knowledge",
     "graphforge-ontology",

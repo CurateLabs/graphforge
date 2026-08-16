@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "3c01e947ac827ff997813fff2ed788ec256d501d457deb399acd2f188f24fd62",
+  "sha256": "fe37804afbbaa557546676cb2bf6394bfa1ba376c452603d83e63557e53ba2ec",
   "entries": [
     {
       "name": "graphforge-api",
@@ -891,6 +891,48 @@
       ]
     },
     {
+      "name": "graphforge-filesystem",
+      "version": "0.5.2",
+      "features": [],
+      "dependencies": [
+        {
+          "name": "rustix",
+          "req": "^1.1",
+          "features": [
+            "fs"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": "cfg(unix)"
+        },
+        {
+          "name": "tempfile",
+          "req": "^3",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
+        {
+          "name": "windows-sys",
+          "req": "^0.61",
+          "features": [
+            "Win32_Foundation",
+            "Win32_Security",
+            "Win32_Security_Authorization",
+            "Win32_Storage_FileSystem",
+            "Win32_System_IO"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": "cfg(windows)"
+        }
+      ]
+    },
+    {
       "name": "graphforge-io",
       "version": "0.5.2",
       "features": [],
@@ -1622,6 +1664,15 @@
           "target": null
         },
         {
+          "name": "graphforge-filesystem",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "graphforge-ir",
           "req": "^0.5.2",
           "features": [],
@@ -1667,6 +1718,17 @@
           "target": null
         },
         {
+          "name": "rustix",
+          "req": "^1.1",
+          "features": [
+            "fs"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": "cfg(unix)"
+        },
+        {
           "name": "serde",
           "req": "^1",
           "features": [
@@ -1692,6 +1754,17 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "sysinfo",
+          "req": "^0.37.2",
+          "features": [
+            "disk"
+          ],
+          "optional": false,
+          "uses_default_features": false,
           "kind": null,
           "target": null
         },

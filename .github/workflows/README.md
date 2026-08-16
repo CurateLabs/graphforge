@@ -68,9 +68,10 @@ only when the platform supports them.
   native bindings.
 - Rust changes run Cargo formatting/Clippy (`Rust Quality`) and authoritative
   Bazel tests (`Bazel Bootstrap` → `//:ci_rust_tests`, including API BDD). The
-  same Rust classification also runs the Windows `graphforge-storage`
-  `project_generation` lock unit tests on `blacksmith-4vcpu-windows-2025`
-  (Linux Bazel CI cannot execute those `#[cfg(windows)]` cases).
+  same Rust classification also runs native filesystem publication/admission
+  tests on `blacksmith-4vcpu-windows-2025` and
+  `blacksmith-12vcpu-macos-15`; Windows retains the existing project-root lock
+  tests. Linux Bazel CI cannot execute those host-specific contracts.
 - Python, Gherkin, public binding, Pulumi static-validation, and Terraform
   static-validation gates run only when their owned surfaces change. Shared
   GraphForge configuration and infrastructure contract fixtures run both IaC

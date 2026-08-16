@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 100,
+  "cargo_target_count": 101,
   "targets": [
     {
       "package": "graphforge-api",
@@ -812,6 +812,16 @@
       "bazel_label": "//crates/graphforge-exec:write_statement",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-filesystem",
+      "target": "graphforge_filesystem",
+      "class": "lib",
+      "source": "crates/graphforge-filesystem/src/lib.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-filesystem:graphforge_filesystem",
+      "exception_id": null,
+      "notes": "#779; unit tests `//crates/graphforge-filesystem:graphforge_filesystem_test`"
     },
     {
       "package": "graphforge-io",

@@ -177,7 +177,7 @@ for job in (
     assert f"- {job}" in summary
 assert "release_rehearsal.py reconcile" in summary
 assert "Release-Reconciliation-${{ github.run_id }}" in summary
-assert ".complete == true and (.nodes | length) == 24" in summary
+assert ".complete == true and (.nodes | length) == 25" in summary
 
 assert "sleep" not in workflow
 assert "continue-on-error" not in workflow

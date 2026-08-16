@@ -108,9 +108,10 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
     {
-        # test.yml: policy + rust-lint + python/node binding + windows locks (5);
+        # test.yml: policy + rust-lint + python/node binding + Windows/macOS
+        # durability (6);
         # Binding RC: 3. PR Cargo sticky disks retired after #4 cutover.
-        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 8,
+        "${{ runner.os }}-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}": 9,
         "${{ runner.os }}-snap-ego-facebook-v1": 1,
         "${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}": 1,
     }
@@ -586,8 +587,26 @@ def validate_ci_gate_cutover(text: str) -> None:
 
 def main() -> None:
     texts = {path: path.read_text(encoding="utf-8") for path in sorted(WORKFLOWS.glob("*.y*ml"))}
-    validate_test_suite_trigger(texts[WORKFLOWS / "test.yml"])
-    validate_ci_gate_cutover(texts[WORKFLOWS / "test.yml"])
+    test_suite = texts[WORKFLOWS / "test.yml"]
+    validate_test_suite_trigger(test_suite)
+    validate_ci_gate_cutover(test_suite)
+    jobs = workflow_jobs(test_suite)
+    for job_id, runner in (
+        ("windows-graphforge-storage-locks", "blacksmith-4vcpu-windows-2025"),
+        ("macos-graphforge-storage-durability", "blacksmith-12vcpu-macos-15"),
+    ):
+        body = jobs[job_id]
+        assert f"runs-on: {runner}" in body
+        assert job_runs_command(body, "cargo test -p graphforge-filesystem --lib --no-fail-fast")
+        assert job_runs_command(body, "filesystem_admission::tests:: --lib --no-fail-fast")
+    gate = jobs["ci-gate"]
+    gate_dependencies = job_needs(gate)
+    for job_id in (
+        "windows-graphforge-storage-locks",
+        "macos-graphforge-storage-durability",
+    ):
+        assert job_id in gate_dependencies
+        assert f"needs.{job_id}.result" in gate
 
     artifact_uploads: list[str] = []
     artifact_downloads: list[str] = []

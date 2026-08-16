@@ -114,10 +114,10 @@ artifacts are publication evidence — see `AGENTS.md` § Issue close.
   That is fast feedback, not multi-OS certification.
 - When Rust surfaces change, Test Suite runs authoritative Bazel tests
   (`Bazel Bootstrap` → `//:ci_rust_tests`) plus Cargo fmt/clippy, and also runs
-  `Windows graphforge-storage Locks`
-  (`cargo test -p graphforge-storage project_generation::tests:: --lib` on
-  `blacksmith-4vcpu-windows-2025`) for the `#[cfg(windows)]` project-root lock
-  unit tests that Linux Bazel CI cannot execute.
+  native filesystem publication/admission tests on
+  `blacksmith-4vcpu-windows-2025` and `blacksmith-12vcpu-macos-15`. Windows
+  also retains the `graphforge-storage` project-root lock unit tests that Linux
+  Bazel CI cannot execute. Both host-native jobs are aggregated by `CI Gate`.
 - Repository policy always validates workflow syntax, the classifier, domain
   dependency directions, license compliance, and the ledgers that back later
   release gates (without running those heavy matrices on every PR).

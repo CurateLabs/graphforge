@@ -642,7 +642,7 @@ jobs:
           done < <(python3 scripts/ci/crate-publish-plan.py list)
 
   reconcile:
-    name: Always reconcile all 24 public nodes
+    name: Always reconcile all 25 public nodes
     if: always()
     needs:
       - candidate-preflight
@@ -714,4 +714,4 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Require complete public verification
-        run: jq -e '.complete == true and (.nodes | length) == 24' reconciliation/summary.json
+        run: jq -e '.complete == true and (.nodes | length) == 25' reconciliation/summary.json

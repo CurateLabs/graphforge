@@ -33,7 +33,8 @@ def run(packages: list[dict[str, Any]]) -> subprocess.CompletedProcess[str]:
 
 base = [
     package("graphforge-core", []),
-    package("graphforge-storage", ["graphforge-core"]),
+    package("graphforge-filesystem", []),
+    package("graphforge-storage", ["graphforge-core", "graphforge-filesystem"]),
     package("graphforge-exec", ["graphforge-core", "graphforge-storage"]),
     package("graphforge-provenance", ["graphforge-core"]),
     package("graphforge-knowledge", ["graphforge-core"]),

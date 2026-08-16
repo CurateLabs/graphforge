@@ -1,0 +1,16 @@
+"""Bazel targets for audited GraphForge filesystem primitives."""
+
+load("//tools/bazel:gf_rust.bzl", "gf_rust_library", "gf_rust_test")
+
+exports_files(["Cargo.toml"])
+
+package(default_visibility = ["//visibility:public"])
+
+gf_rust_library(
+    name = "graphforge_filesystem",
+)
+
+gf_rust_test(
+    name = "graphforge_filesystem_test",
+    crate = ":graphforge_filesystem",
+)

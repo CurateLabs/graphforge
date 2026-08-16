@@ -16,6 +16,7 @@ GRAPH_CRATES = {
     "graphforge-core",
     "graphforge-cypher",
     "graphforge-exec",
+    "graphforge-filesystem",
     "graphforge-io",
     "graphforge-ir",
     "graphforge-ontology",

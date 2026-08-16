@@ -56,6 +56,7 @@ build_test(
     targets = [
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-filesystem:graphforge_filesystem",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-ir:graphforge_ir",
         "//crates/graphforge-ontology:graphforge_ontology",
@@ -71,6 +72,7 @@ test_suite(
     tests = [
         "//crates/graphforge-ast:graphforge_ast_test",
         "//crates/graphforge-core:graphforge_core_test",
+        "//crates/graphforge-filesystem:graphforge_filesystem_test",
         "//crates/graphforge-cypher:graphforge_cypher_test",
         "//crates/graphforge-ir:graphforge_ir_test",
         "//crates/graphforge-ontology:graphforge_ontology_test",
@@ -87,6 +89,7 @@ build_test(
     targets = [
         "//crates/graphforge-api:graphforge_api",
         "//crates/graphforge-exec:graphforge_exec",
+        "//crates/graphforge-filesystem:graphforge_filesystem",
         "//crates/graphforge-io:graphforge_io",
         "//crates/graphforge-knowledge:graphforge_knowledge",
         "//crates/graphforge-search:graphforge_search",
@@ -99,6 +102,7 @@ test_suite(
     tests = [
         "//crates/graphforge-api:graphforge_api_test",
         "//crates/graphforge-exec:graphforge_exec_test",
+        "//crates/graphforge-filesystem:graphforge_filesystem_test",
         "//crates/graphforge-io:graphforge_io_test",
         "//crates/graphforge-knowledge:graphforge_knowledge_test",
         "//crates/graphforge-search:graphforge_search_test",
@@ -114,6 +118,7 @@ build_test(
         "//crates/graphforge-ast:graphforge_ast",
         "//crates/graphforge-cli:graphforge_cli",
         "//crates/graphforge-core:graphforge_core",
+        "//crates/graphforge-filesystem:graphforge_filesystem",
         "//crates/graphforge-cypher:graphforge_cypher",
         "//crates/graphforge-exec:graphforge_exec",
         "//crates/graphforge-io:graphforge_io",
@@ -135,6 +140,7 @@ test_suite(
         "//crates/graphforge-ast:graphforge_ast_test",
         "//crates/graphforge-cli:graphforge_cli_test",
         "//crates/graphforge-core:graphforge_core_test",
+        "//crates/graphforge-filesystem:graphforge_filesystem_test",
         "//crates/graphforge-cypher:graphforge_cypher_test",
         "//crates/graphforge-exec:graphforge_exec_test",
         "//crates/graphforge-io:graphforge_io_test",

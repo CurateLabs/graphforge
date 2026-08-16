@@ -187,11 +187,15 @@ def create_candidate(
         )
     for name in manifest_module.CRATES:
         crate_root = f"{name}-{VERSION}"
-        dependency = (
-            ""
-            if name == "graphforge-core"
-            else (f'graphforge-core = {{ version = "{VERSION}" }}\n')
-        )
+        if name in {"graphforge-core", "graphforge-filesystem"}:
+            dependency = ""
+        elif name == "graphforge-storage":
+            dependency = (
+                f'graphforge-core = {{ version = "{VERSION}" }}\n'
+                f'graphforge-filesystem = {{ version = "{VERSION}" }}\n'
+            )
+        else:
+            dependency = f'graphforge-core = {{ version = "{VERSION}" }}\n'
         members = {
             f"{crate_root}/Cargo.toml": (
                 f'[package]\nname = "{name}"\nversion = "{VERSION}"\n'
@@ -250,7 +254,11 @@ def main() -> None:
         root = Path(temp)
         manifest_path, artifacts, manifest = create_candidate(root)
         validated = release_candidate.validate(manifest_path, artifacts, SHA, VERSION)
-        assert len(validated["nodes"]) == 24
+        assert len(validated["nodes"]) == 25
+        assert {
+            "from": "crates:graphforge-storage",
+            "requires": "crates:graphforge-filesystem",
+        } in validated["dependencies"]
         assert len(release_candidate.npm_paths(validated)) == 8
         assert all(
             [value.split("-", 1)[0] for value in item["integrities"]] == ["sha256", "sha512"]

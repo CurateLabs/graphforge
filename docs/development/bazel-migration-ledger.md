@@ -12,14 +12,14 @@ Performance baseline: [bazel-migration-baseline.md](bazel-migration-baseline.md)
 | Freeze date (UTC) | 2026-08-06 |
 | Inventory SHA | `6e8b8e3fdc1ecd960eacf14a73e5be7b54fcef3c` |
 | Authoritative source | `cargo metadata --format-version=1 --no-deps` |
-| Workspace packages | 17 |
-| Cargo metadata targets | **100** |
-| Bazel modeling claimed complete? | **Yes** — all 100 Cargo targets mapped (#10–#6 + #338 + #336 + #752 + #753); retained tools justified in exceptions |
+| Workspace packages | 18 |
+| Cargo metadata targets | **101** |
+| Bazel modeling claimed complete? | **Yes** — all 101 Cargo targets mapped (#10–#6 + #338 + #336 + #752 + #753 + #779); retained tools justified in exceptions |
 | Machine-readable map | `tools/bazel/parity/migration_target_map.json` (fail-closed via `scripts/ci/bazel-migration-ledger-check.py`) |
 | Bootstrap note | See [bazel-bootstrap.md](bazel-bootstrap.md); parity evidence [bazel-migration-parity.md](bazel-migration-parity.md) |
 
 Issue #1 historically cited ~71 Cargo targets / ~53 integration-test binaries.
-This freeze uses the **current authoritative** metadata count (**100** targets;
+This freeze uses the **current authoritative** metadata count (**101** targets;
 **66** integration-test binaries). Later slices must update rows,
 not silently ignore new targets.
 
@@ -27,13 +27,13 @@ not silently ignore new targets.
 
 | Class | Count | Notes |
 | --- | ---: | --- |
-| `lib` | 15 | First-party libraries (unit/doctest surface rides these targets under `cargo test --lib` / doctests) |
+| `lib` | 16 | First-party libraries (unit/doctest surface rides these targets under `cargo test --lib` / doctests) |
 | `integration-test` | 66 | `tests/*.rs` integration binaries |
 | `cdylib` | 2 | PyO3 + napi-rs native libs |
 | `bin` | 1 | CLI (`gf`) |
 | `custom-build` | 2 | `build.rs` scripts |
 | `example` | 11 | API examples mapped as `//crates/graphforge-api:<name>` (#6) |
-| **Total** | **100** | |
+| **Total** | **101** | |
 
 ### Unit tests and doctests
 
@@ -341,7 +341,7 @@ Retired PR sticky key pattern (do not reintroduce without rollback docs):
 | `scripts/ci/test-binding-release-candidate.py` | 805 | `f"{workflow.name} uses the unsupported napi artifacts --dir option"` |
 | `scripts/ci/test-binding-release-candidate.py` | 809 | `assert "exec napi build --platform --release" not in publish_text` |
 | `Makefile` | 39 | `publish-dry-run-python:  ## Local maturin sdist packaging check (not TestPyPI upload)` |
-| `Makefile` | 41 | `publish-dry-run-cargo:  ## cargo package --list for all 15 crates.io packages in plan order` |
+| `Makefile` | 41 | `publish-dry-run-cargo:  ## cargo package --list for all 16 crates.io packages in plan order` |
 | `Makefile` | 66 | `cargo test -p graphforge-core --test bdd` |
 | `Makefile` | 84 | `echo "   maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml"; \` |
 | `Makefile` | 104 | `coverage-python:  ## Run unit tests with Python wrapper coverage (requires maturin develop)` |

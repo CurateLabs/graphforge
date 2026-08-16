@@ -37,6 +37,7 @@ CRATE_PLAN = ROOT / "scripts" / "ci" / "crate-publish-plan.py"
 # Keep in sync with CRATES_IO_EXCLUDED there: no binding implementation crates.
 FALLBACK_CARGO_ORDER = (
     "graphforge-core",
+    "graphforge-filesystem",
     "graphforge-ast",
     "graphforge-knowledge",
     "graphforge-ontology",

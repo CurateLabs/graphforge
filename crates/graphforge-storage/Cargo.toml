@@ -15,6 +15,7 @@ test-failpoints = []
 
 [dependencies]
 graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
+graphforge-filesystem = { version = "0.5.2", path = "../graphforge-filesystem" }
 graphforge-ir = { version = "0.5.2", path = "../graphforge-ir" }
 graphforge-ontology = { version = "0.5.2", path = "../graphforge-ontology" }
 arrow = { workspace = true }
@@ -25,6 +26,7 @@ datafusion-catalog = "54"
 fs4 = "1.1"
 futures = { workspace = true }
 parquet = { workspace = true }
+sysinfo = { version = "0.37.2", default-features = false, features = ["disk"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -36,6 +38,7 @@ uuid = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustix = { version = "1.1", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 named-lock = "0.4.1"

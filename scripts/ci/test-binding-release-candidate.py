@@ -135,6 +135,71 @@ def workflow_step(section: str, marker: str) -> str:
     return remainder if end < 0 else remainder[:end]
 
 
+def workflow_jobs(text: str) -> dict[str, str]:
+    """Split a workflow into top-level job ID to job-body mappings."""
+    lines = text.splitlines()
+    try:
+        jobs_index = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
+    except StopIteration as exc:
+        raise AssertionError("workflow is missing a top-level jobs: mapping") from exc
+    jobs: dict[str, str] = {}
+    current: str | None = None
+    body: list[str] = []
+    for line in lines[jobs_index + 1 :]:
+        indent = len(line) - len(line.lstrip())
+        if indent == 2 and line.rstrip().endswith(":") and not line.lstrip().startswith("- "):
+            if current is not None:
+                jobs[current] = "\n".join(body)
+            current = line.strip()[:-1]
+            body = []
+            continue
+        if current is None:
+            continue
+        if line.strip() and indent < 2:
+            break
+        body.append(line)
+    if current is not None:
+        jobs[current] = "\n".join(body)
+    assert jobs, "workflow jobs: mapping is empty"
+    return jobs
+
+
+def job_needs(job_body: str) -> set[str]:
+    """Return the active top-level needs entries for one job."""
+    lines = job_body.splitlines()
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("needs:"):
+            continue
+        value = line.strip().split(":", 1)[1].strip()
+        if value:
+            if value.startswith("[") and value.endswith("]"):
+                return {
+                    item.strip().strip("'\"")
+                    for item in value[1:-1].split(",")
+                    if item.strip()
+                }
+            return {value.strip("'\"")}
+        indent = len(line) - len(line.lstrip())
+        needed: set[str] = set()
+        for follow in lines[index + 1 :]:
+            if not follow.strip():
+                continue
+            follow_indent = len(follow) - len(follow.lstrip())
+            if follow_indent <= indent:
+                break
+            item = follow.strip()
+            if item.startswith("- "):
+                needed.add(item[2:].strip().strip("'\""))
+        return needed
+    return set()
+
+
+def job_runs_command(job_body: str, command: str) -> bool:
+    """Require one complete folded or literal run command in a job."""
+    normalized = " ".join(job_body.split())
+    return " ".join(command.split()) in normalized
+
+
 def validate_python_evidence_policy(workflow_text: str) -> None:
     """Reject drift from the cross-platform, read-only-wheel evidence contract."""
     prepare_step = "Prepare writable Python RC evidence directory"
@@ -578,25 +643,56 @@ def main() -> None:
     assert "native_builder: bazel" in python_job
     assert "native_builder: maturin" in python_job
     test_workflow_text = (ROOT / ".github/workflows/test.yml").read_text()
-    windows_locks_job = required_section(
-        test_workflow_text,
-        "  windows-graphforge-storage-locks:\n",
-        "  ci-gate:\n",
-    )
+    test_jobs = workflow_jobs(test_workflow_text)
+    windows_locks_job = test_jobs["windows-graphforge-storage-locks"]
     assert_active_lines(
         windows_locks_job,
         "runs-on: blacksmith-4vcpu-windows-2025",
         "needs: changes",
         "if: needs.changes.outputs.rust == 'true'",
-        "cargo test -p graphforge-storage project_generation::tests:: --lib",
-        "--no-fail-fast",
     )
-    _, ci_gate_found, ci_gate = test_workflow_text.partition("  ci-gate:\n")
-    assert ci_gate_found, "missing workflow marker:   ci-gate:"
+    assert job_needs(windows_locks_job) == {"changes"}
+    assert job_runs_command(
+        windows_locks_job,
+        "cargo test -p graphforge-storage project_generation::tests:: --lib --no-fail-fast",
+    )
+    assert job_runs_command(
+        windows_locks_job,
+        "cargo test -p graphforge-storage filesystem_admission::tests:: --lib --no-fail-fast",
+    )
+    assert job_runs_command(
+        windows_locks_job,
+        "cargo test -p graphforge-filesystem --lib --no-fail-fast",
+    )
+    macos_durability_job = test_jobs["macos-graphforge-storage-durability"]
     assert_active_lines(
+        macos_durability_job,
+        "runs-on: blacksmith-12vcpu-macos-15",
+        "needs: changes",
+        "if: needs.changes.outputs.rust == 'true'",
+    )
+    assert job_needs(macos_durability_job) == {"changes"}
+    assert job_runs_command(
+        macos_durability_job,
+        "cargo test -p graphforge-storage filesystem_admission::tests:: --lib --no-fail-fast",
+    )
+    assert job_runs_command(
+        macos_durability_job,
+        "cargo test -p graphforge-filesystem --lib --no-fail-fast",
+    )
+    ci_gate = test_jobs["ci-gate"]
+    assert {
+        "windows-graphforge-storage-locks",
+        "macos-graphforge-storage-durability",
+    } <= job_needs(ci_gate)
+    assert job_runs_command(
         ci_gate,
-        "- windows-graphforge-storage-locks",
-        '"${{ needs.windows-graphforge-storage-locks.result }}"',
+        'scripts/ci/require-gates.sh "${{ needs.changes.result }}"',
+    )
+    assert job_runs_command(
+        ci_gate,
+        '"${{ needs.windows-graphforge-storage-locks.result }}" '
+        '"${{ needs.macos-graphforge-storage-durability.result }}"',
     )
     assert "macos-latest" not in rc_workflow_text
     assert "macos-15-intel" not in rc_workflow_text
