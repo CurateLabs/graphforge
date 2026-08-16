@@ -1,7 +1,17 @@
 // Thin native checkpoint surface acceptance (#2480).
 
 import assert from "node:assert/strict";
+import {
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
 
@@ -155,3 +165,30 @@ test("checkpoint pagination and diff cancellation use the shared adapter", async
     );
   });
 });
+
+test(
+  "async checkpoint preserves filesystem admission code after root substitution",
+  { skip: process.platform === "win32" },
+  async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "gf-node-checkpoint-admission-"));
+    const parent = realpathSync(fixture);
+    const project = join(parent, "project");
+    const moved = join(parent, "project-moved");
+    const forge = new GraphForge(project);
+    try {
+      await forge.checkpoint({ name: "Before", idempotencyKey: operation(20) });
+      const currentBefore = readFileSync(join(project, "CURRENT"));
+      renameSync(project, moved);
+      symlinkSync(moved, project, "dir");
+
+      await assert.rejects(
+        forge.checkpoint({ name: "Rejected", idempotencyKey: operation(21) }),
+        (error) => error.code === "GF_UNSUPPORTED_FILESYSTEM",
+      );
+      assert.deepEqual(readFileSync(join(moved, "CURRENT")), currentBefore);
+    } finally {
+      forge.close();
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);

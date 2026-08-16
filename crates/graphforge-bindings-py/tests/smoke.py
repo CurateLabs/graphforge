@@ -66,6 +66,35 @@ def check_exception_hierarchy() -> None:
         else:
             raise SystemExit("expected unsupported-format error for pre-v1 root")
 
+    # Durable project admission rejects lexical traversal before reopening or
+    # mutating an otherwise valid project, and preserves the Rust error code.
+    with tempfile.TemporaryDirectory() as directory:
+        parent = Path(directory).resolve()
+        project = parent / "project"
+        forge = g.GraphForge(str(project))
+        forge.close()
+        (parent / "hop").mkdir()
+        current_before = (project / "CURRENT").read_bytes()
+        generations_before = sorted(
+            path.name for path in (project / "generations").iterdir()
+        )
+        parent_before = sorted(path.name for path in parent.iterdir())
+
+        traversal = parent / "hop" / ".." / "project"
+        try:
+            g.GraphForge(str(traversal))
+        except g.StorageError as exc:
+            assert exc.code == "GF_UNSUPPORTED_FILESYSTEM", exc.code
+        else:
+            raise SystemExit("expected unsupported-filesystem error for project traversal")
+
+        assert (project / "CURRENT").read_bytes() == current_before
+        assert (
+            sorted(path.name for path in (project / "generations").iterdir())
+            == generations_before
+        )
+        assert sorted(path.name for path in parent.iterdir()) == parent_before
+
 
 def check_execute() -> None:
     # #586 — execute returns a real pyarrow.Table carrying the result metadata.
