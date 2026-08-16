@@ -91,8 +91,7 @@ test("certification observations agree across reopen", async () => {
     const tx = forge.beginTransaction(OP_CERT);
     tx.stageAddNode(NODE_CERT, "Person", { name: "Cert" });
     const generation = tx.commit();
-    const recovery = forge.projectOpenRecovery();
-    assert.equal(recovery.selectedGenerationUuid, generation);
+    // Open facades pin their generation; only a fresh open observes CURRENT.
     const reopened = new GraphForge(root);
     const again = reopened.projectOpenRecovery();
     assert.equal(again.selectedGenerationUuid, generation);

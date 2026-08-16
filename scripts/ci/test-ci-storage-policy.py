@@ -81,6 +81,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "pr-node-addon-${{ github.sha }}": 1,
         "cargo-bazel-parity-evidence-${{ github.run_id }}": 1,
         "bazel-cache-perf-evidence-${{ github.run_id }}": 1,
+        "durability-certification-evidence-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -272,6 +273,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "dist/perf-sample-collected.json\n"
                 "docs/development/bazel-migration-evidence/perf-sample.json"
             ),
+            "${{ runner.temp }}/durability-certification-evidence",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):

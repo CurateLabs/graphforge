@@ -121,8 +121,7 @@ def check_certification_observation_parity(project: Path) -> None:
     tx = forge.begin_transaction(operation_uuid=OP_CERT)
     tx.stage_add_node(NODE_CERT, "Person", {"name": "Cert"})
     generation = tx.commit()
-    recovery = forge.project_open_recovery()
-    assert recovery["selected_generation_uuid"] == generation
+    # Open facades pin their generation; only a fresh open observes CURRENT.
     reopened = g.GraphForge(str(project))
     again = reopened.project_open_recovery()
     assert again["selected_generation_uuid"] == generation

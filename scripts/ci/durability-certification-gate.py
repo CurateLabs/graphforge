@@ -95,7 +95,9 @@ def validate_config(seed: int, histories: int, ops: int) -> None:
     lifecycle = matrix.get("lifecycle")
     if not isinstance(lifecycle, list):
         raise GateError("durability matrix lifecycle missing")
-    cell = next((item for item in lifecycle if item.get("id") == "seeded_model_certification"), None)
+    cell = next(
+        (item for item in lifecycle if item.get("id") == "seeded_model_certification"), None
+    )
     if cell is None or cell.get("coverage") != "covered":
         raise GateError("seeded_model_certification must be covered in the durability matrix")
     write_skew = next(item for item in matrix["anomalies"] if item["id"] == "write_skew")
@@ -105,9 +107,7 @@ def validate_config(seed: int, histories: int, ops: int) -> None:
         raise GateError("write_skew classification must remain allowed_documented_not_ssi")
 
 
-def run_cargo_certification(
-    histories: int, ops: int, commit: str, timeout: int
-) -> dict[str, Any]:
+def run_cargo_certification(histories: int, ops: int, commit: str, timeout: int) -> dict[str, Any]:
     env = os.environ.copy()
     env["GRAPHFORGE_CERT_HISTORIES"] = str(histories)
     env["GRAPHFORGE_CERT_OPS"] = str(ops)
@@ -274,7 +274,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             # inside the honest classification string.
             if forbidden == "provides ssi" and "provides ssi" in rendered:
                 raise GateError(f"evidence contains forbidden claim {forbidden!r}")
-            if forbidden in {"serializable isolation", "universal filesystem", "distributed durability"}:
+            if forbidden in {
+                "serializable isolation",
+                "universal filesystem",
+                "distributed durability",
+            }:
                 raise GateError(f"evidence contains forbidden claim {forbidden!r}")
     write_evidence(Path(args.output), payload)
     print(
