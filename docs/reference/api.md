@@ -74,7 +74,11 @@ other mutation APIs retain their single-writer behavior. See
 in [ADR 0018](../adr/0018-acknowledged-durability-isolation.md) (including why
 optimistic mode admits write-skew and is not SSI). Success on a persistent
 project means the write is acknowledged-durable only after participant/manifest
-flushes, `CURRENT` replacement, and the project-root directory flush.
+flushes, `CURRENT` replacement, and the project-root
+platform-native namespace durability barrier. POSIX uses directory `fsync(2)`;
+fixed writable local NTFS uses a flushed write-through staging handle and
+same-handle rename. ReFS is unsupported/unproven. See
+[ADR 0020](../adr/0020-ntfs-write-through-namespace-durability.md).
 
 ---
 

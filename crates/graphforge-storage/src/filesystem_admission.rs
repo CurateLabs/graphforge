@@ -100,8 +100,8 @@ fn filesystem_durability_preflight_inner(
 
     let probe_result = run_probe(&parent, &probe, fault);
     let cleanup_result = cleanup_probe(&parent, probe, fault);
-    cleanup_result?;
     probe_result?;
+    cleanup_result?;
 
     Ok(FilesystemAdmissionEvidence {
         filesystem_class,
@@ -295,14 +295,27 @@ fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfE
 fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfError> {
     let information = graphforge_filesystem::windows_volume_information(parent)
         .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
-    if information.read_only {
+    classify_windows_volume(
+        &information.filesystem_name,
+        information.read_only,
+        information.fixed,
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn classify_windows_volume(
+    filesystem_name: &str,
+    read_only: bool,
+    fixed: bool,
+) -> Result<String, GfError> {
+    if read_only {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    if !information.fixed {
+    if !fixed {
         return Err(unsupported("CLASSIFY", "volume_not_fixed_local"));
     }
-    let class = information.filesystem_name.to_ascii_lowercase();
-    if !matches!(class.as_str(), "ntfs" | "refs") {
+    let class = filesystem_name.to_ascii_lowercase();
+    if class != "ntfs" {
         return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
     }
     Ok(class)
@@ -426,7 +439,8 @@ fn create_private_probe_directory(
     graphforge_filesystem::create_private_directory(probe_root)
         .map_err(|_| unsupported("CREATE", "private_directory_create_failed"))?;
     let probe = open_probe_directory(probe_root)?;
-    sync_directory(parent).map_err(|_| unsupported("CREATE", "parent_flush_failed"))?;
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("CREATE", "parent_namespace_barrier_failed"))?;
     probe.revalidate("CREATE")?;
     Ok(probe)
 }
@@ -475,12 +489,14 @@ fn run_probe(parent: &Path, probe: &ProbeDirectory, fault: ProbeFault) -> Result
     hit(fault, ProbeFault::Lock, "LOCK")?;
 
     let (target, target_identity, target_path) = replace_probe_file(probe, fault)?;
-    probe.revalidate("DIRECTORY_FLUSH")?;
-    probe
-        .handle
-        .sync_all()
-        .map_err(|_| unsupported("DIRECTORY_FLUSH", "probe_flush_failed"))?;
-    hit(fault, ProbeFault::DirectoryFlush, "DIRECTORY_FLUSH")?;
+    probe.revalidate("NAMESPACE_DURABILITY")?;
+    complete_namespace_barrier(&probe.path)
+        .map_err(|_| unsupported("NAMESPACE_DURABILITY", "probe_namespace_barrier_failed"))?;
+    hit(
+        fault,
+        ProbeFault::NamespaceDurability,
+        "NAMESPACE_DURABILITY",
+    )?;
 
     // The open handle must keep the old identity while the pathname now names
     // the replacement. This proves stable locked/open file identity across the
@@ -503,7 +519,8 @@ fn run_probe(parent: &Path, probe: &ProbeDirectory, fault: ProbeFault) -> Result
     }
     verify_stable_identity(&published, &target_path, parent)?;
     drop(target);
-    sync_directory(parent).map_err(|_| unsupported("DIRECTORY_FLUSH", "parent_flush_failed"))
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("NAMESPACE_DURABILITY", "parent_namespace_barrier_failed"))
 }
 
 fn replace_probe_file(
@@ -626,8 +643,15 @@ fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io:
 
 #[cfg(windows)]
 fn open_probe_file(probe: &ProbeDirectory, name: &str, create: bool) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
     let mut options = OpenOptions::new();
-    options.read(true).write(true);
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH);
     if create {
         options.create_new(true);
     }
@@ -709,32 +733,35 @@ fn cleanup_probe(parent: &Path, probe: ProbeDirectory, fault: ProbeFault) -> Res
     drop(probe.handle);
     std::fs::remove_dir(path)
         .map_err(|_| unsupported("CLEANUP", "private_directory_remove_failed"))?;
-    sync_directory(parent).map_err(|_| unsupported("CLEANUP", "parent_flush_failed"))
+    complete_namespace_barrier(parent)
+        .map_err(|_| unsupported("CLEANUP", "parent_namespace_barrier_failed"))
 }
 
 #[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
 
 #[cfg(windows)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    use std::os::windows::fs::OpenOptionsExt as _;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?
-        .sync_all()
+fn complete_namespace_barrier(path: &Path) -> std::io::Result<()> {
+    // NTFS persists rename metadata through the write-through staging handle.
+    // Directory FlushFileBuffers is not a documented Windows durability
+    // barrier; here we only revalidate that the namespace parent is ordinary.
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !is_link_or_reparse(&metadata) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "namespace parent is linked or not a directory",
+        ))
+    }
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
+fn complete_namespace_barrier(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "directory flush is unsupported",
+        "namespace durability barrier is unsupported",
     ))
 }
 
@@ -773,7 +800,7 @@ enum ProbeFault {
     FileFlush,
     Replace,
     ReplaceUnknown,
-    DirectoryFlush,
+    NamespaceDurability,
     Identity,
     Cleanup,
 }
@@ -809,12 +836,30 @@ mod tests {
         let evidence = filesystem_durability_preflight(&target).unwrap();
         assert!(matches!(
             evidence.filesystem_class.as_str(),
-            "apfs" | "ext" | "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "ntfs" | "refs"
+            "apfs" | "ext" | "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "ntfs"
         ));
         assert_eq!(evidence.files_created, 3);
         assert_eq!(evidence.bytes_written, MAX_PROBE_BYTES);
         assert!(!target.exists());
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_classifier_accepts_only_fixed_writable_ntfs() {
+        assert_eq!(
+            classify_windows_volume("NTFS", false, true).unwrap(),
+            "ntfs"
+        );
+        for (class, read_only, fixed, cause) in [
+            ("ReFS", false, true, "filesystem_class_unproven"),
+            ("FAT32", false, true, "filesystem_class_unproven"),
+            ("NTFS", true, true, "volume_read_only"),
+            ("NTFS", false, false, "volume_not_fixed_local"),
+        ] {
+            let error = classify_windows_volume(class, read_only, fixed).unwrap_err();
+            assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+            assert!(error.to_string().contains(cause), "{error}");
+        }
     }
 
     #[test]
@@ -826,7 +871,7 @@ mod tests {
             ProbeFault::FileFlush,
             ProbeFault::Replace,
             ProbeFault::ReplaceUnknown,
-            ProbeFault::DirectoryFlush,
+            ProbeFault::NamespaceDurability,
             ProbeFault::Identity,
             ProbeFault::Cleanup,
         ] {
@@ -988,10 +1033,7 @@ mod tests {
         ));
         let target = parent.path().join("project");
         let evidence = filesystem_durability_preflight(&target).unwrap();
-        assert!(matches!(
-            evidence.filesystem_class.as_str(),
-            "ntfs" | "refs"
-        ));
+        assert_eq!(evidence.filesystem_class, "ntfs");
         assert!(!target.exists());
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
     }

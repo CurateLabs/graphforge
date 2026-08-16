@@ -72,7 +72,7 @@ class DurabilityIsolationGateTests(unittest.TestCase):
             data["acknowledgement"]["requires"] = [
                 item
                 for item in data["acknowledgement"]["requires"]
-                if item != "project_root_directory_flush"
+                if item != "project_root_platform_native_namespace_durability_barrier"
             ]
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(GATE.GateError):
@@ -80,6 +80,18 @@ class DurabilityIsolationGateTests(unittest.TestCase):
 
             data = copy.deepcopy(GATE.load_matrix())
             data["filesystem_scope"]["best_effort_allowed"] = True
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(GATE.GateError):
+                GATE.validate_matrix(path)
+
+            data = copy.deepcopy(GATE.load_matrix())
+            data["filesystem_scope"]["supported"].append("windows_local_refs_by_analogy")
+            path.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(GATE.GateError):
+                GATE.validate_matrix(path)
+
+            data = copy.deepcopy(GATE.load_matrix())
+            data["filesystem_scope"]["rejected"].remove("windows_refs_unproven")
             path.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(GATE.GateError):
                 GATE.validate_matrix(path)

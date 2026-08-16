@@ -11,6 +11,9 @@
     "docs/adr/0014-workspace-checkpoints.md",
     "docs/adr/0015-embedded-write-modes.md"
   ],
+  "amending_adrs": [
+    "docs/adr/0020-ntfs-write-through-namespace-durability.md"
+  ],
   "m5_consumer_issues": [
     738,
     742,
@@ -31,10 +34,10 @@
     "requires": [
       "participant_file_flushes",
       "manifest_file_flush",
-      "generation_directory_flushes",
+      "generation_platform_native_namespace_barriers",
       "optimistic_promotion_when_applicable",
       "current_atomic_replace_or_create",
-      "project_root_directory_flush"
+      "project_root_platform_native_namespace_durability_barrier"
     ],
     "linearization_point": "current_atomic_replace_or_create",
     "not_authority": [
@@ -47,7 +50,7 @@
   "filesystem_scope": {
     "supported": [
       "posix_local_fcntl_flock_rename_fsync_dir_fsync",
-      "windows_local_ntfs_refs_lockfileex_flushfilebuffers_replacefilew"
+      "windows_local_ntfs_lockfileex_write_through_setfileinformationbyhandle"
     ],
     "rejected": [
       "network",
@@ -55,6 +58,7 @@
       "removable",
       "cross_device",
       "symlink_mediated",
+      "windows_refs_unproven",
       "unknown"
     ],
     "error": "GF_UNSUPPORTED_FILESYSTEM",
@@ -297,7 +301,7 @@
       ]
     },
     {
-      "id": "lost_root_directory_flush_power_loss",
+      "id": "lost_namespace_durability_barrier_power_loss",
       "failpoints": [
         "project.after_current_replace"
       ],
@@ -770,6 +774,16 @@
       "kind": "rust",
       "path": "crates/graphforge-storage/src/embedding_publication.rs",
       "symbol": "publication_filesystem_and_error_boundaries_are_fail_closed"
+    },
+    {
+      "kind": "rust",
+      "path": "crates/graphforge-storage/src/filesystem_admission.rs",
+      "symbol": "windows_classifier_accepts_only_fixed_writable_ntfs"
+    },
+    {
+      "kind": "rust",
+      "path": "crates/graphforge-filesystem/src/lib.rs",
+      "symbol": "write_through_source_handle_performs_replacement_rename"
     }
   ]
 }

@@ -5,7 +5,8 @@
 **Build target:** v0.5.0
 
 **Related:** ADR 0012 (domain ownership), ADR 0018 (acknowledged durability and
-isolation), ADR 0019 (authoritative graph delta journal)
+isolation), ADR 0019 (authoritative graph delta journal), ADR 0020 (NTFS
+write-through namespace durability amendment)
 
 The public acknowledgement boundary, isolation honesty rules, and anomaly
 coverage matrix are frozen by
@@ -15,7 +16,8 @@ graph delta runs inside a generation-owned `graph/` tree are frozen by
 inventory-listed generation bytes and never replace `CURRENT` as commit
 authority. This ADR remains the normative publication protocol; semantic
 changes to acknowledgement or recovery authority require an amending ADR rather
-than silent edits here.
+than silent edits here. [ADR 0020](0020-ntfs-write-through-namespace-durability.md)
+explicitly amends the Windows filesystem and acknowledgement clauses below.
 
 ## Context
 
@@ -42,16 +44,22 @@ a project:
    when a process exits;
 2. same-directory atomic file creation and replacement;
 3. file data-and-metadata flush;
-4. directory-entry flush for every directory whose entries change; and
+4. a platform-native namespace durability barrier for every changed entry; and
 5. stable file identity while an open handle is locked.
 
 The supported implementations are:
 
 - POSIX local filesystems providing `fcntl`/`flock`, same-filesystem
   `rename(2)`, file `fsync(2)`, and directory `fsync(2)`;
-- Windows local NTFS/ReFS volumes providing `LockFileEx`, `FlushFileBuffers`,
-  atomic same-volume replacement (`ReplaceFileW`, with atomic first creation),
-  and a flushable directory handle.
+- Windows fixed writable local NTFS volumes providing `LockFileEx`, file
+  `FlushFileBuffers`, and `FILE_FLAG_WRITE_THROUGH` staging handles renamed via
+  `SetFileInformationByHandle` / `FILE_RENAME_INFO`. `ReplaceIfExists = FALSE`
+  supplies atomic first creation and `TRUE` supplies atomic replacement. ReFS
+  is unsupported/unproven.
+
+The platform-native namespace durability barrier is POSIX directory `fsync(2)`
+or the NTFS write-through handle rename specified by ADR 0020. Windows
+directory `FlushFileBuffers` and `ReplaceFileW` are not durability authority.
 
 The implementation identifies the backing filesystem/volume and runs a
 create-lock-flush-replace-flush probe in a private sibling under the proposed
@@ -162,7 +170,8 @@ results.
 
 An absent path, or an explicitly supplied empty directory, may become a new
 container. Creation performs the filesystem preflight, creates the tree, writes
-and flushes `FORMAT`, and flushes every created directory bottom-up. For an
+and flushes `FORMAT`, and completes platform-native namespace barriers for each
+created entry bottom-up. For an
 absent path, the complete private root is atomically installed from a sibling.
 For an explicitly empty existing directory, initialization occurs in place
 while holding an exclusive parent-scoped creation lock whose name is the
@@ -233,9 +242,9 @@ PREPARING -> STAGED -> VALIDATED -> DURABLE -> PUBLISHED
 ```
 
 The journal aids cleanup and diagnostics but never selects a generation.
-Journal replacement itself uses write, file flush, atomic replace, and
-directory flush. Its failure can leave an earlier valid journal state without
-changing commit authority.
+Journal replacement itself uses write, file flush, atomic replace, and the
+platform-native namespace durability barrier. Its failure can leave an earlier
+valid journal state without changing commit authority.
 
 The default writer performs these ordered operations while holding
 `writer.lock`. An optimistic writer performs steps 1 through 4 under its
@@ -254,14 +263,15 @@ continues only when it still names the pinned parent:
    staged UUID index, run composite cross-domain validation, and persist the
    `VALIDATED` journal. No validation may read through `CURRENT` again.
 5. **DURABLE.** Write and flush `lease.lock`, write and flush
-   `manifest.json`, reread and verify every participant and the manifest, flush
-   `participants/` directories from leaves upward, flush the generation
-   directory, promote an optimistic attempt by atomic rename into
-   `generations/<generation-uuid>/`, flush both changed parent directories and
-   `generations/`, then persist the `DURABLE` journal.
+   `manifest.json`, reread and verify every participant and the manifest,
+   complete platform-native namespace durability barriers from leaves upward,
+   promote an optimistic attempt by atomic rename into
+   `generations/<generation-uuid>/`, complete the barriers for both changed
+   parents and `generations/`, then persist the `DURABLE` journal.
 6. **Publish.** Write the exact new `CURRENT` bytes to a sibling private file,
    flush it, atomically replace `CURRENT` (or atomically create it for the first
-   generation), and flush the project root.
+   generation), and complete the project-root platform-native namespace
+   durability barrier.
 7. **PUBLISHED.** Persist the `PUBLISHED` journal. The writer may now release
    the parent reader lease, perform conservative cleanup, and release
    `writer.lock`.
@@ -276,10 +286,13 @@ attempt is marked `ABORTED`, its private directory is removed, and
 `GF_WRITE_CONFLICT` is returned without promoting a generation. Domain-level
 rebase policy belongs above this storage protocol.
 
-The root directory flush is required to make the pointer replacement durable
-against power loss. If the process stops between pointer replacement and root
-flush, reopen uses whichever complete `CURRENT` the filesystem presents; it
-does not infer intent from the journal.
+The project-root platform-native namespace durability barrier is required to
+make the pointer replacement durable against power loss. On POSIX this is the
+root directory `fsync(2)`. On Windows NTFS it is the `CURRENT` rename through
+the flushed `FILE_FLAG_WRITE_THROUGH` staging handle; no directory-handle flush
+is claimed. If the process stops before the barrier completes, reopen uses
+whichever complete `CURRENT` the filesystem presents and never infers intent
+from the journal.
 
 ### Validation and failure behavior
 
@@ -349,8 +362,9 @@ For every other generation, cleanup:
 3. acquires the candidate `lease.lock` exclusively without waiting;
 4. recomputes reachability;
 5. atomically moves the candidate into `trash/`;
-6. flushes `generations/` and `trash/`; and
-7. deletes the trash entry and flushes `trash/`.
+6. completes platform-native namespace barriers for `generations/` and
+   `trash/`; and
+7. deletes the trash entry and completes the `trash/` barrier.
 
 A busy lease skips the candidate. A crash before the move leaves it intact; a
 crash after the move makes it invisible to readers and eligible for deletion
@@ -421,8 +435,8 @@ identity after locking to prevent path substitution.
 - Readers have repeatable snapshots without blocking publication.
 - Crashed readers and writers need no wall-clock stale-owner heuristic.
 - Recovery is deterministic because it never elects a generation.
-- Windows and POSIX implementations must meet the same contract or fail before
-  mutation.
+- Windows NTFS and POSIX implementations must meet their documented
+  platform-native barriers or fail before mutation; ReFS is unsupported.
 - Existing fixed-path `RewriteBatch` and standalone generation counters are
   transitional internals to be replaced and related knowledge-layer issues.
 

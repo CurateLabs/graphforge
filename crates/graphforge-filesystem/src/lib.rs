@@ -8,12 +8,12 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
-/// Stable filesystem identity suitable for NTFS/ReFS and Unix filesystems.
+/// Stable filesystem identity suitable for Windows and Unix filesystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileIdentity {
     /// Native volume/device identity.
     pub volume_serial: u64,
-    /// Full native file identity (128-bit on ReFS; zero-extended inode on Unix).
+    /// Full native file identity (128-bit on Windows; zero-extended inode on Unix).
     pub file_id: [u8; 16],
 }
 
@@ -69,10 +69,8 @@ pub fn windows_volume_information(path: &Path) -> io::Result<WindowsVolumeInform
 /// Failure classification for an attempted atomic replacement.
 #[derive(Debug)]
 pub enum ReplaceFileError {
-    /// The operating system rejected the operation and both named identities
-    /// were verified unchanged. The disposable replacement file may have had
-    /// streams or attributes changed by the operating system and must not be
-    /// reused after any failed call.
+    /// The operating system rejected the operation and the open source handle
+    /// plus both named identities were verified unchanged.
     NotReplaced(io::Error),
     /// The operating system reported failure after it may have moved or
     /// modified one of the named files. The caller must reconcile from
@@ -125,8 +123,10 @@ pub fn classify_failed_replacement(
 /// Atomically replace an existing regular file with another regular file in
 /// the same directory.
 ///
-/// Both files must already be closed and flushed. The caller remains
-/// responsible for flushing the containing directory after this returns.
+/// Source contents must already be written. On Windows the implementation
+/// reopens and flushes the source through a write-through handle before issuing
+/// the NTFS namespace rename through that same handle. On POSIX the caller
+/// remains responsible for the containing-directory durability barrier.
 pub fn replace_file(
     directory: &File,
     source_name: &OsStr,
@@ -138,6 +138,9 @@ pub fn replace_file(
 }
 
 /// Atomically install a new regular file without replacing an existing entry.
+///
+/// Windows uses the same flushed write-through source handle for the NTFS
+/// namespace rename. POSIX callers remain responsible for directory `fsync`.
 pub fn install_new_file(
     directory: &File,
     source_name: &OsStr,
@@ -373,9 +376,8 @@ fn install_new_file_platform(
     source_name: &OsStr,
     target_name: &OsStr,
 ) -> io::Result<()> {
-    // Windows rename does not replace an existing destination. The explicit
-    // precheck supplies a stable AlreadyExists class; the OS operation remains
-    // the race-free authority.
+    // The native handle-scoped rename is the race-free no-replace authority;
+    // identity reconciliation supplies a stable AlreadyExists class.
     windows::install_new_file(directory, source_name, target_name)
 }
 
@@ -459,7 +461,7 @@ mod windows {
     use std::os::windows::io::AsRawHandle as _;
     use std::path::{Path, PathBuf};
 
-    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, LocalFree};
     #[cfg(test)]
     use windows_sys::Win32::Security::Authorization::{
         ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
@@ -471,69 +473,85 @@ mod windows {
     use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetDriveTypeW, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
-        GetVolumePathNameW, ReplaceFileW, VOLUME_NAME_DOS,
+        BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, DELETE, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_WRITE_THROUGH, FILE_ID_INFO, FILE_NAME_NORMALIZED,
+        FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetDriveTypeW,
+        GetFileInformationByHandle, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+        GetVolumeInformationW, GetVolumePathNameW, SetFileInformationByHandle, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
     use super::classify_failed_replacement;
     use super::{
-        FileIdentity, ReplaceFileError, WindowsVolumeInformation, verify_regular_metadata,
+        FileIdentity, ReplaceFileError, WindowsVolumeInformation, is_link_or_reparse,
+        verify_regular_metadata,
     };
 
     const DRIVE_FIXED: u32 = 3;
     const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
     const EXTENDED_PATH_CAPACITY: usize = 32_768;
     const FILESYSTEM_NAME_CAPACITY: usize = 256;
+    const FILE_RENAME_REPLACE_IF_EXISTS_FLAG: u32 = 0x0000_0001;
+    const FILE_RENAME_POSIX_SEMANTICS_FLAG: u32 = 0x0000_0002;
 
     pub(super) fn replace_file(
         directory: &File,
         source_name: &OsStr,
         target_name: &OsStr,
     ) -> Result<(), ReplaceFileError> {
-        let directory_path = directory_path(directory).map_err(ReplaceFileError::NotReplaced)?;
+        let (_directory_guard, directory_path) =
+            guarded_directory_path(directory).map_err(ReplaceFileError::NotReplaced)?;
         let source_path = directory_path.join(source_name);
         let target_path = directory_path.join(target_name);
-        verify_windows_regular(&source_path).map_err(ReplaceFileError::NotReplaced)?;
-        verify_windows_regular(&target_path).map_err(ReplaceFileError::NotReplaced)?;
-        let source_before = identity(&source_path).map_err(ReplaceFileError::NotReplaced)?;
-        let target_before = identity(&target_path).map_err(ReplaceFileError::NotReplaced)?;
-        let source = wide(source_path.as_os_str()).map_err(ReplaceFileError::NotReplaced)?;
-        let target = wide(target_path.as_os_str()).map_err(ReplaceFileError::NotReplaced)?;
-        // SAFETY: both strings are owned, NUL-terminated UTF-16 buffers for
-        // the duration of the call. Optional backup/exclusion pointers are
-        // null as required when unused. ReplaceFileW has no supported flags.
-        let succeeded = unsafe {
-            ReplaceFileW(
-                target.as_ptr(),
-                source.as_ptr(),
-                std::ptr::null(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
-        if succeeded != 0 {
-            return if identity(&target_path).ok() == Some(source_before) && !source_path.exists() {
-                Ok(())
-            } else {
-                Err(ReplaceFileError::StateUnknown(io::Error::other(
-                    "replacement success state did not reconcile",
-                )))
-            };
+        let source = open_rename_handle(&source_path).map_err(ReplaceFileError::NotReplaced)?;
+        verify_open_regular(&source).map_err(ReplaceFileError::NotReplaced)?;
+        source.sync_all().map_err(ReplaceFileError::NotReplaced)?;
+        let source_before = file_identity(&source).map_err(ReplaceFileError::NotReplaced)?;
+        if identity(&source_path).map_err(ReplaceFileError::NotReplaced)? != source_before {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "rename source identity changed during open",
+            )));
         }
-        let error = io::Error::last_os_error();
-        let source_after = identity(&source_path);
-        let target_after = identity(&target_path);
+
+        let target = open_identity_handle(&target_path).map_err(ReplaceFileError::NotReplaced)?;
+        verify_open_regular(&target).map_err(ReplaceFileError::NotReplaced)?;
+        let target_before = file_identity(&target).map_err(ReplaceFileError::NotReplaced)?;
+        if identity(&target_path).map_err(ReplaceFileError::NotReplaced)? != target_before {
+            return Err(ReplaceFileError::NotReplaced(io::Error::other(
+                "rename target identity changed during open",
+            )));
+        }
+
+        let result = rename_handle(&source, target_path.as_os_str(), true);
+        let opened_source_after = file_identity(&source).ok();
+        let opened_target_after = file_identity(&target).ok();
+        let source_after = identity(&source_path).ok();
+        let target_after = identity(&target_path).ok();
+        if result.is_ok()
+            && opened_source_after == Some(source_before)
+            && opened_target_after == Some(target_before)
+            && source_after.is_none()
+            && target_after == Some(source_before)
+        {
+            return Ok(());
+        }
+        if result.is_ok() {
+            return Err(ReplaceFileError::StateUnknown(io::Error::other(
+                "replacement success state did not reconcile",
+            )));
+        }
+        let error = result.expect_err("failed rename result was checked");
+        if opened_source_after != Some(source_before) || opened_target_after != Some(target_before)
+        {
+            return Err(ReplaceFileError::StateUnknown(error));
+        }
         Err(super::classify_failed_replacement(
             error,
             source_before,
             target_before,
-            source_after.ok(),
-            target_after.ok(),
+            source_after,
+            target_after,
         ))
     }
 
@@ -542,26 +560,187 @@ mod windows {
         source_name: &OsStr,
         target_name: &OsStr,
     ) -> io::Result<()> {
-        let directory_path = directory_path(directory)?;
-        let source = directory_path.join(source_name);
-        let target = directory_path.join(target_name);
-        verify_windows_regular(&source)?;
-        match std::fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Ok(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "target exists",
-                ));
-            }
-            Err(error) => return Err(error),
+        install_new_file_before_rename(directory, source_name, target_name, || {})
+    }
+
+    fn install_new_file_before_rename(
+        directory: &File,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        before_rename: impl FnOnce(),
+    ) -> io::Result<()> {
+        let (_directory_guard, directory_path) = guarded_directory_path(directory)?;
+        let source_path = directory_path.join(source_name);
+        let target_path = directory_path.join(target_name);
+        let source = open_rename_handle(&source_path)?;
+        verify_open_regular(&source)?;
+        source.sync_all()?;
+        let source_identity = file_identity(&source)?;
+        if identity(&source_path)? != source_identity {
+            return Err(io::Error::other(
+                "rename source identity changed during open",
+            ));
         }
-        let source_identity = identity(&source)?;
-        std::fs::rename(&source, &target)?;
-        if identity(&target)? != source_identity || source.exists() {
+
+        before_rename();
+        let result = rename_handle(&source, target_path.as_os_str(), false);
+        let opened_after = file_identity(&source).ok();
+        let source_after = identity(&source_path).ok();
+        let target_after = identity(&target_path).ok();
+        if result.is_ok()
+            && opened_after == Some(source_identity)
+            && source_after.is_none()
+            && target_after == Some(source_identity)
+        {
+            return Ok(());
+        }
+        if result.is_ok() {
             return Err(io::Error::other("atomic creation state did not reconcile"));
         }
-        Ok(())
+        if opened_after != Some(source_identity) || source_after != Some(source_identity) {
+            return Err(io::Error::other(
+                "atomic creation failure state requires reconciliation",
+            ));
+        }
+        let error = result.expect_err("failed rename result was checked");
+        if matches!(error.raw_os_error(), Some(80) | Some(183)) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "target exists",
+            ));
+        }
+        Err(error)
+    }
+
+    fn guarded_directory_path(directory: &File) -> io::Result<(File, PathBuf)> {
+        let supplied_identity = file_identity(directory)?;
+        let supplied_path = directory_path(directory)?;
+        let guard = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&supplied_path)?;
+        let guard_metadata = guard.metadata()?;
+        if is_link_or_reparse(&guard_metadata)
+            || !guard_metadata.is_dir()
+            || file_identity(&guard)? != supplied_identity
+        {
+            return Err(io::Error::other(
+                "publication directory identity changed while acquiring guard",
+            ));
+        }
+        let guarded_path = directory_path(&guard)?;
+        Ok((guard, guarded_path))
+    }
+
+    fn open_rename_handle(path: &Path) -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .access_mode(GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH)
+            .open(path)
+    }
+
+    fn rename_handle(
+        source: &File,
+        target_path: &OsStr,
+        replace_if_exists: bool,
+    ) -> io::Result<()> {
+        let mut rename = RenameInformation::new(target_path, replace_if_exists)?;
+        // SAFETY: `rename` owns an aligned, initialized FILE_RENAME_INFO buffer
+        // for the duration of the call. The absolute target path was resolved
+        // from the retained directory handle, and the source was opened with
+        // FILE_FLAG_WRITE_THROUGH, so on NTFS the rename metadata uses the
+        // documented write-through path. Replacement uses POSIX semantics so
+        // the retained old-target handle remains valid while new name opens
+        // resolve to the replacement.
+        let information_class = if replace_if_exists {
+            FileRenameInfoEx
+        } else {
+            FileRenameInfo
+        };
+        let renamed = unsafe {
+            SetFileInformationByHandle(
+                source.as_raw_handle(),
+                information_class,
+                rename.as_mut_ptr().cast(),
+                rename.byte_len,
+            )
+        };
+        if renamed == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    struct RenameInformation {
+        words: Vec<usize>,
+        byte_len: u32,
+    }
+
+    impl RenameInformation {
+        fn new(target_name: &OsStr, replace_if_exists: bool) -> io::Result<Self> {
+            let target = target_name.encode_wide().collect::<Vec<_>>();
+            if target.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "target name is empty",
+                ));
+            }
+            let name_bytes = target
+                .len()
+                .checked_mul(std::mem::size_of::<u16>())
+                .and_then(|length| u32::try_from(length).ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "target name too long")
+                })?;
+            let required_bytes = std::mem::size_of::<FILE_RENAME_INFO>()
+                .checked_add(usize::try_from(name_bytes).unwrap_or(usize::MAX))
+                .and_then(|length| length.checked_add(std::mem::size_of::<u16>()))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "target name too long")
+                })?;
+            let word_bytes = std::mem::size_of::<usize>();
+            let mut words = vec![0usize; required_bytes.div_ceil(word_bytes)];
+            let allocated_bytes = words
+                .len()
+                .checked_mul(word_bytes)
+                .and_then(|length| u32::try_from(length).ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "target name too long")
+                })?;
+            let information = words.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+            // SAFETY: `words` is zero-initialized, pointer-aligned, and at
+            // least sizeof(FILE_RENAME_INFO) plus the UTF-16 name and its NUL.
+            // FileNameLength excludes the retained zero terminator.
+            unsafe {
+                if replace_if_exists {
+                    (*information).Anonymous.Flags =
+                        FILE_RENAME_REPLACE_IF_EXISTS_FLAG | FILE_RENAME_POSIX_SEMANTICS_FLAG;
+                } else {
+                    (*information).Anonymous.ReplaceIfExists = false;
+                }
+                // SetFileInformationByHandle resolves a Win32 relative path
+                // against the process current directory. Use the absolute
+                // target path derived from the retained directory handle.
+                (*information).RootDirectory = std::ptr::null_mut();
+                (*information).FileNameLength = name_bytes;
+                std::ptr::copy_nonoverlapping(
+                    target.as_ptr(),
+                    std::ptr::addr_of_mut!((*information).FileName).cast::<u16>(),
+                    target.len(),
+                );
+            }
+            Ok(Self {
+                words,
+                byte_len: allocated_bytes,
+            })
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut FILE_RENAME_INFO {
+            self.words.as_mut_ptr().cast()
+        }
     }
 
     pub(super) fn directory_path(directory: &File) -> io::Result<PathBuf> {
@@ -590,8 +769,14 @@ mod windows {
                 FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
             )
         };
-        if written == 0 || usize::try_from(written).unwrap_or(usize::MAX) >= buffer.len() {
+        if written == 0 {
             return Err(io::Error::last_os_error());
+        }
+        if usize::try_from(written).unwrap_or(usize::MAX) >= buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "normalized directory path exceeded its allocated buffer",
+            ));
         }
         buffer.truncate(usize::try_from(written).unwrap_or_default());
         Ok(PathBuf::from(std::ffi::OsString::from_wide(&buffer)))
@@ -699,11 +884,9 @@ mod windows {
         })
     }
 
-    fn verify_windows_regular(path: &Path) -> io::Result<()> {
-        let metadata = std::fs::symlink_metadata(path)?;
-        verify_regular_metadata(&metadata)?;
-        let file = open_identity_handle(path)?;
-        let information = information(&file)?;
+    fn verify_open_regular(file: &File) -> io::Result<()> {
+        verify_regular_metadata(&file.metadata()?)?;
+        let information = information(file)?;
         if information.nNumberOfLinks != 1 {
             return Err(io::Error::other("replacement path is hard linked"));
         }
@@ -915,7 +1098,7 @@ mod windows {
         }
 
         #[test]
-        fn canonical_extended_drive_path_has_native_volume_information() {
+        fn canonical_extended_drive_path_reports_native_volume_information() {
             use std::path::{Component, Prefix};
 
             let parent = tempfile::tempdir().unwrap();
@@ -928,10 +1111,165 @@ mod windows {
             let information = volume_information(&canonical).unwrap();
             assert!(information.fixed);
             assert!(!information.read_only);
-            assert!(matches!(
-                information.filesystem_name.to_ascii_lowercase().as_str(),
-                "ntfs" | "refs"
-            ));
+            assert!(!information.filesystem_name.is_empty());
+        }
+
+        #[test]
+        fn write_through_source_handle_performs_replacement_rename() {
+            let directory = tempfile::tempdir().unwrap();
+            let source_path = directory.path().join("source");
+            let target_path = directory.path().join("target");
+            std::fs::write(&source_path, b"new").unwrap();
+            std::fs::write(&target_path, b"old").unwrap();
+            let source = open_rename_handle(&source_path).unwrap();
+            source.sync_all().unwrap();
+            let source_identity = file_identity(&source).unwrap();
+            let old_target = open_identity_handle(&target_path).unwrap();
+            let old_target_identity = file_identity(&old_target).unwrap();
+
+            rename_handle(&source, target_path.as_os_str(), true).unwrap();
+
+            assert_eq!(file_identity(&source).unwrap(), source_identity);
+            assert_eq!(file_identity(&old_target).unwrap(), old_target_identity);
+            assert!(!source_path.exists());
+            assert_eq!(identity(&target_path).unwrap(), source_identity);
+            assert_eq!(std::fs::read(target_path).unwrap(), b"new");
+        }
+
+        #[test]
+        fn rename_information_buffer_meets_win32_layout_contract() {
+            let target_path = OsStr::new(r"C:\durability-probe\published");
+            let target = target_path.encode_wide().collect::<Vec<_>>();
+            let mut rename = RenameInformation::new(target_path, false).unwrap();
+            let information = rename.as_mut_ptr();
+
+            assert_eq!(
+                information.addr() % std::mem::align_of::<FILE_RENAME_INFO>(),
+                0
+            );
+            assert!(
+                usize::try_from(rename.byte_len).unwrap()
+                    >= std::mem::size_of::<FILE_RENAME_INFO>()
+                        + target.len() * std::mem::size_of::<u16>()
+                        + std::mem::size_of::<u16>()
+            );
+            // SAFETY: `rename` owns the initialized buffer and the assertion
+            // above proves room for the encoded name plus its zero terminator.
+            unsafe {
+                assert_eq!((*information).FileNameLength as usize, target.len() * 2);
+                assert!((*information).RootDirectory.is_null());
+                assert!(!(*information).Anonymous.ReplaceIfExists);
+                let file_name = std::ptr::addr_of!((*information).FileName).cast::<u16>();
+                assert_eq!(std::slice::from_raw_parts(file_name, target.len()), target);
+                assert_eq!(*file_name.add(target.len()), 0);
+            }
+
+            let mut replacement = RenameInformation::new(target_path, true).unwrap();
+            // SAFETY: `replacement` owns a live initialized buffer.
+            unsafe {
+                assert_eq!(
+                    (*replacement.as_mut_ptr()).Anonymous.Flags,
+                    FILE_RENAME_REPLACE_IF_EXISTS_FLAG | FILE_RENAME_POSIX_SEMANTICS_FLAG
+                );
+            }
+        }
+
+        #[test]
+        fn contender_created_after_source_open_is_never_replaced() {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            let target = directory.path().join("target");
+            std::fs::write(&source, b"source").unwrap();
+            let source_before = identity(&source).unwrap();
+            let handle = super::super::tests::directory_handle(directory.path());
+            let error = install_new_file_before_rename(
+                &handle,
+                OsStr::new("source"),
+                OsStr::new("target"),
+                || std::fs::write(&target, b"contender").unwrap(),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&source).unwrap(), b"source");
+            assert_eq!(identity(&source).unwrap(), source_before);
+            assert_eq!(std::fs::read(&target).unwrap(), b"contender");
+            assert_ne!(identity(&target).unwrap(), source_before);
+        }
+
+        #[test]
+        fn absolute_target_does_not_resolve_against_process_current_directory() {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source");
+            std::fs::write(&source, b"source").unwrap();
+            let cwd_decoy = tempfile::Builder::new()
+                .prefix("graphforge-rename-decoy-")
+                .tempdir_in(std::env::current_dir().unwrap())
+                .unwrap();
+            let target_name = cwd_decoy.path().file_name().unwrap();
+            let target = directory.path().join(target_name);
+            let handle = super::super::tests::directory_handle(directory.path());
+
+            install_new_file(&handle, OsStr::new("source"), target_name).unwrap();
+
+            assert_eq!(std::fs::read(target).unwrap(), b"source");
+            assert!(cwd_decoy.path().is_dir());
+        }
+
+        #[test]
+        fn internal_directory_guard_blocks_anchor_rename() {
+            let parent = tempfile::tempdir().unwrap();
+            let directory = parent.path().join("probe");
+            let moved = parent.path().join("moved");
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("source"), b"source").unwrap();
+            let caller = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&directory)
+                .unwrap();
+
+            install_new_file_before_rename(
+                &caller,
+                OsStr::new("source"),
+                OsStr::new("target"),
+                || assert!(std::fs::rename(&directory, &moved).is_err()),
+            )
+            .unwrap();
+
+            assert_eq!(std::fs::read(directory.join("target")).unwrap(), b"source");
+            assert!(!moved.exists());
+        }
+
+        #[test]
+        fn directory_guard_rejects_junction_before_publication() {
+            let parent = tempfile::tempdir().unwrap();
+            let target_directory = parent.path().join("target-directory");
+            let junction = parent.path().join("junction");
+            std::fs::create_dir(&target_directory).unwrap();
+            let source = target_directory.join("source");
+            let published = target_directory.join("published");
+            std::fs::write(&source, b"source").unwrap();
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&junction)
+                .arg(&target_directory)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let caller = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&junction)
+                .unwrap();
+
+            let error = install_new_file(&caller, OsStr::new("source"), OsStr::new("published"))
+                .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(std::fs::read(source).unwrap(), b"source");
+            assert!(!published.exists());
         }
     }
 }
@@ -940,7 +1278,7 @@ mod windows {
 mod tests {
     use super::*;
 
-    fn directory_handle(path: &Path) -> File {
+    pub(super) fn directory_handle(path: &Path) -> File {
         #[cfg(unix)]
         return File::open(path).unwrap();
 
@@ -948,9 +1286,12 @@ mod tests {
         {
             use std::os::windows::fs::OpenOptionsExt as _;
             const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            const FILE_SHARE_READ: u32 = 0x0000_0001;
+            const FILE_SHARE_WRITE: u32 = 0x0000_0002;
             return std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
                 .unwrap();
@@ -987,6 +1328,55 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
         assert_eq!(std::fs::read(&second).unwrap(), b"other");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_no_replace_install_has_exactly_one_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        let target = directory.path().join("target");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut contenders = Vec::new();
+        for name in ["first", "second"] {
+            let path = directory.path().to_path_buf();
+            let barrier = Arc::clone(&barrier);
+            contenders.push(std::thread::spawn(move || {
+                let handle = directory_handle(&path);
+                barrier.wait();
+                install_new_file(&handle, OsStr::new(name), OsStr::new("target"))
+            }));
+        }
+        barrier.wait();
+        let results = contenders
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::AlreadyExists)
+                })
+                .count(),
+            1
+        );
+        let target_bytes = std::fs::read(&target).unwrap();
+        assert!(target_bytes == b"first" || target_bytes == b"second");
+        let loser = if target_bytes == b"first" {
+            second
+        } else {
+            first
+        };
+        assert!(loser.exists());
     }
 
     #[test]
