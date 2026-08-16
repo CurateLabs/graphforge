@@ -132,9 +132,20 @@ entries are counted and preserved rather than traversed or guessed about.
 
 Initialization of an empty or resumable uninitialized container and
 read-only checkpoint opens remain semantically distinct: they do not run the
-recovery cleanup pass. Safe open evidence exposes selected generation class,
-repaired/aborted journal counts, removed/quarantined entries, deferral
-reason, and elapsed phase without payload data or sensitive paths.
+recovery cleanup pass. Safe open evidence exposes selected generation class
+(`committed_current` or `checkpoint_pinned`), repaired/aborted journal counts,
+removed/quarantined entries, deferral reason, and elapsed phase without payload
+data or sensitive paths.
+
+First-class retention and orphan garbage collection
+(`inspect_project_reachability` / `preview_project_cleanup` /
+`execute_project_cleanup`) share recovery's verified reachability oracle under
+the same writer/checkpoint lock order. Dry-run and execute classify with that
+oracle before any move. CURRENT, retained ancestors, checkpoint roots, and live
+leases are never selected. Reports reconcile candidates, removed, skipped-live,
+quarantined, unknown, and remaining bytes within configured entry/byte/work
+bounds. Crash at `project.after_gc_move` / `project.after_gc_delete` remains
+idempotent on the next cleanup or recovery pass.
 
 New-container interruption after `FORMAT` is durable leaves a supported
 uninitialized container. A later `open_or_initialize_project()` resumes that

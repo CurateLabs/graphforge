@@ -77,10 +77,19 @@ pub use project_publication::{
 
 pub mod project_recovery;
 pub use project_recovery::{
-    ProjectOpenRecoveryEvidence, ProjectOpenRecoveryKind, ProjectRecoveryDeferral,
-    ProjectRecoveryGenerationClass, ProjectRecoveryReport,
-    open_or_initialize_project_with_recovery, recover_project_on_open,
+    DEFAULT_RETAINED_ANCESTORS, MAX_RETAINED_ANCESTORS, ProjectOpenRecoveryEvidence,
+    ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
+    ProjectRecoveryReport, open_or_initialize_project_with_recovery, recover_project_on_open,
     recover_project_transactions,
+};
+
+pub mod project_retention;
+pub use project_retention::{
+    DEFAULT_RETENTION_CLEANUP_BATCH, DEFAULT_RETENTION_MAX_BYTES, DEFAULT_RETENTION_MAX_ENTRIES,
+    DEFAULT_RETENTION_MAX_WORK_UNITS, ProjectCleanupDisposition, ProjectCleanupEntry,
+    ProjectCleanupLocation, ProjectCleanupReport, ProjectReachabilityReport,
+    ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
+    inspect_project_reachability, preview_project_cleanup,
 };
 
 pub mod project_portable;

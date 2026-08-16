@@ -495,9 +495,40 @@
     },
     {
       "id": "bounded_retention_orphan_gc",
-      "coverage": "deferred",
-      "owner_issue": 751,
-      "rationale": "First-class retention/GC productization is #751."
+      "coverage": "covered",
+      "evidence": [
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "dry_run_and_execute_share_reachability_oracle"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "checkpoint_root_and_live_lease_are_never_selected"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "concurrent_writer_returns_typed_busy_without_cleanup"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "work_and_byte_limits_are_fail_closed"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "malicious_filesystem_entries_are_quarantined_not_deleted"
+        },
+        {
+          "kind": "rust",
+          "path": "crates/graphforge-storage/src/project_retention.rs",
+          "symbol": "gc_crash_after_move_is_idempotent_on_reopen_cleanup"
+        }
+      ],
+      "rationale": "First-class retention/GC productization with shared reachability oracle, lease/checkpoint safety, bounds, and crash idempotence."
     }
   ],
   "filesystem_evidence": [
