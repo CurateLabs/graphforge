@@ -17,6 +17,18 @@ pub struct FileIdentity {
     pub file_id: [u8; 16],
 }
 
+/// Native Windows volume facts needed by the durability admission policy.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsVolumeInformation {
+    /// Filesystem name reported by the mounted volume (`NTFS`, `ReFS`, ...).
+    pub filesystem_name: String,
+    /// Whether the volume reports the read-only filesystem flag.
+    pub read_only: bool,
+    /// Whether Windows classifies the volume root as a fixed local drive.
+    pub fixed: bool,
+}
+
 /// Create a durability-probe directory that is private to the current user.
 ///
 /// Unix uses mode `0700`. Windows installs a protected DACL that grants full
@@ -43,6 +55,15 @@ pub fn file_link_count(file: &File) -> io::Result<u64> {
 /// Return the native hard-link count of a non-followed path.
 pub fn path_link_count(path: &Path) -> io::Result<u64> {
     path_link_count_platform(path)
+}
+
+/// Query Windows volume facts from the native mount root containing `path`.
+///
+/// This accepts canonical extended-length paths such as `\\?\C:\...` and
+/// follows mount-point boundaries through `GetVolumePathNameW`.
+#[cfg(windows)]
+pub fn windows_volume_information(path: &Path) -> io::Result<WindowsVolumeInformation> {
+    windows::volume_information(path)
 }
 
 /// Failure classification for an attempted atomic replacement.
@@ -452,13 +473,21 @@ mod windows {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
-        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, ReplaceFileW, VOLUME_NAME_DOS,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetDriveTypeW, GetFileInformationByHandle,
+        GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationW,
+        GetVolumePathNameW, ReplaceFileW, VOLUME_NAME_DOS,
     };
 
     #[cfg(test)]
     use super::classify_failed_replacement;
-    use super::{FileIdentity, ReplaceFileError, verify_regular_metadata};
+    use super::{
+        FileIdentity, ReplaceFileError, WindowsVolumeInformation, verify_regular_metadata,
+    };
+
+    const DRIVE_FIXED: u32 = 3;
+    const FILE_READ_ONLY_VOLUME: u32 = 0x0008_0000;
+    const EXTENDED_PATH_CAPACITY: usize = 32_768;
+    const FILESYSTEM_NAME_CAPACITY: usize = 256;
 
     pub(super) fn replace_file(
         directory: &File,
@@ -612,6 +641,62 @@ mod windows {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn volume_information(path: &Path) -> io::Result<WindowsVolumeInformation> {
+        let path = wide(path.as_os_str())?;
+        let mut volume_root = vec![0u16; EXTENDED_PATH_CAPACITY];
+        // SAFETY: `path` is a NUL-terminated UTF-16 input and `volume_root`
+        // is writable for the exact capacity supplied to the native call.
+        let found = unsafe {
+            GetVolumePathNameW(
+                path.as_ptr(),
+                volume_root.as_mut_ptr(),
+                u32::try_from(volume_root.len()).expect("extended path capacity fits u32"),
+            )
+        };
+        if found == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let root_length = volume_root
+            .iter()
+            .position(|unit| *unit == 0)
+            .ok_or_else(|| io::Error::other("native volume root was not terminated"))?;
+        volume_root.truncate(root_length + 1);
+
+        let mut filesystem_flags = 0u32;
+        let mut filesystem_name = vec![0u16; FILESYSTEM_NAME_CAPACITY];
+        // SAFETY: `volume_root` is the NUL-terminated mount root returned by
+        // Windows. Optional outputs are null and both supplied outputs point
+        // to initialized writable storage of the advertised sizes.
+        let described = unsafe {
+            GetVolumeInformationW(
+                volume_root.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut filesystem_flags,
+                filesystem_name.as_mut_ptr(),
+                u32::try_from(filesystem_name.len()).expect("filesystem name capacity fits u32"),
+            )
+        };
+        if described == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let name_length = filesystem_name
+            .iter()
+            .position(|unit| *unit == 0)
+            .ok_or_else(|| io::Error::other("native filesystem name was not terminated"))?;
+        let filesystem_name = String::from_utf16(&filesystem_name[..name_length])
+            .map_err(|_| io::Error::other("native filesystem name was invalid UTF-16"))?;
+        // SAFETY: `volume_root` remains a valid NUL-terminated root path.
+        let drive_type = unsafe { GetDriveTypeW(volume_root.as_ptr()) };
+        Ok(WindowsVolumeInformation {
+            filesystem_name,
+            read_only: (filesystem_flags & FILE_READ_ONLY_VOLUME) != 0,
+            fixed: drive_type == DRIVE_FIXED,
+        })
     }
 
     fn verify_windows_regular(path: &Path) -> io::Result<()> {
@@ -827,6 +912,26 @@ mod windows {
             assert!(status.success());
             let metadata = std::fs::symlink_metadata(&junction).unwrap();
             assert!(super::super::is_link_or_reparse(&metadata));
+        }
+
+        #[test]
+        fn canonical_extended_drive_path_has_native_volume_information() {
+            use std::path::{Component, Prefix};
+
+            let parent = tempfile::tempdir().unwrap();
+            let canonical = parent.path().canonicalize().unwrap();
+            assert!(matches!(
+                canonical.components().next(),
+                Some(Component::Prefix(prefix))
+                    if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+            ));
+            let information = volume_information(&canonical).unwrap();
+            assert!(information.fixed);
+            assert!(!information.read_only);
+            assert!(matches!(
+                information.filesystem_name.to_ascii_lowercase().as_str(),
+                "ntfs" | "refs"
+            ));
         }
     }
 }

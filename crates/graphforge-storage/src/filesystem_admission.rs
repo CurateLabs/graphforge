@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use sha2::{Digest as _, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use sysinfo::Disks;
 
 const PROBE_BYTES_A: &[u8] = b"graphforge-filesystem-probe/a\n";
@@ -292,20 +293,15 @@ fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfE
 
 #[cfg(target_os = "windows")]
 fn classify_supported_local_volume_platform(parent: &Path) -> Result<String, GfError> {
-    let disks = Disks::new_with_refreshed_list();
-    let disk = disks
-        .list()
-        .iter()
-        .filter(|disk| parent.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().components().count())
-        .ok_or_else(|| unsupported("CLASSIFY", "volume_unknown"))?;
-    if disk.is_read_only() {
+    let information = graphforge_filesystem::windows_volume_information(parent)
+        .map_err(|_| unsupported("CLASSIFY", "native_volume_query_failed"))?;
+    if information.read_only {
         return Err(unsupported("CLASSIFY", "volume_read_only"));
     }
-    if disk.is_removable() {
-        return Err(unsupported("CLASSIFY", "volume_removable"));
+    if !information.fixed {
+        return Err(unsupported("CLASSIFY", "volume_not_fixed_local"));
     }
-    let class = disk.file_system().to_string_lossy().to_ascii_lowercase();
+    let class = information.filesystem_name.to_ascii_lowercase();
     if !matches!(class.as_str(), "ntfs" | "refs") {
         return Err(unsupported("CLASSIFY", "filesystem_class_unproven"));
     }
@@ -977,6 +973,27 @@ mod tests {
         assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
         assert!(error.to_string().contains("ancestor_link_or_special"));
         assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_extended_drive_path_completes_full_native_admission() {
+        use std::path::{Component, Prefix};
+
+        let parent = canonical_tempdir();
+        assert!(matches!(
+            parent.path().components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ));
+        let target = parent.path().join("project");
+        let evidence = filesystem_durability_preflight(&target).unwrap();
+        assert!(matches!(
+            evidence.filesystem_class.as_str(),
+            "ntfs" | "refs"
+        ));
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
     #[test]

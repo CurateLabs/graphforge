@@ -174,9 +174,7 @@ def job_needs(job_body: str) -> set[str]:
         if value:
             if value.startswith("[") and value.endswith("]"):
                 return {
-                    item.strip().strip("'\"")
-                    for item in value[1:-1].split(",")
-                    if item.strip()
+                    item.strip().strip("'\"") for item in value[1:-1].split(",") if item.strip()
                 }
             return {value.strip("'\"")}
         indent = len(line) - len(line.lstrip())

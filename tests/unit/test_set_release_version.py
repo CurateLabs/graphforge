@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import tomllib
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "set_release_version.py"
 SPEC = importlib.util.spec_from_file_location("set_release_version", SCRIPT)
@@ -38,7 +39,13 @@ def test_expected_mapping() -> None:
 
 
 def test_current_tree_is_aligned() -> None:
-    assert len(set_release_version.cargo_lock_versions()) == 17
+    lock_versions = set_release_version.cargo_lock_versions()
+    assert len(lock_versions) == 18
+    manifest_packages = {
+        tomllib.loads(path.read_text(encoding="utf-8"))["package"]["name"]
+        for path in set_release_version.crate_manifests()
+    }
+    assert set(lock_versions) == manifest_packages
     assert set_release_version.check_aligned() == []
     compatibility = json.loads(set_release_version.SKILLS_COMPATIBILITY.read_text(encoding="utf-8"))
     current = set_release_version.read_current()
