@@ -121,7 +121,8 @@ under CodSpeed's CPU simulation instrument on pull requests to `main`, pushes
 to `main`, and manual dispatch. It reports performance deltas against the base
 commit as evidence; it is **not** part of the required `CI Gate` aggregate, and
 its Cargo build stays a diagnostic path next to authoritative Bazel
-compilation. See
+compilation. A sole `lex[simple_match]` Performance Analysis failure on a
+non-cypher PR is a known short-bench noise pattern — see triage in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
 
 ### `binding-release-candidate.yml`

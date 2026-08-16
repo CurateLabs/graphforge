@@ -90,15 +90,36 @@ fn bind(ast: &AstQuery) -> usize {
     binder.bind(ast).map_or(0, |plan| plan.ops.len())
 }
 
+/// How many lexer passes run inside one measured sample.
+///
+/// `SimpleMatch` is a few dozen tokens; a single pass is short enough that
+/// CodSpeed CPU-simulation overhead can dominate and produce intermittent
+/// sole `lex[simple_match]` false regressions (~−19% to −31%) on PRs that
+/// never touch the Cypher front end. Batching raises SNR without changing
+/// lexer semantics. Longer shapes already have enough work per sample.
+const fn lex_iters(shape: Shape) -> usize {
+    match shape {
+        Shape::SimpleMatch => 256,
+        _ => 1,
+    }
+}
+
 /// Tokenization only — the first pass over the query text.
 #[divan::bench(args = SHAPES)]
 fn lex(bencher: Bencher, shape: Shape) {
     let query = shape.query();
+    let iters = lex_iters(shape);
     bencher.bench(|| {
-        let tokens = Lexer::new(divan::black_box(query))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("benchmark query lexes");
-        divan::black_box(tokens.len())
+        let mut tokens = 0_usize;
+        for _ in 0..iters {
+            tokens = tokens.wrapping_add(
+                Lexer::new(divan::black_box(query))
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("benchmark query lexes")
+                    .len(),
+            );
+        }
+        divan::black_box(tokens)
     });
 }
 

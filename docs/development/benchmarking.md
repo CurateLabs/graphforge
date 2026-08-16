@@ -1,11 +1,13 @@
 # Benchmarking with CodSpeed
 
-**Status:** Continuous on every pull request to `main` (`CodSpeed` workflow)
+**Status:** Continuous on every pull request to `main` (`CodSpeed` workflow) —
+**diagnostic only**, not a merge gate
 
 GraphForge values correctness over performance, so benchmarks are evidence, not
 a merge gate. The `CodSpeed` workflow measures a fixed set of Rust benchmarks on
 every pull request and reports the delta against the base commit; it is not part
-of the required `CI Gate` aggregate.
+of the required `CI Gate` aggregate. A red **CodSpeed Performance Analysis**
+check does not block merge when `CI Gate` is green.
 
 ## What is measured
 
@@ -31,6 +33,28 @@ sources stay plain divan code.
 Both targets run under the **CPU simulation** instrument: measurements are
 instruction-level and hardware-agnostic, so a 4 vCPU shared runner still yields
 comparable numbers between runs.
+
+The Actions job **Rust Benchmarks** only builds and runs the suite; CodSpeed's
+separate **Performance Analysis** check compares results to the base commit and
+can fail independently of a green Actions job.
+
+## Triaging Performance Analysis failures
+
+Treat CodSpeed as a diagnostic signal, not a release or merge authority.
+
+**Known false-positive pattern:** sole regression on
+`graphforge-cypher::compile::lex[simple_match]` (often about −19% to −31%) while
+other benches are flat or improved, especially on PRs that do not change Cypher
+lexer/front-end sources. That shape is intentionally tiny; short samples are
+sensitive to measurement floor effects even under CPU simulation. Prefer raising
+SNR in the bench (batched iterations inside the measured closure) over treating
+the failure as an M4 or lexer regression.
+
+**Triage rule:** if the only failing bench is `lex[simple_match]` and the PR
+diff does not touch Cypher lexer/parse/bind sources (or their direct
+dependencies), treat the report as noise and proceed with `CI Gate`. Investigate
+further only when multiple cypher benches regress together or the PR changes the
+front end.
 
 ## Running them locally
 
