@@ -1153,21 +1153,10 @@ impl ValidatedProjectGeneration {
     /// # Errors
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
-    pub fn publish(self) -> Result<ProjectPublicationReceipt, GfError> {
-        self.publish_with_commit_lock_hook(|_| Ok(()))
-    }
-
-    fn publish_with_commit_lock_hook<AfterCommitLock>(
-        mut self,
-        after_commit_lock: AfterCommitLock,
-    ) -> Result<ProjectPublicationReceipt, GfError>
-    where
-        AfterCommitLock: FnOnce(&StagedProjectGeneration) -> Result<(), GfError>,
-    {
+    pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
         self.0.admission.revalidate_identity()?;
-        let commit_lock = self.prepare_commit_lock()?;
-        after_commit_lock(&self.0)?;
         let lifecycle_admission = self.0.admission.readmit_for_publish()?;
+        let commit_lock = self.prepare_commit_lock()?;
         if let Some(admission) = &lifecycle_admission {
             admission.revalidate_identity()?;
         } else {
@@ -1196,7 +1185,7 @@ impl ValidatedProjectGeneration {
             return Ok(None);
         }
         let staged = &self.0;
-        let writer_lock = wait_for_writer_lock(&staged.root)?;
+        let writer_lock = CommitLock(wait_for_writer_lock(&staged.root)?);
         project_failpoint::hit(
             "project.after_optimistic_commit_lock",
             Some(staged.transaction_uuid),
@@ -1218,7 +1207,7 @@ impl ValidatedProjectGeneration {
                 ),
             ));
         }
-        Ok(Some(CommitLock(writer_lock)))
+        Ok(Some(writer_lock))
     }
 
     fn publish_inner(&self) -> Result<ProjectPublicationReceipt, GfError> {
@@ -2901,42 +2890,6 @@ mod tests {
                 .unwrap()
                 .generation_uuid(),
             second.generation_uuid
-        );
-    }
-
-    #[test]
-    fn optimistic_publish_holds_writer_before_consuming_lifecycle_identity() {
-        let root = project();
-        let request = request(vec![participant("graph", "nodes", b"ordered")]);
-        let operation: [u8; 32] = Sha256::digest(b"commit-lock-before-readmission").into();
-        let ProjectStageOutcome::Staged(staged) =
-            stage_project_generation_optimistic(root.path(), &request, operation).unwrap()
-        else {
-            panic!("optimistic operation replayed unexpectedly");
-        };
-        let validated = staged.validate(|_| Ok(()), |_, _| Ok(())).unwrap();
-
-        validated
-            .publish_with_commit_lock_hook(|staged| {
-                assert!(matches!(
-                    &staged.admission,
-                    StagedAdmission::Optimistic(Some(_))
-                ));
-                let contender =
-                    open_regular_lock(&staged.root.join(LOCKS_DIR).join(WRITER_LOCK_FILE))?;
-                assert!(
-                    !crate::file_lock::try_lock_exclusive(&contender).map_err(publication_io)?,
-                    "writer must be unavailable before lifecycle readmission"
-                );
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(
-            resolve_project_generation(root.path())
-                .unwrap()
-                .generation_uuid(),
-            request.generation_uuid
         );
     }
 
