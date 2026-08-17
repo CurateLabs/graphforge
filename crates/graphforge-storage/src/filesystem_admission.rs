@@ -336,11 +336,12 @@ fn admit_project_lifecycle_inner(
             if requirement == ProjectRootRequirement::Existing {
                 return Err(unsupported("IDENTITY", "target_missing"));
             }
-            create_private_child_directory(&parent, &target_name, &root)
-                .map_err(|_| unsupported("CREATE", "project_directory_create_failed"))?;
-            complete_namespace_barrier_handle(&parent)
-                .map_err(|_| unsupported("CREATE", "parent_namespace_barrier_failed"))?;
-            created_root = true;
+            created_root = create_missing_project_root_with(
+                &parent,
+                &target_name,
+                || create_private_child_directory(&parent, &target_name, &root),
+                || complete_namespace_barrier_handle(&parent),
+            )?;
         }
         Err(_) => return Err(unsupported("IDENTITY", "target_metadata_unavailable")),
     }
@@ -370,6 +371,34 @@ fn admit_project_lifecycle_inner(
         false,
     )?;
     Ok(admission)
+}
+
+fn create_missing_project_root_with<Create, Barrier>(
+    parent: &LifecycleDirectory,
+    target_name: &std::ffi::OsStr,
+    create: Create,
+    creator_barrier: Barrier,
+) -> Result<bool, GfError>
+where
+    Create: FnOnce() -> std::io::Result<()>,
+    Barrier: FnOnce() -> std::io::Result<()>,
+{
+    match create() {
+        Ok(()) => {
+            creator_barrier()
+                .map_err(|_| unsupported("CREATE", "parent_namespace_barrier_failed"))?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = child_metadata(parent, target_name)
+                .map_err(|_| unsupported("IDENTITY", "target_metadata_unavailable"))?;
+            if is_link_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err(unsupported("IDENTITY", "target_link_or_special"));
+            }
+            Ok(false)
+        }
+        Err(_) => Err(unsupported("CREATE", "project_directory_create_failed")),
+    }
 }
 
 #[derive(Debug)]
@@ -1868,6 +1897,41 @@ mod tests {
             target.file_name().unwrap(),
         ));
         assert!(lock.is_file());
+    }
+
+    #[test]
+    fn concurrent_already_exists_directory_is_reopened_without_creator_credit() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let ResolvedProjectPath {
+            parent,
+            target_name,
+            root,
+        } = resolve_project_path(&target).unwrap();
+
+        let created_root = create_missing_project_root_with(
+            &parent,
+            &target_name,
+            || {
+                graphforge_filesystem::create_private_directory(&root).unwrap();
+                Err(std::io::ErrorKind::AlreadyExists.into())
+            },
+            || panic!("a concurrent creator owns the namespace barrier"),
+        )
+        .unwrap();
+
+        assert!(!created_root);
+        let project = LifecycleDirectory::open_child(
+            &parent,
+            &target_name,
+            &root,
+            "IDENTITY",
+            "project_identity_unavailable",
+        )
+        .unwrap();
+        project
+            .revalidate("IDENTITY", "project_identity_changed")
+            .unwrap();
     }
 
     #[test]
