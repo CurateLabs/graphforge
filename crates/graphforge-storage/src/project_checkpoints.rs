@@ -204,6 +204,14 @@ struct MutationLocks {
     checkpoint: Option<File>,
 }
 
+struct CheckpointReadLock(File);
+
+impl Drop for CheckpointReadLock {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.0);
+    }
+}
+
 impl MutationLocks {
     fn transfer_writer_for_revert_publication(&mut self) -> File {
         self.writer
@@ -1018,7 +1026,7 @@ fn acquire_mutation_locks(root: &Path) -> Result<MutationLocks, GfError> {
     })
 }
 
-fn acquire_checkpoint_read_lock(root: &Path) -> Result<File, GfError> {
+fn acquire_checkpoint_read_lock(root: &Path) -> Result<CheckpointReadLock, GfError> {
     let lock_root = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     let checkpoint = open_regular_lock(&lock_root.join(CHECKPOINT_LOCK_FILE))?;
     if !crate::file_lock::try_lock_shared(&checkpoint).map_err(storage_io)? {
@@ -1027,13 +1035,13 @@ fn acquire_checkpoint_read_lock(root: &Path) -> Result<File, GfError> {
             "checkpoint read could not acquire checkpoints.lock",
         ));
     }
-    Ok(checkpoint)
+    Ok(CheckpointReadLock(checkpoint))
 }
 
 fn read_registry_for_read(
     root: &Path,
     checkpoint_root: &Path,
-) -> Result<(File, Registry), GfError> {
+) -> Result<(CheckpointReadLock, Registry), GfError> {
     let checkpoint = acquire_checkpoint_read_lock(root)?;
     if !checkpoint_root.join(INTENT_FILE).exists() {
         return read_registry(checkpoint_root).map(|registry| (checkpoint, registry));
@@ -2579,6 +2587,22 @@ mod tests {
             expect_mutation_locks_busy(directory.path())
         });
         assert_checkpoint_mutation_busy_message(&error);
+    }
+
+    #[test]
+    fn checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        let read_lock = acquire_checkpoint_read_lock(directory.path()).unwrap();
+        let inherited_descriptor = read_lock.0.try_clone().unwrap();
+
+        drop(read_lock);
+
+        assert_mutation_locks_free(
+            directory.path(),
+            "after checkpoint read guard drop with a cloned descriptor",
+        );
+        drop(inherited_descriptor);
     }
 
     #[test]
