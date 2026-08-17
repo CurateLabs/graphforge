@@ -204,6 +204,14 @@ struct MutationLocks {
     checkpoint: Option<File>,
 }
 
+struct CheckpointReadLock(File);
+
+impl Drop for CheckpointReadLock {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.0);
+    }
+}
+
 impl MutationLocks {
     fn transfer_writer_for_revert_publication(&mut self) -> File {
         self.writer
@@ -237,9 +245,26 @@ pub fn create_checkpoint(
     container_root: impl AsRef<Path>,
     request: &CheckpointCreateRequest,
 ) -> Result<CheckpointReceipt, GfError> {
+    create_checkpoint_with_mode(
+        container_root,
+        request,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Create a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`create_checkpoint`].
+pub fn create_checkpoint_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointCreateRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
     validate_description(request.description.as_deref())?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
+    let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -331,8 +356,25 @@ pub fn delete_checkpoint(
     container_root: impl AsRef<Path>,
     request: &CheckpointDeleteRequest,
 ) -> Result<CheckpointReceipt, GfError> {
+    delete_checkpoint_with_mode(
+        container_root,
+        request,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Delete a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`delete_checkpoint`].
+pub fn delete_checkpoint_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointDeleteRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
+    let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
     recover_pair(&checkpoint_root)?;
@@ -418,7 +460,22 @@ pub fn delete_checkpoint(
 pub fn list_checkpoints(
     container_root: impl AsRef<Path>,
 ) -> Result<Vec<CheckpointRecord>, GfError> {
-    let root = canonical_project_root(container_root.as_ref())?;
+    list_checkpoints_with_mode(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// List checkpoints using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`list_checkpoints`].
+pub fn list_checkpoints_with_mode(
+    container_root: impl AsRef<Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<Vec<CheckpointRecord>, GfError> {
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
+    let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
     Ok(registry.active)
@@ -429,8 +486,25 @@ pub fn open_checkpoint_generation(
     container_root: impl AsRef<Path>,
     name: &str,
 ) -> Result<(CheckpointRecord, crate::ResolvedProjectGeneration), GfError> {
+    open_checkpoint_generation_with_mode(
+        container_root,
+        name,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Open a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`open_checkpoint_generation`].
+pub fn open_checkpoint_generation_with_mode(
+    container_root: impl AsRef<Path>,
+    name: &str,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<(CheckpointRecord, crate::ResolvedProjectGeneration), GfError> {
     let name = validate_name(name)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
+    let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
     let row = registry
@@ -462,10 +536,6 @@ pub fn open_checkpoint_generation(
 }
 
 /// Publish a complete-workspace restoration as a new child generation.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the revert transaction is intentionally linear so lock ownership and publication order remain auditable"
-)]
 pub fn revert_checkpoint<T, V>(
     container_root: impl AsRef<Path>,
     request: &CheckpointRevertRequest,
@@ -476,9 +546,38 @@ where
     T: FnOnce() -> Result<i64, GfError>,
     V: FnOnce(&crate::ResolvedProjectGeneration) -> Result<(), GfError>,
 {
+    revert_checkpoint_with_mode(
+        container_root,
+        request,
+        select_timestamp,
+        validate_source,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Revert a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`revert_checkpoint`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "the revert transaction is intentionally linear so lock ownership and publication order remain auditable"
+)]
+pub fn revert_checkpoint_with_mode<T, V>(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointRevertRequest,
+    select_timestamp: T,
+    validate_source: V,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<(CheckpointReceipt, crate::ResolvedProjectGeneration), GfError>
+where
+    T: FnOnce() -> Result<i64, GfError>,
+    V: FnOnce(&crate::ResolvedProjectGeneration) -> Result<(), GfError>,
+{
     let requested_name = validate_name(&request.name)?;
     let requested_reason = validate_reason(&request.reason)?;
-    let root = canonical_project_root(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
+    let root = canonical_project_root(admission.root())?;
     let transaction_uuid = revert_transaction_uuid(request.operation_uuid);
     let mut locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
@@ -647,6 +746,7 @@ where
         })
         .collect::<BTreeSet<_>>();
     let writer = locks.transfer_writer_for_revert_publication();
+    let identity = admission.into_identity()?;
     // Revert must stage graph bytes from the pinned source generation. Using
     // the parent's tree (CURRENT) would verify the restored inventory against
     // post-checkpoint mutations and fail closed with length/digest mismatch.
@@ -660,6 +760,7 @@ where
         })
         .then_some(source_graph_tree.as_path());
     let receipt = match stage_project_generation_with_lock(
+        identity,
         root.clone(),
         writer,
         prior_current,
@@ -885,6 +986,19 @@ fn canonical_project_root(path: &Path) -> Result<PathBuf, GfError> {
     std::fs::canonicalize(path).map_err(storage_io)
 }
 
+fn admit_existing_project(
+    root: &Path,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<crate::filesystem_admission::ProjectLifecycleAdmission, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    Ok(admission)
+}
+
 fn checkpoint_root(root: &Path) -> Result<PathBuf, GfError> {
     ensure_machine_directory(root, Path::new(CHECKPOINTS_DIR))
 }
@@ -912,7 +1026,7 @@ fn acquire_mutation_locks(root: &Path) -> Result<MutationLocks, GfError> {
     })
 }
 
-fn acquire_checkpoint_read_lock(root: &Path) -> Result<File, GfError> {
+fn acquire_checkpoint_read_lock(root: &Path) -> Result<CheckpointReadLock, GfError> {
     let lock_root = ensure_machine_directory(root, Path::new(LOCKS_DIR))?;
     let checkpoint = open_regular_lock(&lock_root.join(CHECKPOINT_LOCK_FILE))?;
     if !crate::file_lock::try_lock_shared(&checkpoint).map_err(storage_io)? {
@@ -921,13 +1035,13 @@ fn acquire_checkpoint_read_lock(root: &Path) -> Result<File, GfError> {
             "checkpoint read could not acquire checkpoints.lock",
         ));
     }
-    Ok(checkpoint)
+    Ok(CheckpointReadLock(checkpoint))
 }
 
 fn read_registry_for_read(
     root: &Path,
     checkpoint_root: &Path,
-) -> Result<(File, Registry), GfError> {
+) -> Result<(CheckpointReadLock, Registry), GfError> {
     let checkpoint = acquire_checkpoint_read_lock(root)?;
     if !checkpoint_root.join(INTENT_FILE).exists() {
         return read_registry(checkpoint_root).map(|registry| (checkpoint, registry));
@@ -2476,6 +2590,22 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes() {
+        let directory = tempdir().unwrap();
+        crate::open_or_initialize_project(directory.path()).unwrap();
+        let read_lock = acquire_checkpoint_read_lock(directory.path()).unwrap();
+        let inherited_descriptor = read_lock.0.try_clone().unwrap();
+
+        drop(read_lock);
+
+        assert_mutation_locks_free(
+            directory.path(),
+            "after checkpoint read guard drop with a cloned descriptor",
+        );
+        drop(inherited_descriptor);
+    }
+
+    #[test]
     fn open_list_then_mutation_leaves_checkpoint_locks_free() {
         // Rules out a same-thread shared-lock leak on the #275 failing sequence
         // (open/list/read then immediate mutation).
@@ -2853,8 +2983,9 @@ mod tests {
         symlink(&project, &linked).unwrap();
         assert_eq!(
             list_checkpoints(&linked).unwrap_err().code(),
-            "GF_UNSUPPORTED_PROJECT_FORMAT"
+            "GF_UNSUPPORTED_FILESYSTEM"
         );
+        assert!(!project.join(CHECKPOINTS_DIR).exists());
     }
 
     #[test]

@@ -22,7 +22,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -353,6 +353,8 @@ pub struct GraphForge {
     /// The configured path, if the instance is Parquet-backed; `None` for an
     /// in-memory instance (whose data lives in `dir`).
     path: Option<PathBuf>,
+    /// Filesystem lifecycle contract selected when this facade opened.
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
     /// One immutable committed generation selected exactly once at open.
     resolved_generation: ResolvedProjectGeneration,
     /// Whether this facade is an immutable historical checkpoint view.
@@ -436,6 +438,7 @@ impl std::fmt::Debug for GraphForge {
         f.debug_struct("GraphForge")
             .field("identity", &self.identity)
             .field("path", &self.path)
+            .field("lifecycle_mode", &self.lifecycle_mode)
             .field(
                 "generation_uuid",
                 &self.resolved_generation.generation_uuid(),
@@ -449,11 +452,25 @@ impl std::fmt::Debug for GraphForge {
 }
 
 impl GraphForge {
+    pub(crate) fn stage_project_generation(
+        &self,
+        request: &graphforge_storage::ProjectGenerationRequest,
+    ) -> Result<graphforge_storage::ProjectStageOutcome, GfError> {
+        graphforge_storage::stage_project_generation_with_graph_tree_mode(
+            self.resolved_generation.container_root(),
+            request,
+            None,
+            self.lifecycle_mode,
+        )
+    }
+
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
     ///
-    /// For a persistent instance, the directory must exist. Ontology authority
-    /// and enforcement mode are resolved from the committed workspace ontology
-    /// and configuration participants in the selected project generation.
+    /// For a persistent instance, the directory may be absent when its parent
+    /// exists; storage admission owns creation of the final project directory.
+    /// Ontology authority and enforcement mode are resolved from the committed
+    /// workspace ontology and configuration participants in the selected
+    /// project generation.
     /// Loose `graphforge.yaml` or `ontology.yaml` files are not authority and
     /// are not loaded implicitly. An existing runtime-catalog participant seeds
     /// the runtime catalog.
@@ -461,10 +478,10 @@ impl GraphForge {
     /// An in-memory instance is exploratory and backed by a temp directory.
     ///
     /// # Errors
-    /// Returns [`GfError::Storage`] if `path` does not exist or the temp dir
-    /// cannot be created, [`GfError::Validation`] for malformed committed
-    /// workspace records, and [`GfError::Ontology`] if the adopted ontology
-    /// cannot be decoded or compiled.
+    /// Returns [`GfError::Storage`] if the persistent path's parent does not
+    /// exist or the temp dir cannot be created, [`GfError::Validation`] for
+    /// malformed committed workspace records, and [`GfError::Ontology`] if the
+    /// adopted ontology cannot be decoded or compiled.
     /// Opening a persistent project can also return structured knowledge,
     /// provenance, or publication errors while reconciling an interrupted
     /// recorded algorithm run.
@@ -490,7 +507,7 @@ impl GraphForge {
         let tmp = tempfile::TempDir::new()
             .map_err(|e| GfError::Storage(format!("failed to create temp dir: {e}")))?;
         let (resolved_generation, project_open_recovery) =
-            graphforge_storage::open_or_initialize_project_with_recovery(tmp.path())?;
+            graphforge_storage::open_or_initialize_ephemeral_project_with_recovery(tmp.path())?;
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
@@ -499,6 +516,8 @@ impl GraphForge {
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
+            lifecycle_mode:
+                graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
             resolved_generation,
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
@@ -561,10 +580,14 @@ impl GraphForge {
         options: GraphForgeOptions,
         resource_policy: resource_policy::NormalizedResourcePolicy,
     ) -> Result<Self, GfError> {
-        if !dir.exists() {
+        let parent = dir
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
             return Err(GfError::Storage(format!(
-                "path does not exist: {}",
-                dir.display()
+                "project parent does not exist or is not a directory: {}",
+                parent.display()
             )));
         }
 
@@ -580,10 +603,11 @@ impl GraphForge {
         )
     }
 
-    fn open_resolved_with_mode(
+    fn open_resolved_with_lifecycle_mode(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
         read_only: bool,
+        lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
         let options = GraphForgeOptions::default();
         let (_, resource_policy) = options.clone().validate()?;
@@ -596,14 +620,16 @@ impl GraphForge {
                 resolved_generation.generation_uuid(),
             )
         };
-        Self::open_resolved_with_options(
+        let mut graph = Self::open_resolved_with_options(
             container_dir,
             resolved_generation,
             read_only,
             options,
             resource_policy,
             project_open_recovery,
-        )
+        )?;
+        graph.lifecycle_mode = lifecycle_mode;
+        Ok(graph)
     }
 
     fn open_resolved_with_options(
@@ -645,6 +671,7 @@ impl GraphForge {
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
+            lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
             resolved_generation,
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
@@ -1106,10 +1133,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
             Some(self.dir.as_path()),
+            self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
@@ -1192,10 +1220,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
             Some(self.dir.as_path()),
+            self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
@@ -3780,6 +3809,80 @@ mod tests {
     };
     use arrow::datatypes::DataType;
     use std::collections::HashSet;
+    use std::io::Read as _;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const ABSENT_TARGET_CHILD: &str = "tests::absent_target_open_child";
+    const ABSENT_TARGET_COOKIE: &str = "graphforge-absent-target-open-v1";
+    const ABSENT_TARGET_DEADLINE: Duration = Duration::from_secs(10);
+
+    fn spawn_absent_target_child(parent: &Path, child_id: &str) -> Child {
+        Command::new(std::env::current_exe().expect("absent-target current test executable"))
+            .args(["--exact", ABSENT_TARGET_CHILD, "--nocapture"])
+            .env("GF_ABSENT_TARGET_COOKIE", ABSENT_TARGET_COOKIE)
+            .env("GF_ABSENT_TARGET_PARENT", parent)
+            .env("GF_ABSENT_TARGET_CHILD_ID", child_id)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("absent-target child={child_id} spawn error={error}"))
+    }
+
+    fn wait_for_paths(paths: &[PathBuf], phase: &str) {
+        let deadline = Instant::now() + ABSENT_TARGET_DEADLINE;
+        while paths.iter().any(|path| !path.is_file()) {
+            assert!(
+                Instant::now() < deadline,
+                "phase={phase} timed out waiting for subprocess barrier"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn wait_for_absent_target_child(mut child: Child, child_id: &str) -> uuid::Uuid {
+        let deadline = Instant::now() + ABSENT_TARGET_DEADLINE;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("absent-target child try_wait") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("absent-target child={child_id} timed out");
+            }
+            std::thread::yield_now();
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("absent-target child stdout")
+            .read_to_string(&mut stdout)
+            .expect("read absent-target child stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("absent-target child stderr")
+            .read_to_string(&mut stderr)
+            .expect("read absent-target child stderr");
+        assert!(
+            status.success(),
+            "absent-target child={child_id} failed: status={status} stdout={stdout:?} stderr={stderr:?}"
+        );
+        let generation = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("GF_ABSENT_TARGET_UUID "))
+            .unwrap_or_else(|| {
+                panic!(
+                    "absent-target child={child_id} omitted generation marker: stdout={stdout:?}"
+                )
+            });
+        uuid::Uuid::parse_str(generation).unwrap_or_else(|error| {
+            panic!("absent-target child={child_id} invalid generation={generation:?}: {error}")
+        })
+    }
 
     #[test]
     fn facade_debug_empty_batch_and_procedure_width_contracts_are_exact() {
@@ -5892,6 +5995,115 @@ mod tests {
     }
 
     #[test]
+    fn persistent_open_creates_an_absent_final_target_through_storage() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().canonicalize().unwrap().join("project");
+        assert!(!root.exists());
+
+        let first = GraphForge::new(root.to_str()).expect("admit and create v1 project");
+        let generation_uuid = first.resolved_generation.generation_uuid();
+        assert_eq!(first.path(), Some(root.as_path()));
+        assert!(root.is_dir());
+        drop(first);
+
+        let reopened = GraphForge::new(root.to_str()).expect("reopen admitted project");
+        assert_eq!(
+            reopened.resolved_generation.generation_uuid(),
+            generation_uuid
+        );
+    }
+
+    #[test]
+    fn absent_target_open_child() {
+        if std::env::var("GF_ABSENT_TARGET_COOKIE").as_deref() != Ok(ABSENT_TARGET_COOKIE) {
+            return;
+        }
+        let parent = PathBuf::from(
+            std::env::var_os("GF_ABSENT_TARGET_PARENT")
+                .expect("absent-target child canonical parent"),
+        );
+        let child_id =
+            std::env::var("GF_ABSENT_TARGET_CHILD_ID").expect("absent-target child identifier");
+        std::fs::write(parent.join(format!("ready-{child_id}")), b"ready\n")
+            .expect("absent-target child publish readiness");
+        wait_for_paths(&[parent.join("go")], "child-open-release");
+
+        let root = parent.join("project");
+        let graph = GraphForge::new(root.to_str()).expect("absent-target child open project");
+        println!(
+            "GF_ABSENT_TARGET_UUID {}",
+            graph.resolved_generation.generation_uuid()
+        );
+    }
+
+    #[test]
+    fn concurrent_processes_open_one_absent_target_generation() {
+        let fixture = tempfile::tempdir().expect("absent-target parent fixture");
+        let parent = fixture.path().canonicalize().unwrap();
+        let root = parent.join("project");
+        assert!(!root.exists());
+
+        let first = spawn_absent_target_child(&parent, "first");
+        let second = spawn_absent_target_child(&parent, "second");
+        wait_for_paths(
+            &[parent.join("ready-first"), parent.join("ready-second")],
+            "children-ready",
+        );
+        std::fs::write(parent.join("go"), b"open\n").expect("release absent-target children");
+
+        let first_uuid = wait_for_absent_target_child(first, "first");
+        let second_uuid = wait_for_absent_target_child(second, "second");
+        assert_eq!(first_uuid, second_uuid);
+
+        let current_before_reopen = std::fs::read(root.join(graphforge_storage::CURRENT_FILE))
+            .expect("read CURRENT after concurrent admission");
+        let current_record: serde_json::Value =
+            serde_json::from_slice(&current_before_reopen).expect("CURRENT is canonical JSON");
+        assert_eq!(
+            current_record["generation_uuid"].as_str(),
+            Some(first_uuid.hyphenated().to_string().as_str())
+        );
+        let generations = std::fs::read_dir(root.join("generations"))
+            .expect("read admitted generations")
+            .map(|entry| {
+                entry
+                    .expect("read admitted generation entry")
+                    .file_name()
+                    .into_string()
+                    .expect("generation UUID is UTF-8")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generations, [first_uuid.to_string()]);
+
+        let admission_locks = std::fs::read_dir(&parent)
+            .expect("read canonical parent")
+            .filter_map(|entry| {
+                let entry = entry.expect("read canonical parent entry");
+                let name = entry.file_name().into_string().ok()?;
+                (name.starts_with(".graphforge-admission-") && name.ends_with(".lock"))
+                    .then_some(entry.path())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(admission_locks.len(), 1);
+        assert!(
+            std::fs::symlink_metadata(&admission_locks[0])
+                .expect("inspect persistent admission lock")
+                .file_type()
+                .is_file()
+        );
+
+        let reopened = GraphForge::new(root.to_str()).expect("reopen concurrently admitted root");
+        assert_eq!(reopened.resolved_generation.generation_uuid(), first_uuid);
+        drop(reopened);
+        assert_eq!(
+            std::fs::read(root.join(graphforge_storage::CURRENT_FILE))
+                .expect("read stable CURRENT after reopen"),
+            current_before_reopen
+        );
+        assert!(admission_locks[0].is_file());
+    }
+
+    #[test]
     fn persistent_open_rejects_pre_v1_without_mutation() {
         let root = tempfile::tempdir().unwrap();
         let legacy = root.path().join("topology/nodes.parquet");
@@ -5907,7 +6119,8 @@ mod tests {
 
     #[test]
     fn graphforge_new_bad_path() {
-        let result = GraphForge::new(Some("/nonexistent/path/xyz"));
+        let parent = tempfile::tempdir().unwrap();
+        let result = GraphForge::new(parent.path().join("missing/project").to_str());
         assert!(matches!(result, Err(GfError::Storage(_))));
     }
 

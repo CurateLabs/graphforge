@@ -45,8 +45,8 @@ pub use graph_delta_journal::{
     MAX_GRAPH_DELTA_RECORDS_PER_RUN, MAX_GRAPH_DELTA_REPLAY_MEMORY_BYTES,
     MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, ReconstructedGraphState, apply_delta_runs,
     decode_delta_run, delta_run_relative_path, encode_delta_run, list_delta_runs,
-    load_verified_delta_runs, publish_graph_delta, reconstruct_graph_state,
-    stage_base_graph_workspace,
+    load_verified_delta_runs, publish_graph_delta, publish_graph_delta_with_mode,
+    reconstruct_graph_state, stage_base_graph_workspace,
 };
 
 pub mod graph_delta_compaction;
@@ -55,14 +55,16 @@ pub use graph_delta_compaction::{
     DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
-    graph_delta_compaction_status, preview_graph_delta_compaction,
+    compact_graph_delta_with_mode, graph_delta_compaction_status,
+    graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
+    preview_graph_delta_compaction_with_mode,
 };
 
 pub mod project_generation;
 pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
     ProjectParticipantDescriptor, ProjectParticipantSnapshot, ResolvedProjectGeneration,
-    open_or_initialize_project, resolve_project_generation,
+    open_or_initialize_ephemeral_project, open_or_initialize_project, resolve_project_generation,
 };
 
 mod project_failpoint;
@@ -76,8 +78,10 @@ pub mod project_certification;
 pub mod project_checkpoints;
 pub use project_checkpoints::{
     CheckpointCreateRequest, CheckpointDeleteRequest, CheckpointReceipt, CheckpointRecord,
-    CheckpointRevertRequest, create_checkpoint, delete_checkpoint, list_checkpoints,
-    open_checkpoint_generation, revert_checkpoint,
+    CheckpointRevertRequest, create_checkpoint, create_checkpoint_with_mode, delete_checkpoint,
+    delete_checkpoint_with_mode, list_checkpoints, list_checkpoints_with_mode,
+    open_checkpoint_generation, open_checkpoint_generation_with_mode, revert_checkpoint,
+    revert_checkpoint_with_mode,
 };
 
 pub mod project_publication;
@@ -86,15 +90,17 @@ pub use project_publication::{
     ProjectPublicationReceipt, ProjectStageOutcome, StagedParticipant, StagedProjectGeneration,
     ValidatedProjectGeneration, published_project_transaction, stage_project_generation,
     stage_project_generation_optimistic, stage_project_generation_optimistic_with_graph_tree,
-    stage_project_generation_with_graph_tree,
+    stage_project_generation_optimistic_with_graph_tree_mode,
+    stage_project_generation_with_graph_tree, stage_project_generation_with_graph_tree_mode,
 };
 
 pub mod project_recovery;
 pub use project_recovery::{
     DEFAULT_RETAINED_ANCESTORS, MAX_RETAINED_ANCESTORS, ProjectOpenRecoveryEvidence,
     ProjectOpenRecoveryKind, ProjectRecoveryDeferral, ProjectRecoveryGenerationClass,
-    ProjectRecoveryReport, open_or_initialize_project_with_recovery, recover_project_on_open,
-    recover_project_transactions,
+    ProjectRecoveryReport, open_or_initialize_ephemeral_project_with_recovery,
+    open_or_initialize_project_with_recovery, recover_project_on_open,
+    recover_project_transactions, remove_durable_project_root,
 };
 
 pub mod project_retention;
@@ -103,7 +109,9 @@ pub use project_retention::{
     DEFAULT_RETENTION_MAX_WORK_UNITS, ProjectCleanupDisposition, ProjectCleanupEntry,
     ProjectCleanupLocation, ProjectCleanupReport, ProjectReachabilityReport,
     ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
-    inspect_project_reachability, preview_project_cleanup,
+    execute_project_cleanup_with_mode, inspect_project_reachability,
+    inspect_project_reachability_with_mode, preview_project_cleanup,
+    preview_project_cleanup_with_mode,
 };
 
 pub mod project_portable;

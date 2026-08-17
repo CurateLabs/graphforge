@@ -87,7 +87,11 @@ impl GraphForge {
                 None,
             ),
             PortableSelection::Checkpoint(name) => {
-                let (_, generation) = graphforge_storage::open_checkpoint_generation(root, &name)?;
+                let (_, generation) = graphforge_storage::open_checkpoint_generation_with_mode(
+                    root,
+                    &name,
+                    self.lifecycle_mode,
+                )?;
                 (generation, "checkpoint", Some(name))
             }
         };
@@ -173,7 +177,7 @@ fn hex(digest: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdoptOntologyRequest, ClearOntologyRequest, WriteContext};
+    use crate::{AdoptOntologyRequest, CheckpointRequest, ClearOntologyRequest, WriteContext};
     use graphforge_core::OntologyMode;
 
     const ONTOLOGY: &str = "ontology_id: portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
@@ -218,6 +222,31 @@ mod tests {
         assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
 
         GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
+    }
+
+    #[test]
+    fn in_memory_checkpoint_can_be_exported() {
+        let graph = GraphForge::new(None).unwrap();
+        graph
+            .checkpoint(CheckpointRequest {
+                name: "Export".into(),
+                description: None,
+                idempotency_key: OperationId(Uuid::from_u128(901)),
+                actor_uuid: None,
+            })
+            .unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+        let output = output_dir.path().join("checkpoint.gfportable");
+
+        let exported = graph
+            .export_portable(PortableExportRequest {
+                selection: PortableSelection::Checkpoint("Export".into()),
+                output,
+            })
+            .unwrap();
+
+        assert_eq!(exported.source, "checkpoint");
+        assert_eq!(exported.checkpoint.as_deref(), Some("Export"));
     }
 
     #[test]

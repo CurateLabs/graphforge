@@ -14,7 +14,6 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use atomicwrites::{AllowOverwrite, AtomicFile};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -619,7 +618,46 @@ pub(crate) fn resolve_verified_generation(
 pub fn open_or_initialize_project(
     container_root: impl AsRef<Path>,
 ) -> Result<ResolvedProjectGeneration, GfError> {
-    let root = container_root.as_ref();
+    open_or_initialize_project_for_mode(
+        container_root.as_ref(),
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Open or initialize an explicitly ephemeral project workspace.
+///
+/// This retains the lifecycle link and identity checks while skipping the
+/// durable-volume capability probe. It is reserved for process-owned temporary
+/// workspaces and must not be used for a caller-supplied persistent project.
+///
+/// # Errors
+/// Returns the same initialization, format, and storage errors as
+/// [`open_or_initialize_project`].
+pub fn open_or_initialize_ephemeral_project(
+    container_root: impl AsRef<Path>,
+) -> Result<ResolvedProjectGeneration, GfError> {
+    open_or_initialize_project_for_mode(
+        container_root.as_ref(),
+        crate::filesystem_admission::ProjectLifecycleMode::Ephemeral,
+    )
+}
+
+pub(crate) fn open_or_initialize_project_for_mode(
+    root: &Path,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ResolvedProjectGeneration, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
+    )?;
+    admission.revalidate_identity()?;
+    open_or_initialize_project_admitted(admission.root())
+}
+
+pub(crate) fn open_or_initialize_project_admitted(
+    root: &Path,
+) -> Result<ResolvedProjectGeneration, GfError> {
     reject_root_link(root)?;
     let _root_lock = lock_project_root(root)?;
     let mut entries = std::fs::read_dir(root).map_err(|error| {
@@ -899,14 +937,14 @@ fn initialize_empty_generation(
     let mut current_bytes = serde_json::to_vec(&current)
         .map_err(|error| GfError::Storage(format!("failed to encode CURRENT: {error}")))?;
     current_bytes.push(b'\n');
-    AtomicFile::new(root.join(CURRENT_FILE), AllowOverwrite)
-        .write(|file| {
-            use std::io::Write as _;
-
-            file.write_all(&current_bytes)?;
-            file.sync_all()
-        })
-        .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
+    crate::project_publication::publish_atomic_bytes(
+        &root.join(CURRENT_FILE),
+        &current_bytes,
+        || Ok(()),
+        || Ok(()),
+        || Ok(()),
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
     sync_directory(root)?;
     resolve_project_generation(root)
 }

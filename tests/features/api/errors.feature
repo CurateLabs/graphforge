@@ -18,11 +18,11 @@ Feature: Error Handling
     When I execute "MATCH (p:Person) RETURN p.age + 1 AS result"
     Then an ExecutionError is raised
 
-  Scenario: StorageError is raised on unreadable Parquet path
+  Scenario: An absent durable project path is initialized on open
     Given a path that does not exist on disk
     When I open a graph at that path
     And I execute "MATCH (n) RETURN n"
-    Then a StorageError is raised
+    Then the table has 0 rows
 
 
   Scenario: ParseError on undefined variable in RETURN

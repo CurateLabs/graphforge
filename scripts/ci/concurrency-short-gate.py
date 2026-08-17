@@ -24,6 +24,7 @@ PYTHON_TEST = ROOT / "crates/graphforge-bindings-py/tests/concurrency_parity.py"
 NODE_TEST = ROOT / "crates/graphforge-bindings-node/tests/concurrency-parity.test.mjs"
 CASE_TIMEOUT_SECONDS = 300
 FORBIDDEN_TIMING = re.compile(r"\b(?:time\.sleep|asyncio\.sleep|setTimeout)\s*\(")
+PERSISTENT_ADMISSION_LOCK_NAME = re.compile(r"\.graphforge-admission-[0-9a-f]{64}\.lock\Z")
 
 # Required id → (surface, argv). Additional cases are allowed; these must match exactly.
 REQUIRED_CASES: dict[str, tuple[str, list[str]]] = {
@@ -270,6 +271,20 @@ def git_head() -> str:
     return (completed.stdout or "").strip() or "unknown"
 
 
+def unexpected_lock_artifacts(work: Path) -> list[str]:
+    """Return lock artifacts other than durable lifecycle rendezvous files."""
+    unexpected = []
+    for path in work.rglob("*.lock"):
+        is_file = path.is_file()
+        is_symlink = path.is_symlink()
+        if not is_file and not is_symlink:
+            continue
+        if is_file and not is_symlink and PERSISTENT_ADMISSION_LOCK_NAME.fullmatch(path.name):
+            continue
+        unexpected.append(str(path.relative_to(work)))
+    return sorted(unexpected)
+
+
 def run_case(
     case: dict[str, Any],
     env: dict[str, str],
@@ -302,7 +317,7 @@ def run_case(
     )
     if completed.returncode != 0:
         raise GateError(f"{case_id}: command failed exit={completed.returncode} log={log_path}")
-    leftover_locks = sorted(path.name for path in work.rglob("*.lock") if path.is_file())
+    leftover_locks = unexpected_lock_artifacts(work)
     leftover_staging = sorted(
         str(path.relative_to(work))
         for path in work.rglob("*")
@@ -310,7 +325,7 @@ def run_case(
     )
     if leftover_locks or leftover_staging:
         raise GateError(
-            f"{case_id}: leaked lock/staging under work root "
+            f"{case_id}: leaked transient lock/staging under work root "
             f"locks={leftover_locks} staging={leftover_staging}"
         )
     return {

@@ -83,6 +83,16 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "filesystem_admission",
+    srcs = ["tests/filesystem_admission.rs"],
+    crate = ":graphforge_cli",
+    data = _CLI_TEST_DATA,
+    rustc_env = _CLI_BIN_ENV,
+    size = "medium",
+    deps = _CLI_DEPS,
+)
+
+gf_rust_integration_test(
     name = "portable",
     srcs = ["tests/portable.rs"],
     crate = ":graphforge_cli",
@@ -109,6 +119,7 @@ test_suite(
     name = "cli_tests",
     tests = [
         ":checkpoints",
+        ":filesystem_admission",
         ":graphforge_cli_test",
         ":portable",
         ":repository",

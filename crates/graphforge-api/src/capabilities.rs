@@ -228,28 +228,27 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let generation_uuid =
-            match graphforge_storage::stage_project_generation(root, &publication)? {
-                ProjectStageOutcome::AlreadyPublished(receipt) => receipt.generation_uuid,
-                ProjectStageOutcome::Staged(staged) => {
-                    let expected_parent = parent.generation_uuid();
-                    staged
-                        .validate(
-                            |_| Ok(()),
-                            |actual_parent, _| {
-                                if actual_parent.generation_uuid() != expected_parent {
-                                    return Err(GfError::Validation(
-                                        "project generation changed before capability publication"
-                                            .into(),
-                                    ));
-                                }
-                                Ok(())
-                            },
-                        )?
-                        .publish()?
-                        .generation_uuid
-                }
-            };
+        let generation_uuid = match self.stage_project_generation(&publication)? {
+            ProjectStageOutcome::AlreadyPublished(receipt) => receipt.generation_uuid,
+            ProjectStageOutcome::Staged(staged) => {
+                let expected_parent = parent.generation_uuid();
+                staged
+                    .validate(
+                        |_| Ok(()),
+                        |actual_parent, _| {
+                            if actual_parent.generation_uuid() != expected_parent {
+                                return Err(GfError::Validation(
+                                    "project generation changed before capability publication"
+                                        .into(),
+                                ));
+                            }
+                            Ok(())
+                        },
+                    )?
+                    .publish()?
+                    .generation_uuid
+            }
+        };
         *self
             .current_generation_uuid
             .lock()
@@ -396,6 +395,10 @@ mod tests {
     #[test]
     fn capability_enable_is_atomic_and_idempotent() {
         let graph = GraphForge::new(None).unwrap();
+        assert_eq!(
+            graph.lifecycle_mode,
+            graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral
+        );
         let request = EnableCapabilityRequest {
             context: WriteContext {
                 operation_uuid: OperationId(Uuid::now_v7()),

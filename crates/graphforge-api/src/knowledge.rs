@@ -339,7 +339,7 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+        let receipt = match self.stage_project_generation(&publication)? {
             ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
             ProjectStageOutcome::Staged(staged_generation) => staged_generation
                 .validate(
@@ -1606,7 +1606,7 @@ fn publish_status(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(
@@ -1657,7 +1657,7 @@ fn publish_supersession(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(
@@ -1719,7 +1719,7 @@ fn publish_assertion_status_bundle(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(
@@ -1765,7 +1765,6 @@ fn publish_reasoning(
     expected_parent: Uuid,
     reasoning: &ReasoningLedger,
 ) -> Result<graphforge_exec::ExecutionResult, GfError> {
-    let root = graph.resolved_generation.container_root();
     let participants = reasoning_publication_participants(parent, reasoning)?;
     let capabilities = parent
         .capabilities()
@@ -1785,7 +1784,7 @@ fn publish_reasoning(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(
@@ -1834,7 +1833,7 @@ fn publish_confidence(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
             .validate(
@@ -1896,7 +1895,7 @@ fn publish_evidence(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
             .validate(
@@ -1957,7 +1956,7 @@ fn publish_assertion_evidence(
         capabilities,
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(root, &publication)? {
+    let receipt = match graph.stage_project_generation(&publication)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged_generation) => staged_generation
             .validate(

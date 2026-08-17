@@ -7,11 +7,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { tableFromIPC } from "apache-arrow";
 import { GraphForge, NodeHandle, version } from "../index.js";
 
@@ -103,6 +105,34 @@ function checkPreV1ProjectError() {
     assert.equal(existsSync(join(dir, "FORMAT")), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function checkProjectTraversalAdmissionError() {
+  const fixture = mkdtempSync(join(tmpdir(), "gf-node-admission-"));
+  const parent = realpathSync(fixture);
+  const project = join(parent, "project");
+  try {
+    const forge = new GraphForge(project);
+    forge.close();
+    mkdirSync(join(parent, "hop"));
+    const currentBefore = readFileSync(join(project, "CURRENT"));
+    const generationsBefore = readdirSync(join(project, "generations")).sort();
+    const parentBefore = readdirSync(parent).sort();
+
+    const traversal = `${join(parent, "hop")}${sep}..${sep}project`;
+    assert.throws(
+      () => new GraphForge(traversal),
+      (error) => error.code === "GF_UNSUPPORTED_FILESYSTEM",
+    );
+    assert.deepEqual(readFileSync(join(project, "CURRENT")), currentBefore);
+    assert.deepEqual(
+      readdirSync(join(project, "generations")).sort(),
+      generationsBefore,
+    );
+    assert.deepEqual(readdirSync(parent).sort(), parentBefore);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 }
 
@@ -250,6 +280,7 @@ test("explain", checkExplain);
 test("load ontology", checkLoadOntology);
 test("parse error", checkParseError);
 test("pre-v1 project error", checkPreV1ProjectError);
+test("project traversal admission error", checkProjectTraversalAdmissionError);
 test("find", checkFind);
 test("graph inspection surface", checkInspectionSurface);
 test(
