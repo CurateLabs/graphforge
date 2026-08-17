@@ -20,8 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::project_fault_oracle::{
     AuthorityClass, PublicationPhase, default_durable_ids, expected_authority, history_budget,
-    minimize_durable_ids, native_shared_boundary_authority, publication_ops, simulate_crash,
-    simulate_torn_bytes,
+    minimize_durable_ids, publication_ops, simulate_crash, simulate_torn_bytes,
 };
 
 /// Contract id frozen with the certification evidence schema.
@@ -566,21 +565,6 @@ fn apply_op(model: &mut ReferenceModel, seed: u64, op: &HistoryOp) -> Result<(),
                     expected: authority_label(report.expected).into(),
                     actual: authority_label(report.actual).into(),
                 });
-            }
-            // Native process-kill boundary must agree with the oracle at shared phases.
-            if matches!(
-                *phase,
-                PublicationPhase::BeforeCurrentReplace
-                    | PublicationPhase::AfterCurrentReplace
-                    | PublicationPhase::AfterRootFsync
-            ) {
-                let native = native_shared_boundary_authority(*phase);
-                if native != report.expected {
-                    return Err(CertInvariant::AuthorityMismatch {
-                        expected: authority_label(report.expected).into(),
-                        actual: format!("native:{}", authority_label(native)),
-                    });
-                }
             }
             if !phase.is_linearized() && report.actual == AuthorityClass::NewGeneration {
                 return Err(CertInvariant::PreAckAtomicityBroken);

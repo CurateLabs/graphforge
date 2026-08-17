@@ -876,6 +876,52 @@ jobs:
           cargo test -p graphforge-storage
           filesystem_admission::tests:: --lib --no-fail-fast
 
+      - name: Cross-check Windows publication-kill results against the fault oracle
+        shell: bash
+        env:
+          GRAPHFORGE_NATIVE_ORACLE_EVIDENCE: ${{ runner.temp }}/durability-certification-evidence/native-oracle-windows.json
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints --lib
+          project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Upload Windows native oracle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-oracle-windows-${{ github.sha }}
+          path: ${{ runner.temp }}/durability-certification-evidence
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Run Windows injected publication error recovery test
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints --lib
+          project_recovery::tests::injected_operation_errors_report_exact_commit_state
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Run Windows commit-lock cloned-descriptor test
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Run Windows checkpoint-lock cloned-descriptor test
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Run Windows optimistic-promotion handle test
+        shell: bash
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_publication::tests::optimistic_promotion_closes_staged_handles_before_directory_rename
+          --no-fail-fast -- --exact --nocapture
+
       - name: Run Windows durability certification unit tests
         shell: bash
         run: >-
@@ -915,6 +961,41 @@ jobs:
       - name: Run macOS exact filesystem primitive tests
         run: >-
           cargo test -p graphforge-filesystem --lib --no-fail-fast
+
+      - name: Cross-check macOS publication-kill results against the fault oracle
+        env:
+          GRAPHFORGE_NATIVE_ORACLE_EVIDENCE: ${{ runner.temp }}/durability-certification-evidence/native-oracle-macos.json
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints --lib
+          project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Upload macOS native oracle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-oracle-macos-${{ github.sha }}
+          path: ${{ runner.temp }}/durability-certification-evidence
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Run macOS injected publication error recovery test
+        run: >-
+          cargo test -p graphforge-storage --features test-failpoints --lib
+          project_recovery::tests::injected_operation_errors_report_exact_commit_state
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Run macOS commit-lock cloned-descriptor test
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes
+          --no-fail-fast -- --exact --nocapture
+
+      - name: Run macOS checkpoint-lock cloned-descriptor test
+        run: >-
+          cargo test -p graphforge-storage --lib
+          project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
+          --no-fail-fast -- --exact --nocapture
 
   bazel-bootstrap:
     # Job display name kept for continuity; this is the authoritative Rust
