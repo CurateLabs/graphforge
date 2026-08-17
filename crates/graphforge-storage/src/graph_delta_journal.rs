@@ -713,18 +713,36 @@ pub fn publish_graph_delta(
     container_root: &Path,
     request: &GraphDeltaPublishRequest,
 ) -> Result<GraphDeltaPublicationReceipt, GfError> {
-    publish_graph_delta_after_prepare(container_root, request, |_| Ok(()))
+    publish_graph_delta_with_mode(
+        container_root,
+        request,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Publish a graph delta using the lifecycle mode established by the owning
+/// facade.
+///
+/// # Errors
+/// Returns the same errors as [`publish_graph_delta`].
+pub fn publish_graph_delta_with_mode(
+    container_root: &Path,
+    request: &GraphDeltaPublishRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<GraphDeltaPublicationReceipt, GfError> {
+    publish_graph_delta_after_prepare(container_root, request, mode, |_| Ok(()))
 }
 
 #[allow(clippy::too_many_lines)] // Publication stages copy, encode, and CURRENT commit together.
 fn publish_graph_delta_after_prepare(
     container_root: &Path,
     request: &GraphDeltaPublishRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
     before_stage: impl FnOnce(&Path) -> Result<(), GfError>,
 ) -> Result<GraphDeltaPublicationReceipt, GfError> {
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
@@ -1274,8 +1292,13 @@ mod crash_oracle_tests {
         let prepared = one_node_request();
         let (concurrent_generation, concurrent) = stage_graph_clone(root.path());
 
-        let error =
-            publish_graph_delta_after_prepare(root.path(), &prepared, |_| Ok(())).unwrap_err();
+        let error = publish_graph_delta_after_prepare(
+            root.path(),
+            &prepared,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            |_| Ok(()),
+        )
+        .unwrap_err();
 
         assert_eq!(error.code(), "GF_WRITER_BUSY");
         concurrent

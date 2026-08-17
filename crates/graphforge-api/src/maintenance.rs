@@ -189,4 +189,92 @@ mod tests {
             )
             .unwrap();
     }
+
+    #[test]
+    fn in_memory_compaction_cleanup_uses_ephemeral_lifecycle_mode() {
+        use graphforge_storage::{
+            GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest,
+            ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
+            ReconstructedGraphState,
+        };
+
+        let graph = GraphForge::new(None).unwrap();
+        let root = graph.resolved_generation.container_root();
+        let workspace = tempfile::tempdir().unwrap();
+        graphforge_storage::stage_base_graph_workspace(
+            workspace.path(),
+            &[
+                ("topology/nodes.parquet", b"nodes"),
+                ("topology/edges.parquet", b"edges"),
+            ],
+            Some(&ReconstructedGraphState::default()),
+        )
+        .unwrap();
+        let (_, files) = graphforge_storage::capture_graph_files(workspace.path()).unwrap();
+        let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let base = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            graphforge_storage::stage_project_generation_with_graph_tree_mode(
+                root,
+                &base,
+                Some(workspace.path()),
+                graph.lifecycle_mode,
+            )
+            .unwrap()
+        else {
+            panic!("base publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        graphforge_storage::publish_graph_delta_with_mode(
+            root,
+            &GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations: vec![GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: GraphDeltaOpKind::UpsertNode,
+                    payload: GraphDeltaPayload::UpsertNode {
+                        node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                        type_ids: vec![1],
+                    },
+                }],
+                limits: GraphDeltaJournalLimits::default(),
+            },
+            graph.lifecycle_mode,
+        )
+        .unwrap();
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: GraphDeltaCompactionLimits::default(),
+            cleanup_after_commit: true,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+
+        let report = graph.compact_graph_delta(&request, None).unwrap();
+
+        assert!(report.cleanup.is_some());
+    }
 }

@@ -30,7 +30,8 @@ use crate::project_publication::{
     published_project_transaction, stage_project_generation_from_admitted_parent,
 };
 use crate::project_retention::{
-    ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
+    ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy,
+    execute_project_cleanup_with_mode,
 };
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
@@ -338,10 +339,11 @@ fn compact_graph_delta_after_prepare(
     };
 
     let cleanup = if request.cleanup_after_commit {
-        Some(execute_project_cleanup(
+        Some(execute_project_cleanup_with_mode(
             root,
             request.cleanup_policy,
             request.cleanup_limits,
+            mode,
         )?)
     } else {
         None
@@ -903,7 +905,24 @@ mod crash_oracle_tests {
     };
 
     fn publish_graph_base(root: &Path) {
-        crate::open_or_initialize_project(root).unwrap();
+        publish_graph_base_with_mode(
+            root,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        );
+    }
+
+    fn publish_graph_base_with_mode(
+        root: &Path,
+        mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) {
+        match mode {
+            crate::filesystem_admission::ProjectLifecycleMode::Durable => {
+                crate::open_or_initialize_project(root).unwrap();
+            }
+            crate::filesystem_admission::ProjectLifecycleMode::Ephemeral => {
+                crate::open_or_initialize_ephemeral_project(root).unwrap();
+            }
+        }
         let workspace = tempfile::tempdir().unwrap();
         stage_base_graph_workspace(
             workspace.path(),
@@ -933,8 +952,13 @@ mod crash_oracle_tests {
             participants,
         };
         let ProjectStageOutcome::Staged(staged) =
-            crate::stage_project_generation_with_graph_tree(root, &request, Some(workspace.path()))
-                .unwrap()
+            crate::stage_project_generation_with_graph_tree_mode(
+                root,
+                &request,
+                Some(workspace.path()),
+                mode,
+            )
+            .unwrap()
         else {
             panic!("base publication unexpectedly replayed");
         };
@@ -946,8 +970,18 @@ mod crash_oracle_tests {
     }
 
     fn publish_one_node_delta(root: &Path) -> Uuid {
+        publish_one_node_delta_with_mode(
+            root,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        )
+    }
+
+    fn publish_one_node_delta_with_mode(
+        root: &Path,
+        mode: crate::filesystem_admission::ProjectLifecycleMode,
+    ) -> Uuid {
         let generation_uuid = Uuid::now_v7();
-        crate::publish_graph_delta(
+        crate::publish_graph_delta_with_mode(
             root,
             &crate::GraphDeltaPublishRequest {
                 transaction_uuid: Uuid::now_v7(),
@@ -963,6 +997,7 @@ mod crash_oracle_tests {
                 }],
                 limits: GraphDeltaJournalLimits::default(),
             },
+            mode,
         )
         .unwrap();
         generation_uuid
@@ -1071,6 +1106,33 @@ mod crash_oracle_tests {
             .unwrap()
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn ephemeral_compaction_cleanup_keeps_the_original_lifecycle_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let mode = crate::filesystem_admission::ProjectLifecycleMode::Ephemeral;
+        publish_graph_base_with_mode(root.path(), mode);
+        publish_one_node_delta_with_mode(root.path(), mode);
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: GraphDeltaCompactionLimits::default(),
+            cleanup_after_commit: true,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+
+        let report = compact_graph_delta_with_mode(root.path(), &request, None, mode).unwrap();
+
+        assert!(report.cleanup.is_some());
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            request.generation_uuid
         );
     }
 }

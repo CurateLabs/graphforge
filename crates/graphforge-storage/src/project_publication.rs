@@ -1369,7 +1369,7 @@ fn replace_current(
     };
     let current_bytes = canonical_line(&current)?;
     let current_path = staged.root.join(CURRENT_FILE);
-    publish_atomic_bytes(
+    let replace_result = publish_atomic_bytes(
         &current_path,
         &current_bytes,
         || {
@@ -1399,16 +1399,16 @@ fn replace_current(
                 false,
             )
         },
-    )
-    .map_err(|error| {
-        publication_error_from_parts(
+    );
+    if let Err(error) = replace_result {
+        reconcile_current_replacement_error(
+            &staged.root,
             staged.transaction_uuid,
             staged.generation_uuid,
-            "CURRENT",
-            false,
-            &error.to_string(),
-        )
-    })?;
+            manifest_sha256,
+            &error,
+        )?;
+    }
     project_failpoint::hit(
         "project.after_current_replace",
         Some(staged.transaction_uuid),
@@ -1416,6 +1416,40 @@ fn replace_current(
         "CURRENT",
         true,
     )
+}
+
+fn reconcile_current_replacement_error(
+    root: &Path,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    manifest_sha256: [u8; 32],
+    error: &AtomicPublishError,
+) -> Result<(), GfError> {
+    // The native primitive distinguishes a proved no-op from an outcome whose
+    // namespace state requires reconciliation. Re-read CURRENT under the
+    // still-held writer lock for every error so callers never receive
+    // committed=false after the child actually became authoritative.
+    let resolved = resolve_project_generation(root).map_err(|authority_error| {
+        project_error(
+            ProjectErrorCode::ProjectCorrupt,
+            format!(
+                "CURRENT authority could not be reconciled after native replacement error: {}",
+                safe_cause(&authority_error.to_string())
+            ),
+        )
+    })?;
+    if resolved.generation_uuid() == generation_uuid
+        && resolved.manifest_sha256() == manifest_sha256
+    {
+        return Ok(());
+    }
+    Err(publication_error_from_parts(
+        transaction_uuid,
+        generation_uuid,
+        "CURRENT",
+        false,
+        &error.to_string(),
+    ))
 }
 
 fn finish_published_generation(
@@ -1968,13 +2002,36 @@ pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), 
     )
 }
 
+#[derive(Debug)]
+pub(crate) enum AtomicPublishError {
+    Io(std::io::Error),
+    Replacement(graphforge_filesystem::ReplaceFileError),
+}
+
+impl std::fmt::Display for AtomicPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(formatter),
+            Self::Replacement(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AtomicPublishError {}
+
+impl From<std::io::Error> for AtomicPublishError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 pub(crate) fn publish_atomic_bytes(
     path: &Path,
     bytes: &[u8],
     after_write: impl FnOnce() -> std::io::Result<()>,
     after_sync: impl FnOnce() -> std::io::Result<()>,
     before_replace: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<()> {
+) -> Result<(), AtomicPublishError> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("atomic publication target has no parent"))?;
@@ -2009,14 +2066,15 @@ pub(crate) fn publish_atomic_bytes(
             {
                 return Err(std::io::Error::other(
                     "atomic publication target is not a regular single-link file",
-                ));
+                )
+                .into());
             }
             graphforge_filesystem::replace_file(
                 &directory,
                 std::ffi::OsStr::new(&temp_name),
                 target_name,
             )
-            .map_err(std::io::Error::other)
+            .map_err(AtomicPublishError::Replacement)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             graphforge_filesystem::install_new_file(
@@ -2024,8 +2082,9 @@ pub(crate) fn publish_atomic_bytes(
                 std::ffi::OsStr::new(&temp_name),
                 target_name,
             )
+            .map_err(AtomicPublishError::Io)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(AtomicPublishError::Io(error)),
     }
 }
 
@@ -3226,6 +3285,50 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".graphforge-atomic-"))
         );
+    }
+
+    #[test]
+    fn replacement_error_reconciliation_never_reports_a_committed_child_as_false() {
+        let root = project();
+        let receipt = publish(
+            root.path(),
+            request(vec![participant("graph", "nodes", b"nodes")]),
+        );
+        let state_unknown =
+            AtomicPublishError::Replacement(graphforge_filesystem::ReplaceFileError::StateUnknown(
+                std::io::Error::other("injected replacement status"),
+            ));
+
+        reconcile_current_replacement_error(
+            root.path(),
+            receipt.transaction_uuid,
+            receipt.generation_uuid,
+            receipt.generation_manifest_sha256,
+            &state_unknown,
+        )
+        .unwrap();
+
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            [0xabu8; 32],
+            &state_unknown,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("committed=false"));
+
+        std::fs::write(root.path().join(CURRENT_FILE), b"{torn\n").unwrap();
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            receipt.generation_uuid,
+            receipt.generation_manifest_sha256,
+            &state_unknown,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
     }
 
     #[test]
