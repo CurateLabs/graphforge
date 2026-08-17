@@ -336,7 +336,9 @@ async fn given_papers_with_vectors(world: &mut GraphForgeWorld, dims: u32) {
 #[given(regex = r#"^a path that does not exist on disk$"#)]
 async fn given_nonexistent_path(world: &mut GraphForgeWorld) {
     world.forge = None;
-    world.last_error = Some("path does not exist".to_string());
+    world.persistent_fixture = Some(tempfile::TempDir::new().expect("absent project parent"));
+    world.last_error = None;
+    world.last_error_code = None;
 }
 
 #[given(regex = r#"^a persistent graph backed by Parquet$"#)]
@@ -1367,9 +1369,20 @@ async fn when_clear(world: &mut GraphForgeWorld) {
 
 #[when(regex = r#"^I open a graph at that path$"#)]
 async fn when_open_bad_path(world: &mut GraphForgeWorld) {
-    match graphforge_api::GraphForge::new(Some("/nonexistent/path/xyz")) {
-        Ok(f) => world.forge = Some(f),
-        Err(e) => world.last_error = Some(e.to_string()),
+    let path = world
+        .persistent_fixture
+        .as_ref()
+        .expect("absent project parent fixture")
+        .path()
+        .join("does_not_exist");
+    world.last_error = None;
+    world.last_error_code = None;
+    match graphforge_api::GraphForge::new(Some(path.to_str().expect("UTF-8 fixture path"))) {
+        Ok(forge) => world.forge = Some(forge),
+        Err(error) => {
+            world.last_error_code = Some(error.code());
+            world.last_error = Some(error.to_string());
+        }
     }
 }
 
