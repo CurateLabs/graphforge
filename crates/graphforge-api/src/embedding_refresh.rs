@@ -250,6 +250,7 @@ impl GraphForge {
         Self {
             identity: self.identity.clone(),
             path: self.path.clone(),
+            lifecycle_mode: self.lifecycle_mode,
             resolved_generation: self.resolved_generation.clone(),
             read_only: self.read_only,
             current_generation_uuid: Arc::clone(&self.current_generation_uuid),

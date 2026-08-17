@@ -241,10 +241,28 @@ pub fn inspect_project_reachability(
     policy: ProjectRetentionPolicy,
     limits: ProjectRetentionLimits,
 ) -> Result<ProjectReachabilityReport, GfError> {
+    inspect_project_reachability_with_mode(
+        container_root,
+        policy,
+        limits,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Inspect reachability using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`inspect_project_reachability`].
+pub fn inspect_project_reachability_with_mode(
+    container_root: impl AsRef<Path>,
+    policy: ProjectRetentionPolicy,
+    limits: ProjectRetentionLimits,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectReachabilityReport, GfError> {
     let started = Instant::now();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
@@ -322,7 +340,25 @@ pub fn preview_project_cleanup(
     policy: ProjectRetentionPolicy,
     limits: ProjectRetentionLimits,
 ) -> Result<ProjectCleanupReport, GfError> {
-    run_cleanup(container_root.as_ref(), policy, limits, true)
+    preview_project_cleanup_with_mode(
+        container_root,
+        policy,
+        limits,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Preview cleanup using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`preview_project_cleanup`].
+pub fn preview_project_cleanup_with_mode(
+    container_root: impl AsRef<Path>,
+    policy: ProjectRetentionPolicy,
+    limits: ProjectRetentionLimits,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectCleanupReport, GfError> {
+    run_cleanup(container_root.as_ref(), policy, limits, true, mode)
 }
 
 /// Execute bounded orphan/unreachable cleanup.
@@ -336,7 +372,25 @@ pub fn execute_project_cleanup(
     policy: ProjectRetentionPolicy,
     limits: ProjectRetentionLimits,
 ) -> Result<ProjectCleanupReport, GfError> {
-    run_cleanup(container_root.as_ref(), policy, limits, false)
+    execute_project_cleanup_with_mode(
+        container_root,
+        policy,
+        limits,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Execute cleanup using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`execute_project_cleanup`].
+pub fn execute_project_cleanup_with_mode(
+    container_root: impl AsRef<Path>,
+    policy: ProjectRetentionPolicy,
+    limits: ProjectRetentionLimits,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectCleanupReport, GfError> {
+    run_cleanup(container_root.as_ref(), policy, limits, false, mode)
 }
 
 fn run_cleanup(
@@ -344,11 +398,12 @@ fn run_cleanup(
     policy: ProjectRetentionPolicy,
     limits: ProjectRetentionLimits,
     dry_run: bool,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectCleanupReport, GfError> {
     let started = Instant::now();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;

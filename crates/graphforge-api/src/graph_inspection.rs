@@ -99,10 +99,11 @@ impl GraphForge {
     /// the catalog supplies names only, while logical rows determine presence.
     pub(crate) fn inspect_graph(&self) -> Result<GraphInspection, GfError> {
         let generation = self.generation_for_read()?;
-        let mut view = Self::open_resolved_with_mode(
+        let mut view = Self::open_resolved_with_lifecycle_mode(
             generation.container_root().to_path_buf(),
             generation,
             true,
+            self.lifecycle_mode,
         )?;
         let catalog = self
             .runtime_catalog

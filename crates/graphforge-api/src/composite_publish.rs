@@ -231,17 +231,19 @@ impl GraphForge {
                 participants,
             };
             let staged = if optimistic {
-                graphforge_storage::stage_project_generation_optimistic_with_graph_tree(
+                graphforge_storage::stage_project_generation_optimistic_with_graph_tree_mode(
                     root,
                     &publication,
                     content_fingerprint,
                     Some(self.dir.as_path()),
+                    self.lifecycle_mode,
                 )?
             } else {
-                graphforge_storage::stage_project_generation_with_graph_tree(
+                graphforge_storage::stage_project_generation_with_graph_tree_mode(
                     root,
                     &publication,
                     Some(self.dir.as_path()),
+                    self.lifecycle_mode,
                 )?
             };
             #[cfg(test)]
@@ -1541,6 +1543,31 @@ mod tests {
         assert_eq!(
             publication_parent_changed(false).code(),
             "GF_IDEMPOTENCY_CONFLICT"
+        );
+    }
+
+    #[test]
+    fn in_memory_optimistic_publication_uses_ephemeral_lifecycle_mode() {
+        let graph = GraphForge::new_with_options(None, optimistic_options(1)).unwrap();
+        assert_eq!(
+            graph.lifecycle_mode,
+            graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral
+        );
+        let before = *graph
+            .current_generation_uuid
+            .lock()
+            .expect("generation UUID lock poisoned");
+
+        graph
+            .publish_composite_transaction(graph_request(240, 241, "ephemeral"))
+            .unwrap();
+
+        assert_ne!(
+            before,
+            *graph
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned")
         );
     }
 

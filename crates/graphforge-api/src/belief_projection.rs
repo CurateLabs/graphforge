@@ -1313,10 +1313,7 @@ fn publish_attachment(
             .collect(),
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(
-        graph.resolved_generation.container_root(),
-        &request,
-    )? {
+    let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(

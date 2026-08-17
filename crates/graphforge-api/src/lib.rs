@@ -353,6 +353,8 @@ pub struct GraphForge {
     /// The configured path, if the instance is Parquet-backed; `None` for an
     /// in-memory instance (whose data lives in `dir`).
     path: Option<PathBuf>,
+    /// Filesystem lifecycle contract selected when this facade opened.
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
     /// One immutable committed generation selected exactly once at open.
     resolved_generation: ResolvedProjectGeneration,
     /// Whether this facade is an immutable historical checkpoint view.
@@ -436,6 +438,7 @@ impl std::fmt::Debug for GraphForge {
         f.debug_struct("GraphForge")
             .field("identity", &self.identity)
             .field("path", &self.path)
+            .field("lifecycle_mode", &self.lifecycle_mode)
             .field(
                 "generation_uuid",
                 &self.resolved_generation.generation_uuid(),
@@ -449,6 +452,18 @@ impl std::fmt::Debug for GraphForge {
 }
 
 impl GraphForge {
+    pub(crate) fn stage_project_generation(
+        &self,
+        request: &graphforge_storage::ProjectGenerationRequest,
+    ) -> Result<graphforge_storage::ProjectStageOutcome, GfError> {
+        graphforge_storage::stage_project_generation_with_graph_tree_mode(
+            self.resolved_generation.container_root(),
+            request,
+            None,
+            self.lifecycle_mode,
+        )
+    }
+
     /// Create a new in-memory (`None`) or Parquet-backed (`Some(path)`) instance.
     ///
     /// For a persistent instance, the directory may be absent when its parent
@@ -501,6 +516,8 @@ impl GraphForge {
         Ok(Self {
             identity: GraphIdentity::new(),
             path: None,
+            lifecycle_mode:
+                graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral,
             resolved_generation,
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
@@ -586,10 +603,11 @@ impl GraphForge {
         )
     }
 
-    fn open_resolved_with_mode(
+    fn open_resolved_with_lifecycle_mode(
         container_dir: PathBuf,
         resolved_generation: ResolvedProjectGeneration,
         read_only: bool,
+        lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
     ) -> Result<Self, GfError> {
         let options = GraphForgeOptions::default();
         let (_, resource_policy) = options.clone().validate()?;
@@ -602,14 +620,16 @@ impl GraphForge {
                 resolved_generation.generation_uuid(),
             )
         };
-        Self::open_resolved_with_options(
+        let mut graph = Self::open_resolved_with_options(
             container_dir,
             resolved_generation,
             read_only,
             options,
             resource_policy,
             project_open_recovery,
-        )
+        )?;
+        graph.lifecycle_mode = lifecycle_mode;
+        Ok(graph)
     }
 
     fn open_resolved_with_options(
@@ -651,6 +671,7 @@ impl GraphForge {
         let graph = Self {
             identity: GraphIdentity::new(),
             path: Some(container_dir),
+            lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
             resolved_generation,
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
@@ -1112,10 +1133,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
             Some(self.dir.as_path()),
+            self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged
@@ -1198,10 +1220,11 @@ impl GraphForge {
             capabilities,
             participants,
         };
-        let publication = match graphforge_storage::stage_project_generation_with_graph_tree(
+        let publication = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
             root,
             &request,
             Some(self.dir.as_path()),
+            self.lifecycle_mode,
         )? {
             ProjectStageOutcome::AlreadyPublished(receipt) => Ok(receipt),
             ProjectStageOutcome::Staged(staged) => staged

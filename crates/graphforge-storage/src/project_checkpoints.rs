@@ -237,9 +237,25 @@ pub fn create_checkpoint(
     container_root: impl AsRef<Path>,
     request: &CheckpointCreateRequest,
 ) -> Result<CheckpointReceipt, GfError> {
+    create_checkpoint_with_mode(
+        container_root,
+        request,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Create a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`create_checkpoint`].
+pub fn create_checkpoint_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointCreateRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
     validate_description(request.description.as_deref())?;
-    let admission = admit_existing_project(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
@@ -332,8 +348,24 @@ pub fn delete_checkpoint(
     container_root: impl AsRef<Path>,
     request: &CheckpointDeleteRequest,
 ) -> Result<CheckpointReceipt, GfError> {
+    delete_checkpoint_with_mode(
+        container_root,
+        request,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Delete a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`delete_checkpoint`].
+pub fn delete_checkpoint_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointDeleteRequest,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<CheckpointReceipt, GfError> {
     let name = validate_name(&request.name)?;
-    let admission = admit_existing_project(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let _locks = acquire_mutation_locks(&root)?;
     let checkpoint_root = checkpoint_root(&root)?;
@@ -420,7 +452,21 @@ pub fn delete_checkpoint(
 pub fn list_checkpoints(
     container_root: impl AsRef<Path>,
 ) -> Result<Vec<CheckpointRecord>, GfError> {
-    let admission = admit_existing_project(container_root.as_ref())?;
+    list_checkpoints_with_mode(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// List checkpoints using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`list_checkpoints`].
+pub fn list_checkpoints_with_mode(
+    container_root: impl AsRef<Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<Vec<CheckpointRecord>, GfError> {
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
@@ -432,8 +478,24 @@ pub fn open_checkpoint_generation(
     container_root: impl AsRef<Path>,
     name: &str,
 ) -> Result<(CheckpointRecord, crate::ResolvedProjectGeneration), GfError> {
+    open_checkpoint_generation_with_mode(
+        container_root,
+        name,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Open a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`open_checkpoint_generation`].
+pub fn open_checkpoint_generation_with_mode(
+    container_root: impl AsRef<Path>,
+    name: &str,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<(CheckpointRecord, crate::ResolvedProjectGeneration), GfError> {
     let name = validate_name(name)?;
-    let admission = admit_existing_project(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let checkpoint_root = checkpoint_root(&root)?;
     let (_checkpoint_lock, registry) = read_registry_for_read(&root, &checkpoint_root)?;
@@ -466,10 +528,6 @@ pub fn open_checkpoint_generation(
 }
 
 /// Publish a complete-workspace restoration as a new child generation.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the revert transaction is intentionally linear so lock ownership and publication order remain auditable"
-)]
 pub fn revert_checkpoint<T, V>(
     container_root: impl AsRef<Path>,
     request: &CheckpointRevertRequest,
@@ -480,9 +538,37 @@ where
     T: FnOnce() -> Result<i64, GfError>,
     V: FnOnce(&crate::ResolvedProjectGeneration) -> Result<(), GfError>,
 {
+    revert_checkpoint_with_mode(
+        container_root,
+        request,
+        select_timestamp,
+        validate_source,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Revert a checkpoint using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`revert_checkpoint`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "the revert transaction is intentionally linear so lock ownership and publication order remain auditable"
+)]
+pub fn revert_checkpoint_with_mode<T, V>(
+    container_root: impl AsRef<Path>,
+    request: &CheckpointRevertRequest,
+    select_timestamp: T,
+    validate_source: V,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<(CheckpointReceipt, crate::ResolvedProjectGeneration), GfError>
+where
+    T: FnOnce() -> Result<i64, GfError>,
+    V: FnOnce(&crate::ResolvedProjectGeneration) -> Result<(), GfError>,
+{
     let requested_name = validate_name(&request.name)?;
     let requested_reason = validate_reason(&request.reason)?;
-    let admission = admit_existing_project(container_root.as_ref())?;
+    let admission = admit_existing_project(container_root.as_ref(), mode)?;
     let root = canonical_project_root(admission.root())?;
     let transaction_uuid = revert_transaction_uuid(request.operation_uuid);
     let mut locks = acquire_mutation_locks(&root)?;
@@ -894,10 +980,11 @@ fn canonical_project_root(path: &Path) -> Result<PathBuf, GfError> {
 
 fn admit_existing_project(
     root: &Path,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<crate::filesystem_admission::ProjectLifecycleAdmission, GfError> {
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;

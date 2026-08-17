@@ -638,7 +638,7 @@ impl CheckpointView {
 impl GraphForge {
     /// Create a durable named checkpoint.
     pub fn checkpoint(&self, request: CheckpointRequest) -> Result<ExecutionResult, GfError> {
-        let receipt = graphforge_storage::create_checkpoint(
+        let receipt = graphforge_storage::create_checkpoint_with_mode(
             self.resolved_generation.container_root(),
             &graphforge_storage::CheckpointCreateRequest {
                 operation_uuid: request.idempotency_key.0,
@@ -646,6 +646,7 @@ impl GraphForge {
                 description: request.description,
                 actor_uuid: request.actor_uuid,
             },
+            self.lifecycle_mode,
         )?;
         Ok(receipt_result(&receipt))
     }
@@ -657,7 +658,10 @@ impl GraphForge {
     ) -> Result<ExecutionResult, GfError> {
         let ListCheckpointsRequest { page } = request;
         cancellation(&page)?;
-        let rows = graphforge_storage::list_checkpoints(self.resolved_generation.container_root())?;
+        let rows = graphforge_storage::list_checkpoints_with_mode(
+            self.resolved_generation.container_root(),
+            self.lifecycle_mode,
+        )?;
         let snapshot = checkpoint_list_snapshot(&rows);
         let binding = request_binding("checkpoint-list", 0, 0);
         let cursors = rows
@@ -688,9 +692,10 @@ impl GraphForge {
         request: ShowCheckpointRequest,
     ) -> Result<ExecutionResult, GfError> {
         let ShowCheckpointRequest { name } = request;
-        let (checkpoint, _) = graphforge_storage::open_checkpoint_generation(
+        let (checkpoint, _) = graphforge_storage::open_checkpoint_generation_with_mode(
             self.resolved_generation.container_root(),
             &name,
+            self.lifecycle_mode,
         )?;
         checkpoint_rows(std::slice::from_ref(&checkpoint), None)
     }
@@ -713,14 +718,16 @@ impl GraphForge {
 
     /// Open an immutable view pinned to the named checkpoint generation.
     pub fn open_checkpoint(&self, name: &str) -> Result<CheckpointView, GfError> {
-        let (checkpoint, generation) = graphforge_storage::open_checkpoint_generation(
+        let (checkpoint, generation) = graphforge_storage::open_checkpoint_generation_with_mode(
             self.resolved_generation.container_root(),
             name,
+            self.lifecycle_mode,
         )?;
-        let graph = Self::open_resolved_with_mode(
+        let graph = Self::open_resolved_with_lifecycle_mode(
             self.resolved_generation.container_root().to_owned(),
             generation,
             true,
+            self.lifecycle_mode,
         )?;
         Ok(CheckpointView { checkpoint, graph })
     }
@@ -730,13 +737,14 @@ impl GraphForge {
         &self,
         request: DeleteCheckpointRequest,
     ) -> Result<ExecutionResult, GfError> {
-        let receipt = graphforge_storage::delete_checkpoint(
+        let receipt = graphforge_storage::delete_checkpoint_with_mode(
             self.resolved_generation.container_root(),
             &graphforge_storage::CheckpointDeleteRequest {
                 operation_uuid: request.idempotency_key.0,
                 name: request.name,
                 actor_uuid: request.actor_uuid,
             },
+            self.lifecycle_mode,
         )?;
         Ok(receipt_result(&receipt))
     }
@@ -751,11 +759,12 @@ impl GraphForge {
         }
         let container_root = self.resolved_generation.container_root().to_path_buf();
         let clock = self.clock.lock().expect("clock lock poisoned").clone();
+        let lifecycle_mode = self.lifecycle_mode;
         let write_options = self.write_options.clone();
         let resource_policy = self.resource_policy.clone();
         let select_clock = Arc::clone(&clock);
         let prepared = std::cell::RefCell::new(None);
-        let (receipt, resolved) = graphforge_storage::revert_checkpoint(
+        let (receipt, resolved) = graphforge_storage::revert_checkpoint_with_mode(
             &container_root,
             &graphforge_storage::CheckpointRevertRequest {
                 operation_uuid: request.idempotency_key.0,
@@ -765,7 +774,7 @@ impl GraphForge {
             },
             move || select_clock(),
             |generation| {
-                validate_revert_source(generation)?;
+                validate_revert_source(generation, lifecycle_mode)?;
                 prepared.replace(Some(GraphForge::open_resolved_with_options(
                     container_root.clone(),
                     generation.clone(),
@@ -778,12 +787,14 @@ impl GraphForge {
                 )?));
                 Ok(())
             },
+            self.lifecycle_mode,
         )?;
         let result = receipt_result(&receipt);
 
         let mut reopened = prepared
             .into_inner()
             .expect("successful revert validation prepares the replacement facade");
+        reopened.lifecycle_mode = lifecycle_mode;
         reopened.resolved_generation = resolved;
         *reopened
             .current_generation_uuid
@@ -838,16 +849,19 @@ impl GraphForge {
         let to = resolve(&to)?;
         match detail {
             CheckpointDiffDetail::Summary => summary_diff(&from, &to, scope, binding, &page),
-            CheckpointDiffDetail::Records => record_diff(&from, &to, scope, binding, &page),
+            CheckpointDiffDetail::Records => {
+                record_diff(&from, &to, scope, binding, &page, self.lifecycle_mode)
+            }
         }
     }
 
     fn resolve_selector(&self, selector: &CheckpointSelector) -> Result<DiffEndpoint, GfError> {
         let (checkpoint_uuid, generation) = match selector {
             CheckpointSelector::Named(name) => {
-                let (row, generation) = graphforge_storage::open_checkpoint_generation(
+                let (row, generation) = graphforge_storage::open_checkpoint_generation_with_mode(
                     self.resolved_generation.container_root(),
                     name,
+                    self.lifecycle_mode,
                 )?;
                 (row.checkpoint_uuid, generation)
             }
@@ -945,9 +959,10 @@ fn record_diff(
     scope: CheckpointDiffScope,
     binding: Uuid,
     page: &PageRequest,
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ExecutionResult, GfError> {
-    let left = logical_records(&from.generation, scope, page)?;
-    let right = logical_records(&to.generation, scope, page)?;
+    let left = logical_records(&from.generation, scope, page, lifecycle_mode)?;
+    let right = logical_records(&to.generation, scope, page, lifecycle_mode)?;
     let mut keys = left.keys().chain(right.keys()).cloned().collect::<Vec<_>>();
     keys.sort();
     keys.dedup();
@@ -1023,6 +1038,7 @@ fn logical_records(
     generation: &graphforge_storage::ResolvedProjectGeneration,
     scope: CheckpointDiffScope,
     page: &PageRequest,
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<LogicalRecords, GfError> {
     let adapters = record_adapters()?;
     let mut out = BTreeMap::new();
@@ -1035,9 +1051,10 @@ fn logical_records(
         if descriptor.capability_id == "graph"
             && matches!(descriptor.record_family_id.as_str(), "snapshot" | "files")
         {
-            let records = crate::checkpoint_graph_diff::extract_logical_graph_records(
+            let records = crate::checkpoint_graph_diff::extract_logical_graph_records_with_mode(
                 generation,
                 page.cancellation.as_ref(),
+                lifecycle_mode,
             )?;
             for (family, records) in [("nodes", records.nodes), ("edges", records.edges)] {
                 for record in records {
@@ -1307,6 +1324,7 @@ type Inventory =
 
 fn validate_revert_source(
     generation: &graphforge_storage::ResolvedProjectGeneration,
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<(), GfError> {
     generation.validate_complete_participant_inventory()?;
     let _workspace = crate::hydrate_graph_workspace(generation, true)?;
@@ -1330,6 +1348,7 @@ fn validate_revert_source(
         generation,
         CheckpointDiffScope::All,
         &PageRequest::default(),
+        lifecycle_mode,
     )?;
     // Run each domain owner's decoder as well as the generic checkpoint adapters.
     // These readers enforce each ledger's schema and ledger-local invariants.
@@ -3356,6 +3375,48 @@ mod tests {
                 .num_rows(),
             1
         );
+    }
+
+    #[test]
+    fn in_memory_checkpoint_lifecycle_remains_ephemeral() {
+        let mut graph = GraphForge::new(None).unwrap();
+        graph.execute("CREATE (:Person {name: 'before'})").unwrap();
+        graph
+            .checkpoint(CheckpointRequest {
+                name: "Ephemeral".into(),
+                description: None,
+                idempotency_key: operation(230),
+                actor_uuid: None,
+            })
+            .unwrap();
+        graph.execute("CREATE (:Person {name: 'after'})").unwrap();
+        graph
+            .revert_to_checkpoint(RevertCheckpointRequest {
+                name: "Ephemeral".into(),
+                reason: "restore ephemeral checkpoint".into(),
+                idempotency_key: operation(232),
+                actor_uuid: None,
+            })
+            .unwrap();
+        assert_eq!(
+            graph.lifecycle_mode,
+            graphforge_storage::filesystem_admission::ProjectLifecycleMode::Ephemeral
+        );
+        assert_eq!(
+            graph
+                .list_checkpoints(ListCheckpointsRequest::default())
+                .unwrap()
+                .stats
+                .rows_produced,
+            1
+        );
+        graph
+            .delete_checkpoint(DeleteCheckpointRequest {
+                name: "Ephemeral".into(),
+                idempotency_key: operation(233),
+                actor_uuid: None,
+            })
+            .unwrap();
     }
 
     #[test]
