@@ -75,9 +75,7 @@ def check_exception_hierarchy() -> None:
         forge.close()
         (parent / "hop").mkdir()
         current_before = (project / "CURRENT").read_bytes()
-        generations_before = sorted(
-            path.name for path in (project / "generations").iterdir()
-        )
+        generations_before = sorted(path.name for path in (project / "generations").iterdir())
         parent_before = sorted(path.name for path in parent.iterdir())
 
         traversal = parent / "hop" / ".." / "project"
@@ -90,8 +88,7 @@ def check_exception_hierarchy() -> None:
 
         assert (project / "CURRENT").read_bytes() == current_before
         assert (
-            sorted(path.name for path in (project / "generations").iterdir())
-            == generations_before
+            sorted(path.name for path in (project / "generations").iterdir()) == generations_before
         )
         assert sorted(path.name for path in parent.iterdir()) == parent_before
 
