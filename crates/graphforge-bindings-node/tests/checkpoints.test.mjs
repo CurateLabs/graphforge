@@ -170,7 +170,9 @@ test(
   "async checkpoint preserves filesystem admission code after root substitution",
   { skip: process.platform === "win32" },
   async () => {
-    const fixture = mkdtempSync(join(tmpdir(), "gf-node-checkpoint-admission-"));
+    const fixture = mkdtempSync(
+      join(tmpdir(), "gf-node-checkpoint-admission-"),
+    );
     const parent = realpathSync(fixture);
     const project = join(parent, "project");
     const moved = join(parent, "project-moved");

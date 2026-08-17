@@ -893,11 +893,6 @@ fn normalize_trusted_system_alias(path: &Path) -> Result<PathBuf, GfError> {
     Ok(replacement.join(path.strip_prefix(alias).expect("prefix was checked")))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn normalize_trusted_system_alias(path: &Path) -> Result<PathBuf, GfError> {
-    Ok(path.to_path_buf())
-}
-
 #[cfg(unix)]
 fn resolve_project_path_with_hook(
     root: &Path,
@@ -910,7 +905,10 @@ fn resolve_project_path_with_hook(
         .unwrap_or_else(|| Path::new("."));
 
     let (mut parent, components) = if root.is_absolute() {
+        #[cfg(target_os = "macos")]
         let normalized_root = normalize_trusted_system_alias(root)?;
+        #[cfg(not(target_os = "macos"))]
+        let normalized_root = root.to_path_buf();
         let normalized_parent = normalized_root
             .parent()
             .ok_or_else(|| unsupported("CLASSIFY", "parent_unavailable"))?;
@@ -1256,9 +1254,11 @@ fn child_metadata(
     let stat =
         statat(&parent.handle, name, AtFlags::SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
     let path_metadata = std::fs::symlink_metadata(parent.path.join(name))?;
-    if path_metadata.dev() != u64::try_from(stat.st_dev).unwrap_or(u64::MAX)
-        || path_metadata.ino() != stat.st_ino
-    {
+    #[cfg(target_os = "linux")]
+    let stat_device = stat.st_dev;
+    #[cfg(not(target_os = "linux"))]
+    let stat_device = u64::try_from(stat.st_dev).unwrap_or(u64::MAX);
+    if path_metadata.dev() != stat_device || path_metadata.ino() != stat.st_ino {
         return Err(std::io::Error::other("child identity changed"));
     }
     Ok(path_metadata)
@@ -2019,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_ephemeral_root_is_canonicalized_before_ancestor_policy() {
+    fn existing_ephemeral_root_retains_canonical_identity_before_ancestor_policy() {
         let root = tempfile::tempdir().unwrap();
         let admission = admit_project_lifecycle(
             root.path(),
@@ -2027,7 +2027,10 @@ mod tests {
             ProjectRootRequirement::Existing,
         )
         .unwrap();
-        assert_eq!(admission.root(), root.path().canonicalize().unwrap());
+        assert_eq!(
+            graphforge_filesystem::path_identity(admission.root()).unwrap(),
+            graphforge_filesystem::path_identity(root.path()).unwrap()
+        );
         admission.revalidate_identity().unwrap();
     }
 
