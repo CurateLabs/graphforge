@@ -8,7 +8,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use atomicwrites::{AllowOverwrite, AtomicFile};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -273,7 +272,30 @@ pub fn stage_project_generation_with_graph_tree(
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request, graph_tree)
+    stage_project_generation_with_graph_tree_mode(
+        container_root,
+        request,
+        graph_tree,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Stage a generation using the lifecycle mode established when the owning
+/// facade opened the project.
+///
+/// Ephemeral mode is reserved for process-owned temporary projects. Durable
+/// callers must use the default wrapper or pass `Durable` explicitly.
+///
+/// # Errors
+/// Returns the same stable staging errors as
+/// [`stage_project_generation_with_graph_tree`].
+pub fn stage_project_generation_with_graph_tree_mode(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_inner(container_root.as_ref(), request, graph_tree, mode)
         .map_err(|error| map_stage_error(request, error))
 }
 
@@ -312,13 +334,91 @@ pub fn stage_project_generation_optimistic_with_graph_tree(
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_optimistic_with_graph_tree_mode(
+        container_root,
+        request,
+        operation_fingerprint,
+        graph_tree,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Optimistic staging using the lifecycle mode established when the owning
+/// facade opened the project.
+///
+/// # Errors
+/// Returns the same stable staging errors as
+/// [`stage_project_generation_optimistic_with_graph_tree`].
+pub fn stage_project_generation_optimistic_with_graph_tree_mode(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    operation_fingerprint: [u8; 32],
+    graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_optimistic_inner(
         container_root.as_ref(),
         request,
         operation_fingerprint,
         graph_tree,
+        mode,
     )
     .map_err(|error| map_stage_error(request, error))
+}
+
+/// Stage against one caller-prepared, lifetime-pinned CURRENT generation.
+///
+/// The caller passes the full admission that resolved `parent`. This path takes
+/// the writer while admission is still held, verifies CURRENT still names the
+/// exact prepared generation, and only then releases the lifecycle lock while
+/// retaining root identity under the writer.
+pub(crate) fn stage_project_generation_from_admitted_parent(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+) -> Result<ProjectStageOutcome, GfError> {
+    let result = (|| {
+        validate_request(request)?;
+        admission.revalidate_identity()?;
+        let root = canonical_supported_root(admission.root())?;
+        if parent.container_root() != root {
+            return Err(project_error(
+                ProjectErrorCode::UnsupportedFilesystem,
+                "prepared generation does not belong to the admitted project root",
+            ));
+        }
+        let writer_lock = acquire_writer_lock(&root, request)?;
+        project_failpoint::hit(
+            "project.after_writer_lock",
+            Some(request.transaction_uuid),
+            Some(request.generation_uuid),
+            "WRITER_LOCK",
+            false,
+        )?;
+        admission.revalidate_identity()?;
+        let current = resolve_project_generation(&root)?;
+        if current.generation_uuid() != parent.generation_uuid()
+            || current.manifest_sha256() != parent.manifest_sha256()
+        {
+            return Err(project_error(
+                ProjectErrorCode::WriteConflict,
+                "prepared CURRENT changed before admitted publication acquired the writer",
+            ));
+        }
+        let identity = admission.into_identity()?;
+        stage_project_generation_inner_with_locks(
+            StagedAdmission::Exclusive(identity),
+            root,
+            PublicationLock::Exclusive(writer_lock),
+            parent,
+            request,
+            None,
+            None,
+            graph_tree,
+        )
+    })();
+    result.map_err(|error| map_stage_error(request, error))
 }
 
 fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfError {
@@ -332,13 +432,14 @@ fn stage_project_generation_inner(
     container_root: &Path,
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
     // Reject malformed contracts before taking the writer lock so concurrent
     // readers/writers are never blocked by validation-only failures.
     validate_request(request)?;
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
@@ -370,11 +471,12 @@ fn stage_project_generation_optimistic_inner(
     request: &ProjectGenerationRequest,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
@@ -1267,24 +1369,28 @@ fn replace_current(
     };
     let current_bytes = canonical_line(&current)?;
     let current_path = staged.root.join(CURRENT_FILE);
-    AtomicFile::new(&current_path, AllowOverwrite)
-        .write(|file| {
-            file.write_all(&current_bytes)?;
+    publish_atomic_bytes(
+        &current_path,
+        &current_bytes,
+        || {
             failpoint_as_io(
                 "project.after_current_temp_write",
                 staged.transaction_uuid,
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )?;
-            file.sync_all()?;
+            )
+        },
+        || {
             failpoint_as_io(
                 "project.after_current_temp_fsync",
                 staged.transaction_uuid,
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )?;
+            )
+        },
+        || {
             failpoint_as_io(
                 "project.before_current_replace",
                 staged.transaction_uuid,
@@ -1292,16 +1398,17 @@ fn replace_current(
                 "CURRENT",
                 false,
             )
-        })
-        .map_err(|error| {
-            publication_error_from_parts(
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-                &error.to_string(),
-            )
-        })?;
+        },
+    )
+    .map_err(|error| {
+        publication_error_from_parts(
+            staged.transaction_uuid,
+            staged.generation_uuid,
+            "CURRENT",
+            false,
+            &error.to_string(),
+        )
+    })?;
     project_failpoint::hit(
         "project.after_current_replace",
         Some(staged.transaction_uuid),
@@ -1854,13 +1961,90 @@ fn verify_exact_file(path: &Path, expected: &[u8]) -> Result<(), GfError> {
 
 pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), GfError> {
     let bytes = canonical_line(journal)?;
-    AtomicFile::new(path, AllowOverwrite)
-        .write(|file| file.write_all(&bytes))
-        .map_err(|error| publication_io(std::io::Error::other(error.to_string())))?;
+    publish_atomic_bytes(path, &bytes, || Ok(()), || Ok(()), || Ok(())).map_err(publication_io)?;
     sync_directory(
         path.parent()
             .expect("transaction journal always has a parent"),
     )
+}
+
+pub(crate) fn publish_atomic_bytes(
+    path: &Path,
+    bytes: &[u8],
+    after_write: impl FnOnce() -> std::io::Result<()>,
+    after_sync: impl FnOnce() -> std::io::Result<()>,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("atomic publication target has no parent"))?;
+    let target_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("atomic publication target has no file name"))?;
+    let target_text = target_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
+    let digest: [u8; 32] = Sha256::digest(target_text.as_bytes()).into();
+    let temp_name = format!(".graphforge-atomic-{}.tmp", hex_digest(digest));
+    let temp_path = parent.join(&temp_name);
+    remove_stale_atomic_temp(&temp_path)?;
+
+    let mut temp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    temp.write_all(bytes)?;
+    after_write()?;
+    temp.sync_all()?;
+    after_sync()?;
+    drop(temp);
+    before_replace()?;
+
+    let directory = crate::filesystem_admission::open_directory_handle(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || graphforge_filesystem::path_link_count(path)? != 1
+            {
+                return Err(std::io::Error::other(
+                    "atomic publication target is not a regular single-link file",
+                ));
+            }
+            graphforge_filesystem::replace_file(
+                &directory,
+                std::ffi::OsStr::new(&temp_name),
+                target_name,
+            )
+            .map_err(std::io::Error::other)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            graphforge_filesystem::install_new_file(
+                &directory,
+                std::ffi::OsStr::new(&temp_name),
+                target_name,
+            )
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_stale_atomic_temp(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || graphforge_filesystem::path_link_count(path)? != 1
+            {
+                return Err(std::io::Error::other(
+                    "atomic publication temporary is not a regular single-link file",
+                ));
+            }
+            std::fs::remove_file(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
@@ -1902,6 +2086,26 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(false);
     };
+    if let Some(digest) = name
+        .strip_prefix(".graphforge-atomic-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || graphforge_filesystem::path_link_count(path).map_err(publication_io)? != 1
+        {
+            return Ok(false);
+        }
+        std::fs::remove_file(path).map_err(publication_io)?;
+        sync_directory(
+            path.parent()
+                .expect("atomic-write temporary directory always has a parent"),
+        )?;
+        return Ok(true);
+    }
     let Some(suffix) = name.strip_prefix(".atomicwrite") else {
         return Ok(false);
     };
@@ -2993,6 +3197,34 @@ mod tests {
         assert_eq!(
             std::fs::read(hostile.join("unexpected")).unwrap(),
             b"caller bytes"
+        );
+
+        let native_temp = root.path().join(format!(
+            ".graphforge-atomic-{}.tmp",
+            hex_digest(Sha256::digest(b"CURRENT").into())
+        ));
+        std::fs::write(&native_temp, b"abandoned").unwrap();
+        assert!(cleanup_atomicwrite_temp(&native_temp).unwrap());
+        assert!(!native_temp.exists());
+    }
+
+    #[test]
+    fn atomic_bytes_install_and_replace_use_one_bounded_native_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+
+        publish_atomic_bytes(&target, b"first\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first\n");
+        publish_atomic_bytes(&target, b"second\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"second\n");
+        assert!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".graphforge-atomic-"))
         );
     }
 

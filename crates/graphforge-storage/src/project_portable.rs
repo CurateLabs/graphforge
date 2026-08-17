@@ -18,10 +18,11 @@ use uuid::Uuid;
 #[cfg(test)]
 use crate::open_or_initialize_project;
 use crate::project_generation::open_or_initialize_project_admitted;
+use crate::project_publication::stage_project_generation_from_admitted_parent;
 use crate::{
     ProjectCapability, ProjectGenerationRequest, ProjectParticipant, ProjectParticipantEncoding,
     ProjectPublicationReceipt, ProjectStageOutcome, ResolvedProjectGeneration,
-    resolve_project_generation, stage_project_generation,
+    resolve_project_generation,
 };
 
 const MAGIC: &[u8; 16] = b"graphforge-exp\0\n";
@@ -240,6 +241,26 @@ pub fn import_portable_project(
     supported_capabilities: &[ProjectCapability],
     limits: PortableProjectLimits,
 ) -> Result<PortableImportReceipt, GfError> {
+    import_portable_project_after_prepare(
+        envelope,
+        target,
+        transaction_uuid,
+        generation_uuid,
+        supported_capabilities,
+        limits,
+        |_| Ok(()),
+    )
+}
+
+fn import_portable_project_after_prepare(
+    envelope: &[u8],
+    target: impl AsRef<Path>,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    supported_capabilities: &[ProjectCapability],
+    limits: PortableProjectLimits,
+    before_stage: impl FnOnce(&Path) -> Result<(), GfError>,
+) -> Result<PortableImportReceipt, GfError> {
     let validated = validate_envelope(envelope, supported_capabilities, limits)?;
     let target = target.as_ref();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
@@ -251,7 +272,7 @@ pub fn import_portable_project(
     let target = admission.root();
     let existing_parent = prepare_import_target(target)?;
     let initialized_parent;
-    let _parent = if let Some(parent) = existing_parent {
+    let parent = if let Some(parent) = existing_parent {
         parent
     } else {
         initialized_parent = open_or_initialize_project_admitted(target)?;
@@ -264,13 +285,14 @@ pub fn import_portable_project(
         participants: validated.participants,
     };
     let target = target.to_owned();
-    drop(admission);
-    let publication = match stage_project_generation(&target, &request)? {
-        ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
-        ProjectStageOutcome::Staged(staged) => {
-            staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
-        }
-    };
+    before_stage(&target)?;
+    let publication =
+        match stage_project_generation_from_admitted_parent(admission, parent, &request, None)? {
+            ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
+            ProjectStageOutcome::Staged(staged) => {
+                staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
+            }
+        };
     Ok(PortableImportReceipt {
         envelope_sha256: validated.envelope_sha256,
         source_generation_uuid: validated.source_generation_uuid,
@@ -975,6 +997,38 @@ mod tests {
         assert_eq!(reopened.participant_snapshots().unwrap(), expected);
         assert!(!target.join("trash").exists());
         assert!(!target.join("cache").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_import_never_stages_into_a_replacement_root() {
+        let source = tempfile::tempdir().unwrap();
+        let source_generation = open_or_initialize_project(source.path()).unwrap();
+        let limits = PortableProjectLimits::default();
+        let (envelope, _) = encode_portable_project(&source_generation, limits).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("imported");
+        let moved = parent.path().join("admitted-original");
+
+        let error = import_portable_project_after_prepare(
+            &envelope,
+            &target,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            &supported(&source_generation),
+            limits,
+            |path| {
+                std::fs::rename(path, &moved)
+                    .map_err(|error| GfError::Storage(format!("rename admitted root: {error}")))?;
+                graphforge_filesystem::create_private_directory(path)
+                    .map_err(|error| GfError::Storage(format!("create replacement root: {error}")))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        resolve_project_generation(&moved).unwrap();
     }
 
     #[test]

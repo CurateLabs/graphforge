@@ -27,7 +27,7 @@ use crate::graph_files::{capture_graph_files, verify_graph_tree};
 use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
-    published_project_transaction, stage_project_generation_with_graph_tree,
+    published_project_transaction, stage_project_generation_from_admitted_parent,
 };
 use crate::project_retention::{
     ProjectCleanupReport, ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
@@ -182,14 +182,33 @@ pub fn preview_graph_delta_compaction(
     request: &GraphDeltaCompactionRequest,
     cancel: Option<&AtomicBool>,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
+    preview_graph_delta_compaction_with_mode(
+        container_root,
+        request,
+        cancel,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Preview compaction using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`preview_graph_delta_compaction`].
+pub fn preview_graph_delta_compaction_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &GraphDeltaCompactionRequest,
+    cancel: Option<&AtomicBool>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<GraphDeltaCompactionReport, GfError> {
     let started = Instant::now();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
-    let prepared = prepare_compaction(admission.root(), request, cancel)?;
+    let parent = resolve_project_generation(admission.root())?;
+    let prepared = prepare_compaction(admission.root(), &parent, request, cancel)?;
     Ok(report_from_prepared(
         &prepared,
         true,
@@ -210,10 +229,38 @@ pub fn compact_graph_delta(
     request: &GraphDeltaCompactionRequest,
     cancel: Option<&AtomicBool>,
 ) -> Result<GraphDeltaCompactionReport, GfError> {
+    compact_graph_delta_with_mode(
+        container_root,
+        request,
+        cancel,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Compact using the lifecycle mode established by the owning facade.
+///
+/// # Errors
+/// Returns the same errors as [`compact_graph_delta`].
+pub fn compact_graph_delta_with_mode(
+    container_root: impl AsRef<Path>,
+    request: &GraphDeltaCompactionRequest,
+    cancel: Option<&AtomicBool>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<GraphDeltaCompactionReport, GfError> {
+    compact_graph_delta_after_prepare(container_root, request, cancel, mode, |_| Ok(()))
+}
+
+fn compact_graph_delta_after_prepare(
+    container_root: impl AsRef<Path>,
+    request: &GraphDeltaCompactionRequest,
+    cancel: Option<&AtomicBool>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+    before_stage: impl FnOnce(&Path) -> Result<(), GfError>,
+) -> Result<GraphDeltaCompactionReport, GfError> {
     let started = Instant::now();
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
-        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        mode,
         crate::filesystem_admission::ProjectRootRequirement::Existing,
     )?;
     admission.revalidate_identity()?;
@@ -230,7 +277,8 @@ pub fn compact_graph_delta(
         return replay_compaction_receipt(root, request, publication, elapsed_ms(started));
     }
 
-    let prepared = prepare_compaction(root, request, cancel)?;
+    let parent = resolve_project_generation(root)?;
+    let prepared = prepare_compaction(root, &parent, request, cancel)?;
     check_cancel(cancel)?;
 
     let staging = tempfile::tempdir().map_err(|error| {
@@ -264,9 +312,10 @@ pub fn compact_graph_delta(
     };
 
     check_cancel(cancel)?;
-    drop(admission);
-    let publication = match stage_project_generation_with_graph_tree(
-        root,
+    before_stage(root)?;
+    let publication = match stage_project_generation_from_admitted_parent(
+        admission,
+        parent,
         &generation_request,
         Some(staging.path()),
     )? {
@@ -318,7 +367,31 @@ pub fn graph_delta_compaction_status(
     policy: GraphDeltaCompactionPolicy,
     limits: GraphDeltaJournalLimits,
 ) -> Result<GraphDeltaCompactionStatus, GfError> {
-    let resolved = resolve_project_generation(container_root.as_ref())?;
+    graph_delta_compaction_status_with_mode(
+        container_root,
+        policy,
+        limits,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Inspect compaction status using the lifecycle mode established by the owner.
+///
+/// # Errors
+/// Returns the same errors as [`graph_delta_compaction_status`].
+pub fn graph_delta_compaction_status_with_mode(
+    container_root: impl AsRef<Path>,
+    policy: GraphDeltaCompactionPolicy,
+    limits: GraphDeltaJournalLimits,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<GraphDeltaCompactionStatus, GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let resolved = resolve_project_generation(admission.root())?;
     let inventory = resolved
         .graph_files_inventory()?
         .ok_or_else(|| validation("CURRENT generation lacks graph/files inventory"))?;
@@ -372,13 +445,13 @@ struct PreparedCompaction {
 
 fn prepare_compaction(
     root: &Path,
+    parent: &crate::ResolvedProjectGeneration,
     request: &GraphDeltaCompactionRequest,
     cancel: Option<&AtomicBool>,
 ) -> Result<PreparedCompaction, GfError> {
     let limits = request.limits.validate()?;
     check_cancel(cancel)?;
 
-    let parent = resolve_project_generation(root)?;
     let parent_inventory = parent
         .graph_files_inventory()?
         .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
@@ -823,10 +896,108 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 
 #[cfg(test)]
 mod crash_oracle_tests {
+    use super::*;
     use crate::project_fault_oracle::{
         AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
         publication_ops, simulate_crash,
     };
+
+    fn publish_graph_base(root: &Path) {
+        crate::open_or_initialize_project(root).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        stage_base_graph_workspace(
+            workspace.path(),
+            &[
+                ("topology/nodes.parquet", b"nodes"),
+                ("topology/edges.parquet", b"edges"),
+            ],
+            Some(&ReconstructedGraphState::default()),
+        )
+        .unwrap();
+        let (_, files) = capture_graph_files(workspace.path()).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root, &request, Some(workspace.path()))
+                .unwrap()
+        else {
+            panic!("base publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+    }
+
+    fn publish_one_node_delta(root: &Path) -> Uuid {
+        let generation_uuid = Uuid::now_v7();
+        crate::publish_graph_delta(
+            root,
+            &crate::GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid,
+                run_uuid: Uuid::now_v7(),
+                operations: vec![GraphDeltaOp {
+                    operation_uuid: Uuid::now_v7(),
+                    kind: crate::GraphDeltaOpKind::UpsertNode,
+                    payload: crate::GraphDeltaPayload::UpsertNode {
+                        node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                        type_ids: vec![1],
+                    },
+                }],
+                limits: GraphDeltaJournalLimits::default(),
+            },
+        )
+        .unwrap();
+        generation_uuid
+    }
+
+    fn stage_graph_clone(root: &Path) -> (Uuid, Box<crate::StagedProjectGeneration>) {
+        let current = resolve_project_generation(root).unwrap();
+        let graph_tree = current.graph_tree_root();
+        let (_, files) = capture_graph_files(&graph_tree).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let generation_uuid = Uuid::now_v7();
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid,
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root, &request, Some(&graph_tree))
+                .unwrap()
+        else {
+            panic!("clone publication unexpectedly replayed");
+        };
+        (generation_uuid, staged)
+    }
 
     #[test]
     fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
@@ -852,5 +1023,54 @@ mod crash_oracle_tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn prepared_compaction_fails_busy_behind_a_live_current_writer() {
+        let root = tempfile::tempdir().unwrap();
+        publish_graph_base(root.path());
+        publish_one_node_delta(root.path());
+        let (concurrent_generation, concurrent) = stage_graph_clone(root.path());
+        let request = GraphDeltaCompactionRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            through_run_sequence: None,
+            limits: GraphDeltaCompactionLimits::default(),
+            cleanup_after_commit: false,
+            cleanup_policy: ProjectRetentionPolicy::default(),
+            cleanup_limits: ProjectRetentionLimits::default(),
+        };
+
+        let error = compact_graph_delta_after_prepare(
+            root.path(),
+            &request,
+            None,
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            |_| Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        concurrent
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            concurrent_generation
+        );
+        let current = resolve_project_generation(root.path()).unwrap();
+        assert_eq!(
+            list_delta_runs(
+                &current.graph_files_inventory().unwrap().unwrap(),
+                GraphDeltaJournalLimits::default()
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 }

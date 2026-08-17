@@ -14,7 +14,6 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use atomicwrites::{AllowOverwrite, AtomicFile};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -938,14 +937,14 @@ fn initialize_empty_generation(
     let mut current_bytes = serde_json::to_vec(&current)
         .map_err(|error| GfError::Storage(format!("failed to encode CURRENT: {error}")))?;
     current_bytes.push(b'\n');
-    AtomicFile::new(root.join(CURRENT_FILE), AllowOverwrite)
-        .write(|file| {
-            use std::io::Write as _;
-
-            file.write_all(&current_bytes)?;
-            file.sync_all()
-        })
-        .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
+    crate::project_publication::publish_atomic_bytes(
+        &root.join(CURRENT_FILE),
+        &current_bytes,
+        || Ok(()),
+        || Ok(()),
+        || Ok(()),
+    )
+    .map_err(|error| GfError::Storage(format!("failed to write CURRENT: {error}")))?;
     sync_directory(root)?;
     resolve_project_generation(root)
 }

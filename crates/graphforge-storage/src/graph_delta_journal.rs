@@ -20,7 +20,7 @@ use crate::graph_files::{
 use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
-    published_project_transaction, stage_project_generation_with_graph_tree,
+    published_project_transaction, stage_project_generation_from_admitted_parent,
 };
 use crate::{GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, empty_workspace_participants};
 
@@ -709,10 +709,18 @@ pub fn reconstruct_graph_state(
 /// # Errors
 /// Unsupported kinds are rejected before staging. Publication and idempotency
 /// errors follow the project generation protocol.
-#[allow(clippy::too_many_lines)] // Publication stages copy, encode, and CURRENT commit together.
 pub fn publish_graph_delta(
     container_root: &Path,
     request: &GraphDeltaPublishRequest,
+) -> Result<GraphDeltaPublicationReceipt, GfError> {
+    publish_graph_delta_after_prepare(container_root, request, |_| Ok(()))
+}
+
+#[allow(clippy::too_many_lines)] // Publication stages copy, encode, and CURRENT commit together.
+fn publish_graph_delta_after_prepare(
+    container_root: &Path,
+    request: &GraphDeltaPublishRequest,
+    before_stage: impl FnOnce(&Path) -> Result<(), GfError>,
 ) -> Result<GraphDeltaPublicationReceipt, GfError> {
     let admission = crate::filesystem_admission::admit_project_lifecycle(
         container_root,
@@ -870,9 +878,11 @@ pub fn publish_graph_delta(
         participants,
     };
 
-    drop(admission);
-    let publication = match stage_project_generation_with_graph_tree(
-        container_root,
+    let parent_generation_uuid = parent.generation_uuid();
+    before_stage(container_root)?;
+    let publication = match stage_project_generation_from_admitted_parent(
+        admission,
+        parent,
         &generation_request,
         Some(staging.path()),
     )? {
@@ -891,7 +901,7 @@ pub fn publish_graph_delta(
         &child_inventory,
         request.limits,
     )?;
-    evidence.base_generation_uuid = Some(parent.generation_uuid());
+    evidence.base_generation_uuid = Some(parent_generation_uuid);
 
     Ok(GraphDeltaPublicationReceipt {
         publication,
@@ -1134,10 +1144,102 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 
 #[cfg(test)]
 mod crash_oracle_tests {
+    use super::*;
     use crate::project_fault_oracle::{
         AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
         publication_ops, simulate_crash,
     };
+
+    fn publish_graph_base(root: &Path) {
+        crate::open_or_initialize_project(root).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        stage_base_graph_workspace(
+            workspace.path(),
+            &[
+                ("topology/nodes.parquet", b"nodes"),
+                ("topology/edges.parquet", b"edges"),
+            ],
+            Some(&ReconstructedGraphState::default()),
+        )
+        .unwrap();
+        let (_, files) = capture_graph_files(workspace.path()).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root, &request, Some(workspace.path()))
+                .unwrap()
+        else {
+            panic!("base publication unexpectedly replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+    }
+
+    fn one_node_request() -> GraphDeltaPublishRequest {
+        GraphDeltaPublishRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid: Uuid::now_v7(),
+            run_uuid: Uuid::now_v7(),
+            operations: vec![GraphDeltaOp {
+                operation_uuid: Uuid::now_v7(),
+                kind: GraphDeltaOpKind::UpsertNode,
+                payload: GraphDeltaPayload::UpsertNode {
+                    node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                    type_ids: vec![1],
+                },
+            }],
+            limits: GraphDeltaJournalLimits::default(),
+        }
+    }
+
+    fn stage_graph_clone(root: &Path) -> (Uuid, Box<crate::StagedProjectGeneration>) {
+        let current = resolve_project_generation(root).unwrap();
+        let graph_tree = current.graph_tree_root();
+        let (_, files) = capture_graph_files(&graph_tree).unwrap();
+        let mut participants = empty_workspace_participants().unwrap();
+        participants.insert(0, files);
+        let generation_uuid = Uuid::now_v7();
+        let request = ProjectGenerationRequest {
+            transaction_uuid: Uuid::now_v7(),
+            generation_uuid,
+            capabilities: vec![
+                ProjectCapability {
+                    capability_id: GRAPH_CAPABILITY_ID.into(),
+                    capability_version: GRAPH_CAPABILITY_VERSION,
+                },
+                ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(root, &request, Some(&graph_tree))
+                .unwrap()
+        else {
+            panic!("clone publication unexpectedly replayed");
+        };
+        (generation_uuid, staged)
+    }
 
     #[test]
     fn crash_oracle_before_and_after_ack_matches_frozen_contract() {
@@ -1163,5 +1265,29 @@ mod crash_oracle_tests {
                 _ => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn prepared_delta_fails_busy_behind_a_live_current_writer() {
+        let root = tempfile::tempdir().unwrap();
+        publish_graph_base(root.path());
+        let prepared = one_node_request();
+        let (concurrent_generation, concurrent) = stage_graph_clone(root.path());
+
+        let error =
+            publish_graph_delta_after_prepare(root.path(), &prepared, |_| Ok(())).unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        concurrent
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            concurrent_generation
+        );
     }
 }

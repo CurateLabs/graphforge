@@ -55,7 +55,9 @@ pub use graph_delta_compaction::{
     DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
     GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
-    graph_delta_compaction_status, preview_graph_delta_compaction,
+    compact_graph_delta_with_mode, graph_delta_compaction_status,
+    graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
+    preview_graph_delta_compaction_with_mode,
 };
 
 pub mod project_generation;
@@ -76,8 +78,10 @@ pub mod project_certification;
 pub mod project_checkpoints;
 pub use project_checkpoints::{
     CheckpointCreateRequest, CheckpointDeleteRequest, CheckpointReceipt, CheckpointRecord,
-    CheckpointRevertRequest, create_checkpoint, delete_checkpoint, list_checkpoints,
-    open_checkpoint_generation, revert_checkpoint,
+    CheckpointRevertRequest, create_checkpoint, create_checkpoint_with_mode, delete_checkpoint,
+    delete_checkpoint_with_mode, list_checkpoints, list_checkpoints_with_mode,
+    open_checkpoint_generation, open_checkpoint_generation_with_mode, revert_checkpoint,
+    revert_checkpoint_with_mode,
 };
 
 pub mod project_publication;
@@ -86,7 +90,8 @@ pub use project_publication::{
     ProjectPublicationReceipt, ProjectStageOutcome, StagedParticipant, StagedProjectGeneration,
     ValidatedProjectGeneration, published_project_transaction, stage_project_generation,
     stage_project_generation_optimistic, stage_project_generation_optimistic_with_graph_tree,
-    stage_project_generation_with_graph_tree,
+    stage_project_generation_optimistic_with_graph_tree_mode,
+    stage_project_generation_with_graph_tree, stage_project_generation_with_graph_tree_mode,
 };
 
 pub mod project_recovery;
@@ -104,7 +109,9 @@ pub use project_retention::{
     DEFAULT_RETENTION_MAX_WORK_UNITS, ProjectCleanupDisposition, ProjectCleanupEntry,
     ProjectCleanupLocation, ProjectCleanupReport, ProjectReachabilityReport,
     ProjectRetentionLimits, ProjectRetentionPolicy, execute_project_cleanup,
-    inspect_project_reachability, preview_project_cleanup,
+    execute_project_cleanup_with_mode, inspect_project_reachability,
+    inspect_project_reachability_with_mode, preview_project_cleanup,
+    preview_project_cleanup_with_mode,
 };
 
 pub mod project_portable;
