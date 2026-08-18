@@ -2069,24 +2069,16 @@ pub(crate) fn publish_atomic_bytes(
         before_replace()?;
 
         let directory = crate::filesystem_admission::open_directory_handle(parent)?;
+        // Existence is one snapshot; `replace_file` / `install_new_file` verify
+        // regular single-link identity on the open handles. A second path lstat
+        // here raced concurrent CURRENT replace (nlink != 1) and failed Bazel.
         match std::fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                if !metadata.is_file()
-                    || metadata.file_type().is_symlink()
-                    || graphforge_filesystem::path_link_count(path)? != 1
-                {
-                    return Err(std::io::Error::other(
-                        "atomic publication target is not a regular single-link file",
-                    )
-                    .into());
-                }
-                graphforge_filesystem::replace_file(
-                    &directory,
-                    std::ffi::OsStr::new(&temp_name),
-                    target_name,
-                )
-                .map_err(AtomicPublishError::Replacement)
-            }
+            Ok(_) => graphforge_filesystem::replace_file(
+                &directory,
+                std::ffi::OsStr::new(&temp_name),
+                target_name,
+            )
+            .map_err(AtomicPublishError::Replacement),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 graphforge_filesystem::install_new_file(
                     &directory,
