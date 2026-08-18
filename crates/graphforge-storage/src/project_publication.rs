@@ -2049,69 +2049,70 @@ pub(crate) fn publish_atomic_bytes(
     let target_text = target_name
         .to_str()
         .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
-    let digest: [u8; 32] = Sha256::digest(target_text.as_bytes()).into();
-    let temp_name = format!(".graphforge-atomic-{}.tmp", hex_digest(digest));
+    // Hash the target name plus a per-attempt identity. Hashing only the
+    // target made concurrent CURRENT publishers share one temp, so one
+    // writer's `create_new` prep deleted the other's in-flight file and
+    // `replace_file` failed with ENOENT ("file was not replaced").
+    let temp_name = unique_atomic_temp_name(target_text);
     let temp_path = parent.join(&temp_name);
-    remove_stale_atomic_temp(&temp_path)?;
 
-    let mut temp = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
-    temp.write_all(bytes)?;
-    after_write()?;
-    temp.sync_all()?;
-    after_sync()?;
-    drop(temp);
-    before_replace()?;
+    let publish = || -> Result<(), AtomicPublishError> {
+        let mut temp = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        temp.write_all(bytes)?;
+        after_write()?;
+        temp.sync_all()?;
+        after_sync()?;
+        drop(temp);
+        before_replace()?;
 
-    let directory = crate::filesystem_admission::open_directory_handle(parent)?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || graphforge_filesystem::path_link_count(path)? != 1
-            {
-                return Err(std::io::Error::other(
-                    "atomic publication target is not a regular single-link file",
+        let directory = crate::filesystem_admission::open_directory_handle(parent)?;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || graphforge_filesystem::path_link_count(path)? != 1
+                {
+                    return Err(std::io::Error::other(
+                        "atomic publication target is not a regular single-link file",
+                    )
+                    .into());
+                }
+                graphforge_filesystem::replace_file(
+                    &directory,
+                    std::ffi::OsStr::new(&temp_name),
+                    target_name,
                 )
-                .into());
+                .map_err(AtomicPublishError::Replacement)
             }
-            graphforge_filesystem::replace_file(
-                &directory,
-                std::ffi::OsStr::new(&temp_name),
-                target_name,
-            )
-            .map_err(AtomicPublishError::Replacement)
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                graphforge_filesystem::install_new_file(
+                    &directory,
+                    std::ffi::OsStr::new(&temp_name),
+                    target_name,
+                )
+                .map_err(AtomicPublishError::Io)
+            }
+            Err(error) => Err(AtomicPublishError::Io(error)),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            graphforge_filesystem::install_new_file(
-                &directory,
-                std::ffi::OsStr::new(&temp_name),
-                target_name,
-            )
-            .map_err(AtomicPublishError::Io)
-        }
-        Err(error) => Err(AtomicPublishError::Io(error)),
+    };
+    let result = publish();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
     }
+    result
 }
 
-fn remove_stale_atomic_temp(path: &Path) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file()
-                || metadata.file_type().is_symlink()
-                || graphforge_filesystem::path_link_count(path)? != 1
-            {
-                return Err(std::io::Error::other(
-                    "atomic publication temporary is not a regular single-link file",
-                ));
-            }
-            std::fs::remove_file(path)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
+fn unique_atomic_temp_name(target_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(target_text.as_bytes());
+    hasher.update(Uuid::now_v7().as_bytes());
+    format!(
+        ".graphforge-atomic-{}.tmp",
+        hex_digest(hasher.finalize().into())
+    )
 }
 
 pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
@@ -3325,15 +3326,53 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"first\n");
         publish_atomic_bytes(&target, b"second\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"second\n");
-        assert!(
-            std::fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .all(|entry| !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".graphforge-atomic-"))
-        );
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn concurrent_atomic_replace_of_the_same_target_does_not_share_a_temp() {
+        use std::sync::{Arc, Barrier};
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+        publish_atomic_bytes(&target, b"seed\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
+
+        for _ in 0..32 {
+            let barrier = Arc::new(Barrier::new(2));
+            let mut joins = Vec::new();
+            for payload in [b"left\n" as &[u8], b"right\n"] {
+                let path = target.clone();
+                let barrier = Arc::clone(&barrier);
+                joins.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    publish_atomic_bytes(&path, payload, || Ok(()), || Ok(()), || Ok(()))
+                }));
+            }
+            let results: Vec<_> = joins
+                .into_iter()
+                .map(|thread| thread.join().expect("publisher thread"))
+                .collect();
+            assert!(
+                results.iter().all(Result::is_ok),
+                "concurrent CURRENT replace must not fail with a shared temp: {results:?}"
+            );
+            let published = std::fs::read(&target).unwrap();
+            assert!(
+                published == b"left\n" || published == b"right\n",
+                "{}",
+                String::from_utf8_lossy(&published)
+            );
+        }
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    fn atomic_temp_names(root: &Path) -> Vec<String> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".graphforge-atomic-"))
+            .collect()
     }
 
     #[test]
