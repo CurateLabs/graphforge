@@ -98,10 +98,14 @@ Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
 native binding acceptance is Linux-only and uses Cargo's `dev` profile for
 maturin/napi assembly. Authoritative Rust compile/test is Bazel
 (`//:ci_rust_tests`) under `Bazel Bootstrap`.
-When Rust surfaces change, `Windows graphforge-storage Locks` runs
-`cargo test -p graphforge-storage project_generation::tests:: --lib` on
-`blacksmith-4vcpu-windows-2025` so the `#[cfg(windows)]` project-root lock unit
-tests stay covered outside Binding RC.
+When Rust surfaces change, `Windows graphforge-storage Locks` runs the native
+project-root lock, exact filesystem primitive, NTFS admission, and real
+publication-kill/fault-oracle cross-checks on `blacksmith-4vcpu-windows-2025`.
+`macOS graphforge-storage Durability` runs the corresponding native APFS
+primitive, admission, and publication-kill cross-checks. Linux executes the same
+storage unit suite through authoritative `//:ci_rust_tests`. These platform jobs
+record actual subprocess/handle observations; the simulator does not stand in
+for native evidence.
 
 ### Behavioral acceptance
 

@@ -63,6 +63,18 @@ pub enum PublicationPhase {
 }
 
 impl PublicationPhase {
+    /// Resolve a native publication failpoint to its modeled ADR phase.
+    ///
+    /// Lock acquisition, journal preparation, and validation failpoints have no
+    /// persistence operation of their own and intentionally return `None`.
+    #[must_use]
+    pub fn from_failpoint(failpoint: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|phase| phase.failpoint() == failpoint)
+    }
+
     /// Named failpoint cookie shared with native subprocess matrices.
     #[must_use]
     pub const fn failpoint(self) -> &'static str {
@@ -133,6 +145,58 @@ pub enum AuthorityClass {
     Unexpected,
 }
 
+/// Native durability primitive whose successful completion defines acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurabilityProfile {
+    /// Local POSIX filesystems admitted for file plus directory `fsync`.
+    PosixDirectoryFsync,
+    /// Fixed, writable local NTFS using the ADR 0020 write-through handle rename.
+    WindowsNtfsWriteThrough,
+}
+
+impl DurabilityProfile {
+    /// Profile for the current native test target.
+    #[must_use]
+    pub const fn native() -> Self {
+        if cfg!(windows) {
+            Self::WindowsNtfsWriteThrough
+        } else {
+            Self::PosixDirectoryFsync
+        }
+    }
+
+    /// Map #776's stable admitted filesystem class into oracle semantics.
+    #[must_use]
+    pub fn for_admitted_filesystem_class(filesystem_class: &str) -> Option<Self> {
+        match filesystem_class {
+            "ntfs" => Some(Self::WindowsNtfsWriteThrough),
+            "apfs" | "ext" | "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" => {
+                Some(Self::PosixDirectoryFsync)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Explicit injected result for an operation that did not acknowledge success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectedOperationResult {
+    /// A required file-content flush returned an error.
+    FileFlushError,
+    /// The platform-native namespace barrier returned an error.
+    NamespaceBarrierError,
+    /// Replacement reported a definite error before changing authority.
+    ReplacementNotPerformed,
+    /// Replacement reported an error with prior authority after reconciliation.
+    ReplacementStateUnknownPrior,
+    /// Replacement reported an error with new authority after reconciliation.
+    ReplacementStateUnknownNew,
+    /// Durable bytes were torn or truncated before acknowledgement.
+    TornBytes,
+}
+
 /// One recorded persistence-relevant operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PersistenceOp {
@@ -148,6 +212,20 @@ pub struct PersistenceOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceOpKind {
+    /// Open the staging handle retained through replacement reconciliation.
+    OpenHandle {
+        /// Stable trace-local handle name.
+        handle: String,
+        /// Project-relative staging path.
+        path: String,
+        /// Whether the native handle has write-through semantics.
+        write_through: bool,
+    },
+    /// Close a previously opened staging handle.
+    CloseHandle {
+        /// Stable trace-local handle name.
+        handle: String,
+    },
     /// Create or overwrite file bytes in the volatile view.
     WriteFile {
         /// Project-relative file path.
@@ -171,6 +249,8 @@ pub enum PersistenceOpKind {
         path: String,
         /// Exact bytes installed by the replacement.
         bytes: Vec<u8>,
+        /// Staging handle retained through the replacement call.
+        handle: String,
     },
     /// Flush directory entries for `path`.
     FsyncDir {
@@ -212,6 +292,12 @@ pub struct FaultOracleReport {
     pub phase: PublicationPhase,
     /// Failpoint name.
     pub failpoint: &'static str,
+    /// Platform durability primitive used by this history.
+    pub profile: DurabilityProfile,
+    /// Whether every required operation completed successfully before death.
+    pub acknowledged: bool,
+    /// Injected non-success outcome, when applicable.
+    pub injected_result: Option<InjectedOperationResult>,
     /// Persistence op ids that were made durable before crash.
     pub durable_op_ids: Vec<u64>,
     /// Expected authority class.
@@ -308,6 +394,8 @@ struct Media {
     volatile_files: BTreeMap<String, Vec<u8>>,
     durable_dirs: BTreeMap<String, BTreeSet<String>>,
     volatile_dirs: BTreeMap<String, BTreeSet<String>>,
+    pending_replacements: BTreeMap<String, Vec<u8>>,
+    open_handles: BTreeMap<String, (String, bool)>,
 }
 
 impl Media {
@@ -349,33 +437,76 @@ impl Media {
         self.ensure_dir_volatile(path);
     }
 
-    fn atomic_replace(&mut self, path: &str, bytes: Vec<u8>) {
+    fn open_handle(&mut self, handle: &str, path: &str, write_through: bool) {
+        assert!(
+            self.open_handles
+                .insert(handle.to_owned(), (path.to_owned(), write_through))
+                .is_none(),
+            "oracle handle names are unique"
+        );
+    }
+
+    fn close_handle(&mut self, handle: &str) {
+        assert!(
+            self.open_handles.remove(handle).is_some(),
+            "oracle closes only an open handle"
+        );
+    }
+
+    fn atomic_replace(
+        &mut self,
+        path: &str,
+        bytes: Vec<u8>,
+        handle: &str,
+        profile: DurabilityProfile,
+    ) {
+        let (_, write_through) = self
+            .open_handles
+            .get(handle)
+            .expect("atomic replacement retains its staging handle");
+        if profile == DurabilityProfile::WindowsNtfsWriteThrough {
+            assert!(
+                *write_through,
+                "NTFS replacement requires a write-through staging handle"
+            );
+        }
         let parent = parent_path(path);
         let temp = format!("{parent}/.oracle-tmp-{}", file_name(path));
         self.write_file(&temp, bytes.clone());
         self.fsync_file(&temp);
+        let durable_bytes = self
+            .durable_files
+            .remove(&temp)
+            .expect("atomic replacement temp was flushed");
         self.volatile_files.remove(&temp);
         self.unlink_volatile(&parent, file_name(&temp));
-        self.durable_files.remove(&temp);
-        // Flushed sibling proves data durability; the destination name remains
-        // volatile until the parent directory flush promotes it.
+        // The renamed file's bytes are durable, but the new name remains only
+        // visible until either the rename itself persists or the platform's
+        // later namespace barrier completes.
+        self.pending_replacements
+            .insert(path.to_owned(), durable_bytes);
         self.write_file(path, bytes);
+    }
+
+    fn persist_replacement(&mut self, path: &str) {
+        if let Some(bytes) = self.pending_replacements.remove(path) {
+            self.durable_files.insert(path.to_owned(), bytes);
+            self.link_durable_only(&parent_path(path), file_name(path));
+        }
     }
 
     fn fsync_dir(&mut self, path: &str) {
         let children = self.volatile_dirs.get(path).cloned().unwrap_or_default();
         self.durable_dirs.insert(path.to_owned(), children.clone());
-        // Directory flush makes currently linked children's volatile bytes
-        // durable when their content was already written.
-        for name in children {
+        // A namespace barrier persists directory edges and completed renames;
+        // it never substitutes for a file-content flush.
+        for name in &children {
             let child = if path == "." {
-                name
+                name.clone()
             } else {
                 format!("{path}/{name}")
             };
-            if let Some(bytes) = self.volatile_files.get(&child).cloned() {
-                self.durable_files.insert(child, bytes);
-            }
+            self.persist_replacement(&child);
         }
     }
 
@@ -413,18 +544,33 @@ impl Media {
         self.durable_files = kept_files;
         self.volatile_files = self.durable_files.clone();
         self.volatile_dirs = self.durable_dirs.clone();
+        self.pending_replacements.clear();
+        self.open_handles.clear();
     }
 
-    fn apply_subset(&mut self, ops: &[PersistenceOp], durable_ids: &BTreeSet<u64>) {
+    fn apply_subset(
+        &mut self,
+        ops: &[PersistenceOp],
+        durable_ids: &BTreeSet<u64>,
+        profile: DurabilityProfile,
+    ) {
         let mut scratch = Self {
             durable_files: self.durable_files.clone(),
             durable_dirs: self.durable_dirs.clone(),
             volatile_files: self.durable_files.clone(),
             volatile_dirs: self.durable_dirs.clone(),
+            pending_replacements: BTreeMap::new(),
+            open_handles: BTreeMap::new(),
         };
 
         for op in ops {
             match &op.kind {
+                PersistenceOpKind::OpenHandle {
+                    handle,
+                    path,
+                    write_through,
+                } => scratch.open_handle(handle, path, *write_through),
+                PersistenceOpKind::CloseHandle { handle } => scratch.close_handle(handle),
                 PersistenceOpKind::WriteFile { path, bytes } => {
                     scratch.write_file(path, bytes.clone());
                     if durable_ids.contains(&op.id) {
@@ -445,12 +591,14 @@ impl Media {
                         scratch.link_durable_only(&parent_path(path), file_name(path));
                     }
                 }
-                PersistenceOpKind::AtomicReplace { path, bytes } => {
+                PersistenceOpKind::AtomicReplace {
+                    path,
+                    bytes,
+                    handle,
+                } => {
+                    scratch.atomic_replace(path, bytes.clone(), handle, profile);
                     if durable_ids.contains(&op.id) {
-                        scratch.atomic_replace(path, bytes.clone());
-                        scratch.fsync_dir(&parent_path(path));
-                    } else {
-                        scratch.write_file(path, bytes.clone());
+                        scratch.persist_replacement(path);
                     }
                 }
                 PersistenceOpKind::FsyncDir { path } => {
@@ -472,13 +620,28 @@ impl Media {
 
 fn trace_op(op: &PersistenceOp) -> String {
     let kind = match &op.kind {
+        PersistenceOpKind::OpenHandle {
+            handle,
+            path,
+            write_through,
+        } => format!("open_handle handle={handle} path={path} write_through={write_through}"),
+        PersistenceOpKind::CloseHandle { handle } => {
+            format!("close_handle handle={handle}")
+        }
         PersistenceOpKind::WriteFile { path, bytes } => {
             format!("write_file path={path} len={}", bytes.len())
         }
         PersistenceOpKind::FsyncFile { path } => format!("fsync_file path={path}"),
         PersistenceOpKind::MkDir { path } => format!("mkdir path={path}"),
-        PersistenceOpKind::AtomicReplace { path, bytes } => {
-            format!("atomic_replace path={path} len={}", bytes.len())
+        PersistenceOpKind::AtomicReplace {
+            path,
+            bytes,
+            handle,
+        } => {
+            format!(
+                "atomic_replace path={path} handle={handle} len={}",
+                bytes.len()
+            )
         }
         PersistenceOpKind::FsyncDir { path } => format!("fsync_dir path={path}"),
         PersistenceOpKind::TearFile { path, bytes } => {
@@ -563,6 +726,17 @@ fn current_bytes_for(generation: Uuid, manifest_bytes: &[u8]) -> Vec<u8> {
 #[must_use]
 #[allow(clippy::too_many_lines)] // Phase-ordered durability script mirrors ADR vocabulary.
 pub fn publication_ops(ids: PublicationIds, until: PublicationPhase) -> Vec<PersistenceOp> {
+    publication_ops_for_profile(ids, until, DurabilityProfile::PosixDirectoryFsync)
+}
+
+/// Build a publication history using one admitted platform durability profile.
+#[must_use]
+#[allow(clippy::too_many_lines)] // Phase-ordered durability script mirrors ADR vocabulary.
+pub fn publication_ops_for_profile(
+    ids: PublicationIds,
+    until: PublicationPhase,
+    profile: DurabilityProfile,
+) -> Vec<PersistenceOp> {
     let mut ops = Vec::new();
     let mut next_id = 1u64;
     let mut push = |phase: PublicationPhase, kind: PersistenceOpKind| {
@@ -585,6 +759,7 @@ pub fn publication_ops(ids: PublicationIds, until: PublicationPhase) -> Vec<Pers
     let lease_path = format!("{GENERATIONS_DIR}/{neu}/{LEASE_FILE}");
     let journal_path = format!("transactions/{}.json", ids.transaction.hyphenated());
     let participant_bytes = b"graph:nodes".to_vec();
+    let write_through = profile == DurabilityProfile::WindowsNtfsWriteThrough;
 
     push(
         PublicationPhase::AfterParticipantWrite,
@@ -675,9 +850,24 @@ pub fn publication_ops(ids: PublicationIds, until: PublicationPhase) -> Vec<Pers
     );
     push(
         PublicationPhase::AfterJournalDurable,
+        PersistenceOpKind::OpenHandle {
+            handle: "journal_durable_stage".into(),
+            path: "transactions/.journal-durable.tmp".into(),
+            write_through,
+        },
+    );
+    push(
+        PublicationPhase::AfterJournalDurable,
         PersistenceOpKind::AtomicReplace {
             path: journal_path.clone(),
             bytes: b"{\"phase\":\"DURABLE\"}\n".to_vec(),
+            handle: "journal_durable_stage".into(),
+        },
+    );
+    push(
+        PublicationPhase::AfterJournalDurable,
+        PersistenceOpKind::CloseHandle {
+            handle: "journal_durable_stage".into(),
         },
     );
     push(
@@ -688,6 +878,14 @@ pub fn publication_ops(ids: PublicationIds, until: PublicationPhase) -> Vec<Pers
     );
 
     let current_bytes = current_bytes_for(ids.new_generation, &manifest_bytes);
+    push(
+        PublicationPhase::AfterCurrentTempWrite,
+        PersistenceOpKind::OpenHandle {
+            handle: "current_stage".into(),
+            path: ".CURRENT.tmp".into(),
+            write_through,
+        },
+    );
     push(
         PublicationPhase::AfterCurrentTempWrite,
         PersistenceOpKind::WriteFile {
@@ -707,17 +905,41 @@ pub fn publication_ops(ids: PublicationIds, until: PublicationPhase) -> Vec<Pers
         PersistenceOpKind::AtomicReplace {
             path: CURRENT_FILE.into(),
             bytes: current_bytes,
+            handle: "current_stage".into(),
         },
     );
     push(
-        PublicationPhase::AfterRootFsync,
-        PersistenceOpKind::FsyncDir { path: ".".into() },
+        PublicationPhase::AfterCurrentReplace,
+        PersistenceOpKind::CloseHandle {
+            handle: "current_stage".into(),
+        },
+    );
+    if profile == DurabilityProfile::PosixDirectoryFsync {
+        push(
+            PublicationPhase::AfterRootFsync,
+            PersistenceOpKind::FsyncDir { path: ".".into() },
+        );
+    }
+    push(
+        PublicationPhase::AfterJournalPublished,
+        PersistenceOpKind::OpenHandle {
+            handle: "journal_published_stage".into(),
+            path: "transactions/.journal-published.tmp".into(),
+            write_through,
+        },
     );
     push(
         PublicationPhase::AfterJournalPublished,
         PersistenceOpKind::AtomicReplace {
             path: journal_path,
             bytes: b"{\"phase\":\"PUBLISHED\"}\n".to_vec(),
+            handle: "journal_published_stage".into(),
+        },
+    );
+    push(
+        PublicationPhase::AfterJournalPublished,
+        PersistenceOpKind::CloseHandle {
+            handle: "journal_published_stage".into(),
         },
     );
     push(
@@ -778,7 +1000,6 @@ pub fn default_durable_ids(ops: &[PersistenceOp], phase: PublicationPhase) -> BT
                     | PersistenceOpKind::AtomicReplace { .. }
                     | PersistenceOpKind::MkDir { .. }
                     | PersistenceOpKind::TearFile { .. }
-                    | PersistenceOpKind::WriteFile { .. }
             ),
         })
         .map(|op| op.id)
@@ -819,7 +1040,25 @@ fn materialize_durable(media: &Media, root: &Path) -> Result<(), GfError> {
     }
 
     std::fs::create_dir_all(root).map_err(|error| io_err(&error))?;
-    let mut dirs: Vec<_> = media.durable_dirs.keys().cloned().collect();
+    let mut reachable_dirs = BTreeSet::from([".".to_owned()]);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for dir in media.durable_dirs.keys() {
+            if dir == "." || reachable_dirs.contains(dir) {
+                continue;
+            }
+            let parent = parent_path(dir);
+            let linked = media
+                .durable_dirs
+                .get(&parent)
+                .is_some_and(|children| children.contains(file_name(dir)));
+            if reachable_dirs.contains(&parent) && linked {
+                changed |= reachable_dirs.insert(dir.clone());
+            }
+        }
+    }
+    let mut dirs = reachable_dirs.iter().cloned().collect::<Vec<_>>();
     dirs.sort_by_key(|path| path.matches('/').count());
     for dir in dirs {
         if dir == "." {
@@ -828,11 +1067,14 @@ fn materialize_durable(media: &Media, root: &Path) -> Result<(), GfError> {
         std::fs::create_dir_all(root.join(&dir)).map_err(|error| io_err(&error))?;
     }
     for (path, bytes) in &media.durable_files {
-        let full = root.join(path);
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+        let parent = parent_path(path);
+        let linked = media
+            .durable_dirs
+            .get(&parent)
+            .is_some_and(|children| children.contains(file_name(path)));
+        if reachable_dirs.contains(&parent) && linked {
+            std::fs::write(root.join(path), bytes).map_err(|error| io_err(&error))?;
         }
-        std::fs::write(&full, bytes).map_err(|error| io_err(&error))?;
     }
     Ok(())
 }
@@ -864,7 +1106,6 @@ fn io_err(error: &std::io::Error) -> GfError {
 }
 
 fn expected_authority_for_subset(
-    phase: PublicationPhase,
     ops: &[PersistenceOp],
     durable_ids: &BTreeSet<u64>,
 ) -> AuthorityClass {
@@ -896,23 +1137,68 @@ fn expected_authority_for_subset(
     let replace_durable = current_replace.is_some_and(|op| durable_ids.contains(&op.id));
     let root_durable = root_fsync.is_some_and(|op| durable_ids.contains(&op.id));
 
-    if phase.is_acknowledged() {
-        if root_durable && replace_durable {
-            AuthorityClass::NewGeneration
-        } else if replace_durable {
-            // Linearized but not acknowledged: filesystem may still present new.
+    if replace_durable || root_durable {
+        let new_generation_complete = ops.iter().all(|op| {
+            if op.phase > PublicationPhase::AfterGenerationDirFsync {
+                return true;
+            }
+            match op.kind {
+                PersistenceOpKind::FsyncFile { .. } | PersistenceOpKind::FsyncDir { .. } => {
+                    durable_ids.contains(&op.id)
+                }
+                _ => true,
+            }
+        });
+        if new_generation_complete {
             AuthorityClass::NewGeneration
         } else {
-            AuthorityClass::PriorGeneration
-        }
-    } else if phase.is_linearized() {
-        if replace_durable {
-            AuthorityClass::NewGeneration
-        } else {
-            AuthorityClass::PriorGeneration
+            AuthorityClass::Corrupt
         }
     } else {
         AuthorityClass::PriorGeneration
+    }
+}
+
+fn acknowledged_for_subset(
+    profile: DurabilityProfile,
+    phase: PublicationPhase,
+    ops: &[PersistenceOp],
+    durable_ids: &BTreeSet<u64>,
+) -> bool {
+    let required_pre_ack_effects_complete = ops.iter().all(|op| match &op.kind {
+        PersistenceOpKind::FsyncFile { .. }
+        | PersistenceOpKind::FsyncDir { .. }
+        | PersistenceOpKind::MkDir { .. } => durable_ids.contains(&op.id),
+        PersistenceOpKind::OpenHandle { .. }
+        | PersistenceOpKind::CloseHandle { .. }
+        | PersistenceOpKind::WriteFile { .. }
+        | PersistenceOpKind::AtomicReplace { .. }
+        | PersistenceOpKind::TearFile { .. } => true,
+    });
+    if !required_pre_ack_effects_complete {
+        return false;
+    }
+    match profile {
+        DurabilityProfile::PosixDirectoryFsync => {
+            phase.is_acknowledged()
+                && ops.iter().any(|op| {
+                    durable_ids.contains(&op.id)
+                        && op.phase == PublicationPhase::AfterRootFsync
+                        && matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == ".")
+                })
+        }
+        DurabilityProfile::WindowsNtfsWriteThrough => {
+            phase >= PublicationPhase::AfterCurrentReplace
+                && ops.iter().any(|op| {
+                    durable_ids.contains(&op.id)
+                        && op.phase == PublicationPhase::AfterCurrentReplace
+                        && matches!(
+                            &op.kind,
+                            PersistenceOpKind::AtomicReplace { path, .. }
+                                if path == CURRENT_FILE
+                        )
+                })
+        }
     }
 }
 
@@ -922,22 +1208,40 @@ pub fn simulate_crash(
     phase: PublicationPhase,
     durable_ids: &BTreeSet<u64>,
 ) -> Result<FaultOracleReport, GfError> {
+    simulate_crash_for_profile(
+        seed,
+        phase,
+        durable_ids,
+        DurabilityProfile::PosixDirectoryFsync,
+    )
+}
+
+/// Run one simulated crash under a specific admitted platform profile.
+pub fn simulate_crash_for_profile(
+    seed: u64,
+    phase: PublicationPhase,
+    durable_ids: &BTreeSet<u64>,
+    profile: DurabilityProfile,
+) -> Result<FaultOracleReport, GfError> {
     let ids = PublicationIds::from_seed(seed);
-    let ops = publication_ops(ids, phase);
+    let ops = publication_ops_for_profile(ids, phase, profile);
     let mut media = Media::default();
     install_parent_baseline(&mut media, ids);
-    media.apply_subset(&ops, durable_ids);
+    media.apply_subset(&ops, durable_ids, profile);
 
     let root = tempfile::tempdir().map_err(|error| io_err(&error))?;
     materialize_durable(&media, root.path())?;
     let resolved = resolve_project_generation(root.path());
     let actual = classify_resolution(&resolved, ids);
-    let expected = expected_authority_for_subset(phase, &ops, durable_ids);
+    let expected = expected_authority_for_subset(&ops, durable_ids);
 
     Ok(FaultOracleReport {
         seed,
         phase,
         failpoint: phase.failpoint(),
+        profile,
+        acknowledged: acknowledged_for_subset(profile, phase, &ops, durable_ids),
+        injected_result: None,
         durable_op_ids: durable_ids.iter().copied().collect(),
         expected,
         actual,
@@ -947,9 +1251,14 @@ pub fn simulate_crash(
 }
 
 /// Demonstrate that omitting the root directory flush violates acknowledgement.
+///
+/// Rename persistence is deliberately omitted from both cases. The only
+/// difference is whether the later root namespace barrier persists the already
+/// visible replacement, so this witness cannot accidentally treat rename as a
+/// directory flush.
 #[must_use]
 pub fn lost_root_flush_witness(seed: u64) -> (FaultOracleReport, FaultOracleReport) {
-    let phase = PublicationPhase::AfterCurrentReplace;
+    let phase = PublicationPhase::AfterRootFsync;
     let ids = PublicationIds::from_seed(seed);
     let ops = publication_ops(ids, phase);
     let replace_id = ops
@@ -963,19 +1272,20 @@ pub fn lost_root_flush_witness(seed: u64) -> (FaultOracleReport, FaultOracleRepo
         .map(|op| op.id)
         .expect("CURRENT replace op");
 
-    let mut with_replace = default_durable_ids(&ops, phase);
-    with_replace.insert(replace_id);
-    for op in &ops {
-        if matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == ".") {
-            with_replace.remove(&op.id);
-        }
-    }
+    let root_fsync_id = ops
+        .iter()
+        .find(|op| matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == "."))
+        .map(|op| op.id)
+        .expect("root fsync op");
 
-    let mut without_replace = with_replace.clone();
-    without_replace.remove(&replace_id);
+    let mut with_barrier = default_durable_ids(&ops, phase);
+    with_barrier.remove(&replace_id);
+    with_barrier.insert(root_fsync_id);
+    let mut without_barrier = with_barrier.clone();
+    without_barrier.remove(&root_fsync_id);
 
-    let kept = simulate_crash(seed, phase, &with_replace).expect("simulate");
-    let lost = simulate_crash(seed, phase, &without_replace).expect("simulate");
+    let kept = simulate_crash(seed, phase, &with_barrier).expect("simulate");
+    let lost = simulate_crash(seed, phase, &without_barrier).expect("simulate");
     (kept, lost)
 }
 
@@ -990,9 +1300,18 @@ pub enum TornTarget {
 
 /// Inject torn CURRENT or manifest bytes and classify reopen.
 pub fn simulate_torn_bytes(seed: u64, target: TornTarget) -> Result<FaultOracleReport, GfError> {
+    simulate_torn_bytes_for_profile(seed, target, DurabilityProfile::PosixDirectoryFsync)
+}
+
+/// Inject torn bytes under one admitted platform profile before API success.
+pub fn simulate_torn_bytes_for_profile(
+    seed: u64,
+    target: TornTarget,
+    profile: DurabilityProfile,
+) -> Result<FaultOracleReport, GfError> {
     let ids = PublicationIds::from_seed(seed);
-    let phase = PublicationPhase::AfterRootFsync;
-    let mut ops = publication_ops(ids, phase);
+    let phase = PublicationPhase::AfterCurrentReplace;
+    let mut ops = publication_ops_for_profile(ids, phase, profile);
     let next_id = ops.last().map_or(1, |op| op.id + 1);
     let path = match target {
         TornTarget::Current => CURRENT_FILE.to_owned(),
@@ -1015,7 +1334,7 @@ pub fn simulate_torn_bytes(seed: u64, target: TornTarget) -> Result<FaultOracleR
 
     let mut media = Media::default();
     install_parent_baseline(&mut media, ids);
-    media.apply_subset(&ops, &durable_ids);
+    media.apply_subset(&ops, &durable_ids, profile);
     let root = tempfile::tempdir().map_err(|error| io_err(&error))?;
     materialize_durable(&media, root.path())?;
     let resolved = resolve_project_generation(root.path());
@@ -1025,12 +1344,80 @@ pub fn simulate_torn_bytes(seed: u64, target: TornTarget) -> Result<FaultOracleR
         seed,
         phase,
         failpoint: phase.failpoint(),
+        profile,
+        acknowledged: false,
+        injected_result: Some(InjectedOperationResult::TornBytes),
         durable_op_ids: durable_ids.iter().copied().collect(),
         expected: AuthorityClass::Corrupt,
         actual,
         minimized_op_ids: None,
         operation_trace: ops.iter().map(trace_op).collect(),
     })
+}
+
+/// Inject a typed operation non-success and reconcile authority without ack.
+pub fn simulate_injected_operation(
+    seed: u64,
+    profile: DurabilityProfile,
+    injected: InjectedOperationResult,
+) -> Result<FaultOracleReport, GfError> {
+    assert_ne!(
+        injected,
+        InjectedOperationResult::TornBytes,
+        "use simulate_torn_bytes for byte corruption"
+    );
+    let phase = match injected {
+        InjectedOperationResult::FileFlushError => PublicationPhase::AfterManifestFsync,
+        InjectedOperationResult::NamespaceBarrierError => PublicationPhase::AfterRootFsync,
+        InjectedOperationResult::ReplacementNotPerformed
+        | InjectedOperationResult::ReplacementStateUnknownPrior
+        | InjectedOperationResult::ReplacementStateUnknownNew => {
+            PublicationPhase::AfterCurrentReplace
+        }
+        InjectedOperationResult::TornBytes => unreachable!(),
+    };
+    let ids = PublicationIds::from_seed(seed);
+    let ops = publication_ops_for_profile(ids, phase, profile);
+    let mut durable = default_durable_ids(&ops, phase);
+
+    match injected {
+        InjectedOperationResult::FileFlushError => {
+            let failed = ops
+                .iter()
+                .find(|op| {
+                    op.phase == PublicationPhase::AfterManifestFsync
+                        && matches!(op.kind, PersistenceOpKind::FsyncFile { .. })
+                })
+                .expect("manifest flush");
+            durable.remove(&failed.id);
+        }
+        InjectedOperationResult::NamespaceBarrierError => {
+            for op in &ops {
+                if op.phase == PublicationPhase::AfterRootFsync
+                    && matches!(op.kind, PersistenceOpKind::FsyncDir { .. })
+                {
+                    durable.remove(&op.id);
+                }
+            }
+        }
+        InjectedOperationResult::ReplacementNotPerformed
+        | InjectedOperationResult::ReplacementStateUnknownPrior => {
+            for op in &ops {
+                if op.phase == PublicationPhase::AfterCurrentReplace
+                    && matches!(op.kind, PersistenceOpKind::AtomicReplace { .. })
+                {
+                    durable.remove(&op.id);
+                }
+            }
+        }
+        InjectedOperationResult::ReplacementStateUnknownNew => {}
+        InjectedOperationResult::TornBytes => unreachable!(),
+    }
+
+    let mut report = simulate_crash_for_profile(seed, phase, &durable, profile)?;
+    report.acknowledged = false;
+    report.injected_result = Some(injected);
+    Ok(report)
 }
 
 /// Shrink a durable-id set to a minimal subset that preserves `predicate`.
@@ -1063,13 +1450,122 @@ pub fn minimize_durable_ids(
     current
 }
 
+/// Shrink an omitted-operation fault set while preserving `predicate`.
+///
+/// The default successful history remains fixed; only the specified persistence
+/// effects are removed. This avoids the vacuous empty-durable-set result that
+/// does not explain which omissions are required to reproduce a failure.
+#[must_use]
+pub fn minimize_omitted_ids(
+    seed: u64,
+    phase: PublicationPhase,
+    initial_omitted: &BTreeSet<u64>,
+    predicate: impl Fn(&FaultOracleReport) -> bool,
+) -> BTreeSet<u64> {
+    minimize_omitted_ids_for_profile(
+        seed,
+        phase,
+        initial_omitted,
+        DurabilityProfile::PosixDirectoryFsync,
+        predicate,
+    )
+}
+
+/// Shrink omissions under one admitted platform profile.
+#[must_use]
+pub fn minimize_omitted_ids_for_profile(
+    seed: u64,
+    phase: PublicationPhase,
+    initial_omitted: &BTreeSet<u64>,
+    profile: DurabilityProfile,
+    predicate: impl Fn(&FaultOracleReport) -> bool,
+) -> BTreeSet<u64> {
+    let ids = PublicationIds::from_seed(seed);
+    let ops = publication_ops_for_profile(ids, phase, profile);
+    let successful = default_durable_ids(&ops, phase);
+    let mut current = initial_omitted.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for id in current.iter().copied().collect::<Vec<_>>() {
+            let mut candidate = current.clone();
+            candidate.remove(&id);
+            let durable = successful
+                .difference(&candidate)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let Ok(report) = simulate_crash_for_profile(seed, phase, &durable, profile) else {
+                continue;
+            };
+            if predicate(&report) {
+                current = candidate;
+                changed = true;
+            }
+        }
+    }
+    current
+}
+
+/// Return a reproducing report carrying its stable, 1-minimal omitted trace.
+#[must_use]
+pub fn minimized_omission_report(
+    seed: u64,
+    phase: PublicationPhase,
+    initial_omitted: &BTreeSet<u64>,
+    predicate: impl Fn(&FaultOracleReport) -> bool + Copy,
+) -> FaultOracleReport {
+    minimized_omission_report_for_profile(
+        seed,
+        phase,
+        initial_omitted,
+        DurabilityProfile::PosixDirectoryFsync,
+        predicate,
+    )
+}
+
+/// Return a reproducing minimal omission report for one platform profile.
+#[must_use]
+pub fn minimized_omission_report_for_profile(
+    seed: u64,
+    phase: PublicationPhase,
+    initial_omitted: &BTreeSet<u64>,
+    profile: DurabilityProfile,
+    predicate: impl Fn(&FaultOracleReport) -> bool + Copy,
+) -> FaultOracleReport {
+    let omitted =
+        minimize_omitted_ids_for_profile(seed, phase, initial_omitted, profile, predicate);
+    let ids = PublicationIds::from_seed(seed);
+    let ops = publication_ops_for_profile(ids, phase, profile);
+    let successful = default_durable_ids(&ops, phase);
+    let durable = successful
+        .difference(&omitted)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut report = simulate_crash_for_profile(seed, phase, &durable, profile)
+        .expect("minimized oracle report");
+    assert!(predicate(&report), "minimized trace stopped reproducing");
+    report.minimized_op_ids = Some(omitted.iter().copied().collect());
+    report
+}
+
 /// Bounded CI history count; override with `GRAPHFORGE_FAULT_ORACLE_HISTORIES`.
 #[must_use]
 pub fn history_budget() -> usize {
-    std::env::var("GRAPHFORGE_FAULT_ORACLE_HISTORIES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(8)
+    parse_history_budget(
+        std::env::var("GRAPHFORGE_FAULT_ORACLE_HISTORIES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+const DEFAULT_HISTORY_BUDGET: usize = 8;
+const MAX_HISTORY_BUDGET: usize = 4096;
+
+fn parse_history_budget(value: Option<&str>) -> usize {
+    value
+        .and_then(|candidate| candidate.parse::<usize>().ok())
+        .filter(|count| (1..=MAX_HISTORY_BUDGET).contains(count))
+        .unwrap_or(DEFAULT_HISTORY_BUDGET)
 }
 
 /// Seeded enumeration of pending CURRENT-entry persistence before acknowledgement.
@@ -1111,29 +1607,64 @@ pub fn enumerate_lost_root_flush_subsets(seed: u64) -> Vec<FaultOracleReport> {
     reports
 }
 
-/// Shared-boundary authority classes matching native subprocess-kill matrices.
-///
-/// Process kill after a returned rename observes the new `CURRENT`. The oracle
-/// default durable set mirrors that host-visibility model via
-/// [`expected_authority`]. Power-loss lost-flush subsets are certified
-/// separately and are not claimed to match process kill.
+/// Seed causally ordered pre-ack persistence subsets for bounded CI histories.
 #[must_use]
-pub fn native_shared_boundary_authority(phase: PublicationPhase) -> AuthorityClass {
-    expected_authority(phase)
+pub fn seed_pre_ack_persistence_subsets(seed: u64, count: usize) -> Vec<FaultOracleReport> {
+    let count = count.clamp(1, MAX_HISTORY_BUDGET);
+    let phase = PublicationPhase::AfterCurrentReplace;
+    let ids = PublicationIds::from_seed(seed);
+    let ops = publication_ops(ids, phase);
+    let candidates = ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.kind,
+                PersistenceOpKind::FsyncFile { .. }
+                    | PersistenceOpKind::FsyncDir { .. }
+                    | PersistenceOpKind::AtomicReplace { .. }
+                    | PersistenceOpKind::MkDir { .. }
+            )
+        })
+        .map(|op| op.id)
+        .collect::<Vec<_>>();
+    let default = default_durable_ids(&ops, phase);
+    (0..count)
+        .map(|history| {
+            let mut state = seed ^ (history as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let mut durable = default.clone();
+            for id in &candidates {
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                if state.wrapping_mul(0x2545_f491_4f6c_dd1d) & 1 == 0 {
+                    durable.remove(id);
+                }
+            }
+            simulate_crash(seed ^ history as u64, phase, &durable).expect("seeded subset")
+        })
+        .collect()
 }
 
 /// Run default-durable simulations for every ADR publication phase.
 pub fn simulate_all_phases(seed: u64) -> Result<Vec<PhaseOutcome>, GfError> {
+    simulate_all_phases_for_profile(seed, DurabilityProfile::PosixDirectoryFsync)
+}
+
+/// Run every shared phase under one platform durability profile.
+pub fn simulate_all_phases_for_profile(
+    seed: u64,
+    profile: DurabilityProfile,
+) -> Result<Vec<PhaseOutcome>, GfError> {
     let ids = PublicationIds::from_seed(seed);
     let mut outcomes = Vec::new();
     for phase in PublicationPhase::all() {
-        let ops = publication_ops(ids, *phase);
+        let ops = publication_ops_for_profile(ids, *phase, profile);
         let durable = default_durable_ids(&ops, *phase);
-        let report = simulate_crash(seed, *phase, &durable)?;
+        let report = simulate_crash_for_profile(seed, *phase, &durable, profile)?;
         outcomes.push(PhaseOutcome {
             phase: *phase,
             failpoint: phase.failpoint(),
-            acknowledged: phase.is_acknowledged(),
+            acknowledged: report.acknowledged,
             expected: report.expected,
             actual: report.actual,
             selected_generation: match report.actual {
@@ -1183,8 +1714,8 @@ mod tests {
         let (kept, lost) = lost_root_flush_witness(0x7490);
         assert_eq!(kept.actual, AuthorityClass::NewGeneration);
         assert_eq!(lost.actual, AuthorityClass::PriorGeneration);
-        assert!(!PublicationPhase::AfterCurrentReplace.is_acknowledged());
-        assert!(PublicationPhase::AfterRootFsync.is_acknowledged());
+        assert!(kept.acknowledged);
+        assert!(!lost.acknowledged);
         assert_ne!(
             kept.actual, lost.actual,
             "root flush omission admits loss of the linearized CURRENT entry"
@@ -1206,21 +1737,33 @@ mod tests {
 
     #[test]
     fn torn_current_and_manifest_fail_closed() {
-        for target in [TornTarget::Current, TornTarget::Manifest] {
-            let report = simulate_torn_bytes(0x7491, target).expect("torn");
-            assert_eq!(report.expected, AuthorityClass::Corrupt);
-            assert_eq!(
-                report.actual,
-                AuthorityClass::Corrupt,
-                "torn bytes must surface GF_PROJECT_CORRUPT, not Unexpected"
-            );
+        for profile in [
+            DurabilityProfile::PosixDirectoryFsync,
+            DurabilityProfile::WindowsNtfsWriteThrough,
+        ] {
+            for target in [TornTarget::Current, TornTarget::Manifest] {
+                let report =
+                    simulate_torn_bytes_for_profile(0x7491, target, profile).expect("torn");
+                assert_eq!(report.profile, profile);
+                assert_eq!(report.expected, AuthorityClass::Corrupt);
+                assert!(!report.acknowledged);
+                assert_eq!(
+                    report.injected_result,
+                    Some(InjectedOperationResult::TornBytes)
+                );
+                assert_eq!(
+                    report.actual,
+                    AuthorityClass::Corrupt,
+                    "torn bytes must surface GF_PROJECT_CORRUPT, not Unexpected"
+                );
+            }
         }
     }
 
     #[test]
     fn generated_failures_shrink_to_stable_minimal_trace() {
         let seed = 0x7492;
-        let phase = PublicationPhase::AfterCurrentReplace;
+        let phase = PublicationPhase::AfterRootFsync;
         let ids = PublicationIds::from_seed(seed);
         let ops = publication_ops(ids, phase);
         let replace_id = ops
@@ -1233,39 +1776,50 @@ mod tests {
             })
             .map(|op| op.id)
             .unwrap();
-        let mut initial = default_durable_ids(&ops, phase);
-        for op in &ops {
-            if matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == ".") {
-                initial.remove(&op.id);
-            }
-        }
-        initial.remove(&replace_id);
+        let root_fsync_id = ops
+            .iter()
+            .find(|op| matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == "."))
+            .map(|op| op.id)
+            .unwrap();
+        let initial = BTreeSet::from([replace_id, root_fsync_id]);
 
-        let minimized = minimize_durable_ids(seed, phase, &initial, |report| {
+        let minimized_report = minimized_omission_report(seed, phase, &initial, |report| {
             report.actual == AuthorityClass::PriorGeneration
         });
-        let again = minimize_durable_ids(seed, phase, &minimized, |report| {
+        let minimized = minimized_report
+            .minimized_op_ids
+            .clone()
+            .expect("artifact records minimized omissions")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let again = minimize_omitted_ids(seed, phase, &minimized, |report| {
             report.actual == AuthorityClass::PriorGeneration
         });
         assert_eq!(minimized, again, "minimizer must be idempotent");
-        let report = simulate_crash(seed, phase, &minimized).unwrap();
+        assert_eq!(minimized, initial, "both namespace effects are required");
+        let successful = default_durable_ids(&ops, phase);
+        let durable = successful
+            .difference(&minimized)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let report = simulate_crash(seed, phase, &durable).unwrap();
         assert_eq!(report.actual, AuthorityClass::PriorGeneration);
-        assert!(
-            !minimized.contains(&replace_id),
-            "minimal prior-generation trace must omit durable CURRENT replace"
-        );
-    }
-
-    #[test]
-    fn native_and_simulated_results_agree_at_shared_phase_boundaries() {
-        for outcome in simulate_all_phases(0x7493).unwrap() {
-            let native = native_shared_boundary_authority(outcome.phase);
+        for omitted in &minimized {
+            let candidate = minimized
+                .iter()
+                .copied()
+                .filter(|id| id != omitted)
+                .collect::<BTreeSet<_>>();
+            let durable = successful
+                .difference(&candidate)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let report = simulate_crash(seed, phase, &durable).unwrap();
             assert_eq!(
-                outcome.actual, native,
-                "shared boundary mismatch at {}",
-                outcome.failpoint
+                report.actual,
+                AuthorityClass::NewGeneration,
+                "omission {omitted} was not necessary"
             );
-            assert_ne!(outcome.actual, AuthorityClass::Unexpected);
         }
     }
 
@@ -1278,7 +1832,7 @@ mod tests {
         let durable = default_durable_ids(&ops, phase);
         let report = simulate_crash(seed, phase, &durable).unwrap();
         assert_eq!(report.actual, AuthorityClass::NewGeneration);
-        assert!(phase.is_acknowledged());
+        assert!(report.acknowledged);
     }
 
     #[test]
@@ -1323,9 +1877,112 @@ mod tests {
         let report = simulate_crash(seed, phase, &durable).unwrap();
         assert_eq!(report.actual, AuthorityClass::NewGeneration);
         assert_eq!(report.expected, AuthorityClass::NewGeneration);
+        assert!(report.acknowledged);
         assert!(matches!(
             (report.expected, report.actual),
             (AuthorityClass::NewGeneration, AuthorityClass::NewGeneration)
         ));
+    }
+
+    #[test]
+    fn typed_operation_errors_reconcile_without_acknowledgement() {
+        for profile in [
+            DurabilityProfile::PosixDirectoryFsync,
+            DurabilityProfile::WindowsNtfsWriteThrough,
+        ] {
+            for injected in [
+                (InjectedOperationResult::FileFlushError),
+                (InjectedOperationResult::NamespaceBarrierError),
+                (InjectedOperationResult::ReplacementNotPerformed),
+                (InjectedOperationResult::ReplacementStateUnknownPrior),
+                (InjectedOperationResult::ReplacementStateUnknownNew),
+            ] {
+                let report = simulate_injected_operation(0x7496, profile, injected).unwrap();
+                let expected = match injected {
+                    InjectedOperationResult::NamespaceBarrierError
+                    | InjectedOperationResult::ReplacementStateUnknownNew => {
+                        AuthorityClass::NewGeneration
+                    }
+                    _ => AuthorityClass::PriorGeneration,
+                };
+                assert_eq!(report.injected_result, Some(injected));
+                assert!(!report.acknowledged);
+                assert_eq!(report.expected, expected);
+                assert_eq!(report.actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn ntfs_profile_uses_write_through_handle_rename_as_acknowledgement() {
+        let profile = DurabilityProfile::WindowsNtfsWriteThrough;
+        let phase = PublicationPhase::AfterCurrentReplace;
+        let ids = PublicationIds::from_seed(0x7497);
+        let ops = publication_ops_for_profile(ids, phase, profile);
+        let durable = default_durable_ids(&ops, phase);
+        let report = simulate_crash_for_profile(0x7497, phase, &durable, profile).unwrap();
+        assert!(report.acknowledged);
+        assert_eq!(report.actual, AuthorityClass::NewGeneration);
+        assert!(report.operation_trace.iter().any(|line| {
+            line.contains("open_handle handle=current_stage") && line.contains("write_through=true")
+        }));
+        assert!(!ops.iter().any(|op| {
+            op.phase == PublicationPhase::AfterRootFsync
+                && matches!(op.kind, PersistenceOpKind::FsyncDir { .. })
+        }));
+    }
+
+    #[test]
+    fn bounded_seeded_subsets_never_select_an_unexpected_authority() {
+        let reports = seed_pre_ack_persistence_subsets(0x7498, history_budget());
+        assert_eq!(reports.len(), history_budget());
+        assert!(reports.iter().all(|report| {
+            matches!(
+                report.actual,
+                AuthorityClass::PriorGeneration
+                    | AuthorityClass::NewGeneration
+                    | AuthorityClass::Corrupt
+            ) && report.actual == report.expected
+                && !report.acknowledged
+        }));
+    }
+
+    #[test]
+    fn history_budget_is_positive_and_bounded() {
+        assert_eq!(parse_history_budget(None), DEFAULT_HISTORY_BUDGET);
+        assert_eq!(parse_history_budget(Some("0")), DEFAULT_HISTORY_BUDGET);
+        assert_eq!(parse_history_budget(Some("4096")), MAX_HISTORY_BUDGET);
+        assert_eq!(parse_history_budget(Some("4097")), DEFAULT_HISTORY_BUDGET);
+        assert_eq!(
+            parse_history_budget(Some("not-a-number")),
+            DEFAULT_HISTORY_BUDGET
+        );
+    }
+
+    #[test]
+    fn directory_fsync_never_promotes_unflushed_file_bytes() {
+        let mut media = Media::default();
+        media.mkdir(".");
+        media.fsync_dir(".");
+        media.write_file("unflushed", b"volatile".to_vec());
+        media.fsync_dir(".");
+        media.crash();
+        assert!(!media.durable_files.contains_key("unflushed"));
+    }
+
+    #[test]
+    fn materialization_does_not_recreate_unreachable_namespace_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let media = Media {
+            durable_files: BTreeMap::from([("orphan/child/file".into(), b"bytes".to_vec())]),
+            durable_dirs: BTreeMap::from([
+                (".".into(), BTreeSet::new()),
+                ("orphan".into(), BTreeSet::from(["child".into()])),
+                ("orphan/child".into(), BTreeSet::from(["file".into()])),
+            ]),
+            ..Media::default()
+        };
+        materialize_durable(&media, root.path()).unwrap();
+        assert!(!root.path().join("orphan").exists());
     }
 }

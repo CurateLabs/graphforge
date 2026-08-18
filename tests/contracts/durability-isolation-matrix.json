@@ -748,11 +748,6 @@
         },
         {
           "kind": "rust",
-          "path": "crates/graphforge-api/src/durability_certification_tests.rs",
-          "symbol": "native_shared_boundaries_agree_with_oracle_authority"
-        },
-        {
-          "kind": "rust",
           "path": "crates/graphforge-storage/src/project_recovery.rs",
           "symbol": "subprocess_kill_matrix_never_exposes_a_partial_generation"
         },
