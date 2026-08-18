@@ -654,6 +654,25 @@ pub(crate) enum GenerationCleanupOutcome {
     Retained,
 }
 
+/// Probe `lease.lock` and release any acquired handle before returning.
+///
+/// Windows rejects renaming or deleting a directory while a descendant file
+/// handle is still live. Recovery already holds `writer.lock`; exclusive lease
+/// acquisition proves no live readers. The handle must not remain open across
+/// the trash rename.
+fn generation_lease_is_idle(generation_path: &Path) -> Result<bool, GfError> {
+    let lease_path = generation_path.join("lease.lock");
+    if !lease_path.exists() {
+        return Ok(true);
+    }
+    let lease = open_regular_lock(&lease_path)?;
+    if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
+        return Ok(false);
+    }
+    crate::file_lock::unlock(&lease).map_err(storage_io)?;
+    Ok(true)
+}
+
 /// Move an unreachable generation to trash and delete it (ADR 0013 GC path).
 ///
 /// Rechecks reachability and `CURRENT` under the caller's writer lock before
@@ -684,16 +703,9 @@ pub(crate) fn cleanup_unreachable_generation(
         return Ok(GenerationCleanupOutcome::Absent);
     }
     reject_real_directory(&generation_path)?;
-    let lease_path = generation_path.join("lease.lock");
-    let _lease = if lease_path.exists() {
-        let lease = open_regular_lock(&lease_path)?;
-        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
-            return Ok(GenerationCleanupOutcome::SkippedLiveLease);
-        }
-        Some(lease)
-    } else {
-        None
-    };
+    if !generation_lease_is_idle(&generation_path)? {
+        return Ok(GenerationCleanupOutcome::SkippedLiveLease);
+    }
 
     let current = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     if current.generation_uuid() == generation_uuid {
@@ -778,16 +790,9 @@ fn cleanup_abandoned_generation(
         return Ok(removed);
     }
     reject_real_directory(&generation_path)?;
-    let lease_path = generation_path.join("lease.lock");
-    let _lease = if lease_path.exists() {
-        let lease = open_regular_lock(&lease_path)?;
-        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
-            return Ok(0);
-        }
-        Some(lease)
-    } else {
-        None
-    };
+    if !generation_lease_is_idle(&generation_path)? {
+        return Ok(0);
+    }
 
     let current = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     if current.generation_uuid() == generation_uuid {
@@ -1400,6 +1405,45 @@ mod tests {
             report.seed,
             report.observations.len(),
             digest
+        );
+    }
+
+    #[test]
+    fn recovery_gc_releases_generation_lease_before_directory_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_or_initialize_project(root.path())
+            .unwrap()
+            .generation_uuid();
+        let abandoned = Uuid::now_v7();
+        let status = spawn_writer(
+            root.path(),
+            Uuid::now_v7(),
+            abandoned,
+            "graph",
+            "project.after_manifest_write",
+        );
+        assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+        let generation_path = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(abandoned.hyphenated().to_string());
+        assert!(
+            generation_path.join("lease.lock").exists(),
+            "after_manifest_write is the first publication boundary that creates lease.lock"
+        );
+
+        let report = recover_project_transactions(root.path()).unwrap();
+        assert_eq!(report.selected_generation_uuid, parent);
+        assert!(report.removed_generations >= 1);
+        assert!(
+            !generation_path.exists(),
+            "abandoned generation with lease.lock must be removable after the lease handle is released"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
         );
     }
 
