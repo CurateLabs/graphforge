@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::project_checkpoints::checkpoint_retention_roots_after_writer_lock;
 use crate::project_failpoint;
 use crate::project_generation::{
-    CURRENT_FILE, ResolvedProjectGeneration, open_or_initialize_project,
+    CURRENT_FILE, ResolvedProjectGeneration, open_or_initialize_project_admitted,
     resolve_project_generation, validated_generation_manifest_sha256, validated_generation_parent,
 };
 use crate::project_publication::{
@@ -188,11 +188,42 @@ impl ProjectOpenRecoveryEvidence {
 pub fn open_or_initialize_project_with_recovery(
     container_root: impl AsRef<Path>,
 ) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
-    let root = container_root.as_ref();
+    open_or_initialize_project_with_recovery_for_mode(
+        container_root.as_ref(),
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Open or initialize an explicitly ephemeral project and apply the same
+/// bounded recovery protocol without requiring a durable-volume probe.
+///
+/// # Errors
+/// Returns the same initialization and recovery errors as
+/// [`open_or_initialize_project_with_recovery`].
+pub fn open_or_initialize_ephemeral_project_with_recovery(
+    container_root: impl AsRef<Path>,
+) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+    open_or_initialize_project_with_recovery_for_mode(
+        container_root.as_ref(),
+        crate::filesystem_admission::ProjectLifecycleMode::Ephemeral,
+    )
+}
+
+fn open_or_initialize_project_with_recovery_for_mode(
+    root: &Path,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::CreateIfMissing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = admission.root();
     if root.join(CURRENT_FILE).exists() {
-        return recover_project_on_open(root);
+        return recover_project_on_open_admitted(root);
     }
-    let resolved = open_or_initialize_project(root)?;
+    let resolved = open_or_initialize_project_admitted(root)?;
     Ok((
         resolved.clone(),
         ProjectOpenRecoveryEvidence::initialization(resolved.generation_uuid()),
@@ -212,8 +243,19 @@ pub fn open_or_initialize_project_with_recovery(
 pub fn recover_project_on_open(
     container_root: impl AsRef<Path>,
 ) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    recover_project_on_open_admitted(admission.root())
+}
+
+fn recover_project_on_open_admitted(
+    root: &Path,
+) -> Result<(ResolvedProjectGeneration, ProjectOpenRecoveryEvidence), GfError> {
     let started = Instant::now();
-    let root = container_root.as_ref();
     let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let work_detected = project_needs_recovery_pass(root)?;
     if !work_detected {
@@ -234,7 +276,7 @@ pub fn recover_project_on_open(
         ));
     }
 
-    match recover_project_transactions(root) {
+    match recover_project_transactions_admitted(root) {
         Ok(report) => {
             let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
             Ok((
@@ -382,8 +424,42 @@ fn looks_like_atomicwrite_temp(path: &Path) -> bool {
 pub fn recover_project_transactions(
     container_root: impl AsRef<Path>,
 ) -> Result<ProjectRecoveryReport, GfError> {
-    let selected =
-        resolve_project_generation(container_root.as_ref()).map_err(map_recovery_resolution)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    recover_project_transactions_admitted(admission.root())
+}
+
+/// Remove an explicitly selected durable project only while no writer owns the
+/// project mutation lock.
+///
+/// Lifecycle admission remains held after the nonblocking writer-idle check,
+/// so no new admitted mutator can enter between that check and exact-root
+/// removal. The writer handle is released before deletion for Windows
+/// compatibility; retained lifecycle identity still prevents root substitution.
+///
+/// # Errors
+/// Returns `GF_WRITER_BUSY` when a live writer exists, or the same typed
+/// admission/removal failures as the shared filesystem lifecycle.
+pub fn remove_durable_project_root(container_root: impl AsRef<Path>) -> Result<(), GfError> {
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let writer_lock = acquire_recovery_lock(admission.root())?;
+    crate::file_lock::unlock(&writer_lock).map_err(storage_io)?;
+    drop(writer_lock);
+    admission.revalidate_identity()?;
+    admission.remove_project_root()
+}
+
+fn recover_project_transactions_admitted(root: &Path) -> Result<ProjectRecoveryReport, GfError> {
+    let selected = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     let root = selected.container_root().to_owned();
     let writer_lock = acquire_recovery_lock(&root)?;
 
@@ -1473,6 +1549,40 @@ mod tests {
         let error = recover_project_transactions(root.path()).unwrap_err();
 
         assert_eq!(error.code(), "GF_WRITER_BUSY");
+    }
+
+    #[test]
+    fn live_writer_lock_blocks_project_removal_until_the_writer_is_idle() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("project");
+        open_or_initialize_project(&root).unwrap();
+        let lock_dir = ensure_machine_directory(&root, Path::new(LOCKS_DIR)).unwrap();
+        let lock = open_regular_lock(&lock_dir.join(WRITER_LOCK_FILE)).unwrap();
+        crate::file_lock::lock_exclusive(&lock).unwrap();
+
+        let error = remove_durable_project_root(&root).unwrap_err();
+
+        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        assert!(root.exists());
+        crate::file_lock::unlock(&lock).unwrap();
+        drop(lock);
+
+        remove_durable_project_root(&root).unwrap();
+        assert!(!root.exists());
+        assert_eq!(
+            std::fs::read_dir(parent.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".graphforge-admission-")
+                })
+                .count(),
+            1,
+            "the persistent parent-scoped admission lock must survive removal"
+        );
     }
 
     #[test]

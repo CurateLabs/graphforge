@@ -248,7 +248,7 @@ fn publish_workspace_records(
             .collect(),
         participants,
     };
-    let receipt = match graphforge_storage::stage_project_generation(&root, &request)? {
+    let receipt = match graph.stage_project_generation(&request)? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
         ProjectStageOutcome::Staged(staged) => staged
             .validate(validate_workspace_record_inventory, |actual_parent, _| {

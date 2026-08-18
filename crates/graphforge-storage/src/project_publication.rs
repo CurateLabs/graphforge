@@ -8,7 +8,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use atomicwrites::{AllowOverwrite, AtomicFile};
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -149,6 +148,7 @@ pub enum ProjectStageOutcome {
 pub struct StagedProjectGeneration {
     root: PathBuf,
     publication_lock: PublicationLock,
+    admission: StagedAdmission,
     parent: ResolvedProjectGeneration,
     transaction_uuid: Uuid,
     generation_uuid: Uuid,
@@ -166,6 +166,48 @@ enum PublicationLock {
     Optimistic(File),
 }
 
+struct CommitLock(File);
+
+enum StagedAdmission {
+    Exclusive(crate::filesystem_admission::ProjectRootIdentity),
+    Optimistic(Option<crate::filesystem_admission::ProjectRootIdentity>),
+}
+
+impl StagedAdmission {
+    fn revalidate_identity(&self) -> Result<(), GfError> {
+        match self {
+            Self::Exclusive(identity) | Self::Optimistic(Some(identity)) => {
+                identity.revalidate_identity()
+            }
+            Self::Optimistic(None) => Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "optimistic project identity was already consumed",
+            )),
+        }
+    }
+
+    fn readmit_for_publish(
+        &mut self,
+    ) -> Result<Option<crate::filesystem_admission::ProjectLifecycleAdmission>, GfError> {
+        match self {
+            Self::Exclusive(identity) => {
+                identity.revalidate_identity()?;
+                Ok(None)
+            }
+            Self::Optimistic(identity) => identity
+                .take()
+                .ok_or_else(|| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "optimistic project identity was already consumed",
+                    )
+                })?
+                .readmit()
+                .map(Some),
+        }
+    }
+}
+
 impl Drop for PublicationLock {
     fn drop(&mut self) {
         // Every error path that abandons a held publication lock must release it.
@@ -175,6 +217,12 @@ impl Drop for PublicationLock {
                 let _ = crate::file_lock::unlock(lock);
             }
         }
+    }
+}
+
+impl Drop for CommitLock {
+    fn drop(&mut self) {
+        let _ = crate::file_lock::unlock(&self.0);
     }
 }
 
@@ -232,7 +280,30 @@ pub fn stage_project_generation_with_graph_tree(
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
-    stage_project_generation_inner(container_root.as_ref(), request, graph_tree)
+    stage_project_generation_with_graph_tree_mode(
+        container_root,
+        request,
+        graph_tree,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Stage a generation using the lifecycle mode established when the owning
+/// facade opened the project.
+///
+/// Ephemeral mode is reserved for process-owned temporary projects. Durable
+/// callers must use the default wrapper or pass `Durable` explicitly.
+///
+/// # Errors
+/// Returns the same stable staging errors as
+/// [`stage_project_generation_with_graph_tree`].
+pub fn stage_project_generation_with_graph_tree_mode(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_inner(container_root.as_ref(), request, graph_tree, mode)
         .map_err(|error| map_stage_error(request, error))
 }
 
@@ -271,13 +342,91 @@ pub fn stage_project_generation_optimistic_with_graph_tree(
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    stage_project_generation_optimistic_with_graph_tree_mode(
+        container_root,
+        request,
+        operation_fingerprint,
+        graph_tree,
+        crate::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+/// Optimistic staging using the lifecycle mode established when the owning
+/// facade opened the project.
+///
+/// # Errors
+/// Returns the same stable staging errors as
+/// [`stage_project_generation_optimistic_with_graph_tree`].
+pub fn stage_project_generation_optimistic_with_graph_tree_mode(
+    container_root: impl AsRef<Path>,
+    request: &ProjectGenerationRequest,
+    operation_fingerprint: [u8; 32],
+    graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
+) -> Result<ProjectStageOutcome, GfError> {
     stage_project_generation_optimistic_inner(
         container_root.as_ref(),
         request,
         operation_fingerprint,
         graph_tree,
+        mode,
     )
     .map_err(|error| map_stage_error(request, error))
+}
+
+/// Stage against one caller-prepared, lifetime-pinned CURRENT generation.
+///
+/// The caller passes the full admission that resolved `parent`. This path takes
+/// the writer while admission is still held, verifies CURRENT still names the
+/// exact prepared generation, and only then releases the lifecycle lock while
+/// retaining root identity under the writer.
+pub(crate) fn stage_project_generation_from_admitted_parent(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    graph_tree: Option<&Path>,
+) -> Result<ProjectStageOutcome, GfError> {
+    let result = (|| {
+        validate_request(request)?;
+        admission.revalidate_identity()?;
+        let root = canonical_supported_root(admission.root())?;
+        if parent.container_root() != root {
+            return Err(project_error(
+                ProjectErrorCode::PublicationFailed,
+                "prepared generation does not belong to the admitted project root",
+            ));
+        }
+        let writer_lock = acquire_writer_lock(&root, request)?;
+        project_failpoint::hit(
+            "project.after_writer_lock",
+            Some(request.transaction_uuid),
+            Some(request.generation_uuid),
+            "WRITER_LOCK",
+            false,
+        )?;
+        admission.revalidate_identity()?;
+        let current = resolve_project_generation(&root)?;
+        if current.generation_uuid() != parent.generation_uuid()
+            || current.manifest_sha256() != parent.manifest_sha256()
+        {
+            return Err(project_error(
+                ProjectErrorCode::WriteConflict,
+                "prepared CURRENT changed before admitted publication acquired the writer",
+            ));
+        }
+        let identity = admission.into_identity()?;
+        stage_project_generation_inner_with_locks(
+            StagedAdmission::Exclusive(identity),
+            root,
+            PublicationLock::Exclusive(writer_lock),
+            parent,
+            request,
+            None,
+            None,
+            graph_tree,
+        )
+    })();
+    result.map_err(|error| map_stage_error(request, error))
 }
 
 fn map_stage_error(request: &ProjectGenerationRequest, error: GfError) -> GfError {
@@ -291,11 +440,18 @@ fn stage_project_generation_inner(
     container_root: &Path,
     request: &ProjectGenerationRequest,
     graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
     // Reject malformed contracts before taking the writer lock so concurrent
     // readers/writers are never blocked by validation-only failures.
     validate_request(request)?;
-    let root = canonical_supported_root(container_root)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = canonical_supported_root(admission.root())?;
     let writer_lock = acquire_writer_lock(&root, request)?;
     project_failpoint::hit(
         "project.after_writer_lock",
@@ -305,7 +461,17 @@ fn stage_project_generation_inner(
         false,
     )?;
     let parent = resolve_project_generation(&root)?;
-    stage_project_generation_with_lock(root, writer_lock, parent, request, None, graph_tree)
+    let identity = admission.into_identity()?;
+    stage_project_generation_inner_with_locks(
+        StagedAdmission::Exclusive(identity),
+        root,
+        PublicationLock::Exclusive(writer_lock),
+        parent,
+        request,
+        None,
+        None,
+        graph_tree,
+    )
 }
 
 fn stage_project_generation_optimistic_inner(
@@ -313,12 +479,21 @@ fn stage_project_generation_optimistic_inner(
     request: &ProjectGenerationRequest,
     operation_fingerprint: [u8; 32],
     graph_tree: Option<&Path>,
+    mode: crate::filesystem_admission::ProjectLifecycleMode,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
-    let root = canonical_supported_root(container_root)?;
+    let admission = crate::filesystem_admission::admit_project_lifecycle(
+        container_root,
+        mode,
+        crate::filesystem_admission::ProjectRootRequirement::Existing,
+    )?;
+    admission.revalidate_identity()?;
+    let root = canonical_supported_root(admission.root())?;
     let transaction_lock = acquire_transaction_lock(&root, request)?;
     let parent = resolve_project_generation(&root)?;
+    let identity = admission.into_identity()?;
     stage_project_generation_inner_with_locks(
+        StagedAdmission::Optimistic(Some(identity)),
         root,
         PublicationLock::Optimistic(transaction_lock),
         parent,
@@ -335,6 +510,7 @@ fn stage_project_generation_optimistic_inner(
 /// Pass `graph_tree` when the request's `graph`/`files` inventory must be
 /// staged from a non-parent source (for example a pinned checkpoint generation).
 pub(crate) fn stage_project_generation_with_lock(
+    identity: crate::filesystem_admission::ProjectRootIdentity,
     root: PathBuf,
     writer_lock: File,
     parent: ResolvedProjectGeneration,
@@ -342,7 +518,9 @@ pub(crate) fn stage_project_generation_with_lock(
     revert: Option<RevertJournalExtension>,
     graph_tree: Option<&Path>,
 ) -> Result<ProjectStageOutcome, GfError> {
+    identity.revalidate_identity()?;
     stage_project_generation_inner_with_locks(
+        StagedAdmission::Exclusive(identity),
         root,
         PublicationLock::Exclusive(writer_lock),
         parent,
@@ -353,7 +531,12 @@ pub(crate) fn stage_project_generation_with_lock(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared staging kernel keeps admission, lock, parent, request, revert, optimistic identity, and graph-tree authority explicit"
+)]
 fn stage_project_generation_inner_with_locks(
+    admission: StagedAdmission,
     root: PathBuf,
     publication_lock: PublicationLock,
     parent: ResolvedProjectGeneration,
@@ -438,6 +621,7 @@ fn stage_project_generation_inner_with_locks(
 
     Ok(ProjectStageOutcome::Staged(Box::new(
         StagedProjectGeneration {
+            admission,
             root,
             publication_lock,
             parent,
@@ -884,6 +1068,7 @@ impl StagedProjectGeneration {
         D: FnOnce(&[StagedParticipant]) -> Result<(), GfError>,
         C: FnOnce(&ResolvedProjectGeneration, &[StagedParticipant]) -> Result<(), GfError>,
     {
+        self.admission.revalidate_identity()?;
         for participant in &self.participants {
             verify_participant_file(
                 &self
@@ -968,8 +1153,15 @@ impl ValidatedProjectGeneration {
     /// # Errors
     /// Returns a stable publication error whose diagnostic states whether the
     /// commit point was crossed.
-    pub fn publish(self) -> Result<ProjectPublicationReceipt, GfError> {
+    pub fn publish(mut self) -> Result<ProjectPublicationReceipt, GfError> {
+        self.0.admission.revalidate_identity()?;
+        let lifecycle_admission = self.0.admission.readmit_for_publish()?;
         let commit_lock = self.prepare_commit_lock()?;
+        if let Some(admission) = &lifecycle_admission {
+            admission.revalidate_identity()?;
+        } else {
+            self.0.admission.revalidate_identity()?;
+        }
         let result = self.publish_inner().map_err(|error| {
             if matches!(error, GfError::Project { .. }) {
                 error
@@ -984,15 +1176,16 @@ impl ValidatedProjectGeneration {
             }
         });
         drop(commit_lock);
+        drop(lifecycle_admission);
         result
     }
 
-    fn prepare_commit_lock(&self) -> Result<Option<File>, GfError> {
+    fn prepare_commit_lock(&self) -> Result<Option<CommitLock>, GfError> {
         if matches!(self.0.publication_lock, PublicationLock::Exclusive(_)) {
             return Ok(None);
         }
         let staged = &self.0;
-        let writer_lock = wait_for_writer_lock(&staged.root)?;
+        let writer_lock = CommitLock(wait_for_writer_lock(&staged.root)?);
         project_failpoint::hit(
             "project.after_optimistic_commit_lock",
             Some(staged.transaction_uuid),
@@ -1184,24 +1377,28 @@ fn replace_current(
     };
     let current_bytes = canonical_line(&current)?;
     let current_path = staged.root.join(CURRENT_FILE);
-    AtomicFile::new(&current_path, AllowOverwrite)
-        .write(|file| {
-            file.write_all(&current_bytes)?;
+    let replace_result = publish_atomic_bytes(
+        &current_path,
+        &current_bytes,
+        || {
             failpoint_as_io(
                 "project.after_current_temp_write",
                 staged.transaction_uuid,
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )?;
-            file.sync_all()?;
+            )
+        },
+        || {
             failpoint_as_io(
                 "project.after_current_temp_fsync",
                 staged.transaction_uuid,
                 staged.generation_uuid,
                 "CURRENT",
                 false,
-            )?;
+            )
+        },
+        || {
             failpoint_as_io(
                 "project.before_current_replace",
                 staged.transaction_uuid,
@@ -1209,16 +1406,17 @@ fn replace_current(
                 "CURRENT",
                 false,
             )
-        })
-        .map_err(|error| {
-            publication_error_from_parts(
-                staged.transaction_uuid,
-                staged.generation_uuid,
-                "CURRENT",
-                false,
-                &error.to_string(),
-            )
-        })?;
+        },
+    );
+    if let Err(error) = replace_result {
+        reconcile_current_replacement_error(
+            &staged.root,
+            staged.transaction_uuid,
+            staged.generation_uuid,
+            manifest_sha256,
+            &error,
+        )?;
+    }
     project_failpoint::hit(
         "project.after_current_replace",
         Some(staged.transaction_uuid),
@@ -1226,6 +1424,40 @@ fn replace_current(
         "CURRENT",
         true,
     )
+}
+
+fn reconcile_current_replacement_error(
+    root: &Path,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+    manifest_sha256: [u8; 32],
+    error: &AtomicPublishError,
+) -> Result<(), GfError> {
+    // The native primitive distinguishes a proved no-op from an outcome whose
+    // namespace state requires reconciliation. Re-read CURRENT under the
+    // still-held writer lock for every error so callers never receive
+    // committed=false after the child actually became authoritative.
+    let resolved = resolve_project_generation(root).map_err(|authority_error| {
+        project_error(
+            ProjectErrorCode::ProjectCorrupt,
+            format!(
+                "CURRENT authority could not be reconciled after native replacement error: {}",
+                safe_cause(&authority_error.to_string())
+            ),
+        )
+    })?;
+    if resolved.generation_uuid() == generation_uuid
+        && resolved.manifest_sha256() == manifest_sha256
+    {
+        return Ok(());
+    }
+    Err(publication_error_from_parts(
+        transaction_uuid,
+        generation_uuid,
+        "CURRENT",
+        false,
+        &error.to_string(),
+    ))
 }
 
 fn finish_published_generation(
@@ -1771,13 +2003,115 @@ fn verify_exact_file(path: &Path, expected: &[u8]) -> Result<(), GfError> {
 
 pub(crate) fn write_journal(path: &Path, journal: &JournalRecord) -> Result<(), GfError> {
     let bytes = canonical_line(journal)?;
-    AtomicFile::new(path, AllowOverwrite)
-        .write(|file| file.write_all(&bytes))
-        .map_err(|error| publication_io(std::io::Error::other(error.to_string())))?;
+    publish_atomic_bytes(path, &bytes, || Ok(()), || Ok(()), || Ok(())).map_err(publication_io)?;
     sync_directory(
         path.parent()
             .expect("transaction journal always has a parent"),
     )
+}
+
+#[derive(Debug)]
+pub(crate) enum AtomicPublishError {
+    Io(std::io::Error),
+    Replacement(graphforge_filesystem::ReplaceFileError),
+}
+
+impl std::fmt::Display for AtomicPublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(formatter),
+            Self::Replacement(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for AtomicPublishError {}
+
+impl From<std::io::Error> for AtomicPublishError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub(crate) fn publish_atomic_bytes(
+    path: &Path,
+    bytes: &[u8],
+    after_write: impl FnOnce() -> std::io::Result<()>,
+    after_sync: impl FnOnce() -> std::io::Result<()>,
+    before_replace: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), AtomicPublishError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("atomic publication target has no parent"))?;
+    let target_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("atomic publication target has no file name"))?;
+    let target_text = target_name
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("atomic publication target is not UTF-8"))?;
+    let digest: [u8; 32] = Sha256::digest(target_text.as_bytes()).into();
+    let temp_name = format!(".graphforge-atomic-{}.tmp", hex_digest(digest));
+    let temp_path = parent.join(&temp_name);
+    remove_stale_atomic_temp(&temp_path)?;
+
+    let mut temp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    temp.write_all(bytes)?;
+    after_write()?;
+    temp.sync_all()?;
+    after_sync()?;
+    drop(temp);
+    before_replace()?;
+
+    let directory = crate::filesystem_admission::open_directory_handle(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || graphforge_filesystem::path_link_count(path)? != 1
+            {
+                return Err(std::io::Error::other(
+                    "atomic publication target is not a regular single-link file",
+                )
+                .into());
+            }
+            graphforge_filesystem::replace_file(
+                &directory,
+                std::ffi::OsStr::new(&temp_name),
+                target_name,
+            )
+            .map_err(AtomicPublishError::Replacement)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            graphforge_filesystem::install_new_file(
+                &directory,
+                std::ffi::OsStr::new(&temp_name),
+                target_name,
+            )
+            .map_err(AtomicPublishError::Io)
+        }
+        Err(error) => Err(AtomicPublishError::Io(error)),
+    }
+}
+
+fn remove_stale_atomic_temp(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || graphforge_filesystem::path_link_count(path)? != 1
+            {
+                return Err(std::io::Error::other(
+                    "atomic publication temporary is not a regular single-link file",
+                ));
+            }
+            std::fs::remove_file(path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn read_journal(path: &Path) -> Result<JournalRecord, GfError> {
@@ -1819,6 +2153,26 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(false);
     };
+    if let Some(digest) = name
+        .strip_prefix(".graphforge-atomic-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || graphforge_filesystem::path_link_count(path).map_err(publication_io)? != 1
+        {
+            return Ok(false);
+        }
+        std::fs::remove_file(path).map_err(publication_io)?;
+        sync_directory(
+            path.parent()
+                .expect("atomic-write temporary directory always has a parent"),
+        )?;
+        return Ok(true);
+    }
     let Some(suffix) = name.strip_prefix(".atomicwrite") else {
         return Ok(false);
     };
@@ -2460,6 +2814,32 @@ mod tests {
     }
 
     #[test]
+    fn admitted_parent_from_another_root_is_a_publication_failure() {
+        let admitted_root = project();
+        let other_root = project();
+        let admission = crate::filesystem_admission::admit_project_lifecycle(
+            admitted_root.path(),
+            crate::filesystem_admission::ProjectLifecycleMode::Durable,
+            crate::filesystem_admission::ProjectRootRequirement::Existing,
+        )
+        .unwrap();
+        let other_parent = resolve_project_generation(other_root.path()).unwrap();
+        let request = request(vec![participant("graph", "nodes", b"wrong-root")]);
+
+        let error =
+            stage_project_generation_from_admitted_parent(admission, other_parent, &request, None)
+                .err()
+                .expect("a prepared parent from another root must fail");
+
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(
+            error
+                .to_string()
+                .contains("prepared generation does not belong")
+        );
+    }
+
+    #[test]
     fn optimistic_attempts_stage_concurrently_and_compare_parent_at_commit() {
         let root = project();
         let first = request(vec![participant("graph", "nodes", b"first")]);
@@ -2703,6 +3083,21 @@ mod tests {
     }
 
     #[test]
+    fn commit_lock_guard_unlocks_before_a_cloned_descriptor_closes() {
+        let root = project();
+        let writer = wait_for_writer_lock(root.path()).unwrap();
+        let inherited_descriptor = writer.try_clone().unwrap();
+
+        drop(CommitLock(writer));
+
+        let contender =
+            open_regular_lock(&root.path().join(LOCKS_DIR).join(WRITER_LOCK_FILE)).unwrap();
+        assert!(crate::file_lock::try_lock_exclusive(&contender).unwrap());
+        crate::file_lock::unlock(&contender).unwrap();
+        drop(inherited_descriptor);
+    }
+
+    #[test]
     fn malformed_generation_contracts_fail_before_staging_or_current_change() {
         let root = project();
         let before = fs::read(root.path().join(CURRENT_FILE)).unwrap();
@@ -2911,6 +3306,78 @@ mod tests {
             std::fs::read(hostile.join("unexpected")).unwrap(),
             b"caller bytes"
         );
+
+        let native_temp = root.path().join(format!(
+            ".graphforge-atomic-{}.tmp",
+            hex_digest(Sha256::digest(b"CURRENT").into())
+        ));
+        std::fs::write(&native_temp, b"abandoned").unwrap();
+        assert!(cleanup_atomicwrite_temp(&native_temp).unwrap());
+        assert!(!native_temp.exists());
+    }
+
+    #[test]
+    fn atomic_bytes_install_and_replace_use_one_bounded_native_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+
+        publish_atomic_bytes(&target, b"first\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first\n");
+        publish_atomic_bytes(&target, b"second\n", || Ok(()), || Ok(()), || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"second\n");
+        assert!(
+            std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".graphforge-atomic-"))
+        );
+    }
+
+    #[test]
+    fn replacement_error_reconciliation_never_reports_a_committed_child_as_false() {
+        let root = project();
+        let receipt = publish(
+            root.path(),
+            request(vec![participant("graph", "nodes", b"nodes")]),
+        );
+        let state_unknown =
+            AtomicPublishError::Replacement(graphforge_filesystem::ReplaceFileError::StateUnknown(
+                std::io::Error::other("injected replacement status"),
+            ));
+
+        reconcile_current_replacement_error(
+            root.path(),
+            receipt.transaction_uuid,
+            receipt.generation_uuid,
+            receipt.generation_manifest_sha256,
+            &state_unknown,
+        )
+        .unwrap();
+
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            [0xabu8; 32],
+            &state_unknown,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
+        assert!(error.to_string().contains("committed=false"));
+
+        std::fs::write(root.path().join(CURRENT_FILE), b"{torn\n").unwrap();
+        let error = reconcile_current_replacement_error(
+            root.path(),
+            Uuid::now_v7(),
+            receipt.generation_uuid,
+            receipt.generation_manifest_sha256,
+            &state_unknown,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "GF_PROJECT_CORRUPT");
     }
 
     #[test]

@@ -114,6 +114,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-bindings-py` | `graphforge_bindings_py` | `cdylib` | `crates/graphforge-bindings-py/src/lib.rs` | `//crates/graphforge-bindings-py:graphforge_bindings_py` | `mapped` | #7; packaging `//:python_wheel_smoke` |
 | `graphforge-cli` | `graphforge_cli` | `lib` | `crates/graphforge-cli/src/lib.rs` | `//crates/graphforge-cli:graphforge_cli` | `mapped` | #7/#8; unit `//crates/graphforge-cli:graphforge_cli_test` |
 | `graphforge-cli` | `gf` | `bin` | `crates/graphforge-cli/src/main.rs` | `//crates/graphforge-cli:gf` | `mapped` | #8 |
+| `graphforge-cli` | `filesystem_admission` | `integration-test` | `crates/graphforge-cli/tests/filesystem_admission.rs` | `//crates/graphforge-cli:filesystem_admission` | `mapped` | #780 |
 | `graphforge-cli` | `checkpoints` | `integration-test` | `crates/graphforge-cli/tests/checkpoints.rs` | `//crates/graphforge-cli:checkpoints` | `mapped` | #8 |
 | `graphforge-cli` | `portable` | `integration-test` | `crates/graphforge-cli/tests/portable.rs` | `//crates/graphforge-cli:portable` | `mapped` | #8 |
 | `graphforge-cli` | `repository` | `integration-test` | `crates/graphforge-cli/tests/repository.rs` | `//crates/graphforge-cli:repository` | `mapped` | #8 |

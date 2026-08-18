@@ -38,15 +38,29 @@ pub(crate) struct LogicalGraphRecords {
 /// relationship types and endpoints, and user properties. Storage surrogate
 /// IDs, timestamps, Parquet row groups, archive paths, and batch boundaries do
 /// not participate.
+#[cfg(test)]
 pub(crate) fn extract_logical_graph_records(
     generation: &ResolvedProjectGeneration,
     cancellation: Option<&CancellationToken>,
 ) -> Result<LogicalGraphRecords, GfError> {
+    extract_logical_graph_records_with_mode(
+        generation,
+        cancellation,
+        graphforge_storage::filesystem_admission::ProjectLifecycleMode::Durable,
+    )
+}
+
+pub(crate) fn extract_logical_graph_records_with_mode(
+    generation: &ResolvedProjectGeneration,
+    cancellation: Option<&CancellationToken>,
+    lifecycle_mode: graphforge_storage::filesystem_admission::ProjectLifecycleMode,
+) -> Result<LogicalGraphRecords, GfError> {
     checkpoint(cancellation)?;
-    let graph = GraphForge::open_resolved_with_mode(
+    let graph = GraphForge::open_resolved_with_lifecycle_mode(
         generation.container_root().to_path_buf(),
         generation.clone(),
         true,
+        lifecycle_mode,
     )?;
 
     let nodes = streamed_logical_rows(

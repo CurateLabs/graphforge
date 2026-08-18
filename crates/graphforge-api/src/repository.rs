@@ -18,8 +18,11 @@ const CONFIG: &str = ".graphforge/graphforge.yaml";
 const IGNORE_START: &str = "# graphforge: managed data (do not edit)";
 const IGNORE_END: &str = "# graphforge: end managed data";
 const MAX_PORTABLE_INTEGER: u64 = 9_007_199_254_740_991;
-const IGNORE_LINES: [&str; 3] = [
+/// Four repository-local runtime patterns managed as one idempotent block.
+/// The admission lock is a persistent sibling of `state`, not part of it.
+const IGNORE_LINES: [&str; 4] = [
     "/.graphforge/state/",
+    "/.graphforge/.graphforge-admission-*.lock",
     "/.graphforge/imports/",
     "/.graphforge/exports/",
 ];
@@ -357,14 +360,13 @@ impl RepositoryContext {
             true
         };
         let ignore_changed = Self::write_gitignore(ignore)?;
-        fs::create_dir_all(&self.state_path)
-            .map_err(|error| GfError::Storage(error.to_string()))?;
         let state = self
             .state_path
             .to_str()
             .ok_or_else(|| validation("project path must be valid UTF-8"))?;
-        // GraphForge::new creates or reopens the v1 container. Opening it a second
-        // time proves that the published project can be resolved immediately.
+        // Storage admission creates or reopens the v1 container. Repository
+        // setup must not create the final state target before that gate. Opening
+        // it a second time proves that the published project resolves immediately.
         super::GraphForge::new(Some(state))?;
         super::GraphForge::new(Some(state))?;
         Ok(RepositoryInitReceipt {
@@ -1109,7 +1111,7 @@ impl RepositoryContext {
         }
         let removed = if target.exists() {
             reject_symlink_components(&self.root, &target)?;
-            fs::remove_dir_all(&target).map_err(|error| GfError::Storage(error.to_string()))?;
+            storage::remove_durable_project_root(&target)?;
             true
         } else {
             false
@@ -3046,10 +3048,115 @@ mod tests {
         assert!(!context.init().unwrap().ignore_changed);
         let ignore = fs::read_to_string(root.path().join(".gitignore")).unwrap();
         assert!(ignore.starts_with("target/\n"));
+        assert_eq!(IGNORE_LINES.len(), 4);
         for line in IGNORE_LINES {
             assert_eq!(ignore.matches(line).count(), 1);
         }
         assert!(root.path().join(".graphforge/graphforge.yaml").is_file());
+    }
+
+    #[test]
+    fn admission_lock_persists_without_dirtying_git_after_init_or_remove() {
+        let root = tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg("-q")
+                .arg(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+
+        let admission_locks = || {
+            fs::read_dir(root.path().join(".graphforge"))
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.unwrap();
+                    let name = entry.file_name().into_string().ok()?;
+                    (name.starts_with(".graphforge-admission-") && name.ends_with(".lock"))
+                        .then_some(entry.path())
+                })
+                .collect::<Vec<_>>()
+        };
+        let locks = admission_locks();
+        assert_eq!(locks.len(), 1);
+        let lock = locks[0].clone();
+        assert!(lock.is_file());
+        let ignored = Command::new("git")
+            .arg("-C")
+            .arg(root.path())
+            .args(["check-ignore", "-v"])
+            .arg(&lock)
+            .output()
+            .unwrap();
+        assert!(ignored.status.success());
+        assert!(
+            String::from_utf8(ignored.stdout)
+                .unwrap()
+                .contains("/.graphforge/.graphforge-admission-*.lock")
+        );
+
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(["add", "-A"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args([
+                    "-c",
+                    "user.name=GraphForge Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "fixture",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_status = || {
+            Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(["status", "--porcelain=v1"])
+                .output()
+                .unwrap()
+                .stdout
+        };
+        assert!(git_status().is_empty());
+
+        assert!(!context.init_without_skills().unwrap().ignore_changed);
+        assert_eq!(admission_locks(), [lock.clone()]);
+        assert!(git_status().is_empty());
+
+        assert!(context.remove(true).unwrap().removed);
+        assert!(!context.state_path.exists());
+        assert_eq!(admission_locks(), [lock]);
+        assert!(git_status().is_empty());
+    }
+
+    #[test]
+    fn repository_init_delegates_state_target_creation_to_storage_admission() {
+        let root = tempdir().unwrap();
+        let mut context = RepositoryContext::discover(root.path()).unwrap();
+        fs::create_dir_all(root.path().join(".graphforge/hop")).unwrap();
+        context.state_path = root.path().join(".graphforge/hop/../state");
+
+        let error = context.init_without_skills().unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert!(!root.path().join(".graphforge/state").exists());
     }
 
     #[test]
@@ -3092,6 +3199,25 @@ mod tests {
         assert!(context.remove(true).unwrap().removed);
         assert!(root.path().join(".graphforge/ontology/keep.yaml").is_file());
         assert!(!root.path().join(".graphforge/state").exists());
+    }
+
+    #[test]
+    fn remove_rejects_traversal_without_deleting_the_project() {
+        let root = tempdir().unwrap();
+        let context = RepositoryContext::discover(root.path()).unwrap();
+        context.init_without_skills().unwrap();
+        let current = fs::read(context.state_path.join(storage::CURRENT_FILE)).unwrap();
+        fs::create_dir(root.path().join("hop")).unwrap();
+        let mut traversed = context.clone();
+        traversed.root = context.root.join("hop/..");
+
+        let error = traversed.remove(true).unwrap_err();
+
+        assert_eq!(error.code(), "GF_UNSUPPORTED_FILESYSTEM");
+        assert_eq!(
+            fs::read(context.state_path.join(storage::CURRENT_FILE)).unwrap(),
+            current
+        );
     }
 
     #[test]

@@ -34,6 +34,40 @@ def reject(matrix: dict) -> None:
         assert GATE.MATRIX_PATH.read_text(encoding="utf-8") == original
 
 
+def assert_persistent_admission_lock_contract() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        work = Path(directory)
+        nested = work / "case"
+        nested.mkdir()
+        admission_lock = nested / f".graphforge-admission-{'a' * 64}.lock"
+        admission_lock.touch()
+        assert GATE.unexpected_lock_artifacts(work) == []
+
+        uppercase_dir = work / "uppercase"
+        uppercase_dir.mkdir()
+        unexpected = [
+            nested / "writer.lock",
+            nested / f".graphforge-admission-{'a' * 63}.lock",
+            uppercase_dir / f".graphforge-admission-{'A' * 64}.lock",
+            nested / ".graphforge-admission-not-a-digest.lock",
+        ]
+        for path in unexpected:
+            path.touch()
+
+        expected = sorted(str(path.relative_to(work)) for path in unexpected)
+        assert GATE.unexpected_lock_artifacts(work) == expected
+
+        symlink = nested / f".graphforge-admission-{'b' * 64}.lock"
+        try:
+            symlink.symlink_to(admission_lock)
+        except (NotImplementedError, OSError):
+            pass
+        else:
+            assert GATE.unexpected_lock_artifacts(work) == sorted(
+                [*expected, str(symlink.relative_to(work))]
+            )
+
+
 def main() -> None:
     matrix = GATE.validate_matrix()
     assert matrix["issue"] == 2552
@@ -56,6 +90,8 @@ def main() -> None:
     else:
         raise AssertionError("python-bulk-acceptance case missing")
     reject(mutated)
+
+    assert_persistent_admission_lock_contract()
 
     print("bulk construction conformance mutation tests passed")
 
