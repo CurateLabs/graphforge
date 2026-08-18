@@ -96,13 +96,12 @@ struct Rung {
     note: Option<String>,
 }
 
-fn profile_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scale_g500_ladder.v1.json")
-}
+/// The profile is embedded at compile time so the runner is hermetic under both
+/// Cargo and Bazel (no runtime `CARGO_MANIFEST_DIR` path dependency).
+const PROFILE_JSON: &str = include_str!("fixtures/scale_g500_ladder.v1.json");
 
 fn load_profile() -> ScaleProfile {
-    let raw = fs::read_to_string(profile_path()).expect("read ladder profile fixture");
-    serde_json::from_str(&raw).expect("parse ladder profile fixture")
+    serde_json::from_str(PROFILE_JSON).expect("parse ladder profile fixture")
 }
 
 // ---------------------------------------------------------------------------
@@ -359,24 +358,31 @@ struct RungOutcome {
 }
 
 /// Check the envelope after a phase. Returns `Some(error_class)` on the first
-/// violation so the caller can stop the ladder.
+/// violation so the caller can stop the ladder. `ladder_started` is the
+/// ladder-level clock so the 24 h host envelope bounds the whole run, not each
+/// rung independently.
 fn envelope_violation(
     env: &RunEnvelope,
-    started: Instant,
+    ladder_started: Instant,
     project: &Path,
     spill: &Path,
 ) -> Option<&'static str> {
-    if peak_rss_bytes().is_some_and(|rss| rss > env.rss_bytes) {
+    if peak_rss().is_some_and(|(rss, _)| rss > env.rss_bytes) {
         return Some("oom");
     }
     let disk = directory_bytes(project).unwrap_or(0) + directory_bytes(spill).unwrap_or(0);
     if disk > env.disk_bytes {
         return Some("disk_exhaustion");
     }
-    if started.elapsed().as_secs() > env.timeout_s {
+    if ladder_started.elapsed().as_secs() > env.timeout_s {
         return Some("timeout");
     }
     None
+}
+
+/// Current peak RSS as a JSON value (bytes or null).
+fn rss_value() -> Value {
+    peak_rss().map_or(Value::Null, |(bytes, _)| json!(bytes))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -385,6 +391,7 @@ fn run_rung(
     rung: &Rung,
     env: RunEnvelope,
     edge_factor: u32,
+    ladder_started: Instant,
 ) -> RungOutcome {
     let started = Instant::now();
     let workspace = TempDir::new().expect("rung workspace");
@@ -408,10 +415,16 @@ fn run_rung(
         &spill_dir,
     );
     let generate_s = gen_started.elapsed().as_secs_f64();
+    let gen_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+    if let Some(class) = gen_violation {
+        first_failing_phase = Some("generate");
+        error_class = Some(class);
+    }
     steps.push(json!({
         "id": "generate",
-        "pass": true,
+        "pass": gen_violation.is_none(),
         "wall_time_s": generate_s,
+        "rss_peak_bytes": rss_value(),
         "detail": {
             "raw_attempts": spill.raw_attempts,
             "self_loops_rejected": spill.self_loops_rejected,
@@ -420,15 +433,12 @@ fn run_rung(
             "run_count": spill.runs.len(),
         }
     }));
-    if let Some(class) = envelope_violation(&env, started, &project, &spill_dir) {
-        first_failing_phase = Some("generate");
-        error_class = Some(class);
-    }
 
     // ---- ingest (merge + publish through the public facade) ----
     let mut live_unique_edges = 0u64;
     let mut duplicates_rejected = 0u64;
     let mut input_fingerprint = String::from("sha256:");
+    let mut ingest_ran = false;
     if first_failing_phase.is_none() {
         let ingest_started = Instant::now();
         let graph = GraphForge::new(Some(project.to_str().expect("utf8 project")))
@@ -441,21 +451,27 @@ fn run_rung(
         duplicates_rejected = merge.duplicates_rejected;
         input_fingerprint = format!("sha256:{}", hex_encode(sink.finish()));
         drop(graph);
+        ingest_ran = true;
         let ingest_s = ingest_started.elapsed().as_secs_f64();
+        let ingest_violation = envelope_violation(&env, ladder_started, &project, &spill_dir);
+        if let Some(class) = ingest_violation {
+            first_failing_phase = Some("ingest");
+            error_class = Some(class);
+        }
         steps.push(json!({
             "id": "ingest",
-            "pass": true,
+            "pass": ingest_violation.is_none(),
             "wall_time_s": ingest_s,
+            // NOTE: ingest RSS includes the upstream bulk-publication identity
+            // set (see runbook), so an ingest-phase `oom` is not a generator
+            // bottleneck. Recorded here so consumers can attribute it.
+            "rss_peak_bytes": rss_value(),
             "detail": {
                 "live_unique_edges": live_unique_edges,
                 "duplicates_rejected": duplicates_rejected,
                 "input_fingerprint": input_fingerprint,
             }
         }));
-        if let Some(class) = envelope_violation(&env, started, &project, &spill_dir) {
-            first_failing_phase = Some("ingest");
-            error_class = Some(class);
-        }
     }
 
     // ---- reopen + recount ----
@@ -474,6 +490,7 @@ fn run_rung(
             "id": "reopen",
             "pass": true,
             "wall_time_s": reopen_s,
+            "rss_peak_bytes": rss_value(),
             "detail": { "node_count": node_count, "edge_count": edge_count, "gsi": gsi }
         }));
 
@@ -498,7 +515,7 @@ fn run_rung(
             "detail": { "rows": hop2_rows }
         }));
         drop(graph);
-        if let Some(class) = envelope_violation(&env, started, &project, &spill_dir) {
+        if let Some(class) = envelope_violation(&env, ladder_started, &project, &spill_dir) {
             first_failing_phase = Some("query");
             error_class = Some(class);
         }
@@ -506,10 +523,20 @@ fn run_rung(
 
     let disk_used_bytes =
         directory_bytes(&project).unwrap_or(0) + directory_bytes(&spill_dir).unwrap_or(0);
-    let reconciles = first_failing_phase.is_some()
-        || spill.raw_attempts
-            == live_unique_edges + spill.self_loops_rejected + duplicates_rejected;
-    let passed = first_failing_phase.is_none() && reconciles;
+    // Tri-state: reconciliation is only *evaluated* once ingest has run. A rung
+    // stopped in the generate phase is reported as null (not evaluated), never
+    // as a forced `true`.
+    let reconciles: Option<bool> = ingest_ran.then(|| {
+        spill.raw_attempts == live_unique_edges + spill.self_loops_rejected + duplicates_rejected
+    });
+    let all_steps_pass = steps
+        .iter()
+        .all(|step| step["pass"].as_bool().unwrap_or(false));
+    let passed = first_failing_phase.is_none() && all_steps_pass && reconciles == Some(true);
+    let (rss_peak_bytes, rss_source) = match peak_rss() {
+        Some((bytes, source)) => (json!(bytes), json!(source)),
+        None => (Value::Null, Value::Null),
+    };
 
     let evidence = json!({
         "schema": EVIDENCE_SCHEMA,
@@ -525,6 +552,7 @@ fn run_rung(
         "first_failing_phase": first_failing_phase,
         "error_class": error_class,
         "reconciles": reconciles,
+        "reconciliation_evaluated": reconciles.is_some(),
         "counts": {
             "raw_attempts": spill.raw_attempts,
             "self_loops_rejected": spill.self_loops_rejected,
@@ -535,7 +563,8 @@ fn run_rung(
         "persisted": { "node_count": node_count, "edge_count": edge_count },
         "input_fingerprint": input_fingerprint,
         "wall_time_s": started.elapsed().as_secs_f64(),
-        "rss_peak_bytes": peak_rss_bytes(),
+        "rss_peak_bytes": rss_peak_bytes,
+        "rss_source": rss_source,
         "disk_used_bytes": disk_used_bytes,
         "machine_envelope": {
             "rss_bytes": env.rss_bytes,
@@ -563,9 +592,10 @@ fn run_rung(
 
 /// Drive the ladder rung-by-rung, stopping at the first failing rung.
 fn run_ladder(profile: &ScaleProfile, env: RunEnvelope, rungs: &[Rung]) -> Vec<Value> {
+    let ladder_started = Instant::now();
     let mut evidence = Vec::new();
     for rung in rungs {
-        let outcome = run_rung(profile, rung, env, profile.edgefactor);
+        let outcome = run_rung(profile, rung, env, profile.edgefactor, ladder_started);
         let passed = outcome.passed;
         evidence.push(outcome.evidence);
         if !passed {
@@ -805,7 +835,11 @@ fn directory_bytes(path: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
-fn peak_rss_bytes() -> Option<u64> {
+/// Returns `(bytes, source)`. `"vmhwm"` (Linux `/proc/self/status`) is a true
+/// high-water mark; `"ps_sampled"` (fallback) is the instantaneous RSS at the
+/// moment of the call, i.e. a **lower bound** on the real peak. Consumers must
+/// treat a `ps_sampled` value as a floor, not a ceiling.
+fn peak_rss() -> Option<(u64, &'static str)> {
     if let Ok(contents) = fs::read_to_string("/proc/self/status") {
         for line in contents.lines() {
             if let Some(value) = line.strip_prefix("VmHWM:") {
@@ -815,7 +849,7 @@ fn peak_rss_bytes() -> Option<u64> {
                     .trim()
                     .parse::<u64>()
                     .ok()?;
-                return Some(kb.saturating_mul(1024));
+                return Some((kb.saturating_mul(1024), "vmhwm"));
             }
         }
     }
@@ -830,7 +864,7 @@ fn peak_rss_bytes() -> Option<u64> {
         .trim()
         .parse::<u64>()
         .ok()?;
-    Some(kb.saturating_mul(1024))
+    Some((kb.saturating_mul(1024), "ps_sampled"))
 }
 
 struct SplitMix64(u64);
@@ -1056,10 +1090,19 @@ fn first_fail_stops_at_envelope_violation() {
         .find(|r| r.tier == "ci")
         .cloned()
         .expect("ci rung");
-    let outcome = run_rung(&profile, &ci_rung, tiny_env, profile.edgefactor);
+    let outcome = run_rung(
+        &profile,
+        &ci_rung,
+        tiny_env,
+        profile.edgefactor,
+        Instant::now(),
+    );
     assert!(!outcome.passed, "a violated envelope must not pass");
     assert_eq!(outcome.evidence["first_failing_phase"], "generate");
     assert_eq!(outcome.evidence["error_class"], "oom");
+    // Reconciliation was never evaluated (stopped before ingest): tri-state null.
+    assert!(outcome.evidence["reconciles"].is_null());
+    assert_eq!(outcome.evidence["reconciliation_evaluated"], false);
     assert!(outcome.evidence["teps"].is_null());
     assert!(
         outcome.evidence["scale"].as_u64().unwrap() < 26,
@@ -1083,6 +1126,7 @@ fn ci_rung_public_facade_engineering_green() {
         &ci_rung,
         profile.envelope.into(),
         profile.edgefactor,
+        Instant::now(),
     );
     assert!(outcome.passed, "CI rung must pass: {:#}", outcome.evidence);
     let ev = &outcome.evidence;
@@ -1140,8 +1184,14 @@ fn ladder_public_facade_first_fail_evidence() {
     )
     .expect("write ladder evidence");
 
-    // Every attempted rung reconciles; the ladder stops at the first failure.
+    // Every rung that reached ingest reconciles; a rung stopped in the generate
+    // phase reports reconciles=null (not evaluated). The ladder stops at the
+    // first failure.
     for rung in &evidence {
-        assert_eq!(rung["reconciles"], true, "attempted rung must reconcile");
+        let rec = &rung["reconciles"];
+        assert!(
+            rec.is_null() || rec == &Value::Bool(true),
+            "an evaluated rung must reconcile; got {rec}"
+        );
     }
 }

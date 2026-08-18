@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 101,
+  "cargo_target_count": 102,
   "targets": [
     {
       "package": "graphforge-api",
@@ -252,6 +252,16 @@
       "bazel_label": "//crates/graphforge-api:scale_g500_scale20",
       "exception_id": null,
       "notes": "#710 Official-parameter SCALE-20 engineering green; SCALE-6 CI smoke"
+    },
+    {
+      "package": "graphforge-api",
+      "target": "scale_g500_ladder",
+      "class": "integration-test",
+      "source": "crates/graphforge-api/tests/scale_g500_ladder.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-api:scale_g500_ladder",
+      "exception_id": null,
+      "notes": "#736 bounded billion-edge scale ladder + first-fail contract; SCALE-10 CI"
     },
     {
       "package": "graphforge-api",

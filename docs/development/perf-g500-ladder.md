@@ -77,9 +77,19 @@ elapsed time against the envelope. On the **first** violation it records the
 failing phase and `error_class` (`oom` | `disk_exhaustion` | `timeout`) and
 stops — no larger rung is attempted and no SCALE-26 pass is claimed.
 
-> RSS fidelity: peak RSS is read from `/proc/self/status` `VmHWM` on Linux and
-> falls back to sampled `ps` RSS on macOS (not a kernel high-water mark). Run
+> RSS fidelity: peak RSS is read from `/proc/self/status` `VmHWM` on Linux
+> (a true high-water mark) and falls back to sampled `ps` RSS otherwise (an
+> *instantaneous lower bound*, not a peak). Evidence records `rss_source`
+> (`vmhwm` | `ps_sampled`) so a `ps_sampled` value is read as a floor. Run
 > provisioned certification rungs on **Linux**.
+
+> Ingest-phase attribution: `publish_bulk_nodes` / `publish_bulk_edges` build an
+> in-memory set of existing identities per call (`bulk_construction.rs`), so RSS
+> during the `ingest` phase grows with the persisted graph, not just the
+> generator buffer. Per-phase `rss_peak_bytes` is recorded on each step, and an
+> `oom` with `first_failing_phase: "ingest"` reflects that upstream
+> bulk-publication cost — **not** a generator-memory regression. Reducing that
+> cost is upstream storage work (a non-goal here), tracked toward #745.
 
 ## Commands
 
