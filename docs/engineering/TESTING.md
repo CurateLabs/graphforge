@@ -132,8 +132,9 @@ parity mismatches reject the candidate. It does not tag or publish.
 
 **Windows posture:** the Windows Python lane proves user-facing use of the
 installed abi3 wheel (build → clean-install → native contracts). It is **not** a
-second MSVC `cargo test` of the full Rust workspace. Windows project-root lock
-unit tests are hosted by Test Suite `Windows graphforge-storage Locks`, not Binding RC.
+second MSVC `cargo test` of the full Rust workspace. Windows project-root lock,
+filesystem admission/primitive, and publication-kill fault-oracle cross-checks
+are hosted by Test Suite `Windows graphforge-storage Locks`, not Binding RC.
 Do not treat “wheel contracts green” as “every Rust unit test ran under MSVC.”
 
 ### Non-Cypher surface and other publication gates

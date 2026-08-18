@@ -10,9 +10,6 @@
 use graphforge_storage::project_certification::{
     CERT_CONTRACT, CERT_SEED, WRITE_SKEW_CLASSIFICATION, evidence_summary, run_certification_suite,
 };
-use graphforge_storage::project_fault_oracle::{
-    AuthorityClass, PublicationPhase, native_shared_boundary_authority,
-};
 
 #[test]
 fn seeded_certification_suite_is_clean_at_required_budget() {
@@ -35,25 +32,6 @@ fn seeded_certification_suite_is_clean_at_required_budget() {
     assert!(!rendered.contains("serializable isolation"));
     assert!(!rendered.contains("distributed durability"));
     assert!(!rendered.contains("universal filesystem"));
-}
-
-#[test]
-fn native_shared_boundaries_agree_with_oracle_authority() {
-    for phase in [
-        PublicationPhase::BeforeCurrentReplace,
-        PublicationPhase::AfterCurrentReplace,
-        PublicationPhase::AfterRootFsync,
-    ] {
-        let native = native_shared_boundary_authority(phase);
-        let expected = match phase {
-            PublicationPhase::BeforeCurrentReplace => AuthorityClass::PriorGeneration,
-            PublicationPhase::AfterCurrentReplace | PublicationPhase::AfterRootFsync => {
-                AuthorityClass::NewGeneration
-            }
-            _ => unreachable!(),
-        };
-        assert_eq!(native, expected, "phase={phase:?}");
-    }
 }
 
 #[test]

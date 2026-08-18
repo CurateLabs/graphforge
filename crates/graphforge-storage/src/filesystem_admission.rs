@@ -2411,4 +2411,29 @@ mod tests {
         assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
         filesystem_durability_preflight(&target).unwrap();
     }
+
+    #[test]
+    fn admitted_filesystem_class_selects_the_matching_fault_oracle_profile() {
+        let parent = canonical_tempdir();
+        let target = parent.path().join("project");
+        let evidence = filesystem_durability_preflight(&target).unwrap();
+        let profile =
+            crate::project_fault_oracle::DurabilityProfile::for_admitted_filesystem_class(
+                &evidence.filesystem_class,
+            )
+            .expect("every admitted durable filesystem has oracle semantics");
+        let outcomes =
+            crate::project_fault_oracle::simulate_all_phases_for_profile(0x749a, profile)
+                .expect("admission profile phase sweep");
+        assert_eq!(
+            outcomes.len(),
+            crate::project_fault_oracle::PublicationPhase::all().len()
+        );
+        assert!(outcomes.iter().all(|outcome| {
+            outcome.actual == outcome.expected
+                && outcome.actual != crate::project_fault_oracle::AuthorityClass::Unexpected
+                && (!outcome.acknowledged
+                    || outcome.actual == crate::project_fault_oracle::AuthorityClass::NewGeneration)
+        }));
+    }
 }

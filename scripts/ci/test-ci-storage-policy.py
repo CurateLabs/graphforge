@@ -93,6 +93,8 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "cargo-bazel-parity-evidence-${{ github.run_id }}": 1,
         "bazel-cache-perf-evidence-${{ github.run_id }}": 1,
         "durability-certification-evidence-${{ github.sha }}": 1,
+        "native-oracle-windows-${{ github.sha }}": 1,
+        "native-oracle-macos-${{ github.sha }}": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(

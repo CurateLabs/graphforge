@@ -155,6 +155,75 @@ STORAGE_ADMISSION_COMMAND = (
     "cargo test -p graphforge-storage filesystem_admission::tests:: --lib --no-fail-fast"
 )
 FILESYSTEM_COMMAND = "cargo test -p graphforge-filesystem --lib --no-fail-fast"
+NATIVE_ORACLE_CROSSCHECK_COMMAND = (
+    "cargo test -p graphforge-storage --features test-failpoints --lib "
+    "project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation "
+    "--no-fail-fast -- --exact --nocapture"
+)
+INJECTED_OPERATION_ERROR_COMMAND = (
+    "cargo test -p graphforge-storage --features test-failpoints --lib "
+    "project_recovery::tests::injected_operation_errors_report_exact_commit_state "
+    "--no-fail-fast -- --exact --nocapture"
+)
+COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND = (
+    "cargo test -p graphforge-storage --lib "
+    "project_publication::tests::commit_lock_guard_unlocks_before_a_cloned_descriptor_closes "
+    "--no-fail-fast -- --exact --nocapture"
+)
+CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND = (
+    "cargo test -p graphforge-storage --lib "
+    "project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes "
+    "--no-fail-fast -- --exact --nocapture"
+)
+WINDOWS_OPTIMISTIC_PROMOTION_COMMAND = (
+    "cargo test -p graphforge-storage --lib "
+    "project_publication::tests::"
+    "optimistic_promotion_closes_staged_handles_before_directory_rename "
+    "--no-fail-fast -- --exact --nocapture"
+)
+UPLOAD_ARTIFACT_ACTION = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1"
+NATIVE_ORACLE_EVIDENCE_ENV = "GRAPHFORGE_NATIVE_ORACLE_EVIDENCE"
+WINDOWS_NATIVE_ORACLE_EVIDENCE = (
+    "${{ runner.temp }}/durability-certification-evidence/native-oracle-windows.json"
+)
+MACOS_NATIVE_ORACLE_EVIDENCE = (
+    "${{ runner.temp }}/durability-certification-evidence/native-oracle-macos.json"
+)
+NATIVE_ORACLE_ARTIFACT_PATH = "${{ runner.temp }}/durability-certification-evidence"
+
+
+def validate_native_oracle_artifact(
+    job_body: str,
+    *,
+    platform_name: str,
+    evidence_path: str,
+) -> None:
+    """Require active evidence output and a pinned, fail-closed artifact upload."""
+    oracle_step = workflow_step(
+        job_body,
+        "project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation",
+    )
+    assert_active_lines(
+        oracle_step,
+        f"{NATIVE_ORACLE_EVIDENCE_ENV}: {evidence_path}",
+    )
+    assert oracle_step.count(NATIVE_ORACLE_EVIDENCE_ENV) == 1
+
+    upload_name = f"Upload {platform_name} native oracle evidence"
+    assert job_body.count(upload_name) == 1
+    upload_step = workflow_step(job_body, upload_name)
+    artifact_slug = platform_name.lower()
+    assert_active_lines(
+        upload_step,
+        f"- name: {upload_name}",
+        "if: always()",
+        f"uses: {UPLOAD_ARTIFACT_ACTION}",
+        f"name: native-oracle-{artifact_slug}-${{{{ github.sha }}}}",
+        f"path: {NATIVE_ORACLE_ARTIFACT_PATH}",
+        "if-no-files-found: error",
+        "retention-days: 1",
+    )
+    assert "continue-on-error" not in upload_step
 
 
 def validate_native_test_workflow(workflow_text: str) -> None:
@@ -169,7 +238,22 @@ def validate_native_test_workflow(workflow_text: str) -> None:
         assert job_scalar(body, "if") == "needs.changes.outputs.rust == 'true'"
         assert job_runs_exact(body, STORAGE_ADMISSION_COMMAND)
         assert job_runs_exact(body, FILESYSTEM_COMMAND)
+        assert job_runs_exact(body, NATIVE_ORACLE_CROSSCHECK_COMMAND)
+        assert job_runs_exact(body, INJECTED_OPERATION_ERROR_COMMAND)
+        assert job_runs_exact(body, COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND)
+        assert job_runs_exact(body, CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND)
     assert job_runs_exact(windows, WINDOWS_PROJECT_LOCK_COMMAND)
+    assert job_runs_exact(windows, WINDOWS_OPTIMISTIC_PROMOTION_COMMAND)
+    validate_native_oracle_artifact(
+        windows,
+        platform_name="Windows",
+        evidence_path=WINDOWS_NATIVE_ORACLE_EVIDENCE,
+    )
+    validate_native_oracle_artifact(
+        macos,
+        platform_name="macOS",
+        evidence_path=MACOS_NATIVE_ORACLE_EVIDENCE,
+    )
 
     gate = jobs["ci-gate"]
     assert {WINDOWS_DURABILITY_JOB, MACOS_DURABILITY_JOB} <= job_needs(gate)
@@ -198,6 +282,27 @@ def validate_native_workflow_negative_fixtures() -> None:
           {STORAGE_ADMISSION_COMMAND}
       - run: >-
           {FILESYSTEM_COMMAND}
+      - name: Cross-check Windows publication-kill results against the fault oracle
+        env:
+          {NATIVE_ORACLE_EVIDENCE_ENV}: {WINDOWS_NATIVE_ORACLE_EVIDENCE}
+        run: >-
+          {NATIVE_ORACLE_CROSSCHECK_COMMAND}
+      - name: Upload Windows native oracle evidence
+        if: always()
+        uses: {UPLOAD_ARTIFACT_ACTION}
+        with:
+          name: native-oracle-windows-${{{{ github.sha }}}}
+          path: {NATIVE_ORACLE_ARTIFACT_PATH}
+          if-no-files-found: error
+          retention-days: 1
+      - run: >-
+          {INJECTED_OPERATION_ERROR_COMMAND}
+      - run: >-
+          {COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND}
+      - run: >-
+          {CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND}
+      - run: >-
+          {WINDOWS_OPTIMISTIC_PROMOTION_COMMAND}
   {MACOS_DURABILITY_JOB}:
     runs-on: {MACOS_RUNNER}
     needs: changes
@@ -207,6 +312,25 @@ def validate_native_workflow_negative_fixtures() -> None:
           {STORAGE_ADMISSION_COMMAND}
       - run: >-
           {FILESYSTEM_COMMAND}
+      - name: Cross-check macOS publication-kill results against the fault oracle
+        env:
+          {NATIVE_ORACLE_EVIDENCE_ENV}: {MACOS_NATIVE_ORACLE_EVIDENCE}
+        run: >-
+          {NATIVE_ORACLE_CROSSCHECK_COMMAND}
+      - name: Upload macOS native oracle evidence
+        if: always()
+        uses: {UPLOAD_ARTIFACT_ACTION}
+        with:
+          name: native-oracle-macos-${{{{ github.sha }}}}
+          path: {NATIVE_ORACLE_ARTIFACT_PATH}
+          if-no-files-found: error
+          retention-days: 1
+      - run: >-
+          {INJECTED_OPERATION_ERROR_COMMAND}
+      - run: >-
+          {COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND}
+      - run: >-
+          {CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND}
   ci-gate:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
@@ -240,6 +364,55 @@ def validate_native_workflow_negative_fixtures() -> None:
         fixture.replace(
             f"          {STORAGE_ADMISSION_COMMAND}",
             f'          echo "{STORAGE_ADMISSION_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {NATIVE_ORACLE_CROSSCHECK_COMMAND}",
+            f'          echo "{NATIVE_ORACLE_CROSSCHECK_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {INJECTED_OPERATION_ERROR_COMMAND}",
+            f'          echo "{INJECTED_OPERATION_ERROR_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND}",
+            f'          echo "{COMMIT_LOCK_CLONED_DESCRIPTOR_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND}",
+            f'          echo "{CHECKPOINT_LOCK_CLONED_DESCRIPTOR_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {WINDOWS_OPTIMISTIC_PROMOTION_COMMAND}",
+            f'          echo "{WINDOWS_OPTIMISTIC_PROMOTION_COMMAND}"',
+            1,
+        ),
+        fixture.replace(
+            f"          {NATIVE_ORACLE_EVIDENCE_ENV}: {WINDOWS_NATIVE_ORACLE_EVIDENCE}",
+            f"          # {NATIVE_ORACLE_EVIDENCE_ENV}: {WINDOWS_NATIVE_ORACLE_EVIDENCE}",
+            1,
+        ),
+        fixture.replace(
+            f"          path: {NATIVE_ORACLE_ARTIFACT_PATH}",
+            "          path: wrong-native-oracle-evidence.json",
+            1,
+        ),
+        fixture.replace(
+            f"        uses: {UPLOAD_ARTIFACT_ACTION}",
+            "        uses: actions/upload-artifact@unapproved # wrong",
+            1,
+        ),
+        fixture.replace("        if: always()", "        if: false", 1),
+        fixture.replace(
+            "          if-no-files-found: error", "          if-no-files-found: warn", 1
+        ),
+        fixture.replace(
+            "      - name: Upload macOS native oracle evidence",
+            "      # - name: Upload macOS native oracle evidence",
             1,
         ),
         fixture.replace(
