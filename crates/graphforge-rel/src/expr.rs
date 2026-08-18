@@ -12017,11 +12017,12 @@ impl ScalarUDFImpl for CypherPathNodes {
 }
 
 /// Build the `labels` + property-union children for hydrated path-node
-/// elements (#1024 / #706), one entry per flattened node uuid.
+/// elements (#1024 / #706 / #807), one entry per flattened node uuid.
 ///
 /// Demand-first: unique requested UUIDs are gathered once from batchwise
 /// topology/property reads (no full-stem `concat_batches`), then expanded back
-/// to flattened public positions so repeats keep identical values.
+/// to flattened public positions so repeats keep identical values. Property
+/// rows for the same UUID are retained across stems and coalesced on expand.
 fn hydrate_path_node_children(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
@@ -12176,14 +12177,17 @@ struct PropRowLoc {
     row: u32,
 }
 
-/// Kept property batches per stem, plus UUID → row location (#706).
+/// Kept property batches per stem, plus UUID → row locations across stems
+/// (#706 / #807). Complementary fields for one UUID may live in more than one
+/// stem; expand coalesces them.
 type GatheredPathProps = (
     Vec<Vec<datafusion::arrow::array::RecordBatch>>,
-    std::collections::HashMap<[u8; 16], PropRowLoc>,
+    std::collections::HashMap<[u8; 16], Vec<PropRowLoc>>,
 );
 
 /// Gather property rows for the requested UUID set only — batchwise, no
-/// complete-stem `concat_batches` (#706).
+/// complete-stem `concat_batches` (#706). Each stem is scanned independently
+/// so a UUID found in an earlier stem is still sought in later stems (#807).
 fn gather_path_node_props(
     h: &PathNodeHydration,
     unique: &[[u8; 16]],
@@ -12194,8 +12198,7 @@ fn gather_path_node_props(
     use std::collections::{HashMap, HashSet};
 
     let exec_err = |m: String| DataFusionError::Execution(m);
-    let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
-    let mut uuid_to_loc: HashMap<[u8; 16], PropRowLoc> = HashMap::with_capacity(unique.len());
+    let mut uuid_to_loc: HashMap<[u8; 16], Vec<PropRowLoc>> = HashMap::with_capacity(unique.len());
     let mut kept_by_stem: Vec<Vec<datafusion::arrow::array::RecordBatch>> =
         Vec::with_capacity(h.prop_stems.len());
 
@@ -12205,10 +12208,8 @@ fn gather_path_node_props(
 
     for (si, stem) in h.prop_stems.iter().enumerate() {
         check_path_hydration_cancel()?;
-        if remaining.is_empty() {
-            break;
-        }
         path_hydration_stats::record_stem_opened();
+        let mut remaining: HashSet<[u8; 16]> = unique.iter().copied().collect();
         let mut kept: Vec<datafusion::arrow::array::RecordBatch> = Vec::new();
         graphforge_storage::visit_properties_batched(&h.dir, stem, batch_size, |b| {
             check_path_hydration_cancel()?;
@@ -12245,14 +12246,11 @@ fn gather_path_node_props(
                     let row = u32::try_from(local_row).map_err(|_| {
                         exec_err(format!("gathered property row {local_row} exceeds u32"))
                     })?;
-                    uuid_to_loc.insert(
-                        u,
-                        PropRowLoc {
-                            stem: si,
-                            batch: batch_idx,
-                            row,
-                        },
-                    );
+                    uuid_to_loc.entry(u).or_default().push(PropRowLoc {
+                        stem: si,
+                        batch: batch_idx,
+                        row,
+                    });
                     path_hydration_stats::record_property_gathered(1);
                 }
             }
@@ -12285,6 +12283,9 @@ fn take_record_batch_rows(
 }
 
 /// Expand gathered property rows into one nullable union child per field (#1024).
+///
+/// Each UUID may contribute a row from more than one stem (#807); `zip` keeps
+/// the last non-null value in sorted-stem order.
 fn expand_path_node_props(
     h: &PathNodeHydration,
     flat: &[[u8; 16]],
@@ -12307,9 +12308,12 @@ fn expand_path_node_props(
                 };
                 let indices = UInt32Array::from(
                     flat.iter()
-                        .map(|u| match uuid_to_loc.get(u) {
-                            Some(loc) if loc.stem == si && loc.batch == bi => Some(loc.row),
-                            _ => None,
+                        .map(|u| {
+                            uuid_to_loc.get(u).and_then(|locs| {
+                                locs.iter()
+                                    .find(|loc| loc.stem == si && loc.batch == bi)
+                                    .map(|loc| loc.row)
+                            })
                         })
                         .collect::<Vec<_>>(),
                 );
@@ -15508,6 +15512,166 @@ mod tests {
         assert_eq!(
             path_node_label_lists(&out, 0),
             path_node_label_lists(&out_large, 0)
+        );
+    }
+
+    #[test]
+    fn hydrated_path_nodes_coalesce_properties_across_stems() {
+        // #807: complementary properties in two stems must both hydrate.
+        // `Company` sorts before `Person`, so first-stem-only gather would keep
+        // `title` and leave later-stem `name` null.
+        let _guard = PathHydrationTestGuard::arm();
+        use std::collections::HashMap;
+
+        use datafusion::arrow::array::{
+            FixedSizeBinaryArray, FixedSizeBinaryBuilder, ListBuilder, StructBuilder,
+        };
+        use datafusion::arrow::datatypes::Field;
+        use graphforge_core::uuid::{new_v7, to_bytes};
+        use graphforge_core::{OntologyMode, TypeId};
+        use graphforge_ir::IrLiteral;
+        use graphforge_storage::GraphWriter;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keep = new_v7();
+        {
+            let mut w = GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 0).unwrap();
+            w.create_node_with_labels(keep, &[TypeId(1), TypeId(2)])
+                .unwrap();
+            w.set_properties(
+                &keep,
+                Some("Company"),
+                HashMap::from([("title".into(), IrLiteral::Str("CEO".into()))]),
+            )
+            .unwrap();
+            for i in 0..200 {
+                let filler = new_v7();
+                w.create_node_with_labels(filler, &[TypeId(2)]).unwrap();
+                w.set_properties(
+                    &filler,
+                    Some("Company"),
+                    HashMap::from([("title".into(), IrLiteral::Str(format!("filler-title-{i}")))]),
+                )
+                .unwrap();
+            }
+            w.set_properties(
+                &keep,
+                Some("Person"),
+                HashMap::from([("name".into(), IrLiteral::Str("Ada".into()))]),
+            )
+            .unwrap();
+            for i in 0..200 {
+                let filler = new_v7();
+                w.create_node_with_labels(filler, &[TypeId(1)]).unwrap();
+                w.set_properties(
+                    &filler,
+                    Some("Person"),
+                    HashMap::from([("name".into(), IrLiteral::Str(format!("filler-name-{i}")))]),
+                )
+                .unwrap();
+            }
+            w.flush().unwrap();
+        }
+
+        let bytes = to_bytes(&keep);
+        let hydrate = PathNodeHydration {
+            dir: dir.path().to_path_buf(),
+            labels_by_type: vec![(1, "Person".to_owned()), (2, "Company".to_owned())],
+            prop_stems: vec!["Company".to_owned(), "Person".to_owned()],
+            fields: vec![
+                Field::new("node_uuid", DataType::FixedSizeBinary(16), false),
+                Field::new("labels", DataType::new_list(DataType::Utf8, true), true),
+                Field::new("name", DataType::Utf8, true),
+                Field::new("title", DataType::Utf8, true),
+            ]
+            .into(),
+        };
+        let seed = std::sync::Arc::new(
+            FixedSizeBinaryArray::try_from_iter([bytes].iter().copied()).unwrap(),
+        ) as datafusion::arrow::array::ArrayRef;
+        let edge_fields: datafusion::arrow::datatypes::Fields = vec![
+            Field::new("src_uuid", DataType::FixedSizeBinary(16), false),
+            Field::new("dst_uuid", DataType::FixedSizeBinary(16), false),
+        ]
+        .into();
+        let mut edge_b = ListBuilder::new(StructBuilder::new(
+            edge_fields,
+            vec![
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+                Box::new(FixedSizeBinaryBuilder::new(16)),
+            ],
+        ));
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(0)
+            .unwrap()
+            .append_value(bytes)
+            .unwrap();
+        edge_b
+            .values()
+            .field_builder::<FixedSizeBinaryBuilder>(1)
+            .unwrap()
+            .append_value(bytes)
+            .unwrap();
+        edge_b.values().append(true);
+        edge_b.append(true);
+        let rels = std::sync::Arc::new(edge_b.finish()) as datafusion::arrow::array::ArrayRef;
+
+        path_hydration_stats::reset();
+        let out = invoke_hydrated_path_nodes_with_batch_size(
+            hydrate.clone(),
+            seed.clone(),
+            rels.clone(),
+            8,
+        )
+        .unwrap();
+        let snap = path_hydration_stats::snapshot();
+        assert_eq!(snap.unique_uuids_requested, 1);
+        assert_eq!(snap.property_stems_opened, 2);
+        assert_eq!(snap.property_rows_gathered, 2);
+        assert!(
+            snap.peak_gathered_entries <= 1,
+            "gather map peak must stay within unique requested UUIDs, got {}",
+            snap.peak_gathered_entries
+        );
+        assert!(
+            snap.property_rows_examined < 50,
+            "per-stem early-exit must avoid examining filler rows: examined {}",
+            snap.property_rows_examined
+        );
+        let names = path_node_prop_strings(&out, 0, "name").unwrap();
+        let titles = path_node_prop_strings(&out, 0, "title").unwrap();
+        assert_eq!(names, vec![Some("Ada".into()), Some("Ada".into())]);
+        assert_eq!(titles, vec![Some("CEO".into()), Some("CEO".into())]);
+
+        path_hydration_stats::reset();
+        let out_large = invoke_hydrated_path_nodes_with_batch_size(
+            hydrate.clone(),
+            seed.clone(),
+            rels.clone(),
+            8_192,
+        )
+        .unwrap();
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "name"),
+            path_node_prop_strings(&out_large, 0, "name")
+        );
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "title"),
+            path_node_prop_strings(&out_large, 0, "title")
+        );
+
+        drop(GraphWriter::open_at(dir.path(), OntologyMode::Advisory, 0).unwrap());
+        path_hydration_stats::reset();
+        let out_reopen =
+            invoke_hydrated_path_nodes_with_batch_size(hydrate, seed, rels, 8).unwrap();
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "name"),
+            path_node_prop_strings(&out_reopen, 0, "name")
+        );
+        assert_eq!(
+            path_node_prop_strings(&out, 0, "title"),
+            path_node_prop_strings(&out_reopen, 0, "title")
         );
     }
 
