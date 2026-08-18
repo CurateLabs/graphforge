@@ -359,6 +359,9 @@ fn rename_type(doc: &mut OntologyDoc, old: &str, new: &str) {
 }
 
 fn parse_value_type(s: &str) -> PropertyValueType {
+    if let Some(spatial) = crate::spatial::SpatialType::from_catalog_name(s) {
+        return PropertyValueType::Spatial(spatial);
+    }
     match s.trim().to_lowercase().as_str() {
         "int64" => PropertyValueType::Int64,
         "float64" => PropertyValueType::Float64,

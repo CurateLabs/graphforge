@@ -30,6 +30,9 @@ Project = Knowledge Graph + Documents + Provenance + Embeddings + Workflows + Ar
 Behavior lives in a **Rust core**. Python and Node are thin bindings over `graphforge-api` — never fallback
 engines. v0.5.0 exposes a unified API and a compiler pipeline (DataFusion-backed execution, Arrow as
 the stable in-memory and FFI contract, Parquet for durable graph data).
+
+The normative pre-v1 geometry, CRS, Arrow layout, and ownership boundary is
+defined in [Canonical spatial values](spatial-values.md).
 ---
 
 ## Architecture Principles

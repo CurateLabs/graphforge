@@ -1313,7 +1313,10 @@ fn validate_ontology_field(
                 DataType::List(_) | DataType::LargeList(_)
             )
         }
-        PropertyValueType::Duration | PropertyValueType::DateTime | PropertyValueType::Map => false,
+        PropertyValueType::Duration
+        | PropertyValueType::DateTime
+        | PropertyValueType::Map
+        | PropertyValueType::Spatial(_) => false,
     };
     if !compatible {
         return Err(row_error(

@@ -293,7 +293,8 @@ impl OntologyHandle {
             {
                 return None;
             }
-            let value_type = match value_types.value(row) {
+            let raw_value_type = value_types.value(row);
+            let value_type = match raw_value_type {
                 "utf8" => PropertyValueType::Utf8,
                 "int64" => PropertyValueType::Int64,
                 "float64" => PropertyValueType::Float64,
@@ -302,7 +303,8 @@ impl OntologyHandle {
                 "datetime" => PropertyValueType::DateTime,
                 "list" => PropertyValueType::List,
                 "map" => PropertyValueType::Map,
-                _ => return None,
+                other => crate::spatial::SpatialType::from_catalog_name(other)
+                    .map(PropertyValueType::Spatial)?,
             };
             Some(PropertyDef {
                 owner: owner_name.to_owned(),

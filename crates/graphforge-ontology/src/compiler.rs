@@ -298,16 +298,17 @@ fn build_relation_types(
     .map_err(|e| arrow_err(&e))
 }
 
-fn property_value_type_str(vt: &PropertyValueType) -> &'static str {
+fn property_value_type_str(vt: &PropertyValueType) -> String {
     match vt {
-        PropertyValueType::Utf8 => "utf8",
-        PropertyValueType::Int64 => "int64",
-        PropertyValueType::Float64 => "float64",
-        PropertyValueType::Bool => "bool",
-        PropertyValueType::Duration => "duration",
-        PropertyValueType::DateTime => "datetime",
-        PropertyValueType::List => "list",
-        PropertyValueType::Map => "map",
+        PropertyValueType::Utf8 => "utf8".to_owned(),
+        PropertyValueType::Int64 => "int64".to_owned(),
+        PropertyValueType::Float64 => "float64".to_owned(),
+        PropertyValueType::Bool => "bool".to_owned(),
+        PropertyValueType::Duration => "duration".to_owned(),
+        PropertyValueType::DateTime => "datetime".to_owned(),
+        PropertyValueType::List => "list".to_owned(),
+        PropertyValueType::Map => "map".to_owned(),
+        PropertyValueType::Spatial(spatial) => spatial.catalog_name(),
     }
 }
 
@@ -663,6 +664,38 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(owner_kinds.value(0), "entity");
+    }
+
+    #[test]
+    fn compile_and_handle_preserve_complete_spatial_property_type() {
+        use crate::handle::OntologyHandle;
+        use crate::spatial::{SpatialCrs, SpatialGeometryType, SpatialType};
+
+        let spatial = SpatialType {
+            geometry: SpatialGeometryType::MultiPolygon,
+            crs: SpatialCrs::Epsg3857,
+        };
+        let mut doc = sample_doc();
+        doc.properties[0].value_type = PropertyValueType::Spatial(spatial);
+        let runtime = OntologyCompiler::compile(&doc).unwrap();
+        let values = runtime
+            .property_types
+            .column_by_name("value_type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "spatial:multipolygon:EPSG:3857");
+
+        let handle = OntologyHandle::new(runtime);
+        let owner = handle.entity_type_id("Person").unwrap();
+        assert_eq!(
+            handle
+                .entity_property_def(owner, "name")
+                .unwrap()
+                .value_type,
+            PropertyValueType::Spatial(spatial)
+        );
     }
 
     #[test]

@@ -350,6 +350,21 @@ pub fn property_type_to_arrow(vt: &PropertyValueType) -> DataType {
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
         }
         PropertyValueType::List | PropertyValueType::Map => DataType::LargeUtf8,
+        PropertyValueType::Spatial(spatial) => spatial.data_type(),
+    }
+}
+
+/// Construct a canonical property field, including GeoArrow extension
+/// metadata for spatial values.
+#[must_use]
+pub fn property_field(def: &PropertyDef) -> Field {
+    match def.value_type {
+        PropertyValueType::Spatial(spatial) => spatial.field(&def.name, def.nullable),
+        _ => Field::new(
+            &def.name,
+            property_type_to_arrow(&def.value_type),
+            def.nullable,
+        ),
     }
 }
 
@@ -362,11 +377,7 @@ pub fn property_type_to_arrow(vt: &PropertyValueType) -> DataType {
 pub fn property_schema(entity_type: &str, property_defs: &[PropertyDef]) -> Schema {
     let mut fields = vec![uuid_field("node_uuid")];
     for def in property_defs {
-        fields.push(Field::new(
-            &def.name,
-            property_type_to_arrow(&def.value_type),
-            def.nullable,
-        ));
+        fields.push(property_field(def));
     }
     let meta: HashMap<String, String> =
         [("graphforge.entity_type".to_owned(), entity_type.to_owned())]
@@ -508,6 +519,7 @@ mod tests {
 
     #[test]
     fn property_type_to_arrow_all_variants() {
+        use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
         assert_eq!(
             property_type_to_arrow(&PropertyValueType::Utf8),
             DataType::Utf8
@@ -539,6 +551,26 @@ mod tests {
         assert_eq!(
             property_type_to_arrow(&PropertyValueType::Map),
             DataType::LargeUtf8
+        );
+        let spatial = SpatialType {
+            geometry: SpatialGeometryType::Point,
+            crs: SpatialCrs::Epsg4326,
+        };
+        assert_eq!(
+            property_type_to_arrow(&PropertyValueType::Spatial(spatial)),
+            spatial.data_type()
+        );
+        let definition = PropertyDef {
+            owner: "Place".into(),
+            name: "location".into(),
+            value_type: PropertyValueType::Spatial(spatial),
+            nullable: false,
+            multivalued: false,
+            default_json: None,
+        };
+        assert_eq!(
+            property_field(&definition),
+            spatial.field("location", false)
         );
     }
 
