@@ -4,9 +4,11 @@
 //! domain semantics remain in their owning crates and enter validation through
 //! opaque callbacks.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use serde::{Deserialize, Serialize};
@@ -2068,10 +2070,18 @@ pub(crate) fn publish_atomic_bytes(
         drop(temp);
         before_replace()?;
 
+        // Concurrent same-process replace of one target must not overlap
+        // `replace_file`: the loser's post-rename identity check sees the
+        // winner's inode and returns StateUnknown. Unique temps already
+        // prevent the shared-name ENOENT; this lock serializes the rename.
+        let namespace_lock = lock_atomic_publish_target(path);
+        let _namespace_guard = namespace_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         let directory = crate::filesystem_admission::open_directory_handle(parent)?;
         // Existence is one snapshot; `replace_file` / `install_new_file` verify
-        // regular single-link identity on the open handles. A second path lstat
-        // here raced concurrent CURRENT replace (nlink != 1) and failed Bazel.
+        // regular single-link identity on the open handles.
         match std::fs::symlink_metadata(path) {
             Ok(_) => graphforge_filesystem::replace_file(
                 &directory,
@@ -2104,6 +2114,19 @@ fn unique_atomic_temp_name(target_text: &str) -> String {
     format!(
         ".graphforge-atomic-{}.tmp",
         hex_digest(hasher.finalize().into())
+    )
+}
+
+fn lock_atomic_publish_target(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        locks
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
     )
 }
 
