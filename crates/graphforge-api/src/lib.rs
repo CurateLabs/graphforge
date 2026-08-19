@@ -75,6 +75,7 @@ mod graph_inspection;
 mod graph_snapshot;
 mod gsi_profiler;
 mod hypotheses;
+mod import_session;
 mod invocation_descriptor;
 mod knowledge;
 mod maintenance;
@@ -142,6 +143,9 @@ pub use graphforge_core::{
     AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError, NodeHandle,
     NodeSelector, OntologyFormat, OntologyMode, PathsOptions, ProjectErrorCode, PropValue,
     RankOptions, SimilarOptions, Span,
+};
+pub use import_session::{
+    GraphImportSession, ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
 pub use graphforge_exec::validate_embedding_options;
