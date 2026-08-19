@@ -724,16 +724,7 @@ fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
             if !is_array && !looks_like_spatial_json(&json) {
                 return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
             }
-            json_to_prop_value(&json).map_err(|error| {
-                if is_array {
-                    error
-                } else {
-                    to_napi_err(&GfError::Validation(format!(
-                        "invalid canonical spatial property: {}",
-                        error.reason
-                    )))
-                }
-            })
+            json_to_prop_value(&json)
         }
         ValueType::Function
         | ValueType::Symbol

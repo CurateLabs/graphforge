@@ -210,7 +210,12 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
                 "unsupported node property type (plain nested dictionaries are not properties)",
             ));
         }
-        let json = py_property_json(value)?;
+        let json = py_property_json(value).map_err(|error| {
+            to_pyerr(
+                value.py(),
+                &GfError::Validation(format!("invalid canonical spatial property: {error}")),
+            )
+        })?;
         serde_json::from_value(json)
             .map(PropValue::Spatial)
             .map_err(|error| {

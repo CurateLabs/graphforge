@@ -42,27 +42,24 @@ def check_geoarrow_interchange() -> None:
     table = forge.execute(f"MATCH (n:Geometry) RETURN {projection}")
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
-    assert [batch.num_rows for batch in table.to_batches()] == [2]
+    assert [batch.num_rows for batch in table.to_batches()] == FIXTURE["rows"]["batchSizes"]
     for case in FIXTURE["cases"]:
         field = table.schema.field(case["name"])
         metadata = field.metadata or {}
         assert metadata[b"ARROW:extension:name"].decode() == case["extensionName"]
         assert metadata[b"ARROW:extension:metadata"].decode() == case["extensionMetadata"]
         values = table.column(case["name"]).to_pylist()
-        assert flatten_coordinates(values[0]) == case["flat"]
-        assert values[1] is None
+        assert flatten_coordinates(values[FIXTURE["rows"]["populated"]]) == case["flat"]
+        assert values[FIXTURE["rows"]["null"]] is None
 
     try:
         forge.add_node(
             "Geometry",
-            bad={
-                "spatial_type": {"geometry": "point", "crs": "EPSG:9999"},
-                "coordinates": {"Point": [1.0, 2.0]},
-            },
+            bad=FIXTURE["malformed"]["value"],
         )
     except gf.ValidationError as error:
-        assert error.code == "GF_VALIDATION"
-        assert "coordinate" not in str(error).lower()
+        assert error.code == FIXTURE["malformed"]["code"]
+        assert str(error) == FIXTURE["malformed"]["message"]
     else:
         raise AssertionError("malformed spatial input must fail")
 

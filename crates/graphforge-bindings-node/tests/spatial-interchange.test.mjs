@@ -53,7 +53,7 @@ test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
   assert.equal(table.numRows, 2);
   assert.deepEqual(
     table.batches.map(({ numRows }) => numRows),
-    [2],
+    fixture.rows.batchSizes,
   );
   for (const entry of fixture.cases) {
     const field = table.schema.fields.find(({ name }) => name === entry.name);
@@ -66,20 +66,20 @@ test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
       entry.extensionMetadata,
     );
     assert.deepEqual(
-      flattenCoordinates(table.getChild(entry.name).get(0)),
+      flattenCoordinates(
+        table.getChild(entry.name).get(fixture.rows.populated),
+      ),
       entry.flat,
     );
-    assert.equal(table.getChild(entry.name).get(1), null);
+    assert.equal(table.getChild(entry.name).get(fixture.rows.null), null);
   }
   assert.throws(
     () =>
       forge.addNode("Geometry", {
-        bad: {
-          spatial_type: { geometry: "point", crs: "EPSG:9999" },
-          coordinates: { Point: [1, 2] },
-        },
+        bad: fixture.malformed.value,
       }),
     (error) =>
-      error.code === "GF_VALIDATION" && !/coordinate/i.test(error.message),
+      error.code === fixture.malformed.code &&
+      error.message === fixture.malformed.message,
   );
 });

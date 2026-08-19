@@ -2348,9 +2348,41 @@ mod tests {
         use std::collections::HashMap;
         use std::io::Cursor;
 
-        use arrow::array::Array;
+        use arrow::array::{
+            Array, FixedSizeListArray, Float64Array, LargeListArray, ListArray, StructArray,
+        };
         use arrow::ipc::reader::StreamReader;
         use graphforge_api::{PropValue, SpatialValue};
+
+        fn flatten_value(array: &dyn Array, row: usize, output: &mut Vec<f64>) {
+            if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
+                output.push(values.value(row));
+            } else if let Some(values) = array.as_any().downcast_ref::<StructArray>() {
+                for column in values.columns() {
+                    flatten_value(column.as_ref(), row, output);
+                }
+            } else if let Some(values) = array.as_any().downcast_ref::<ListArray>() {
+                let values = values.value(row);
+                for index in 0..values.len() {
+                    flatten_value(values.as_ref(), index, output);
+                }
+            } else if let Some(values) = array.as_any().downcast_ref::<LargeListArray>() {
+                let values = values.value(row);
+                for index in 0..values.len() {
+                    flatten_value(values.as_ref(), index, output);
+                }
+            } else if let Some(values) = array.as_any().downcast_ref::<FixedSizeListArray>() {
+                let values = values.value(row);
+                for index in 0..values.len() {
+                    flatten_value(values.as_ref(), index, output);
+                }
+            } else {
+                panic!(
+                    "unexpected GeoArrow coordinate array: {:?}",
+                    array.data_type()
+                );
+            }
+        }
 
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../tests/contracts/geoarrow-interchange-v1.json"
@@ -2392,7 +2424,19 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(batches.len(), 1);
+        let expected_batches = fixture["rows"]["batchSizes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as usize)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>(),
+            expected_batches
+        );
         assert_eq!(
             batches
                 .iter()
@@ -2411,7 +2455,21 @@ mod tests {
                 field.metadata()["ARROW:extension:metadata"],
                 case["extensionMetadata"]
             );
-            assert!(batches[0].column_by_name(name).unwrap().is_null(1));
+            let column = batches[0].column_by_name(name).unwrap();
+            let mut coordinates = Vec::new();
+            flatten_value(
+                column.as_ref(),
+                fixture["rows"]["populated"].as_u64().unwrap() as usize,
+                &mut coordinates,
+            );
+            let expected = case["flat"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_f64().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(coordinates, expected);
+            assert!(column.is_null(fixture["rows"]["null"].as_u64().unwrap() as usize));
         }
     }
 }

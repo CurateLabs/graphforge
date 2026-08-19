@@ -1,5 +1,14 @@
 {
   "schema": "graphforge.geoarrow-interchange.v1",
+  "rows": { "populated": 0, "null": 1, "batchSizes": [2] },
+  "malformed": {
+    "value": {
+      "spatial_type": { "geometry": "point", "crs": "EPSG:9999" },
+      "coordinates": { "Point": [1.0, 2.0] }
+    },
+    "code": "GF_VALIDATION",
+    "message": "invalid canonical spatial property: unknown variant `EPSG:9999`, expected `EPSG:4326` or `EPSG:3857`"
+  },
   "cases": [
     {
       "name": "point",
