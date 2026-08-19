@@ -337,6 +337,48 @@ mod tests {
     }
 
     #[test]
+    fn public_v2_import_facade_verifies_publishes_and_reopens() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        GraphForge::new(source.to_str()).unwrap();
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let limits = graphforge_storage::PortableV2Limits::default();
+        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let package = root.path().join("complete.gfpb");
+        graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &package,
+            graphforge_storage::PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        let target = root.path().join("target");
+        let imported = GraphForge::import_portable_v2(
+            &target,
+            &PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(Uuid::new_v4()),
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!imported.idempotent_replay);
+        assert!(imported.package_digest.starts_with("sha256:"));
+        assert_eq!(
+            GraphForge::new(target.to_str())
+                .unwrap()
+                .resolved_generation
+                .generation_uuid(),
+            imported.generation_uuid
+        );
+    }
+
+    #[test]
     fn in_memory_checkpoint_can_be_exported() {
         let graph = GraphForge::new(None).unwrap();
         graph
