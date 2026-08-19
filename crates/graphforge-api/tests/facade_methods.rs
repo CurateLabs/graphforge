@@ -5,7 +5,9 @@
 use arrow::array::{Array, StringArray};
 use std::collections::HashMap;
 
-use graphforge_api::{GfError, GraphForge, OntologyMode, PropValue};
+use graphforge_api::{
+    CancellationToken, GfError, GraphForge, OntologyMode, PropValue, ResultSinkOptions,
+};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -385,4 +387,72 @@ fn execute_to_parquet_zero_rows_writes_schema_only() {
     let builder =
         parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     assert!(builder.schema().field_with_name("id").is_ok());
+}
+
+#[test]
+fn streaming_parquet_and_ipc_report_progress_and_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let parquet = dir.path().join("stream.parquet");
+    let ipc = dir.path().join("stream.arrow");
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    for name in ["a", "b", "c"] {
+        gf.execute(&format!("CREATE (:Person {{name: '{name}'}})"))
+            .expect("create fixture");
+    }
+    let options = ResultSinkOptions {
+        max_row_group_rows: 2,
+        max_batch_rows: 64,
+    };
+    let query = "MATCH (p:Person) RETURN p.name AS name ORDER BY name";
+    let parquet_receipt = gf
+        .execute_to_parquet_stream_with_params(
+            query,
+            &HashMap::new(),
+            parquet.to_str().unwrap(),
+            &options,
+            None,
+        )
+        .unwrap();
+    let ipc_receipt = gf
+        .execute_to_arrow_ipc_stream_with_params(
+            query,
+            &HashMap::new(),
+            ipc.to_str().unwrap(),
+            &options,
+            None,
+        )
+        .unwrap();
+    assert_eq!(parquet_receipt.progress.rows, 3);
+    assert_eq!(ipc_receipt.progress.rows, 3);
+    assert!(parquet_receipt.progress.complete && ipc_receipt.progress.complete);
+    let parquet_rows: usize = read_parquet(&parquet)
+        .iter()
+        .map(arrow::record_batch::RecordBatch::num_rows)
+        .sum();
+    let ipc_rows: usize =
+        arrow::ipc::reader::StreamReader::try_new(std::fs::File::open(ipc).unwrap(), None)
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+    assert_eq!((parquet_rows, ipc_rows), (3, 3));
+}
+
+#[test]
+fn cancelled_stream_does_not_publish_destination() {
+    let dir = TempDir::new().unwrap();
+    let output = dir.path().join("cancelled.arrow");
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let error = gf
+        .execute_to_arrow_ipc_stream_with_params(
+            "RETURN 1 AS value",
+            &HashMap::new(),
+            output.to_str().unwrap(),
+            &ResultSinkOptions::default(),
+            Some(&cancellation),
+        )
+        .unwrap_err();
+    assert!(matches!(error, GfError::Api { .. }));
+    assert!(!output.exists());
 }

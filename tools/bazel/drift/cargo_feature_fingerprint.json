@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "64f2bcf3b532b032b3a7f5c5db9a24515fde3c4d5225dee895f5263efb66916f",
+  "sha256": "152024b320001a8bb664bebdb03e8044d3a52541a72e29f282fa25e6597c8122",
   "entries": [
     {
       "name": "graphforge-api",
@@ -83,6 +83,15 @@
         },
         {
           "name": "graphforge-exec",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "graphforge-io",
           "req": "^0.5.2",
           "features": [],
           "optional": false,
@@ -938,8 +947,19 @@
       "features": [],
       "dependencies": [
         {
-          "name": "graphforge-core",
-          "req": "^0.5.2",
+          "name": "arrow",
+          "req": "^58",
+          "features": [
+            "prettyprint"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "futures",
+          "req": "^0.3",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -947,8 +967,17 @@
           "target": null
         },
         {
-          "name": "graphforge-storage",
-          "req": "^0.5.2",
+          "name": "parquet",
+          "req": "^58",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "tempfile",
+          "req": "^3",
           "features": [],
           "optional": false,
           "uses_default_features": true,
