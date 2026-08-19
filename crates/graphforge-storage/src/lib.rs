@@ -126,6 +126,13 @@ pub use project_portable::{
     export_portable_project, import_portable_project, import_portable_project_file,
 };
 
+pub mod project_portable_v2;
+pub use project_portable_v2::{
+    PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
+    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
+    PortableV2Report, PortableV2Representation, verify_portable_v2,
+};
+
 pub mod workspace_participants;
 pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,

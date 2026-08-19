@@ -110,9 +110,14 @@ mod valid_time;
 mod workspace_ontology;
 mod write_modes;
 
+pub use graphforge_storage::{
+    PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
+    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
+    PortableV2Representation,
+};
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
-    PortableSelection,
+    PortableSelection, PortableVerifyRequest, PortableVerifyResult, verify_portable_v2,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,
@@ -144,7 +149,7 @@ pub use graphforge_core::{
     AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError, NodeHandle,
     NodeSelector, OntologyFormat, OntologyMode, PathsOptions, ProjectErrorCode, PropValue,
     RankOptions, SimilarOptions, Span, SpatialCoordinates, SpatialCrs, SpatialGeometryType,
-    SpatialType, SpatialValue,
+    SpatialType, SpatialValue, TemporalValue,
 };
 pub use import_session::{
     GraphImportSession, ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind,

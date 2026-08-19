@@ -1,0 +1,14 @@
+{
+  "schema": "graphforge.temporal-interchange.v1",
+  "cases": [
+    {"name":"date","value":{"type":"date","epoch_days":-10000}},
+    {"name":"local_time","value":{"type":"local_time","nanos":42}},
+    {"name":"offset_time","value":{"type":"offset_time","nanos":43,"offset_seconds":19800}},
+    {"name":"local_date_time","value":{"type":"local_date_time","epoch_days":20000,"nanos":1234567890}},
+    {"name":"utc_date_time","value":{"type":"utc_date_time","epoch_micros":-1234567}},
+    {"name":"zoned_date_time","value":{"type":"zoned_date_time","epoch_days":20001,"nanos":7200000000000,"offset_seconds":-21600,"zone":"America/Denver"}},
+    {"name":"overlap_offset_only","value":{"type":"zoned_date_time","epoch_days":20002,"nanos":5400000000000,"offset_seconds":-25200,"zone":null}},
+    {"name":"unknown_zone","value":{"type":"zoned_date_time","epoch_days":20003,"nanos":1,"offset_seconds":0,"zone":"Vendor/Preserved"}},
+    {"name":"duration","value":{"type":"duration","months":-2,"days":3,"seconds":-4,"nanos":500000001}}
+  ]
+}
