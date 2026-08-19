@@ -2412,6 +2412,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "atomicwrites",
+ "codspeed-divan-compat",
  "datafusion",
  "datafusion-catalog",
  "fs4 1.1.0",

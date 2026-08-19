@@ -44,7 +44,16 @@ rustix = { version = "1.1", features = ["fs"] }
 named-lock = "0.4.1"
 
 [dev-dependencies]
+divan = { workspace = true }
 wait-timeout = "0.2"
+
+[[bench]]
+name = "m6_storage"
+harness = false
+
+[[bench]]
+name = "m6_storage_io"
+harness = false
 
 [lints]
 workspace = true
