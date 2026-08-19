@@ -718,7 +718,7 @@ mod tests {
                 &HashMap::from([("name".into(), PropValue::Str("Grace".into()))]),
             )
             .unwrap();
-        let source = identity(&graph);
+        let source = graph.committed_generation_identity().unwrap();
         let added = graph
             .add_node(
                 "Person",
@@ -733,7 +733,7 @@ mod tests {
                 &HashMap::from([("since".into(), PropValue::Int(2026))]),
             )
             .unwrap();
-        let target = identity(&graph);
+        let target = graph.committed_generation_identity().unwrap();
 
         let first = graph
             .diff_committed_generations(&request(source, target))
