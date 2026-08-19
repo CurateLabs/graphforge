@@ -1110,6 +1110,10 @@ impl GraphForge {
             ));
         }
 
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            &self.dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
         let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
@@ -1198,6 +1202,10 @@ impl GraphForge {
                 "project generation changed before graph publication".into(),
             ));
         }
+        graphforge_storage::rebuild_uuid_membership_indexes(
+            &self.dir,
+            graphforge_storage::UuidIndexBuildLimits::default(),
+        )?;
         let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
