@@ -1125,6 +1125,11 @@ fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
             offset.hash(state);
             zone.hash(state);
         }
+        IrLiteral::Spatial(value) => {
+            15u8.hash(state);
+            value.spatial_type.hash(state);
+            hash_spatial_coordinates(&value.coordinates, state);
+        }
         IrLiteral::List(items) => {
             12u8.hash(state);
             items.len().hash(state);
@@ -1138,6 +1143,70 @@ fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
             for (key, value) in entries {
                 key.hash(state);
                 hash_literal(value, state);
+            }
+        }
+    }
+}
+
+fn hash_spatial_coordinates<H: Hasher>(
+    coordinates: &graphforge_core::SpatialCoordinates,
+    state: &mut H,
+) {
+    use graphforge_core::SpatialCoordinates;
+    fn point<H: Hasher>(value: &[f64; 2], state: &mut H) {
+        value[0].to_bits().hash(state);
+        value[1].to_bits().hash(state);
+    }
+    match coordinates {
+        SpatialCoordinates::Point(value) => {
+            0u8.hash(state);
+            point(value, state);
+        }
+        SpatialCoordinates::LineString(values) => {
+            1u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                point(value, state);
+            }
+        }
+        SpatialCoordinates::Polygon(rings) => {
+            2u8.hash(state);
+            rings.len().hash(state);
+            for ring in rings {
+                ring.len().hash(state);
+                for value in ring {
+                    point(value, state);
+                }
+            }
+        }
+        SpatialCoordinates::MultiPoint(values) => {
+            3u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                point(value, state);
+            }
+        }
+        SpatialCoordinates::MultiLineString(lines) => {
+            4u8.hash(state);
+            lines.len().hash(state);
+            for line in lines {
+                line.len().hash(state);
+                for value in line {
+                    point(value, state);
+                }
+            }
+        }
+        SpatialCoordinates::MultiPolygon(polygons) => {
+            5u8.hash(state);
+            polygons.len().hash(state);
+            for polygon in polygons {
+                polygon.len().hash(state);
+                for ring in polygon {
+                    ring.len().hash(state);
+                    for value in ring {
+                        point(value, state);
+                    }
+                }
             }
         }
     }

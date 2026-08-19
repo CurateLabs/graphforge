@@ -372,6 +372,7 @@ impl GraphForge {
             let uuids = uuid_column(batch, BulkInputKind::Node, "node_uuid")?;
             let labels = string_column(batch, BulkInputKind::Node, "label")?;
             let properties = property_columns(batch, &NODE_REQUIRED);
+            preflight_spatial_columns(BulkInputKind::Node, ordinal, &properties)?;
             for row in 0..batch.num_rows() {
                 let node_uuid = uuid_at(
                     uuids,
@@ -637,6 +638,7 @@ impl GraphForge {
             let sources = uuid_column(batch, BulkInputKind::Edge, "source_uuid")?;
             let targets = uuid_column(batch, BulkInputKind::Edge, "target_uuid")?;
             let properties = property_columns(batch, &EDGE_REQUIRED);
+            preflight_spatial_columns(BulkInputKind::Edge, ordinal, &properties)?;
             for row in 0..batch.num_rows() {
                 let edge_uuid = uuid_at(
                     uuids,
@@ -886,7 +888,18 @@ fn input_schema(
             ));
         }
         validate_property_name(kind, field.name())?;
-        validate_property_type(kind, field.name(), field.data_type())?;
+        if field.metadata().contains_key("ARROW:extension:name") {
+            spatial_type_from_field(field).ok_or_else(|| {
+                field_error(
+                    kind,
+                    BulkValidationReason::UnsupportedPropertyType,
+                    field.name(),
+                    "unsupported or non-canonical Arrow extension property",
+                )
+            })?;
+        } else {
+            validate_property_type(kind, field.name(), field.data_type())?;
+        }
         if prior == Some(field.name()) {
             return Err(field_error(
                 kind,
@@ -1002,7 +1015,18 @@ fn validate_batch_schema(
     }
     for field in properties {
         validate_property_name(kind, field.name())?;
-        validate_property_type(kind, field.name(), field.data_type())?;
+        if field.metadata().contains_key("ARROW:extension:name") {
+            spatial_type_from_field(field).ok_or_else(|| {
+                field_error(
+                    kind,
+                    BulkValidationReason::UnsupportedPropertyType,
+                    field.name(),
+                    "unsupported or non-canonical Arrow extension property",
+                )
+            })?;
+        } else {
+            validate_property_type(kind, field.name(), field.data_type())?;
+        }
     }
     Ok(())
 }
@@ -1074,18 +1098,96 @@ where
     let mut values = BTreeMap::new();
     for (field, array) in columns {
         owner_validation(field.name(), field)?;
-        let value = property_value_at(array.as_ref(), row).map_err(|message| {
-            row_error(
-                kind,
-                BulkValidationReason::UnsupportedPropertyType,
-                ordinal,
-                field.name(),
-                &message,
-            )
-        })?;
+        let value = if field.metadata().contains_key("ARROW:extension:name") {
+            spatial_type_from_field(field).ok_or_else(|| {
+                row_error(
+                    kind,
+                    BulkValidationReason::PropertyTypeMismatch,
+                    ordinal,
+                    field.name(),
+                    "spatial field metadata is not canonical",
+                )
+            })?;
+            if array.is_null(row) {
+                PropValue::Null
+            } else {
+                PropValue::Spatial(
+                    graphforge_storage::decode_spatial_property_value(array.as_ref(), field, row)
+                        .map_err(|error| {
+                        row_error(
+                            kind,
+                            BulkValidationReason::UnsupportedPropertyType,
+                            ordinal,
+                            field.name(),
+                            &error.to_string(),
+                        )
+                    })?,
+                )
+            }
+        } else {
+            property_value_at(array.as_ref(), row).map_err(|message| {
+                row_error(
+                    kind,
+                    BulkValidationReason::UnsupportedPropertyType,
+                    ordinal,
+                    field.name(),
+                    &message,
+                )
+            })?
+        };
         values.insert(field.name().to_owned(), value);
     }
     Ok(values)
+}
+
+fn preflight_spatial_columns(
+    kind: BulkInputKind,
+    first_ordinal: u64,
+    columns: &[(&Field, &ArrayRef)],
+) -> Result<(), BulkValidationError> {
+    for (field, array) in columns {
+        let Some(spatial) = spatial_type_from_field(field) else {
+            continue;
+        };
+        spatial
+            .validate_array(
+                field,
+                array.as_ref(),
+                graphforge_ontology::SpatialValidationLimits::default(),
+            )
+            .map_err(|error| {
+                row_error(
+                    kind,
+                    BulkValidationReason::PropertyTypeMismatch,
+                    first_ordinal,
+                    field.name(),
+                    error.code(),
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn spatial_type_from_field(field: &Field) -> Option<graphforge_ontology::SpatialType> {
+    use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+    let geometry = match field.metadata().get("ARROW:extension:name")?.as_str() {
+        "geoarrow.point" => SpatialGeometryType::Point,
+        "geoarrow.linestring" => SpatialGeometryType::LineString,
+        "geoarrow.polygon" => SpatialGeometryType::Polygon,
+        "geoarrow.multipoint" => SpatialGeometryType::MultiPoint,
+        "geoarrow.multilinestring" => SpatialGeometryType::MultiLineString,
+        "geoarrow.multipolygon" => SpatialGeometryType::MultiPolygon,
+        _ => return None,
+    };
+    let metadata = field.metadata().get("ARROW:extension:metadata")?;
+    let crs = if metadata == &SpatialCrs::Epsg4326.extension_metadata() {
+        SpatialCrs::Epsg4326
+    } else if metadata == &SpatialCrs::Epsg3857.extension_metadata() {
+        SpatialCrs::Epsg3857
+    } else {
+        return None;
+    };
+    Some(SpatialType { geometry, crs })
 }
 
 fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String> {
@@ -1313,10 +1415,11 @@ fn validate_ontology_field(
                 DataType::List(_) | DataType::LargeList(_)
             )
         }
-        PropertyValueType::Duration
-        | PropertyValueType::DateTime
-        | PropertyValueType::Map
-        | PropertyValueType::Spatial(_) => false,
+        PropertyValueType::Spatial(spatial) => {
+            field.data_type() == &spatial.data_type()
+                && field.metadata() == &spatial.field_metadata()
+        }
+        PropertyValueType::Duration | PropertyValueType::DateTime | PropertyValueType::Map => false,
     };
     if !compatible {
         return Err(row_error(
@@ -1850,7 +1953,7 @@ fn row_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use arrow::array::{FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, StructArray};
     use std::process::Command;
 
     const FAILPOINT_COOKIE: &str = "graphforge-internal-subprocess-v1";
@@ -1864,6 +1967,32 @@ mod tests {
 
     fn operation(seed: u128) -> OperationId {
         OperationId(uuid(seed))
+    }
+
+    #[test]
+    fn spatial_bulk_preflight_validates_the_complete_array_before_row_normalization() {
+        use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+        let spatial = SpatialType {
+            geometry: SpatialGeometryType::Point,
+            crs: SpatialCrs::Epsg4326,
+        };
+        let field = spatial.field("location", false);
+        let array: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-105.0, 181.0])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7, 0.0])) as ArrayRef,
+            ),
+        ]));
+        let error =
+            preflight_spatial_columns(BulkInputKind::Node, 40, &[(&field, &array)]).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+        assert_eq!(error.row_ordinal, Some(40));
+        assert_eq!(error.field.as_deref(), Some("location"));
+        assert_eq!(error.message, "GF_SPATIAL_COORDINATE_OUT_OF_RANGE");
     }
 
     #[test]

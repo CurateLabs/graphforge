@@ -4694,6 +4694,7 @@ fn is_known_cypher_function(call: &FunctionCall) -> bool {
             | "duration.indays"
             | "duration.inmonths"
             | "duration.inseconds"
+            | "distance"
             | "elementid"
             | "endnode"
             | "exp"

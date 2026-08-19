@@ -5080,3 +5080,59 @@ fn dynamic_subscript_parameter_type_errors_remain_runtime_errors() {
         .expect_err("scalar subscript must fail");
     assert!(matches!(error, graphforge_api::GfError::Execution(_)));
 }
+
+#[test]
+fn certified_spatial_point_and_distance_execute_in_rust() {
+    let gf = GraphForge::new(None).expect("in-memory instance");
+    let result = rows(
+        &gf,
+        "RETURN point({x: 3, y: 4, crs: 'EPSG:3857'}) AS point, \
+         distance(point({x: 0, y: 0}), point({x: 3, y: 4})) AS distance",
+    );
+    let point = result.batches[0]
+        .column_by_name("point")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("point is a native Arrow struct");
+    assert_eq!(
+        point
+            .column_by_name("x")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0),
+        3.0
+    );
+    assert_eq!(
+        point
+            .column_by_name("y")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0),
+        4.0
+    );
+    assert_eq!(
+        result.batches[0]
+            .column_by_name("distance")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0),
+        5.0
+    );
+
+    let error = gf
+        .execute("RETURN distance(point({x: 0, y: 0}), point({longitude: 0, latitude: 0}))")
+        .expect_err("mixed CRS must not be silently reprojected");
+    assert!(
+        error
+            .to_string()
+            .contains("does not implicitly reproject mixed CRS"),
+        "{error}"
+    );
+}
