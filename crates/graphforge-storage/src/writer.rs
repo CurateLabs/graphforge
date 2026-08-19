@@ -250,6 +250,7 @@ struct ReplayNodeAuthority {
     deleted_nodes: HashSet<String>,
 }
 
+#[allow(clippy::too_many_lines)] // One bounded authority scan validates all node invariants.
 fn scan_replay_node_authority(
     node_path: &Path,
     overlay: &crate::graph_delta_journal::ReplayOverlay,
@@ -752,7 +753,7 @@ fn stream_replay_properties(
                 }
             }
         }
-        for ((entity_uuid, operation_stem, _), _) in operations {
+        for (entity_uuid, operation_stem, _) in operations.keys() {
             if operation_stem != &stem || seen.contains(entity_uuid) {
                 continue;
             }
