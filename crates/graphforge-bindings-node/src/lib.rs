@@ -596,14 +596,18 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
-            // Nested plain objects are unsupported property values. Callers that
-            // need a JS `TypeError` (add_node / add_edge) must go through
-            // [`props_from_js_object`]; this serde path is used by composite
-            // JSON inputs and keeps a ValidationError for domain mapping.
-            return Err(to_napi_err(&GfError::Validation(
-                "unsupported node property type (expected null/boolean/number/string/array)".into(),
-            )));
+            PropValue::Spatial(serde_json::from_value(value.clone()).map_err(|error| {
+                to_napi_err(&GfError::Validation(format!(
+                    "invalid canonical spatial property: {error}"
+                )))
+            })?)
         }
+    })
+}
+
+fn looks_like_spatial_json(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("spatial_type") || object.contains_key("coordinates")
     })
 }
 
@@ -617,8 +621,7 @@ pub(crate) fn props_from_map(
         .collect()
 }
 
-const UNSUPPORTED_PROP_TYPE_MSG: &str =
-    "unsupported node property type (expected null/boolean/number/string/array)";
+const UNSUPPORTED_PROP_TYPE_MSG: &str = "unsupported node property type (expected null/boolean/number/string/array/canonical spatial object)";
 
 /// Convert a JS property bag, raising a real `TypeError` for unsupported values
 /// (functions, symbols, nested plain objects).
@@ -703,24 +706,34 @@ fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
             let object = unsafe { value.cast::<Object>() }.map_err(|error| {
                 type_error(env, format!("expected object property: {}", error.reason))
             })?;
-            if !object.is_array().map_err(|error| {
+            let is_array = object.is_array().map_err(|error| {
                 type_error(
                     env,
                     format!("failed to inspect array property: {}", error.reason),
                 )
-            })? {
-                return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
-            }
+            })?;
             let json = unsafe {
                 <serde_json::Value as FromNapiValue>::from_napi_value(env.raw(), object.raw())
             }
             .map_err(|error| {
                 type_error(
                     env,
-                    format!("failed to read array property: {}", error.reason),
+                    format!("failed to read object property: {}", error.reason),
                 )
             })?;
-            json_to_prop_value(&json)
+            if !is_array && !looks_like_spatial_json(&json) {
+                return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
+            }
+            json_to_prop_value(&json).map_err(|error| {
+                if is_array {
+                    error
+                } else {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid canonical spatial property: {}",
+                        error.reason
+                    )))
+                }
+            })
         }
         ValueType::Function
         | ValueType::Symbol

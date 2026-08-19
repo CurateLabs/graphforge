@@ -141,7 +141,8 @@ pub use graphforge_core::manifest::{MANIFEST_FILE, ONTOLOGY_FILE, ProjectManifes
 pub use graphforge_core::{
     AnalyzeOptions, ApiErrorCode, ClusterOptions, EdgeHandle, FindOptions, GfError, NodeHandle,
     NodeSelector, OntologyFormat, OntologyMode, PathsOptions, ProjectErrorCode, PropValue,
-    RankOptions, SimilarOptions, Span,
+    RankOptions, SimilarOptions, Span, SpatialCoordinates, SpatialCrs, SpatialGeometryType,
+    SpatialType, SpatialValue,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
 pub use graphforge_exec::validate_embedding_options;

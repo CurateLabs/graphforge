@@ -1,0 +1,13 @@
+{
+  "schema": "graphforge.geoarrow-interchange.v1",
+  "crs": "EPSG:4326",
+  "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+  "cases": [
+    {"name":"point","geometry":"point","extensionName":"geoarrow.point","coordinates":{"Point":[-104.9903,39.7392]},"flat":[-104.9903,39.7392]},
+    {"name":"linestring","geometry":"line_string","extensionName":"geoarrow.linestring","coordinates":{"LineString":[[-105.0,39.7],[-104.9,39.8]]},"flat":[-105.0,39.7,-104.9,39.8]},
+    {"name":"polygon","geometry":"polygon","extensionName":"geoarrow.polygon","coordinates":{"Polygon":[[[-105.0,39.7],[-104.9,39.7],[-104.9,39.8],[-105.0,39.7]]]},"flat":[-105.0,39.7,-104.9,39.7,-104.9,39.8,-105.0,39.7]},
+    {"name":"multipoint","geometry":"multi_point","extensionName":"geoarrow.multipoint","coordinates":{"MultiPoint":[[-105.0,39.7],[-104.9,39.8]]},"flat":[-105.0,39.7,-104.9,39.8]},
+    {"name":"multilinestring","geometry":"multi_line_string","extensionName":"geoarrow.multilinestring","coordinates":{"MultiLineString":[[[-105.0,39.7],[-104.9,39.8]],[[-104.8,39.9],[-104.7,40.0]]]},"flat":[-105.0,39.7,-104.9,39.8,-104.8,39.9,-104.7,40.0]},
+    {"name":"multipolygon","geometry":"multi_polygon","extensionName":"geoarrow.multipolygon","coordinates":{"MultiPolygon":[[[[-105.0,39.7],[-104.9,39.7],[-104.9,39.8],[-105.0,39.7]]]]},"flat":[-105.0,39.7,-104.9,39.7,-104.9,39.8,-105.0,39.7]}
+  ]
+}

@@ -2342,4 +2342,75 @@ mod tests {
             CheckpointSelector::Current
         ));
     }
+
+    #[test]
+    fn arrow_result_export_preserves_geoarrow_fields_values_and_nulls() {
+        use std::collections::HashMap;
+        use std::io::Cursor;
+
+        use arrow::array::Array;
+        use arrow::ipc::reader::StreamReader;
+        use graphforge_api::{PropValue, SpatialValue};
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/contracts/geoarrow-interchange-v1.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        let properties = cases
+            .iter()
+            .map(|case| {
+                let name = case["name"].as_str().unwrap().to_owned();
+                let spatial: SpatialValue = serde_json::from_value(serde_json::json!({
+                    "spatial_type": {
+                        "geometry": case["geometry"],
+                        "crs": fixture["crs"],
+                    },
+                    "coordinates": case["coordinates"],
+                }))
+                .unwrap();
+                (name, PropValue::Spatial(spatial))
+            })
+            .collect::<HashMap<_, _>>();
+        let graph = GraphForge::new(None).unwrap();
+        graph.add_node("Geometry", &properties).unwrap();
+        graph.add_node("Geometry", &HashMap::new()).unwrap();
+        let projection = cases
+            .iter()
+            .map(|case| {
+                let name = case["name"].as_str().unwrap();
+                format!("n.{name} AS {name}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let result = graph
+            .execute(&format!("MATCH (n:Geometry) RETURN {projection}"))
+            .unwrap();
+        let mut ipc = Vec::new();
+        write_result(&result, &mut ipc).unwrap();
+        let batches = StreamReader::try_new(Cursor::new(ipc), None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            batches
+                .iter()
+                .map(arrow::array::RecordBatch::num_rows)
+                .sum::<usize>(),
+            2
+        );
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let field = batches[0].schema().field_with_name(name).unwrap().clone();
+            assert_eq!(
+                field.metadata()["ARROW:extension:name"],
+                case["extensionName"]
+            );
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                fixture["extensionMetadata"]
+            );
+            assert!(batches[0].column_by_name(name).unwrap().is_null(1));
+        }
+    }
 }
