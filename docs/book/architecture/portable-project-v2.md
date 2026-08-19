@@ -12,8 +12,8 @@ Four identities are deliberately distinct:
 - `transport_digest` is SHA-256 over the exact `.gfpb` bytes, or over the
   canonical expanded transport inventory described below. It is not package
   identity.
-- `participant_id` is a stable portable component identity scoped by its kind;
-  it is never a runtime catalog ID.
+- `participant_id` is a stable portable component identity, globally unique
+  within the package; it is never a runtime catalog ID.
 - `source_generation` identifies the committed GraphForge generation from
   which selection occurred. It proves provenance, not package identity or an
   import target generation.
@@ -32,6 +32,11 @@ JSON strings MUST be valid Unicode, object members MUST be JCS-canonical, and
 numbers outside the schema are forbidden. Arrays are ordered as stated by the
 schema; components use ascending UTF-8 byte order of `(kind, participant_id)`
 and dependencies use ascending UTF-8 byte order with no duplicates.
+Each component owns one or more file descriptors in ascending portable-path
+order. Paths are globally unique, so a participant can own bounded Parquet and
+index shards without fabricating per-file participant identities.
+Every selection root and dependency names that globally unique participant ID;
+unknown, duplicate, self, or cyclic required dependencies fail compatibility.
 
 The closed component kinds are `ontology`, `schema`, `migration`, `settings`,
 `graph-data`, `derived-artifact`, `evidence`, `provenance`, and `compatibility`.
@@ -45,7 +50,8 @@ The on-wire manifest MUST contain `package_digest`. Canonicalization for digest
 calculation removes only that member, without modifying any other value; the
 reader recomputes it and compares in constant time before semantic use.
 
-Absolute paths, `.`/`..`, backslashes, drive prefixes, NUL/control characters,
+Duplicate JSON member names, lone Unicode surrogates, absolute paths, `.`/`..`,
+backslashes, drive prefixes, NUL/control characters,
 runtime-local catalog IDs, mutable timestamps, secrets, and session-only
 ontology state MUST NOT occur. NFC-normalized relative paths are compared by
 both exact UTF-8 bytes and Unicode default case folding; a collision fails.

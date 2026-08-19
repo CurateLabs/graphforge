@@ -2,17 +2,21 @@
   "components": [
     {
       "kind": "ontology",
-      "length": 2,
-      "media_type": "application/json",
+      "files": [
+        {
+          "length": 2,
+          "media_type": "application/json",
+          "path": "data/components/ontology/core-ontology/ontology.json",
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+        }
+      ],
       "participant_id": "core-ontology",
-      "path": "data/components/ontology/core-ontology/ontology.json",
-      "required_dependencies": [],
-      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      "required_dependencies": []
     }
   ],
   "format": "graphforge-project/2",
   "package_class": "ontology-only",
-  "package_digest": "sha256:446c6bf556e4c55035d5124cb32746e45b6397478397f0897b592c8724946732",
+  "package_digest": "sha256:869da25f99c90864c321bf8c42aa3f1f3642c877b92bc34255c900d3083a525d",
   "requirements": {
     "capabilities": ["ontology@1"],
     "dependency_rule": "required-transitive-closure/1"
