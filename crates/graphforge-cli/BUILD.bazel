@@ -25,6 +25,10 @@ _CONTRACT_FIXTURES = [
     "//docs/contracts/examples:fixtures",
 ]
 
+_GEOARROW_FIXTURE = [
+    "//tests/contracts:geoarrow-interchange-v1.json",
+]
+
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
 # `project-skills/` remains a pure distribution tree (#7 packaging contract).
 gf_cargo_build_script(
@@ -54,7 +58,7 @@ gf_rust_library(
 gf_rust_test(
     name = "graphforge_cli_test",
     crate = ":graphforge_cli",
-    compile_data = _CONTRACT_FIXTURES,
+    compile_data = _CONTRACT_FIXTURES + _GEOARROW_FIXTURE,
     size = "medium",
     deps = _CLI_DEPS,
 )
