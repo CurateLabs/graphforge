@@ -231,6 +231,18 @@ class GraphForge:
         idempotency_key: str | uuid.UUID,
         actor_uuid: str | None = None,
     ) -> pyarrow.Table: ...
+    def committed_generation_identity(self) -> dict[str, bytes]: ...
+    def diff_committed_generations(
+        self,
+        *,
+        source_generation_uuid: bytes,
+        source_manifest_sha256: bytes,
+        target_generation_uuid: bytes,
+        target_manifest_sha256: bytes,
+        max_records_per_generation: int = 1_000_000,
+        max_output_bytes: int = 268_435_456,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
     def diff_checkpoints(
         self,
         *,

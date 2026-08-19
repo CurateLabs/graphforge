@@ -27,7 +27,7 @@
     "compatibility": "arrowIpc",
     "transaction-maintenance": "transactionMaintenance",
     "resumable-import": "lifecycleConstruction",
-    "semantic-generation-diff": "arrowIpc"
+    "semantic-generation-diff": "semanticGenerationDiff"
   },
   "classification": {
     "equivalent": [
@@ -62,7 +62,9 @@
       "GraphForge.create_hypothesis_group",
       "GraphForge.delete_checkpoint",
       "GraphForge.delete_embedding_space",
+      "GraphForge.committed_generation_identity",
       "GraphForge.diff_checkpoints",
+      "GraphForge.diff_committed_generations",
       "GraphForge.embedding_refresh_project_policy",
       "GraphForge.embedding_space",
       "GraphForge.embedding_spaces",
@@ -337,6 +339,11 @@
       "arrow_roundtrip.test.mjs": [
         "multi-column results keep column order",
         "zero-row result keeps a valid schema"
+      ]
+    },
+    "semanticGenerationDiff": {
+      "generation-diff.test.mjs": [
+        "generation diff forwards exact Rust IPC, identities, limits, and cancellation"
       ]
     },
     "persistenceErrorsCancellation": {

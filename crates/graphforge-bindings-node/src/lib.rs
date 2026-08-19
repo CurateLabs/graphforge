@@ -21,24 +21,25 @@ use graphforge_api::{
     AssertionGraphRole, AttachResolvedRunRequest, BeliefProjectionPolicyV1, BeliefSubjectV1,
     BulkEdgePublicationError, BulkNodePublicationError, CallerEmbeddingBatchRequest,
     CallerEmbeddingBatchRow, CallerEmbeddingDistance, CallerEmbeddingNormalization, CapabilityId,
-    EmbeddingAnalyzeOptions, EmbeddingOptions, EmbeddingRefreshFailureClass,
-    EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy,
-    EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection,
-    EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo, EmbeddingSpaceProducer,
-    EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult, FastRpOptions,
-    FindDiagnostic, FindExecutionOptions, FindOptions, FindRerankOptions, GfError,
-    GraphForgeOptions, GraphObjectKind, GraphSageAggregator, GraphSageOptions, HashGnnOptions,
-    InvocationDescriptor, InvocationError, IrLiteral, Node2VecOptions, NodeSelector,
-    OpenRouterProviderSession, OpenRouterProviderSessionConfig, OpenRouterWireLimits, OperationId,
-    PathsOptions, ProjectWriteMode, PropValue, ProviderBatchLimits, ProviderCapabilities,
-    ProviderCapability, ProviderEmbeddingDistance, ProviderEmbeddingNormalization,
-    ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest, ProviderExecutionLimits,
-    ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    ResolveBeliefProjectionRequest, ResolveBeliefSubjectRequest, ResolvedAttachmentOutcome,
-    ResolvedBeliefProjection, ResolvedBeliefSubject, ResolvedRecordedAlgorithmRequest,
-    SearchIndexOptions, SimilarOptions, StatuslessPolicyV1, SupersessionBranchPolicyV1,
-    TextIndexInspection, TokenCountClass, WriteContext, algorithm_descriptor_contracts,
-    validate_embedding_options,
+    CommittedGenerationIdentity, EmbeddingAnalyzeOptions, EmbeddingOptions,
+    EmbeddingRefreshFailureClass, EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus,
+    EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState,
+    EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo,
+    EmbeddingSpaceProducer, EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult,
+    FastRpOptions, FindDiagnostic, FindExecutionOptions, FindOptions, FindRerankOptions,
+    GenerationDiffDisposition, GenerationDiffLimits, GenerationDiffRequest, GenerationGraphDiff,
+    GfError, GraphChangeStream, GraphForgeOptions, GraphObjectKind, GraphSageAggregator,
+    GraphSageOptions, HashGnnOptions, InvocationDescriptor, InvocationError, IrLiteral,
+    Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
+    OpenRouterWireLimits, OperationId, PathsOptions, ProjectWriteMode, PropValue,
+    ProviderBatchLimits, ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
+    ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
+    ProviderExecutionLimits, ProviderRequestLimits, ReloadRequiredReason, RerankAdvisoryPolicy,
+    RerankFailurePolicy, ResolveBeliefProjectionRequest, ResolveBeliefSubjectRequest,
+    ResolvedAttachmentOutcome, ResolvedBeliefProjection, ResolvedBeliefSubject,
+    ResolvedRecordedAlgorithmRequest, SearchIndexOptions, SimilarOptions, StatuslessPolicyV1,
+    SupersessionBranchPolicyV1, TextIndexInspection, TokenCountClass, WriteContext,
+    algorithm_descriptor_contracts, validate_embedding_options,
 };
 use napi::bindgen_prelude::{
     AbortSignal, AsyncTask, BigInt, Buffer, ClassInstance, Either3, FromNapiValue, Function,
@@ -1268,6 +1269,88 @@ pub struct DiffCheckpointsInput {
     pub signal: Option<AbortSignal>,
 }
 
+/// Exact binary identity of one immutable committed generation.
+#[napi(object)]
+pub struct CommittedGenerationIdentityOutput {
+    /// Raw 16-byte UUID, never a JavaScript number or reconstructed string.
+    pub generation_uuid: Buffer,
+    /// Raw 32-byte SHA-256 of the canonical generation manifest.
+    pub manifest_sha256: Buffer,
+}
+
+/// Thin input carrying one exact binary committed-generation identity.
+#[napi(object)]
+pub struct CommittedGenerationIdentityInput {
+    /// Raw 16-byte UUID.
+    pub generation_uuid: Buffer,
+    /// Raw 32-byte manifest SHA-256.
+    pub manifest_sha256: Buffer,
+}
+
+/// Bounded Rust semantic-generation diff request.
+#[napi(object, object_to_js = false)]
+pub struct GenerationDiffInput {
+    /// Exact earlier generation.
+    pub source: CommittedGenerationIdentityInput,
+    /// Exact later generation.
+    pub target: CommittedGenerationIdentityInput,
+    /// Unsigned 64-bit record budget; defaults to 1,000,000.
+    pub max_records_per_generation: Option<BigInt>,
+    /// Unsigned 64-bit combined IPC byte budget; defaults to 256 MiB.
+    pub max_output_bytes: Option<BigInt>,
+    /// Optional standard AbortSignal mapped to Rust cancellation.
+    pub signal: Option<AbortSignal>,
+}
+
+/// One unchanged Rust-owned Arrow IPC change stream.
+#[napi(object)]
+pub struct GraphChangeStreamOutput {
+    /// Exact unsigned row count.
+    pub row_count: BigInt,
+    /// Complete Arrow IPC stream bytes.
+    pub ipc: Buffer,
+}
+
+/// Changed-property names keyed by an exact binary record UUID.
+#[napi(object)]
+pub struct ModifiedPropertiesOutput {
+    /// Raw 16-byte node or edge UUID.
+    pub record_uuid: Buffer,
+    /// Canonically ordered changed-property names.
+    pub names: Vec<String>,
+}
+
+/// Ready all-stream result or typed reload-required disposition.
+#[napi(object)]
+pub struct GenerationDiffOutput {
+    /// `ready` or `reload_required`.
+    pub kind: String,
+    /// Stable reload reason; absent for a ready result.
+    pub reason: Option<String>,
+    /// Exact source identity; absent for reload-required.
+    pub source: Option<CommittedGenerationIdentityOutput>,
+    /// Exact target identity; absent for reload-required.
+    pub target: Option<CommittedGenerationIdentityOutput>,
+    /// Complete target-state added-node IPC stream.
+    pub added_nodes: Option<GraphChangeStreamOutput>,
+    /// Removed-node identity IPC stream.
+    pub removed_nodes: Option<GraphChangeStreamOutput>,
+    /// Complete target-state modified-node IPC stream.
+    pub modified_nodes: Option<GraphChangeStreamOutput>,
+    /// Complete target-state added-edge IPC stream.
+    pub added_edges: Option<GraphChangeStreamOutput>,
+    /// Removed-edge identity IPC stream.
+    pub removed_edges: Option<GraphChangeStreamOutput>,
+    /// Complete target-state modified-edge IPC stream.
+    pub modified_edges: Option<GraphChangeStreamOutput>,
+    /// Canonical changed-property names for modified nodes.
+    pub modified_node_properties: Option<Vec<ModifiedPropertiesOutput>>,
+    /// Canonical changed-property names for modified edges.
+    pub modified_edge_properties: Option<Vec<ModifiedPropertiesOutput>>,
+    /// Raw 32-byte checkpoint binding; absent for reload-required.
+    pub checkpoint_binding: Option<Buffer>,
+}
+
 /// Thin Node provenance-history page and filter request.
 #[napi(object, object_to_js = false)]
 pub struct ProvenanceHistoryInput {
@@ -2156,6 +2239,131 @@ fn node_page(
         after,
         cancellation: Some(cancellation),
     })
+}
+
+fn node_generation_identity(
+    input: CommittedGenerationIdentityInput,
+) -> Result<CommittedGenerationIdentity> {
+    let generation_uuid = uuid::Uuid::from_slice(input.generation_uuid.as_ref()).map_err(|_| {
+        to_napi_err(&GfError::Validation(
+            "generationUuid must contain exactly 16 bytes".into(),
+        ))
+    })?;
+    let manifest_sha256 = input.manifest_sha256.as_ref().try_into().map_err(|_| {
+        to_napi_err(&GfError::Validation(
+            "manifestSha256 must contain exactly 32 bytes".into(),
+        ))
+    })?;
+    Ok(CommittedGenerationIdentity {
+        generation_uuid,
+        manifest_sha256,
+    })
+}
+
+fn node_usize(value: Option<BigInt>, default: usize, name: &str) -> Result<usize> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let (negative, value, lossless) = value.get_u64();
+    if negative || !lossless {
+        return Err(to_napi_err(&GfError::Validation(format!(
+            "{name} must be a lossless unsigned 64-bit integer"
+        ))));
+    }
+    usize::try_from(value).map_err(|_| {
+        to_napi_err(&GfError::Validation(format!(
+            "{name} exceeds this runtime's addressable range"
+        )))
+    })
+}
+
+fn node_generation_identity_output(
+    identity: CommittedGenerationIdentity,
+) -> CommittedGenerationIdentityOutput {
+    CommittedGenerationIdentityOutput {
+        generation_uuid: Buffer::from(identity.generation_uuid.as_bytes().to_vec()),
+        manifest_sha256: Buffer::from(identity.manifest_sha256.to_vec()),
+    }
+}
+
+fn node_change_stream(stream: GraphChangeStream) -> GraphChangeStreamOutput {
+    GraphChangeStreamOutput {
+        row_count: BigInt::from(u64::try_from(stream.row_count).unwrap_or(u64::MAX)),
+        ipc: Buffer::from(stream.ipc),
+    }
+}
+
+fn node_modified_properties(
+    properties: BTreeMap<uuid::Uuid, Vec<String>>,
+) -> Vec<ModifiedPropertiesOutput> {
+    properties
+        .into_iter()
+        .map(|(uuid, names)| ModifiedPropertiesOutput {
+            record_uuid: Buffer::from(uuid.as_bytes().to_vec()),
+            names,
+        })
+        .collect()
+}
+
+fn node_reload_reason(reason: ReloadRequiredReason) -> &'static str {
+    match reason {
+        ReloadRequiredReason::GenerationUnavailable => "generation_unavailable",
+        ReloadRequiredReason::IdentityMismatch => "identity_mismatch",
+        ReloadRequiredReason::CorruptGeneration => "corrupt_generation",
+        ReloadRequiredReason::IncompatibleGraph => "incompatible_graph",
+        ReloadRequiredReason::ResourceLimit => "resource_limit",
+    }
+}
+
+fn node_generation_diff_output(disposition: GenerationDiffDisposition) -> GenerationDiffOutput {
+    let GenerationDiffDisposition::Ready(diff) = disposition else {
+        let GenerationDiffDisposition::ReloadRequired(reason) = disposition else {
+            unreachable!()
+        };
+        return GenerationDiffOutput {
+            kind: "reload_required".into(),
+            reason: Some(node_reload_reason(reason).into()),
+            source: None,
+            target: None,
+            added_nodes: None,
+            removed_nodes: None,
+            modified_nodes: None,
+            added_edges: None,
+            removed_edges: None,
+            modified_edges: None,
+            modified_node_properties: None,
+            modified_edge_properties: None,
+            checkpoint_binding: None,
+        };
+    };
+    let GenerationGraphDiff {
+        source,
+        target,
+        added_nodes,
+        removed_nodes,
+        modified_nodes,
+        added_edges,
+        removed_edges,
+        modified_edges,
+        modified_node_properties,
+        modified_edge_properties,
+        checkpoint_binding,
+    } = *diff;
+    GenerationDiffOutput {
+        kind: "ready".into(),
+        reason: None,
+        source: Some(node_generation_identity_output(source)),
+        target: Some(node_generation_identity_output(target)),
+        added_nodes: Some(node_change_stream(added_nodes)),
+        removed_nodes: Some(node_change_stream(removed_nodes)),
+        modified_nodes: Some(node_change_stream(modified_nodes)),
+        added_edges: Some(node_change_stream(added_edges)),
+        removed_edges: Some(node_change_stream(removed_edges)),
+        modified_edges: Some(node_change_stream(modified_edges)),
+        modified_node_properties: Some(node_modified_properties(modified_node_properties)),
+        modified_edge_properties: Some(node_modified_properties(modified_edge_properties)),
+        checkpoint_binding: Some(Buffer::from(checkpoint_binding.to_vec())),
+    }
 }
 
 fn checkpoint_selector(value: String) -> graphforge_api::CheckpointSelector {
@@ -3236,6 +3444,50 @@ impl GraphForge {
                 idempotency_key: canonical_operation_id(&request.idempotency_key)?,
                 actor_uuid,
             }),
+        }))
+    }
+
+    /// Return the exact binary identity of the selected committed generation.
+    #[napi]
+    pub fn committed_generation_identity(&self) -> Result<CommittedGenerationIdentityOutput> {
+        self.open_guard()?
+            .committed_generation_identity()
+            .map(node_generation_identity_output)
+            .map_err(|error| to_napi_err(&error))
+    }
+
+    /// Return Rust-owned semantic Arrow IPC changes between two generations.
+    #[napi]
+    pub fn diff_committed_generations(
+        &self,
+        request: GenerationDiffInput,
+    ) -> Result<AsyncTask<GenerationDiffTask>> {
+        self.ensure_open()?;
+        let cancellation = graphforge_api::CancellationToken::new();
+        if let Some(signal) = &request.signal {
+            let cancellation = cancellation.clone();
+            signal.on_abort(move || cancellation.cancel());
+        }
+        let request = GenerationDiffRequest {
+            source: node_generation_identity(request.source)?,
+            target: node_generation_identity(request.target)?,
+            limits: GenerationDiffLimits {
+                max_records_per_generation: node_usize(
+                    request.max_records_per_generation,
+                    GenerationDiffLimits::default().max_records_per_generation,
+                    "maxRecordsPerGeneration",
+                )?,
+                max_output_bytes: node_usize(
+                    request.max_output_bytes,
+                    GenerationDiffLimits::default().max_output_bytes,
+                    "maxOutputBytes",
+                )?,
+            },
+            cancellation: Some(cancellation),
+        };
+        Ok(AsyncTask::new(GenerationDiffTask {
+            engine: Arc::clone(&self.inner),
+            request,
         }))
     }
 
@@ -6145,6 +6397,32 @@ enum CheckpointOperation {
     Delete(graphforge_api::DeleteCheckpointRequest),
     Diff(graphforge_api::DiffCheckpointsRequest),
     Revert(graphforge_api::RevertCheckpointRequest),
+}
+
+/// Worker task for the bounded semantic committed-generation diff.
+pub struct GenerationDiffTask {
+    engine: Arc<RwLock<graphforge_api::GraphForge>>,
+    request: GenerationDiffRequest,
+}
+
+impl Task for GenerationDiffTask {
+    type Output = std::result::Result<GenerationDiffDisposition, GfError>;
+    type JsValue = GenerationDiffOutput;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok((|| {
+            self.engine
+                .read()
+                .map_err(|_| GfError::Execution("GraphForge lock poisoned".into()))?
+                .diff_committed_generations(&self.request)
+        })())
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .map(node_generation_diff_output)
+            .map_err(|error| to_napi_deferred_err(env, &error))
+    }
 }
 
 /// Worker task for Rust-owned checkpoint operations.
