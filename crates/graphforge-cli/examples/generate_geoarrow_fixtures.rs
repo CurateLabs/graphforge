@@ -3,8 +3,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use arrow::datatypes::Schema;
 use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
 use graphforge_api::{GraphForge, PropValue, SpatialValue};
 use parquet::arrow::ArrowWriter;
 
@@ -52,19 +55,30 @@ fn main() {
     let result = graph
         .execute(&format!("MATCH (n:Geometry) RETURN {projection}"))
         .expect("query fixture");
+    let mut schema_metadata = result.schema.metadata().clone();
+    schema_metadata.remove("graphforge.query_id");
+    let schema = Arc::new(Schema::new_with_metadata(
+        result.schema.fields().clone(),
+        schema_metadata,
+    ));
+    let batches = result
+        .batches
+        .iter()
+        .map(|batch| RecordBatch::try_new(schema.clone(), batch.columns().to_vec()).unwrap())
+        .collect::<Vec<_>>();
     let fixtures = root.join("tests/fixtures/geoarrow-v1");
     std::fs::create_dir_all(&fixtures).expect("fixture directory");
 
     let ipc = File::create(fixtures.join("canonical.arrow")).expect("IPC file");
-    let mut ipc = StreamWriter::try_new(ipc, &result.schema).expect("IPC writer");
-    for batch in &result.batches {
+    let mut ipc = StreamWriter::try_new(ipc, &schema).expect("IPC writer");
+    for batch in &batches {
         ipc.write(batch).expect("IPC batch");
     }
     ipc.finish().expect("finish IPC");
 
     let parquet = File::create(fixtures.join("canonical.parquet")).expect("Parquet file");
-    let mut parquet = ArrowWriter::try_new(parquet, result.schema, None).expect("Parquet writer");
-    for batch in &result.batches {
+    let mut parquet = ArrowWriter::try_new(parquet, schema, None).expect("Parquet writer");
+    for batch in &batches {
         parquet.write(batch).expect("Parquet batch");
     }
     parquet.close().expect("finish Parquet");

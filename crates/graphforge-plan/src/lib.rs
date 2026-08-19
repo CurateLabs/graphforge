@@ -2215,6 +2215,50 @@ mod tests {
     }
 
     #[test]
+    fn graph_create_hash_includes_exact_preserved_spatial_profile() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+        use std::collections::hash_map::DefaultHasher;
+
+        let hash = |metadata: &str| {
+            let node = GraphCreateNode::new(
+                empty_plan(),
+                vec![ResolvedNodeSpec {
+                    var: 0,
+                    label_ids: vec![],
+                    label_names: vec!["Place".into()],
+                    properties: vec![(
+                        "location".into(),
+                        IrLiteral::Spatial(SpatialValue {
+                            spatial_type: SpatialType {
+                                geometry: SpatialGeometryType::Point,
+                                crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+                            },
+                            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+                            extension_name: Some("geoarrow.vendor_point".into()),
+                            extension_metadata: Some(metadata.into()),
+                        }),
+                    )],
+                    computed_properties: vec![],
+                    is_reference: false,
+                }],
+                vec![],
+                PathBuf::from("/tmp/gf"),
+                OntologyMode::Exploratory,
+            );
+            let mut hasher = DefaultHasher::new();
+            node.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_ne!(
+            hash("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}"),
+            hash("{\"crs\":\"OGC:CRS84\",\"edges\":\"planar\"}")
+        );
+    }
+
+    #[test]
     fn graph_create_hashes_every_literal_shape_deterministically() {
         use std::collections::hash_map::DefaultHasher;
 

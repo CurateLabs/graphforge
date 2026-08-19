@@ -988,14 +988,16 @@ fn input_schema(
         }
         validate_property_name(kind, field.name())?;
         if field.metadata().contains_key("ARROW:extension:name") {
-            spatial_type_from_field(field).ok_or_else(|| {
-                field_error(
-                    kind,
-                    BulkValidationReason::UnsupportedPropertyType,
-                    field.name(),
-                    "unsupported or non-canonical Arrow extension property",
-                )
-            })?;
+            (spatial_type_from_field(field).is_some() || is_preserved_spatial_field(field))
+                .then_some(())
+                .ok_or_else(|| {
+                    field_error(
+                        kind,
+                        BulkValidationReason::UnsupportedPropertyType,
+                        field.name(),
+                        "unsupported Arrow extension property",
+                    )
+                })?;
         } else {
             validate_property_type(kind, field.name(), field.data_type())?;
         }
@@ -1115,14 +1117,16 @@ fn validate_batch_schema(
     for field in properties {
         validate_property_name(kind, field.name())?;
         if field.metadata().contains_key("ARROW:extension:name") {
-            spatial_type_from_field(field).ok_or_else(|| {
-                field_error(
-                    kind,
-                    BulkValidationReason::UnsupportedPropertyType,
-                    field.name(),
-                    "unsupported or non-canonical Arrow extension property",
-                )
-            })?;
+            (spatial_type_from_field(field).is_some() || is_preserved_spatial_field(field))
+                .then_some(())
+                .ok_or_else(|| {
+                    field_error(
+                        kind,
+                        BulkValidationReason::UnsupportedPropertyType,
+                        field.name(),
+                        "unsupported Arrow extension property",
+                    )
+                })?;
         } else {
             validate_property_type(kind, field.name(), field.data_type())?;
         }
@@ -1299,6 +1303,39 @@ fn spatial_type_from_field(field: &Field) -> Option<graphforge_ontology::Spatial
         return None;
     };
     Some(SpatialType { geometry, crs })
+}
+
+fn is_preserved_spatial_field(field: &Field) -> bool {
+    use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+
+    let Some(metadata) = field.metadata().get("ARROW:extension:metadata") else {
+        return false;
+    };
+    if serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| value.get("crs").cloned())
+        .is_none()
+    {
+        return false;
+    }
+    [
+        SpatialGeometryType::Point,
+        SpatialGeometryType::LineString,
+        SpatialGeometryType::Polygon,
+        SpatialGeometryType::MultiPoint,
+        SpatialGeometryType::MultiLineString,
+        SpatialGeometryType::MultiPolygon,
+    ]
+    .into_iter()
+    .any(|geometry| {
+        SpatialType {
+            geometry,
+            crs: SpatialCrs::Epsg4326,
+        }
+        .field("spatial", field.is_nullable())
+        .data_type()
+            == field.data_type()
+    })
 }
 
 fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String> {
@@ -2268,6 +2305,78 @@ mod tests {
         let error =
             preflight_spatial_columns(BulkInputKind::Node, 0, &[(&malformed, &array)]).unwrap_err();
         assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+    }
+
+    #[test]
+    fn preserved_spatial_bulk_publish_reopens_and_projects_exact_metadata() {
+        use std::collections::HashMap;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let extension_name = "geoarrow.vendor_point";
+        let extension_metadata = "{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}";
+        let location: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-104.9903])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7392])) as ArrayRef,
+            ),
+        ]));
+        let location_field = Field::new("location", location.data_type().clone(), true)
+            .with_metadata(HashMap::from([
+                ("ARROW:extension:name".into(), extension_name.into()),
+                ("ARROW:extension:metadata".into(), extension_metadata.into()),
+            ]));
+        let schema = bulk_node_input_schema(vec![location_field]).unwrap();
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(8_020).as_bytes()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Place"])),
+                location,
+            ],
+        )
+        .unwrap();
+
+        let graph = GraphForge::new(path.to_str()).unwrap();
+        graph
+            .publish_bulk_nodes(operation(8_021), &[input])
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Place) RETURN n.location AS location")
+            .unwrap();
+        let field = result.schema.field_with_name("location").unwrap();
+        assert_eq!(field.metadata()["ARROW:extension:name"], extension_name);
+        assert_eq!(
+            field.metadata()["ARROW:extension:metadata"],
+            extension_metadata
+        );
+        let values = result.batches[0]
+            .column_by_name("location")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            values
+                .column_by_name("x")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            -104.9903
+        );
     }
 
     #[test]

@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.ipc as ipc
-import pyarrow.parquet as pq
+from pyarrow import ipc
+from pyarrow import parquet as pq
 
 FIXTURE = json.loads(
     (Path(__file__).parents[3] / "tests/contracts/geoarrow-interchange-v1.json").read_text()
