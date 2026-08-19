@@ -360,25 +360,32 @@ impl GraphForge {
                     .join(graphforge_storage::adjacency::ADJACENCY_SPILL_DIR_NAME),
             )
         };
-        graphforge_storage::adjacency::AdjacencyBuildOptions {
+        let mut options = graphforge_storage::adjacency::AdjacencyBuildOptions::default();
+        options.chunk_rows = {
             // Scale chunk with the instance memory budget so large Explicit
             // policies spill fewer runs (agent-host >200M evidence). Cap keeps
             // a single flush allocation bounded; `effective()` still shrinks
             // when the budget is tighter than this starting point.
-            chunk_rows: {
-                const MAX_CHUNK_ROWS: u64 = 16_777_216;
-                let budget_entries = policy
-                    .memory_budget_bytes
-                    .saturating_div(24u64.saturating_mul(4));
-                usize::try_from(budget_entries.clamp(1, MAX_CHUNK_ROWS))
-                    .unwrap_or(graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS)
-            },
-            batch_size: policy.batch_size.max(1),
-            spill_dir,
-            spill_max_bytes: policy.spill_max_bytes,
-            memory_budget_bytes: Some(policy.memory_budget_bytes),
-        }
-        .effective()
+            const MAX_CHUNK_ROWS: u64 = 16_777_216;
+            let budget_entries = policy
+                .memory_budget_bytes
+                .saturating_div(24u64.saturating_mul(4));
+            usize::try_from(budget_entries.clamp(1, MAX_CHUNK_ROWS))
+                .unwrap_or(graphforge_storage::adjacency::DEFAULT_ADJACENCY_CHUNK_ROWS)
+        };
+        options.batch_size = policy.batch_size.max(1);
+        options.spill_dir = spill_dir;
+        options.spill_max_bytes = policy.spill_max_bytes;
+        options.memory_budget_bytes = Some(policy.memory_budget_bytes);
+        options.shard_max_edges = {
+            let budget_entries = policy
+                .memory_budget_bytes
+                .saturating_div(24u64.saturating_mul(8));
+            usize::try_from(budget_entries)
+                .unwrap_or(graphforge_storage::adjacency::DEFAULT_CSR_SHARD_EDGES)
+                .clamp(1, graphforge_storage::adjacency::DEFAULT_CSR_SHARD_EDGES)
+        };
+        options.effective()
     }
 
     /// Inspect the derived adjacency artifact without mutating it.
