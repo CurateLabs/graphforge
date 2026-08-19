@@ -4,41 +4,26 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use graphforge_core::GfError;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use crate::ResolvedProjectGeneration;
+use crate::{
+    PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
+    ResolvedProjectGeneration, verify_portable_v2,
+};
+
+type GfError = PortableV2Error;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Finite planner and streaming-writer budgets.
-pub struct PortableV2ExportLimits {
-    /// Maximum payload entries retained in the metadata plan.
-    pub max_entries: usize,
-    /// Maximum declared bytes in one entry.
-    pub max_entry_bytes: u64,
-    /// Maximum declared bytes in the package.
-    pub max_total_bytes: u64,
-    /// Reused copy buffer size; at most 64 MiB.
-    pub copy_buffer_bytes: usize,
-}
-impl Default for PortableV2ExportLimits {
-    fn default() -> Self {
-        Self {
-            max_entries: 1_000_000,
-            max_entry_bytes: 16 * 1024 * 1024 * 1024 * 1024,
-            max_total_bytes: 1024 * 1024 * 1024 * 1024 * 1024,
-            copy_buffer_bytes: 8 * 1024 * 1024,
-        }
-    }
-}
+pub type PortableV2ExportLimits = PortableV2Limits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Portable-v2 transport representation.
@@ -220,17 +205,22 @@ pub fn plan_complete_portable_v2(
             files: owned,
         });
     }
-    if files.len() > limits.max_entries {
+    if files.len() as u64 > limits.max_entries {
         return Err(limit("entry count exceeds configured limit"));
+    }
+    if components.len() as u64 > limits.max_components {
+        return Err(limit("component count exceeds configured limit"));
     }
     files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     components.sort_by(|a, b| (&a.kind, &a.participant_id).cmp(&(&b.kind, &b.participant_id)));
     roots.sort();
     collisions(&files)?;
     let capabilities = || {
-        g.capabilities()
+        components
+            .iter()
+            .map(|component| format!("{}@1", component.kind))
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|c| format!("{}@{}", c.capability_id, c.capability_version))
             .collect()
     };
     let source = || Source {
@@ -287,6 +277,9 @@ pub fn plan_complete_portable_v2(
         },
     };
     let manifest = canonical(&serde_json::to_value(final_manifest).map_err(storage)?)?;
+    if manifest.len() as u64 > limits.max_manifest_bytes {
+        return Err(limit("semantic manifest exceeds configured limit"));
+    }
     Ok(PortableV2ExportPlan {
         generation_uuid: g.generation_uuid(),
         files,
@@ -302,7 +295,7 @@ pub fn export_complete_portable_v2(
     destination: impl AsRef<Path>,
     output: PortableV2Output,
     limits: PortableV2ExportLimits,
-    cancelled: impl Fn() -> bool,
+    cancelled: &AtomicBool,
     mut progress: impl FnMut(PortableV2ExportProgress),
 ) -> Result<PortableV2ExportReceipt, GfError> {
     validate_limits(limits)?;
@@ -316,9 +309,10 @@ pub fn export_complete_portable_v2(
         .and_then(|n| n.to_str())
         .ok_or_else(|| err("GF_INVALID_DESTINATION", "invalid destination name"))?;
     let stage = parent.join(format!(".{name}.{}.partial", Uuid::new_v4()));
+    let is_cancelled = || cancelled.load(Ordering::Relaxed);
     let result = match output {
-        PortableV2Output::Expanded => expanded(plan, &stage, limits, &cancelled, &mut progress),
-        PortableV2Output::Bundle => bundle(plan, &stage, limits, &cancelled, &mut progress),
+        PortableV2Output::Expanded => expanded(plan, &stage, limits, &is_cancelled, &mut progress),
+        PortableV2Output::Bundle => bundle(plan, &stage, limits, &is_cancelled, &mut progress),
     };
     let digest = match result {
         Ok(d) => d,
@@ -327,9 +321,28 @@ pub fn export_complete_portable_v2(
             return Err(e);
         }
     };
-    if cancelled() {
+    if is_cancelled() {
         remove(&stage);
         return Err(err("GF_CANCELLED", "portable export cancelled"));
+    }
+    let verified = verify_portable_v2(&stage, PortableV2Mode::Full, limits, Some(cancelled))
+        .inspect_err(|_| remove(&stage))?;
+    let expected_transport = format!("sha256:{}", hex(digest));
+    if verified.package_class != PortableV2PackageClass::Complete
+        || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
+    {
+        remove(&stage);
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "writer and verifier semantic receipts disagree",
+        ));
+    }
+    if verified.transport_digest.as_deref() != Some(expected_transport.as_str()) {
+        remove(&stage);
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "writer and verifier transport receipts disagree",
+        ));
     }
     publish_no_replace(&stage, dst).map_err(|error| {
         remove(&stage);
@@ -376,7 +389,7 @@ fn expanded(
         payload.push((f.path.clone(), f.length, f.digest));
     }
     payload.sort_by(|a, b| a.0.cmp(&b.0));
-    let inv = inventory(&payload);
+    let inv = inventory(&payload, l.max_tag_manifest_bytes)?;
     write_bytes(stage, "manifest-sha256.txt", &inv)?;
     write_bytes(stage, "bagit.txt", BAGIT)?;
     write_bytes(stage, "bag-info.txt", BAG_INFO)?;
@@ -389,7 +402,7 @@ fn expanded(
         .iter()
         .map(|(p, b)| (p.to_string(), b.len() as u64, Sha256::digest(b).into()))
         .collect::<Vec<_>>();
-    let tag = inventory(&tag_rows);
+    let tag = inventory(&tag_rows, l.max_tag_manifest_bytes)?;
     write_bytes(stage, "tagmanifest-sha256.txt", &tag)?;
     sync_tree(stage)?;
     let mut all = payload;
@@ -419,7 +432,10 @@ impl Src<'_> {
         }
     }
 }
-fn entries(plan: &PortableV2ExportPlan) -> Vec<(String, Src<'_>)> {
+fn entries(
+    plan: &PortableV2ExportPlan,
+    max_tag_manifest_bytes: u64,
+) -> Result<Vec<(String, Src<'_>)>, GfError> {
     let mut v = vec![(
         "data/graphforge-project.json".into(),
         Src::Bytes(plan.manifest.clone()),
@@ -439,7 +455,8 @@ fn entries(plan: &PortableV2ExportPlan) -> Vec<(String, Src<'_>)> {
                 )
             })
             .collect::<Vec<_>>(),
-    );
+        max_tag_manifest_bytes,
+    )?;
     let tags = [
         ("bag-info.txt", BAG_INFO.to_vec()),
         ("bagit.txt", BAGIT.to_vec()),
@@ -450,10 +467,11 @@ fn entries(plan: &PortableV2ExportPlan) -> Vec<(String, Src<'_>)> {
             .iter()
             .map(|(p, b)| (p.to_string(), b.len() as u64, Sha256::digest(b).into()))
             .collect::<Vec<_>>(),
-    );
+        max_tag_manifest_bytes,
+    )?;
     v.extend(tags.into_iter().map(|(p, b)| (p.into(), Src::Bytes(b))));
     v.push(("tagmanifest-sha256.txt".into(), Src::Bytes(tag)));
-    v
+    Ok(v)
 }
 fn bundle(
     plan: &PortableV2ExportPlan,
@@ -462,7 +480,7 @@ fn bundle(
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
 ) -> Result<[u8; 32], GfError> {
-    let mut items = entries(plan);
+    let mut items = entries(plan, l.max_tag_manifest_bytes)?;
     items.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = OpenOptions::new()
         .create_new(true)
@@ -503,6 +521,9 @@ fn inspect(
     limits: PortableV2ExportLimits,
     total: &mut u64,
 ) -> Result<PlannedFile, GfError> {
+    if path.len() > limits.max_path_bytes {
+        return Err(limit("portable path exceeds configured limit"));
+    }
     valid_path(path)?;
     let mut input = open_source_no_follow(source)?;
     let before = identity(&input.metadata().map_err(storage)?)?;
@@ -744,15 +765,23 @@ fn canonical(v: &Value) -> Result<Vec<u8>, GfError> {
     w(v, &mut o)?;
     Ok(o)
 }
-fn inventory(rows: &[(String, u64, [u8; 32])]) -> Vec<u8> {
+fn inventory(rows: &[(String, u64, [u8; 32])], limit_bytes: u64) -> Result<Vec<u8>, GfError> {
     let mut o = Vec::new();
     for (p, _, d) in rows {
+        let row_bytes = 64_u64
+            .checked_add(2)
+            .and_then(|value| value.checked_add(p.len() as u64))
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| limit("tag inventory size overflow"))?;
+        if (o.len() as u64).saturating_add(row_bytes) > limit_bytes {
+            return Err(limit("tag inventory exceeds configured limit"));
+        }
         o.extend(hex(*d).bytes());
         o.extend(b"  ");
         o.extend(p.bytes());
         o.push(b'\n');
     }
-    o
+    Ok(o)
 }
 fn identity(m: &fs::Metadata) -> Result<Identity, GfError> {
     if !m.is_file() || m.file_type().is_symlink() {
@@ -781,6 +810,13 @@ fn identity(m: &fs::Metadata) -> Result<Identity, GfError> {
 }
 #[cfg(unix)]
 fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
+    if fs::symlink_metadata(path)
+        .map_err(storage)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "source is a link"));
+    }
     let descriptor = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
@@ -793,6 +829,13 @@ fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
 fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    if fs::symlink_metadata(path)
+        .map_err(storage)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "source is a link"));
+    }
     OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -876,7 +919,14 @@ fn graph_media(p: &str) -> &str {
     }
 }
 fn validate_limits(l: PortableV2ExportLimits) -> Result<(), GfError> {
-    if l.max_entries == 0 || l.copy_buffer_bytes == 0 || l.copy_buffer_bytes > 64 * 1024 * 1024 {
+    if l.max_components == 0
+        || l.max_entries == 0
+        || l.max_manifest_bytes == 0
+        || l.max_tag_manifest_bytes == 0
+        || l.max_path_bytes == 0
+        || l.copy_buffer_bytes == 0
+        || l.copy_buffer_bytes > 64 * 1024 * 1024
+    {
         return Err(limit("invalid limits"));
     }
     Ok(())
@@ -962,13 +1012,26 @@ fn hex(d: [u8; 32]) -> String {
         })
 }
 fn limit(m: &str) -> GfError {
-    err("GF_LIMIT_EXCEEDED", m)
+    let _ = m;
+    PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "export limit exceeded")
 }
 fn err(c: &str, m: &str) -> GfError {
-    GfError::Storage(format!("{c}: {m}"))
+    let code = match c {
+        "GF_CANCELLED" => PortableV2ErrorCode::Cancelled,
+        "GF_LIMIT_EXCEEDED" => PortableV2ErrorCode::LimitExceeded,
+        "GF_SOURCE_CHANGED" => PortableV2ErrorCode::ConcurrentMutation,
+        "GF_INVALID_PORTABLE_PATH" => PortableV2ErrorCode::InvalidPath,
+        "GF_UNSUPPORTED_ENTRY_TYPE" => PortableV2ErrorCode::InvalidStructure,
+        "GF_DUPLICATE_PORTABLE_PATH" => PortableV2ErrorCode::DuplicateEntry,
+        "GF_INTEGRITY_FAILED" => PortableV2ErrorCode::DigestMismatch,
+        _ => PortableV2ErrorCode::Io,
+    };
+    let _ = m;
+    PortableV2Error::new(code, "portable-v2 export failed")
 }
 fn storage(e: impl std::fmt::Display) -> GfError {
-    GfError::Storage(e.to_string())
+    let _ = e;
+    PortableV2Error::new(PortableV2ErrorCode::Io, "portable-v2 I/O failed")
 }
 
 #[cfg(test)]
@@ -989,12 +1052,13 @@ mod tests {
         let expanded = out.path().join("complete.gfproject");
         let first = out.path().join("first.gfpb");
         let second = out.path().join("second.gfpb");
+        let cancelled = AtomicBool::new(false);
         let a = export_complete_portable_v2(
             &plan,
             &expanded,
             PortableV2Output::Expanded,
             limits,
-            || false,
+            &cancelled,
             |_| {},
         )
         .unwrap();
@@ -1003,7 +1067,7 @@ mod tests {
             &first,
             PortableV2Output::Bundle,
             limits,
-            || false,
+            &cancelled,
             |_| {},
         )
         .unwrap();
@@ -1012,7 +1076,7 @@ mod tests {
             &second,
             PortableV2Output::Bundle,
             limits,
-            || false,
+            &cancelled,
             |_| {},
         )
         .unwrap();
@@ -1032,16 +1096,17 @@ mod tests {
         let plan = plan_complete_portable_v2(&generation, limits).unwrap();
         let out = tempfile::tempdir().unwrap();
         let destination = out.path().join("cancelled.gfpb");
+        let cancelled = AtomicBool::new(true);
         let error = export_complete_portable_v2(
             &plan,
             &destination,
             PortableV2Output::Bundle,
             limits,
-            || true,
+            &cancelled,
             |_| {},
         )
         .unwrap_err();
-        assert!(error.to_string().contains("GF_CANCELLED"));
+        assert_eq!(error.code, PortableV2ErrorCode::Cancelled);
         assert!(!destination.exists());
         assert!(fs::read_dir(out.path()).unwrap().next().is_none());
         let limited = PortableV2ExportLimits {
@@ -1049,7 +1114,7 @@ mod tests {
             ..limits
         };
         let error = plan_complete_portable_v2(&generation, limited).unwrap_err();
-        assert!(error.to_string().contains("GF_LIMIT_EXCEEDED"));
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
     }
 
     #[test]
@@ -1064,12 +1129,13 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let destination = out.path().join("raced.gfpb");
         let mut replaced = false;
+        let cancelled = AtomicBool::new(false);
         let error = export_complete_portable_v2(
             &plan,
             &destination,
             PortableV2Output::Bundle,
             limits,
-            || false,
+            &cancelled,
             |_| {
                 if !replaced {
                     fs::write(&destination, b"attacker").unwrap();
@@ -1078,7 +1144,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(error.to_string().contains("exist") || error.to_string().contains("File exists"));
+        assert_eq!(error.code, PortableV2ErrorCode::Io);
         assert_eq!(fs::read(&destination).unwrap(), b"attacker");
         assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
 
@@ -1091,11 +1157,11 @@ mod tests {
             &mutated,
             PortableV2Output::Bundle,
             limits,
-            || false,
+            &cancelled,
             |_| {},
         )
         .unwrap_err();
-        assert!(error.to_string().contains("GF_SOURCE_CHANGED"));
+        assert_eq!(error.code, PortableV2ErrorCode::ConcurrentMutation);
         assert!(!mutated.exists());
     }
 
@@ -1112,10 +1178,7 @@ mod tests {
             PortableV2ExportLimits::default().max_entry_bytes,
             16 * 1024 * 1024 * 1024 * 1024
         );
-        assert_eq!(
-            PortableV2ExportLimits::default().copy_buffer_bytes,
-            8 * 1024 * 1024
-        );
+        assert!(PortableV2ExportLimits::default().copy_buffer_bytes <= 8 * 1024 * 1024);
         let out = tempfile::NamedTempFile::new().unwrap();
         let mut file = out.reopen().unwrap();
         let mut digest = Sha256::new();
@@ -1127,5 +1190,62 @@ mod tests {
         assert_eq!(bytes[156], b'x');
         assert_eq!(bytes[1024..1033].as_ref(), b"PaxFiles/");
         assert_eq!(bytes[1024 + 156], b'0');
+    }
+
+    #[test]
+    fn large_sparse_source_streams_densely_with_a_tiny_buffer() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("large.parquet");
+        let file = File::create(&source).unwrap();
+        file.set_len(32 * 1024 * 1024).unwrap();
+        drop(file);
+        let limits = PortableV2ExportLimits {
+            copy_buffer_bytes: 11,
+            ..Default::default()
+        };
+        let mut total = 0;
+        let planned = inspect(
+            &source,
+            "data/components/graph-data/graph-files/large.parquet",
+            limits,
+            &mut total,
+        )
+        .unwrap();
+        assert_eq!(total, 32 * 1024 * 1024);
+        let destination = root.path().join("dense.parquet");
+        let mut observed = 0;
+        copy(
+            &planned,
+            &destination,
+            limits.copy_buffer_bytes,
+            &|| false,
+            |bytes| {
+                observed += bytes;
+            },
+        )
+        .unwrap();
+        assert_eq!(observed, total);
+        assert_eq!(fs::metadata(destination).unwrap().len(), total);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_symlink_is_rejected_without_following_it() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        fs::write(&real, b"secret").unwrap();
+        let linked = root.path().join("linked");
+        symlink(&real, &linked).unwrap();
+        let mut total = 0;
+        let error = inspect(
+            &linked,
+            "data/components/settings/settings/secret.bin",
+            PortableV2ExportLimits::default(),
+            &mut total,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
+        assert_eq!(total, 0);
     }
 }

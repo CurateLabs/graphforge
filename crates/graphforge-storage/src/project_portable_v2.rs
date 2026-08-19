@@ -132,14 +132,14 @@ pub struct PortableV2Error {
 }
 
 impl PortableV2Error {
-    fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
+    pub(crate) fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
         Self {
             code,
             entry: None,
             detail,
         }
     }
-    fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
+    pub(crate) fn at(code: PortableV2ErrorCode, entry: &str, detail: &'static str) -> Self {
         Self {
             code,
             entry: Some(entry.chars().take(4096).collect()),
@@ -153,6 +153,14 @@ impl fmt::Display for PortableV2Error {
     }
 }
 impl std::error::Error for PortableV2Error {}
+impl From<graphforge_core::GfError> for PortableV2Error {
+    fn from(_: graphforge_core::GfError) -> Self {
+        Self::new(
+            PortableV2ErrorCode::Incompatible,
+            "pinned project generation is not exportable",
+        )
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
