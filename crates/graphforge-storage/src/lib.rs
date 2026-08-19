@@ -43,19 +43,24 @@ pub use graph_delta_journal::{
     GraphDeltaPayload, GraphDeltaPublicationReceipt, GraphDeltaPublishRequest,
     GraphDeltaReplayEvidence, GraphDeltaRun, MAX_GRAPH_DELTA_PAYLOAD_BYTES,
     MAX_GRAPH_DELTA_RECORDS_PER_RUN, MAX_GRAPH_DELTA_REPLAY_MEMORY_BYTES,
-    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, ReconstructedGraphState, apply_delta_runs,
-    decode_delta_run, delta_run_relative_path, encode_delta_run, list_delta_runs,
-    load_verified_delta_runs, publish_graph_delta, publish_graph_delta_with_mode,
-    reconstruct_graph_state, stage_base_graph_workspace,
+    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, PreparedGraphDelta, ReconstructedGraphState,
+    apply_delta_runs, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
+    encode_delta_run, encode_graph_delta_value, list_delta_runs, load_verified_delta_runs,
+    materialize_replayed_graph_tree, prepare_graph_delta, publish_graph_delta,
+    publish_graph_delta_with_mode, reconstruct_graph_state, stage_base_graph_workspace,
 };
 
 pub mod graph_delta_compaction;
 pub use graph_delta_compaction::{
-    DEFAULT_COMPACTION_MAX_DISK_BYTES, DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
+    DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS, DEFAULT_COMPACTION_MAX_DISK_BYTES,
+    DEFAULT_COMPACTION_MAX_INPUT_BYTES, DEFAULT_COMPACTION_MAX_INPUT_RUNS,
+    DEFAULT_COMPACTION_MAX_MEMORY_BYTES, DEFAULT_COMPACTION_MAX_OUTPUT_ROWS,
     DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
-    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
-    compact_graph_delta_with_mode, graph_delta_compaction_status,
+    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus,
+    MAX_COMPACTION_CANCELLATION_CHECK_ROWS, MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES,
+    MAX_COMPACTION_MEMORY_BYTES, MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES,
+    compact_graph_delta, compact_graph_delta_with_mode, graph_delta_compaction_status,
     graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
     preview_graph_delta_compaction_with_mode,
 };
@@ -222,6 +227,13 @@ pub use vector_store::{
 pub mod io_stats;
 pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
+pub mod uuid_membership;
+pub use uuid_membership::{
+    UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexKind, UuidMembershipIndex,
+    UuidProbeMetrics, rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh,
+    uuid_membership_index_present,
+};
+
 pub mod catalog;
 pub use catalog::{
     EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
@@ -252,10 +264,11 @@ pub use schemas::{
 
 pub mod writer;
 pub use writer::{
-    GraphWriter, count_entity_properties, read_entity_properties, read_entity_property_keys,
-    read_node_property_rows, remove_edge_properties, remove_node_properties,
-    set_edge_properties_rewrite, set_node_properties, stage_remove_edge_properties,
-    stage_remove_node_properties, stage_set_edge_properties, stage_set_node_properties,
+    GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
+    read_entity_property_keys, read_node_property_rows, remove_edge_properties,
+    remove_node_properties, set_edge_properties_rewrite, set_node_properties,
+    stage_remove_edge_properties, stage_remove_node_properties, stage_set_edge_properties,
+    stage_set_node_properties,
 };
 
 pub mod mutator;

@@ -1,5 +1,5 @@
 {
-  "checksum": "eb825bb532c27d7ca9b1742de33af130925482788ca47c526d094c8f6982f8d0",
+  "checksum": "c79eadabcf22e7d0d308d31294a7d03c7538b15a3276913e4a72497bfc36f979",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13249,6 +13249,22 @@
         "deps": {
           "common": [
             {
+              "id": "arrow 58.3.0",
+              "target": "arrow"
+            },
+            {
+              "id": "futures 0.3.32",
+              "target": "futures"
+            },
+            {
+              "id": "parquet 58.3.0",
+              "target": "parquet"
+            },
+            {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
@@ -13610,6 +13626,10 @@
             {
               "id": "datafusion-functions-aggregate 54.1.0",
               "target": "datafusion_functions_aggregate"
+            },
+            {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
             },
             {
               "id": "thiserror 2.0.20",

@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "51fd33865c0866530edac0f1c3e735ba72354774de93966883b5020e1a1655fb"
-EXPECTED_RELEASE_DIGEST = "7b10db80d4bd05e21a94c57a7c4218e54f0d464a27dab127bdec59903afc66a0"
+EXPECTED_RUST_DIGEST = "b6951843737bfb46b5f1ac5b439522e1a817471aea8ca6c67c2947e45899f768"
+EXPECTED_RELEASE_DIGEST = "549c020e5163437593001d94c900b964700b6722d124fc8d36c39f0cbdafbf7a"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -129,6 +129,9 @@ EVIDENCE = {
     },
     "compatibility": {
         "non_cypher_release.py": ["check_native_artifact_and_no_fallback"],
+    },
+    "resumable-import": {
+        "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
 }
 
@@ -237,7 +240,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 192
+    assert len(release_methods) == 205
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 

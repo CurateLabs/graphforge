@@ -449,6 +449,137 @@ impl TemporalValue {
     }
 }
 
+/// Coordinate reference systems certified by GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpatialCrs {
+    /// WGS 84 longitude/latitude in canonical x/y order.
+    Epsg4326,
+    /// Web Mercator easting/northing in canonical x/y order.
+    Epsg3857,
+    /// Standards-valid CRS identifier preserved for interchange only.
+    Preserved(String),
+}
+
+impl serde::Serialize for SpatialCrs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Epsg4326 => "EPSG:4326",
+            Self::Epsg3857 => "EPSG:3857",
+            Self::Preserved(value) => value,
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SpatialCrs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "EPSG:4326" => Self::Epsg4326,
+            "EPSG:3857" => Self::Epsg3857,
+            _ => Self::Preserved(value),
+        })
+    }
+}
+
+/// Homogeneous geometry kinds in GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialGeometryType {
+    /// One x/y coordinate.
+    Point,
+    /// One ordered sequence of vertices.
+    LineString,
+    /// One polygon represented as ordered rings.
+    Polygon,
+    /// A collection of points.
+    MultiPoint,
+    /// A collection of line strings.
+    MultiLineString,
+    /// A collection of polygons.
+    MultiPolygon,
+}
+
+/// Complete homogeneous spatial property type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SpatialType {
+    /// Homogeneous geometry kind.
+    pub geometry: SpatialGeometryType,
+    /// Coordinate reference system for every coordinate.
+    pub crs: SpatialCrs,
+}
+
+/// Canonical f64 coordinate payload for one spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SpatialCoordinates {
+    /// Point coordinate.
+    Point([f64; 2]),
+    /// Line-string vertices.
+    LineString(Vec<[f64; 2]>),
+    /// Polygon rings and their vertices.
+    Polygon(Vec<Vec<[f64; 2]>>),
+    /// Multi-point coordinates.
+    MultiPoint(Vec<[f64; 2]>),
+    /// Multi-line-string vertices.
+    MultiLineString(Vec<Vec<[f64; 2]>>),
+    /// Multi-polygon rings and vertices.
+    MultiPolygon(Vec<Vec<Vec<[f64; 2]>>>),
+}
+
+/// One canonical typed spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpatialValue {
+    /// Geometry kind and CRS.
+    pub spatial_type: SpatialType,
+    /// Coordinates matching `spatial_type.geometry`.
+    pub coordinates: SpatialCoordinates,
+    /// Original extension name when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_name: Option<String>,
+    /// Original extension metadata JSON when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_metadata: Option<String>,
+}
+
+impl SpatialValue {
+    /// Whether this value is preserved for interchange but not certified for computation.
+    #[must_use]
+    pub fn is_preserved_only(&self) -> bool {
+        matches!(self.spatial_type.crs, SpatialCrs::Preserved(_))
+            || self.extension_name.is_some()
+            || self.extension_metadata.is_some()
+    }
+
+    /// Validate the explicit envelope required for preserved-only values.
+    pub fn validate_interchange_profile(&self) -> Result<(), &'static str> {
+        if !self.is_preserved_only() {
+            return Ok(());
+        }
+        let (Some(name), Some(metadata)) = (&self.extension_name, &self.extension_metadata) else {
+            return Err(
+                "preserved-only spatial values require extension_name and extension_metadata",
+            );
+        };
+        if name.is_empty() {
+            return Err("preserved-only spatial extension_name must not be empty");
+        }
+        let trimmed = metadata.trim();
+        let valid_metadata = trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && trimmed.contains("\"crs\"")
+            && trimmed.contains(':');
+        if !valid_metadata {
+            return Err("preserved-only spatial extension_metadata must contain a CRS");
+        }
+        Ok(())
+    }
+}
+
 /// A graph property value.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -467,6 +598,8 @@ pub enum PropValue {
     List(Vec<PropValue>),
     /// Typed temporal value with consumer-neutral Arrow semantics.
     Temporal(TemporalValue),
+    /// Canonical typed spatial value.
+    Spatial(SpatialValue),
 }
 
 impl fmt::Display for PropValue {
@@ -488,6 +621,11 @@ impl fmt::Display for PropValue {
                 write!(f, "]")
             }
             Self::Temporal(value) => write!(f, "temporal({value:?})"),
+            Self::Spatial(value) => write!(
+                f,
+                "spatial({:?}, {:?})",
+                value.spatial_type, value.coordinates
+            ),
         }
     }
 }

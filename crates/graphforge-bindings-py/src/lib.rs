@@ -205,28 +205,78 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
             .collect::<PyResult<Vec<_>>>()
             .map(PropValue::List)
     } else if let Ok(dict) = value.cast::<PyDict>() {
-        let mut object = serde_json::Map::with_capacity(dict.len());
-        for (key, value) in dict {
-            let key = key.extract::<String>()?;
-            let value = if value.is_none() {
-                serde_json::Value::Null
-            } else if let Ok(value) = value.extract::<String>() {
-                serde_json::Value::String(value)
-            } else if value.is_instance_of::<PyInt>() {
-                serde_json::Value::Number(value.extract::<i64>()?.into())
-            } else {
-                return Err(PyTypeError::new_err(
-                    "temporal fields must be strings, integers, or None",
-                ));
-            };
-            object.insert(key, value);
+        let is_spatial = dict.contains("spatial_type")? || dict.contains("coordinates")?;
+        let is_temporal = dict.contains("type")?;
+        if !is_spatial && !is_temporal {
+            return Err(PyTypeError::new_err(
+                "unsupported node property type (plain nested dictionaries are not properties)",
+            ));
         }
-        serde_json::from_value::<TemporalValue>(serde_json::Value::Object(object))
-            .map(PropValue::Temporal)
-            .map_err(|error| PyTypeError::new_err(format!("invalid temporal property: {error}")))
+        let json = py_property_json(value).map_err(|error| {
+            to_pyerr(
+                value.py(),
+                &GfError::Validation(format!("invalid canonical spatial property: {error}")),
+            )
+        })?;
+        if is_spatial {
+            let spatial: graphforge_api::SpatialValue =
+                serde_json::from_value(json).map_err(|error| {
+                    to_pyerr(
+                        value.py(),
+                        &GfError::Validation(format!(
+                            "invalid canonical spatial property: {error}"
+                        )),
+                    )
+                })?;
+            spatial.validate_interchange_profile().map_err(|error| {
+                to_pyerr(
+                    value.py(),
+                    &GfError::Validation(format!("invalid canonical spatial property: {error}")),
+                )
+            })?;
+            Ok(PropValue::Spatial(spatial))
+        } else {
+            serde_json::from_value::<TemporalValue>(json)
+                .map(PropValue::Temporal)
+                .map_err(|error| {
+                    PyTypeError::new_err(format!("invalid temporal property: {error}"))
+                })
+        }
     } else {
         Err(PyTypeError::new_err(
-            "unsupported node property type (expected None/bool/int/float/str/list/temporal dict)",
+            "unsupported node property type (expected None/bool/int/float/str/list/temporal or canonical spatial dict)",
+        ))
+    }
+}
+
+fn py_property_json(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
+    if value.is_none() {
+        Ok(serde_json::Value::Null)
+    } else if let Ok(value) = value.extract::<bool>() {
+        Ok(serde_json::Value::Bool(value))
+    } else if value.is_instance_of::<PyInt>() {
+        Ok(serde_json::Value::Number(value.extract::<i64>()?.into()))
+    } else if let Ok(value) = value.extract::<f64>() {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| PyTypeError::new_err("spatial coordinates must be finite"))
+    } else if let Ok(value) = value.extract::<String>() {
+        Ok(serde_json::Value::String(value))
+    } else if let Ok(values) = value.cast::<PyList>() {
+        values
+            .iter()
+            .map(|item| py_property_json(&item))
+            .collect::<PyResult<Vec<_>>>()
+            .map(serde_json::Value::Array)
+    } else if let Ok(values) = value.cast::<PyDict>() {
+        let mut object = serde_json::Map::with_capacity(values.len());
+        for (key, value) in values {
+            object.insert(key.extract::<String>()?, py_property_json(&value)?);
+        }
+        Ok(serde_json::Value::Object(object))
+    } else {
+        Err(PyTypeError::new_err(
+            "structured properties contain only dict/list/string/number/bool/None values",
         ))
     }
 }

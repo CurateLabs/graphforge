@@ -1,0 +1,8 @@
+"""Binary interoperability fixtures consumed by independent readers."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "geoarrow_v1",
+    srcs = glob(["geoarrow-v1/*"]),
+)

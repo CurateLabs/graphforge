@@ -7,10 +7,8 @@
 //! reclaims subsumed inputs only via the shared retention reachability oracle
 //! (#751). Derived `indexes/adjacency/deltas/` remain unrelated.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -19,11 +17,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::graph_delta_journal::{
-    GRAPH_DELTA_DIR, GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaRun, ReconstructedGraphState,
-    apply_delta_runs, delta_run_relative_path, encode_delta_run, list_delta_runs,
-    load_verified_delta_runs, reconstruct_graph_state, stage_base_graph_workspace,
+    GraphDeltaJournalLimits, list_delta_runs, load_verified_delta_runs,
 };
-use crate::graph_files::{capture_graph_files, verify_graph_tree};
+use crate::graph_files::{GraphFilesInventory, capture_graph_files, verify_graph_tree};
 use crate::project_generation::resolve_project_generation;
 use crate::project_publication::{
     ProjectCapability, ProjectGenerationRequest, ProjectPublicationReceipt, ProjectStageOutcome,
@@ -41,6 +37,26 @@ pub const DEFAULT_COMPACTION_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_COMPACTION_MAX_SPILL_BYTES: u64 = 256 * 1024 * 1024;
 /// Default staged output disk budget for one compaction invocation.
 pub const DEFAULT_COMPACTION_MAX_DISK_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum supported logical memory budget.
+pub const MAX_COMPACTION_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum supported spill-byte budget.
+pub const MAX_COMPACTION_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Maximum supported staged output disk budget.
+pub const MAX_COMPACTION_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default and supported maximum aggregate input runs.
+pub const DEFAULT_COMPACTION_MAX_INPUT_RUNS: u64 = 64;
+/// Default aggregate encoded input-byte budget.
+pub const DEFAULT_COMPACTION_MAX_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+/// Maximum supported aggregate encoded input-byte budget.
+pub const MAX_COMPACTION_INPUT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default maximum canonical output rows.
+pub const DEFAULT_COMPACTION_MAX_OUTPUT_ROWS: u64 = 100_000_000;
+/// Maximum supported canonical output rows.
+pub const MAX_COMPACTION_OUTPUT_ROWS: u64 = 1_000_000_000;
+/// Default cancellation polling cadence in rows.
+pub const DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS: u64 = 8_192;
+/// Maximum supported cancellation polling cadence in rows.
+pub const MAX_COMPACTION_CANCELLATION_CHECK_ROWS: u64 = 1_048_576;
 /// Spill directory name under the project-local spill root.
 pub const GRAPH_DELTA_COMPACTION_SPILL_DIR: &str = "graph-delta-compaction";
 
@@ -55,6 +71,14 @@ pub struct GraphDeltaCompactionLimits {
     pub max_spill_bytes: u64,
     /// Maximum staged generation bytes before CURRENT publish.
     pub max_disk_bytes: u64,
+    /// Maximum aggregate verified input runs.
+    pub max_input_runs: u64,
+    /// Maximum aggregate encoded bytes across the compacted run prefix.
+    pub max_input_bytes: u64,
+    /// Maximum canonical topology rows emitted.
+    pub max_output_rows: u64,
+    /// Maximum rows processed between cancellation checks.
+    pub cancellation_check_rows: u64,
 }
 
 impl Default for GraphDeltaCompactionLimits {
@@ -64,6 +88,10 @@ impl Default for GraphDeltaCompactionLimits {
             max_memory_bytes: DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
             max_spill_bytes: DEFAULT_COMPACTION_MAX_SPILL_BYTES,
             max_disk_bytes: DEFAULT_COMPACTION_MAX_DISK_BYTES,
+            max_input_runs: DEFAULT_COMPACTION_MAX_INPUT_RUNS,
+            max_input_bytes: DEFAULT_COMPACTION_MAX_INPUT_BYTES,
+            max_output_rows: DEFAULT_COMPACTION_MAX_OUTPUT_ROWS,
+            cancellation_check_rows: DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS,
         }
     }
 }
@@ -74,14 +102,29 @@ impl GraphDeltaCompactionLimits {
     /// # Errors
     /// Returns `GF_RESOURCE_LIMIT` when any hard budget is zero.
     pub fn validate(self) -> Result<Self, GfError> {
-        if self.max_memory_bytes == 0 {
+        if self.max_memory_bytes == 0 || self.max_memory_bytes > MAX_COMPACTION_MEMORY_BYTES {
             return Err(resource_limit("compaction max_memory_bytes"));
         }
-        if self.max_spill_bytes == 0 {
+        if self.max_spill_bytes == 0 || self.max_spill_bytes > MAX_COMPACTION_SPILL_BYTES {
             return Err(resource_limit("compaction max_spill_bytes"));
         }
-        if self.max_disk_bytes == 0 {
+        if self.max_disk_bytes == 0 || self.max_disk_bytes > MAX_COMPACTION_DISK_BYTES {
             return Err(resource_limit("compaction max_disk_bytes"));
+        }
+        if self.max_input_runs == 0 || self.max_input_runs > DEFAULT_COMPACTION_MAX_INPUT_RUNS {
+            return Err(resource_limit("compaction max_input_runs"));
+        }
+        if self.max_input_bytes == 0 || self.max_input_bytes > MAX_COMPACTION_INPUT_BYTES {
+            return Err(resource_limit("compaction max_input_bytes"));
+        }
+        if self.max_output_rows == 0 || self.max_output_rows > MAX_COMPACTION_OUTPUT_ROWS {
+            return Err(resource_limit("compaction max_output_rows"));
+        }
+        if self.cancellation_check_rows == 0
+            || self.cancellation_check_rows > MAX_COMPACTION_CANCELLATION_CHECK_ROWS
+            || self.cancellation_check_rows < self.journal.max_batch_rows as u64
+        {
+            return Err(resource_limit("compaction cancellation_check_rows"));
         }
         Ok(self)
     }
@@ -321,14 +364,10 @@ fn compact_graph_delta_after_prepare(
         Some(staging.path()),
     )? {
         ProjectStageOutcome::Staged(staged) => {
-            // Pre-publication verification: reconstructed fingerprint and
-            // inventory integrity must match the planned compact state.
+            // Pre-publication verification authenticates the exact bounded
+            // materialization planned above without rebuilding whole-graph maps.
             verify_graph_tree(staging.path(), &inventory)?;
-            let (verify_state, verify_evidence) =
-                reconstruct_graph_state(staging.path(), &inventory, limits.journal)?;
-            if verify_evidence.state_fingerprint != prepared.expected_fingerprint
-                || verify_state.fingerprint() != prepared.expected_fingerprint
-            {
+            if inventory_state_fingerprint(&inventory) != prepared.expected_fingerprint {
                 return Err(corrupt(
                     "compacted generation fingerprint mismatch before CURRENT",
                 ));
@@ -397,8 +436,16 @@ pub fn graph_delta_compaction_status_with_mode(
     let inventory = resolved
         .graph_files_inventory()?
         .ok_or_else(|| validation("CURRENT generation lacks graph/files inventory"))?;
-    let (state, evidence) =
-        reconstruct_graph_state(&resolved.graph_tree_root(), &inventory, limits)?;
+    let materialized = tempfile::tempdir().map_err(|error| {
+        GfError::Storage(format!("create bounded compaction status view: {error}"))
+    })?;
+    let (_, evidence) = crate::graph_delta_journal::materialize_replayed_graph_tree(
+        &resolved.graph_tree_root(),
+        &inventory,
+        materialized.path(),
+        limits,
+    )?;
+    let (materialized_inventory, _) = capture_graph_files(materialized.path())?;
     let run_count = evidence.runs_replayed;
     let run_bytes = evidence.run_bytes_validated;
     let estimated = evidence.estimated_replay_memory_bytes;
@@ -423,7 +470,7 @@ pub fn graph_delta_compaction_status_with_mode(
         run_count,
         run_bytes,
         estimated_replay_memory_bytes: estimated,
-        state_fingerprint: state.fingerprint(),
+        state_fingerprint: inventory_state_fingerprint(&materialized_inventory),
         should_compact: !trigger_reasons.is_empty(),
         trigger_reasons,
     })
@@ -437,16 +484,16 @@ struct PreparedCompaction {
     input_rows: u64,
     output_rows: u64,
     input_bytes: u64,
+    output_bytes: u64,
     spill_bytes: u64,
     peak_memory_bytes: u64,
     expected_fingerprint: [u8; 32],
-    compacted_base: ReconstructedGraphState,
-    suffix_ops: Vec<Vec<GraphDeltaOp>>,
-    suffix_meta: Vec<(Uuid, Uuid)>,
+    materialized: tempfile::TempDir,
+    materialized_inventory: GraphFilesInventory,
 }
 
 fn prepare_compaction(
-    root: &Path,
+    _root: &Path,
     parent: &crate::ResolvedProjectGeneration,
     request: &GraphDeltaCompactionRequest,
     cancel: Option<&AtomicBool>,
@@ -467,6 +514,17 @@ fn prepare_compaction(
             "graph delta compaction requires at least one verified run",
         ));
     }
+    if input_runs > limits.max_input_runs {
+        return Err(resource_limit("compaction aggregate input runs"));
+    }
+    let input_bytes = runs.iter().try_fold(0_u64, |total, run| {
+        total
+            .checked_add(run.bytes.len() as u64)
+            .ok_or_else(|| resource_limit("compaction aggregate input bytes"))
+    })?;
+    if input_bytes > limits.max_input_bytes {
+        return Err(resource_limit("compaction aggregate input bytes"));
+    }
 
     let through = request.through_run_sequence.unwrap_or(input_runs);
     if through == 0 || through > input_runs {
@@ -474,194 +532,136 @@ fn prepare_compaction(
             "graph delta compaction through_run_sequence out of bounds",
         ));
     }
-
-    // Full-chain fingerprint is the publication correctness oracle.
-    let (full_state, full_evidence) =
-        reconstruct_graph_state(&parent_tree, &parent_inventory, limits.journal)?;
-    let expected_fingerprint = full_state.fingerprint();
-    let _ = full_evidence;
-
-    let mut spill = CompactionSpillSession::create(root, request.generation_uuid, limits)?;
-    let mut compacted_base = load_base_state_for_compaction(&parent_tree)?;
-    let mut peak_memory = compacted_base.estimated_memory() as u64;
-    enforce_memory(peak_memory, limits.max_memory_bytes)?;
-
-    let through_usize = usize::try_from(through).map_err(|_| {
-        validation("graph delta compaction through_run_sequence exceeds platform size")
-    })?;
-    let prefix = &runs[..through_usize];
-    let suffix = &runs[through_usize..];
-    check_cancel(cancel)?;
-
-    let prefix_evidence = apply_delta_runs(&mut compacted_base, prefix, limits.journal)?;
-    peak_memory = peak_memory.max(prefix_evidence.estimated_replay_memory_bytes);
-    enforce_memory(peak_memory, limits.max_memory_bytes)?;
-    spill.maybe_spill_state(&compacted_base)?;
-    // Folded operations become base state; clear idempotency map so only
-    // retained suffix ops remain relevant after publication.
-    compacted_base.applied_operations.clear();
-
-    let mut suffix_ops = Vec::with_capacity(suffix.len());
-    let mut suffix_meta = Vec::with_capacity(suffix.len());
-    let mut suffix_state = compacted_base.clone();
-    for run in suffix {
-        check_cancel(cancel)?;
-        let ops: Vec<GraphDeltaOp> = run
-            .records
-            .iter()
-            .map(|record| GraphDeltaOp {
-                operation_uuid: record.operation_uuid,
-                kind: record.kind,
-                payload: record.payload.clone(),
-            })
-            .collect();
-        let evidence = apply_delta_runs(
-            &mut suffix_state,
-            &[GraphDeltaRun {
-                run_sequence: run.run_sequence,
-                run_uuid: run.run_uuid,
-                transaction_uuid: run.transaction_uuid,
-                records: run.records.clone(),
-                bytes: run.bytes.clone(),
-            }],
-            limits.journal,
-        )?;
-        peak_memory = peak_memory.max(evidence.estimated_replay_memory_bytes);
-        enforce_memory(peak_memory, limits.max_memory_bytes)?;
-        spill.maybe_spill_state(&suffix_state)?;
-        suffix_ops.push(ops);
-        suffix_meta.push((run.run_uuid, run.transaction_uuid));
-    }
-
-    if suffix_state.fingerprint() != expected_fingerprint {
-        return Err(corrupt(
-            "compaction prefix/suffix merge fingerprint diverged from full chain",
+    if through != input_runs {
+        return Err(validation(
+            "GF_UNSUPPORTED_PROJECT_FORMAT: bounded v1 compaction requires the full verified delta chain",
         ));
     }
 
-    let input_rows = prefix.iter().map(|run| run.records.len() as u64).sum();
-    let input_bytes = prefix.iter().map(|run| run.bytes.len() as u64).sum();
-    let output_rows = (compacted_base.nodes.len() + compacted_base.edges.len()) as u64;
-    let spill_bytes = spill.bytes_written;
-    spill.cleanup();
-
+    let materialized = tempfile::tempdir().map_err(|error| {
+        GfError::Storage(format!(
+            "create bounded compaction materialization: {error}"
+        ))
+    })?;
+    let (_, replay) = crate::graph_delta_journal::materialize_replayed_graph_tree(
+        &parent_tree,
+        &parent_inventory,
+        materialized.path(),
+        limits.journal,
+    )?;
+    let (materialized_inventory, _) = capture_graph_files(materialized.path())?;
+    let output_bytes = materialized_inventory.total_byte_length;
+    if output_bytes > limits.max_disk_bytes {
+        return Err(resource_limit("compaction staged disk bytes"));
+    }
+    let expected_fingerprint = inventory_state_fingerprint(&materialized_inventory);
+    let input_rows = runs.iter().map(|run| run.records.len() as u64).sum();
+    let output_rows = canonical_topology_rows(
+        materialized.path(),
+        limits.journal.max_batch_rows,
+        limits.cancellation_check_rows,
+        cancel,
+    )?;
+    if output_rows > limits.max_output_rows {
+        return Err(resource_limit("compaction output rows"));
+    }
+    let peak_memory_bytes = replay.estimated_replay_memory_bytes;
+    enforce_memory(peak_memory_bytes, limits.max_memory_bytes)?;
     Ok(PreparedCompaction {
         input_generation_uuid: parent.generation_uuid(),
         input_runs,
         compacted_runs: through,
-        retained_suffix_runs: suffix.len() as u64,
+        retained_suffix_runs: 0,
         input_rows,
         output_rows,
         input_bytes,
-        spill_bytes,
-        peak_memory_bytes: peak_memory,
+        output_bytes,
+        spill_bytes: 0,
+        peak_memory_bytes,
         expected_fingerprint,
-        compacted_base,
-        suffix_ops,
-        suffix_meta,
+        materialized,
+        materialized_inventory,
     })
 }
 
 fn materialize_compacted_workspace(
     workspace: &Path,
     prepared: &PreparedCompaction,
-    limits: &GraphDeltaCompactionLimits,
+    _limits: &GraphDeltaCompactionLimits,
     cancel: Option<&AtomicBool>,
 ) -> Result<(), GfError> {
     check_cancel(cancel)?;
-    let nodes_bytes = encode_canonical_nodes(&prepared.compacted_base);
-
-    let mut edges_by_rel: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (edge_uuid, (src, dst, rel)) in &prepared.compacted_base.edges {
-        let entry = edges_by_rel.entry(rel.clone()).or_default();
-        entry.extend_from_slice(edge_uuid.as_bytes());
-        entry.push(b'|');
-        entry.extend_from_slice(src.as_bytes());
-        entry.push(b'|');
-        entry.extend_from_slice(dst.as_bytes());
-        entry.push(b'\n');
-    }
-
-    let mut owned_files: Vec<(String, Vec<u8>)> =
-        vec![("topology/nodes.parquet".into(), nodes_bytes)];
-    if edges_by_rel.is_empty() {
-        owned_files.push(("topology/edges/_empty.parquet".into(), Vec::new()));
-    } else {
-        for (rel, bytes) in edges_by_rel {
-            owned_files.push((format!("topology/edges/{rel}.parquet"), bytes));
-        }
-    }
-    let file_refs: Vec<(&str, &[u8])> = owned_files
-        .iter()
-        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
-        .collect();
-    stage_base_graph_workspace(workspace, &file_refs, Some(&prepared.compacted_base))?;
-
-    for (index, ops) in prepared.suffix_ops.iter().enumerate() {
-        check_cancel(cancel)?;
-        let sequence = (index as u64).saturating_add(1);
-        let (run_uuid, transaction_uuid) = prepared.suffix_meta[index];
-        let bytes = encode_delta_run(sequence, run_uuid, transaction_uuid, ops, limits.journal)?;
-        let relative = delta_run_relative_path(sequence);
-        let path = workspace.join(&relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| storage("create compacted suffix dir", parent, error))?;
-        }
-        let mut file = File::create(&path)
-            .map_err(|error| storage("create compacted suffix run", &path, error))?;
-        file.write_all(&bytes)
-            .map_err(|error| storage("write compacted suffix run", &path, error))?;
-        file.sync_all()
-            .map_err(|error| storage("flush compacted suffix run", &path, error))?;
-    }
+    crate::graph_files::materialize_graph_tree(
+        prepared.materialized.path(),
+        &prepared.materialized_inventory,
+        workspace,
+    )?;
     Ok(())
 }
 
-fn encode_canonical_nodes(state: &ReconstructedGraphState) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"GFNP\n");
-    for (uuid, types) in &state.nodes {
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        for (index, type_id) in types.iter().enumerate() {
-            if index > 0 {
-                out.push(b',');
-            }
-            out.extend_from_slice(type_id.to_string().as_bytes());
+fn inventory_state_fingerprint(inventory: &GraphFilesInventory) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"graphforge-materialized-graph-tree/1\n");
+    for entry in &inventory.files {
+        if entry.relative_path.starts_with("deltas/") {
+            continue;
         }
-        out.push(b'\n');
+        hasher.update(entry.relative_path.as_bytes());
+        hasher.update(b"|");
+        hasher.update(entry.content_sha256.as_bytes());
+        hasher.update(b"\n");
     }
-    for ((uuid, key), value) in &state.node_properties {
-        out.extend_from_slice(b"P|");
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(key.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(value.as_bytes());
-        out.push(b'\n');
-    }
-    for ((uuid, key), value) in &state.edge_properties {
-        out.extend_from_slice(b"EP|");
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(key.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(value.as_bytes());
-        out.push(b'\n');
-    }
-    out
+    hasher.finalize().into()
 }
 
-fn load_base_state_for_compaction(graph_root: &Path) -> Result<ReconstructedGraphState, GfError> {
-    let marker = graph_root.join(GRAPH_DELTA_DIR).join(".base_state.json");
-    if !marker.exists() {
-        return Ok(ReconstructedGraphState::default());
+fn canonical_topology_rows(
+    root: &Path,
+    batch_rows: usize,
+    cancellation_check_rows: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<u64, GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut paths = vec![root.join("topology/nodes.parquet")];
+    let edges = root.join("topology/edges");
+    if edges.exists() {
+        for entry in fs::read_dir(&edges)
+            .map_err(|error| storage("list compacted edge files", &edges, error))?
+        {
+            let path = entry
+                .map_err(|error| storage("read compacted edge entry", &edges, error))?
+                .path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
+                paths.push(path);
+            }
+        }
     }
-    let bytes =
-        fs::read(&marker).map_err(|error| storage("read base state marker", &marker, error))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| corrupt(format!("invalid base state marker: {error}")))
+    let mut rows = 0_u64;
+    let mut rows_since_cancel = 0_u64;
+    for path in paths {
+        let input =
+            File::open(&path).map_err(|error| storage("open compacted topology", &path, error))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+            .map_err(|error| corrupt(format!("decode compacted topology metadata: {error}")))?
+            .with_batch_size(batch_rows)
+            .build()
+            .map_err(|error| corrupt(format!("open compacted topology reader: {error}")))?;
+        for batch in reader {
+            let batch = batch
+                .map_err(|error| corrupt(format!("read compacted topology batch: {error}")))?;
+            rows = rows
+                .checked_add(batch.num_rows() as u64)
+                .ok_or_else(|| resource_limit("compaction topology rows"))?;
+            rows_since_cancel = rows_since_cancel.saturating_add(batch.num_rows() as u64);
+            if rows_since_cancel >= cancellation_check_rows {
+                check_cancel(cancel)?;
+                rows_since_cancel = 0;
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn report_from_prepared(
@@ -681,7 +681,7 @@ fn report_from_prepared(
         input_rows: prepared.input_rows,
         output_rows: prepared.output_rows,
         input_bytes: prepared.input_bytes,
-        output_bytes: 0,
+        output_bytes: prepared.output_bytes,
         spill_bytes: prepared.spill_bytes,
         peak_memory_bytes: prepared.peak_memory_bytes,
         elapsed_ms,
@@ -701,11 +701,16 @@ fn replay_compaction_receipt(
     let inventory = resolved
         .graph_files_inventory()?
         .ok_or_else(|| corrupt("published compaction generation missing graph inventory"))?;
-    let (state, evidence) = reconstruct_graph_state(
+    let materialized = tempfile::tempdir().map_err(|error| {
+        GfError::Storage(format!("create bounded compaction receipt view: {error}"))
+    })?;
+    let (_, evidence) = crate::graph_delta_journal::materialize_replayed_graph_tree(
         &resolved.graph_tree_root(),
         &inventory,
+        materialized.path(),
         request.limits.journal,
     )?;
+    let (materialized_inventory, _) = capture_graph_files(materialized.path())?;
     let runs = list_delta_runs(&inventory, request.limits.journal)?;
     Ok(GraphDeltaCompactionReport {
         dry_run: false,
@@ -717,102 +722,21 @@ fn replay_compaction_receipt(
         compacted_runs: 0,
         retained_suffix_runs: runs.len() as u64,
         input_rows: evidence.records_seen,
-        output_rows: (state.nodes.len() + state.edges.len()) as u64,
+        output_rows: canonical_topology_rows(
+            materialized.path(),
+            request.limits.journal.max_batch_rows,
+            request.limits.cancellation_check_rows,
+            None,
+        )?,
         input_bytes: evidence.run_bytes_validated,
         output_bytes: inventory.total_byte_length,
         spill_bytes: 0,
         peak_memory_bytes: evidence.estimated_replay_memory_bytes,
         elapsed_ms,
-        state_fingerprint: state.fingerprint(),
+        state_fingerprint: inventory_state_fingerprint(&materialized_inventory),
         publication: Some(publication),
         cleanup: None,
     })
-}
-
-struct CompactionSpillSession {
-    root: PathBuf,
-    bytes_written: u64,
-    max_bytes: u64,
-    run_counter: u64,
-    cleaned: bool,
-    memory_budget: usize,
-}
-
-impl CompactionSpillSession {
-    fn create(
-        project_root: &Path,
-        generation_uuid: Uuid,
-        limits: GraphDeltaCompactionLimits,
-    ) -> Result<Self, GfError> {
-        let root = project_root
-            .join(".spill")
-            .join(GRAPH_DELTA_COMPACTION_SPILL_DIR)
-            .join(generation_uuid.hyphenated().to_string());
-        fs::create_dir_all(&root)
-            .map_err(|error| storage("create compaction spill", &root, error))?;
-        Ok(Self {
-            root,
-            bytes_written: 0,
-            max_bytes: limits.max_spill_bytes,
-            run_counter: 0,
-            cleaned: false,
-            memory_budget: limits.max_memory_bytes,
-        })
-    }
-
-    fn maybe_spill_state(&mut self, state: &ReconstructedGraphState) -> Result<(), GfError> {
-        // Spill a checkpointed snapshot whenever memory is at least half the
-        // budget so peak retained heap stays independent of total graph size
-        // across multi-run merges (fixtures still exercise the spill path).
-        let memory = state.estimated_memory();
-        if memory < self.memory_budget.saturating_add(1) / 2 && self.run_counter > 0 {
-            return Ok(());
-        }
-        if memory < 32 {
-            return Ok(());
-        }
-        let bytes = serde_json::to_vec(state)
-            .map_err(|error| validation(format!("compaction spill encode failed: {error}")))?;
-        self.account_write(bytes.len() as u64)?;
-        let path = self.root.join(format!("state.{}.spill", self.run_counter));
-        self.run_counter = self.run_counter.saturating_add(1);
-        fs::write(&path, &bytes)
-            .map_err(|error| storage("write compaction spill", &path, error))?;
-        // Digest the spill so torn spill files cannot be mistaken for authority.
-        let digest = Sha256::digest(&bytes);
-        let digest_path = PathBuf::from(format!("{}.sha256", path.display()));
-        fs::write(&digest_path, hex_digest(digest.into()))
-            .map_err(|error| storage("write compaction spill digest", &digest_path, error))?;
-        Ok(())
-    }
-
-    fn account_write(&mut self, bytes: u64) -> Result<(), GfError> {
-        self.bytes_written = self.bytes_written.saturating_add(bytes);
-        if self.bytes_written > self.max_bytes {
-            return Err(resource_limit("compaction spill bytes"));
-        }
-        Ok(())
-    }
-
-    fn cleanup(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        self.cleaned = true;
-        let _ = fs::remove_dir_all(&self.root);
-        if let Some(parent) = self.root.parent() {
-            let _ = fs::remove_dir(parent);
-            if let Some(spill_root) = parent.parent() {
-                let _ = fs::remove_dir(spill_root);
-            }
-        }
-    }
-}
-
-impl Drop for CompactionSpillSession {
-    fn drop(&mut self) {
-        self.cleanup();
-    }
 }
 
 fn enforce_memory(peak: u64, max_memory_bytes: usize) -> Result<(), GfError> {
@@ -860,16 +784,6 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn hex_digest(digest: [u8; 32]) -> String {
-    use std::fmt::Write as _;
-    digest
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            let _ = write!(out, "{byte:02x}");
-            out
-        })
-}
-
 fn validation(message: impl Into<String>) -> GfError {
     GfError::Validation(message.into())
 }
@@ -899,6 +813,7 @@ fn storage(action: &str, path: &Path, error: impl std::fmt::Display) -> GfError 
 #[cfg(test)]
 mod crash_oracle_tests {
     use super::*;
+    use crate::GraphDeltaOp;
     use crate::project_fault_oracle::{
         AuthorityClass, PublicationIds, PublicationPhase, default_durable_ids, expected_authority,
         publication_ops, simulate_crash,
@@ -924,15 +839,13 @@ mod crash_oracle_tests {
             }
         }
         let workspace = tempfile::tempdir().unwrap();
-        stage_base_graph_workspace(
+        let mut writer = crate::GraphWriter::open_at(
             workspace.path(),
-            &[
-                ("topology/nodes.parquet", b"nodes"),
-                ("topology/edges.parquet", b"edges"),
-            ],
-            Some(&ReconstructedGraphState::default()),
+            graphforge_core::OntologyMode::Strict,
+            1_700_000_000_000_000,
         )
         .unwrap();
+        writer.flush().unwrap();
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
@@ -990,9 +903,12 @@ mod crash_oracle_tests {
                 operations: vec![GraphDeltaOp {
                     operation_uuid: Uuid::now_v7(),
                     kind: crate::GraphDeltaOpKind::UpsertNode,
-                    payload: crate::GraphDeltaPayload::UpsertNode {
+                    payload: crate::GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                        node_id: 1,
                         type_ids: vec![1],
+                        created_at_micros: 1,
+                        updated_at_micros: 1,
                     },
                 }],
                 limits: GraphDeltaJournalLimits::default(),

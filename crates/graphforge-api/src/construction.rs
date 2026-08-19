@@ -208,6 +208,7 @@ pub(crate) fn prop_literal(value: &PropValue) -> Result<IrLiteral, GfError> {
             value.validate()?;
             Ok(temporal_literal(value))
         }
+        PropValue::Spatial(value) => Ok(IrLiteral::Spatial(value.clone())),
         PropValue::List(values) => values
             .iter()
             .map(prop_literal)
@@ -299,12 +300,65 @@ fn validation(message: impl Into<String>) -> GfError {
 mod tests {
     use super::*;
     use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use graphforge_core::{
+        SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+    };
 
     fn properties() -> HashMap<String, PropValue> {
         HashMap::from([
             ("name".into(), PropValue::Str("Alice".into())),
             ("score".into(), PropValue::Int(7)),
         ])
+    }
+
+    #[test]
+    fn scalar_spatial_node_and_edge_project_after_reopen_with_geoarrow_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let graph = GraphForge::new(Some(path)).unwrap();
+        let location = PropValue::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Epsg4326,
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: None,
+            extension_metadata: None,
+        });
+        let source = graph
+            .add_node(
+                "Place",
+                &HashMap::from([("location".into(), location.clone())]),
+            )
+            .unwrap();
+        let target = graph.add_node("Place", &HashMap::new()).unwrap();
+        graph
+            .add_edge(
+                &source,
+                "ROUTE",
+                &target,
+                &HashMap::from([("location".into(), location)]),
+            )
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(Some(path)).unwrap();
+        for query in [
+            "MATCH (n:Place) WHERE n.location IS NOT NULL RETURN n.location AS location",
+            "MATCH ()-[r:ROUTE]->() RETURN r.location AS location",
+        ] {
+            let result = reopened.execute(query).unwrap();
+            let field = result.schema.field_with_name("location").unwrap();
+            assert_eq!(field.metadata()["ARROW:extension:name"], "geoarrow.point");
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
+            );
+            assert_eq!(
+                result.batches[0].column_by_name("location").unwrap().len(),
+                1
+            );
+        }
     }
 
     #[test]

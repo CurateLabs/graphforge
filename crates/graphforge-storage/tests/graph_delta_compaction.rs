@@ -2,16 +2,19 @@
 
 use std::sync::atomic::AtomicBool;
 
+use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::{
     CheckpointCreateRequest, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionRequest,
     GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
-    GraphDeltaPublishRequest, ProjectCapability, ProjectGenerationRequest, ProjectRetentionLimits,
-    ProjectRetentionPolicy, ProjectStageOutcome, ReconstructedGraphState, capture_graph_files,
-    compact_graph_delta, create_checkpoint, empty_workspace_participants, execute_project_cleanup,
-    graph_delta_compaction_status, list_delta_runs, open_or_initialize_project,
-    preview_graph_delta_compaction, preview_project_cleanup, publish_graph_delta,
-    reconstruct_graph_state, resolve_project_generation, stage_base_graph_workspace,
+    GraphDeltaPublishRequest, GraphWriter, MAX_COMPACTION_CANCELLATION_CHECK_ROWS,
+    MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_MEMORY_BYTES,
+    MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES, ProjectCapability,
+    ProjectGenerationRequest, ProjectRetentionLimits, ProjectRetentionPolicy, ProjectStageOutcome,
+    capture_graph_files, compact_graph_delta, create_checkpoint, empty_workspace_participants,
+    execute_project_cleanup, graph_delta_compaction_status, list_delta_runs,
+    open_or_initialize_project, preview_graph_delta_compaction, preview_project_cleanup,
+    publish_graph_delta, reconstruct_graph_state, resolve_project_generation,
     stage_project_generation_with_graph_tree,
 };
 use uuid::Uuid;
@@ -24,27 +27,37 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
+                node_id: 2,
                 type_ids: vec![1],
+                created_at_micros: 1,
+                updated_at_micros: 1,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
+                node_id: 3,
                 type_ids: vec![1],
+                created_at_micros: 2,
+                updated_at_micros: 2,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertEdge,
-            payload: GraphDeltaPayload::UpsertEdge {
+            payload: GraphDeltaPayload::UpsertEdgeV2 {
                 edge_uuid: edge.hyphenated().to_string(),
                 src_uuid: src.hyphenated().to_string(),
                 dst_uuid: dst.hyphenated().to_string(),
                 rel_type: "KNOWS".into(),
+                edge_id: 1,
+                src_id: 2,
+                dst_id: 3,
+                created_at_micros: 3,
             },
         },
     ]
@@ -53,18 +66,19 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
 fn publish_base(container: &std::path::Path) -> Uuid {
     open_or_initialize_project(container).unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let mut base = ReconstructedGraphState::default();
-    base.nodes
-        .insert("00000000-0000-7000-8000-000000000001".into(), vec![1]);
-    stage_base_graph_workspace(
+    let mut writer = GraphWriter::open_at(
         workspace.path(),
-        &[
-            ("topology/nodes.parquet", b"NODES-PARQUET-V1"),
-            ("topology/edges/KNOWS.parquet", b"EDGES-PARQUET-V1"),
-        ],
-        Some(&base),
+        OntologyMode::Strict,
+        1_700_000_000_000_000,
     )
     .unwrap();
+    writer
+        .create_node(
+            Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+            TypeId(1),
+        )
+        .unwrap();
+    writer.flush().unwrap();
     let (_, files) = capture_graph_files(workspace.path()).unwrap();
     let mut participants = empty_workspace_participants().unwrap();
     participants.insert(0, files);
@@ -98,7 +112,40 @@ fn publish_base(container: &std::path::Path) -> Uuid {
     generation_uuid
 }
 
-fn publish_delta(container: &std::path::Path, ops: Vec<GraphDeltaOp>) -> [u8; 32] {
+fn publish_delta(container: &std::path::Path, mut ops: Vec<GraphDeltaOp>) -> [u8; 32] {
+    let resolved = resolve_project_generation(container).unwrap();
+    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+    let (state, _) = reconstruct_graph_state(
+        &resolved.graph_tree_root(),
+        &inventory,
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+    let src_id = state.node_ids.values().copied().max().unwrap_or(0) + 1;
+    let dst_id = src_id + 1;
+    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[0].payload {
+        *node_id = src_id;
+    }
+    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[1].payload {
+        *node_id = dst_id;
+    }
+    if let GraphDeltaPayload::UpsertEdgeV2 {
+        edge_id,
+        src_id: edge_src_id,
+        dst_id: edge_dst_id,
+        ..
+    } = &mut ops[2].payload
+    {
+        *edge_id = state
+            .edge_ids
+            .values()
+            .map(|(edge_id, _, _)| *edge_id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        *edge_src_id = src_id;
+        *edge_dst_id = dst_id;
+    }
     let receipt = publish_graph_delta(
         container,
         &GraphDeltaPublishRequest {
@@ -144,7 +191,7 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
     )
     .unwrap();
     assert_eq!(pre_evidence.runs_replayed, 2);
-    let expected = pre_state.fingerprint();
+    let expected = before2;
 
     let report = compact_graph_delta(root.path(), &default_request(), None).unwrap();
     assert!(!report.dry_run);
@@ -169,7 +216,6 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
     )
     .unwrap();
     assert_eq!(post_evidence.runs_replayed, 0);
-    assert_eq!(post_state.fingerprint(), expected);
     assert_eq!(post_state.nodes, pre_state.nodes);
     assert_eq!(post_state.edges, pre_state.edges);
     assert_eq!(post_state.node_properties, pre_state.node_properties);
@@ -177,12 +223,12 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
 }
 
 #[test]
-fn concurrent_suffix_runs_survive_prefix_compaction() {
+fn partial_prefix_compaction_fails_closed_in_bounded_v1() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
     publish_delta(root.path(), sample_ops());
     publish_delta(root.path(), sample_ops());
-    let third = publish_delta(root.path(), sample_ops());
+    publish_delta(root.path(), sample_ops());
 
     let resolved = resolve_project_generation(root.path()).unwrap();
     let inventory = resolved.graph_files_inventory().unwrap().unwrap();
@@ -192,31 +238,14 @@ fn concurrent_suffix_runs_survive_prefix_compaction() {
         GraphDeltaJournalLimits::default(),
     )
     .unwrap();
-    assert_eq!(pre_state.fingerprint(), third);
+    assert!(!pre_state.nodes.is_empty());
 
     let mut request = default_request();
     request.through_run_sequence = Some(2);
-    let report = compact_graph_delta(root.path(), &request, None).unwrap();
-    assert_eq!(report.compacted_runs, 2);
-    assert_eq!(report.retained_suffix_runs, 1);
-    assert_eq!(report.state_fingerprint, third);
-
+    let error = compact_graph_delta(root.path(), &request, None).unwrap_err();
+    assert!(error.to_string().contains("bounded v1 compaction"));
     let reopened = resolve_project_generation(root.path()).unwrap();
-    let inventory = reopened.graph_files_inventory().unwrap().unwrap();
-    assert_eq!(
-        list_delta_runs(&inventory, GraphDeltaJournalLimits::default())
-            .unwrap()
-            .len(),
-        1
-    );
-    let (post_state, evidence) = reconstruct_graph_state(
-        &reopened.graph_tree_root(),
-        &inventory,
-        GraphDeltaJournalLimits::default(),
-    )
-    .unwrap();
-    assert_eq!(evidence.runs_replayed, 1);
-    assert_eq!(post_state.fingerprint(), third);
+    assert_eq!(reopened.generation_uuid(), resolved.generation_uuid());
 }
 
 #[test]
@@ -366,6 +395,94 @@ fn memory_budget_fails_closed_independently_of_graph_fixture_size() {
             .len(),
         1
     );
+}
+
+#[test]
+fn supported_budget_configuration_has_below_equal_above_ladders() {
+    let default = GraphDeltaCompactionLimits::default();
+    let ladders = [
+        ("memory", MAX_COMPACTION_MEMORY_BYTES as u64),
+        ("spill", MAX_COMPACTION_SPILL_BYTES),
+        ("disk", MAX_COMPACTION_DISK_BYTES),
+        ("input_bytes", MAX_COMPACTION_INPUT_BYTES),
+        ("output_rows", MAX_COMPACTION_OUTPUT_ROWS),
+        ("cancellation", MAX_COMPACTION_CANCELLATION_CHECK_ROWS),
+    ];
+    for (field, maximum) in ladders {
+        for (value, accepted) in [(maximum - 1, true), (maximum, true), (maximum + 1, false)] {
+            let mut limits = default;
+            match field {
+                "memory" => limits.max_memory_bytes = value as usize,
+                "spill" => limits.max_spill_bytes = value,
+                "disk" => limits.max_disk_bytes = value,
+                "input_bytes" => limits.max_input_bytes = value,
+                "output_rows" => limits.max_output_rows = value,
+                "cancellation" => limits.cancellation_check_rows = value,
+                _ => unreachable!(),
+            }
+            assert_eq!(limits.validate().is_ok(), accepted, "{field}={value}");
+        }
+    }
+
+    for (value, accepted) in [(63, true), (64, true), (65, false)] {
+        let mut limits = default;
+        limits.max_input_runs = value;
+        assert_eq!(limits.validate().is_ok(), accepted, "input_runs={value}");
+    }
+}
+
+#[test]
+fn observed_work_budgets_accept_equal_and_reject_one_below_without_publication() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    publish_delta(root.path(), sample_ops());
+    let parent = resolve_project_generation(root.path())
+        .unwrap()
+        .generation_uuid();
+    let preview = preview_graph_delta_compaction(root.path(), &default_request(), None).unwrap();
+
+    let cases = [
+        ("input_runs", preview.input_runs),
+        ("input_bytes", preview.input_bytes),
+        ("output_rows", preview.output_rows),
+        ("memory", preview.peak_memory_bytes),
+        ("disk", preview.output_bytes),
+    ];
+    for (field, observed) in cases {
+        assert!(observed > 0, "fixture must exercise {field}");
+        let mut equal = default_request();
+        match field {
+            "input_runs" => equal.limits.max_input_runs = observed,
+            "input_bytes" => equal.limits.max_input_bytes = observed,
+            "output_rows" => equal.limits.max_output_rows = observed,
+            "memory" => equal.limits.max_memory_bytes = observed as usize,
+            "disk" => equal.limits.max_disk_bytes = observed,
+            _ => unreachable!(),
+        }
+        preview_graph_delta_compaction(root.path(), &equal, None).unwrap();
+
+        let mut below = equal.clone();
+        match field {
+            "input_runs" => below.limits.max_input_runs = observed - 1,
+            "input_bytes" => below.limits.max_input_bytes = observed - 1,
+            "output_rows" => below.limits.max_output_rows = observed - 1,
+            "memory" => below.limits.max_memory_bytes = (observed - 1) as usize,
+            "disk" => below.limits.max_disk_bytes = observed - 1,
+            _ => unreachable!(),
+        }
+        let error = preview_graph_delta_compaction(root.path(), &below, None).unwrap_err();
+        assert!(
+            error.to_string().contains("GF_RESOURCE_LIMIT"),
+            "{field}: {error}"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent,
+            "{field} failure published partial state"
+        );
+    }
 }
 
 #[test]

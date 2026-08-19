@@ -214,6 +214,8 @@ build_test(
         "//docs/reference:schema_inventory_fixtures",
         "//examples/agent_grounding:notebooks",
         "//tests/features:api_features",
+        "//tests/contracts:geoarrow-interchange-v1.json",
+        "//tests/fixtures:geoarrow_v1",
         "//tests/tck:corpus",
         "//tests/release_workflows:sna_phase2_advisory",
         "//crates/graphforge-cypher:corpus_data",

@@ -596,12 +596,56 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
-            PropValue::Temporal(serde_json::from_value(value.clone()).map_err(|error| {
-                to_napi_err(&GfError::Validation(format!(
-                    "invalid temporal node property: {error}"
-                )))
-            })?)
+            if looks_like_spatial_json(value) {
+                let spatial: graphforge_api::SpatialValue = serde_json::from_value(value.clone())
+                    .map_err(|error| {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid canonical spatial property: {error}"
+                    )))
+                })?;
+                spatial.validate_interchange_profile().map_err(|error| {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid canonical spatial property: {error}"
+                    )))
+                })?;
+                PropValue::Spatial(spatial)
+            } else if looks_like_temporal_json(value) {
+                PropValue::Temporal(serde_json::from_value(value.clone()).map_err(|error| {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid temporal node property: {error}"
+                    )))
+                })?)
+            } else {
+                return Err(to_napi_err(&GfError::Validation(
+                    UNSUPPORTED_PROP_TYPE_MSG.into(),
+                )));
+            }
         }
+    })
+}
+
+fn looks_like_spatial_json(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("spatial_type") || object.contains_key("coordinates")
+    })
+}
+
+fn looks_like_temporal_json(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "date"
+                        | "local_time"
+                        | "offset_time"
+                        | "local_date_time"
+                        | "zoned_date_time"
+                        | "duration"
+                )
+            })
     })
 }
 
@@ -615,8 +659,7 @@ pub(crate) fn props_from_map(
         .collect()
 }
 
-const UNSUPPORTED_PROP_TYPE_MSG: &str =
-    "unsupported node property type (expected null/boolean/number/string/array/temporal object)";
+const UNSUPPORTED_PROP_TYPE_MSG: &str = "unsupported node property type (expected null/boolean/number/string/array/temporal or canonical spatial object)";
 
 /// Convert a JS property bag, raising a real `TypeError` for unsupported values
 /// (functions, symbols, nested plain objects).
@@ -716,13 +759,10 @@ fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
                     format!("failed to read object property: {}", error.reason),
                 )
             })?;
-            json_to_prop_value(&json).map_err(|error| {
-                if is_array {
-                    error
-                } else {
-                    type_error(env, format!("invalid temporal property: {}", error.reason))
-                }
-            })
+            if !is_array && !looks_like_spatial_json(&json) && !looks_like_temporal_json(&json) {
+                return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
+            }
+            json_to_prop_value(&json)
         }
         ValueType::Function
         | ValueType::Symbol

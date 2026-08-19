@@ -152,7 +152,10 @@ There are four CI surfaces for concurrency and durability contracts:
    behavior; the oracle is reusable by recovery, delta, compaction, and final
    certification. Authoritative graph delta runs (#752 / ADR 0019) publish only
    through the same `CURRENT` contract; they never recover by scanning newest
-   logs. Recovery-on-open
+   logs. After CURRENT selects a generation, normal and checkpoint opens verify
+   its inventory and complete GFDR chain, replay canonical Parquet plus typed
+   records inside a private workspace, and publish no partial read view on
+   corruption, unsupported versions, or resource-limit failure. Recovery-on-open
    (`open_or_initialize_project_with_recovery` / facade open) runs bounded
    inspection and idempotent cleanup when locks are free, and defers cleanup
    without blocking a valid `CURRENT` snapshot when a live writer holds them.

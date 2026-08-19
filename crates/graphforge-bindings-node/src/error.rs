@@ -39,7 +39,8 @@ fn error_code(err: &GfError) -> &'static str {
         GfError::Validation(message)
             if is_uuid_parameter_validation(message)
                 || is_bulk_validation(message)
-                || is_ontology_lifecycle_validation(message) =>
+                || is_ontology_lifecycle_validation(message)
+                || is_spatial_validation(message) =>
         {
             "GF_VALIDATION"
         }
@@ -51,6 +52,10 @@ fn error_code(err: &GfError) -> &'static str {
 
 fn is_bulk_validation(message: &str) -> bool {
     message.starts_with("GF_BULK_VALIDATION(")
+}
+
+fn is_spatial_validation(message: &str) -> bool {
+    message.starts_with("invalid canonical spatial property: ")
 }
 
 fn is_ontology_lifecycle_validation(message: &str) -> bool {
@@ -197,6 +202,14 @@ mod tests {
     fn bulk_validation_uses_the_stable_public_code() {
         let message =
             "GF_BULK_VALIDATION(invalid_uuid): bulk node row 0 field \"node_uuid\": invalid UUID";
+        let mapped = to_napi_err(&GfError::Validation(message.into()));
+        assert_eq!(mapped.status, "GF_VALIDATION");
+        assert_eq!(mapped.reason, message);
+    }
+
+    #[test]
+    fn canonical_spatial_validation_uses_the_stable_public_code() {
+        let message = "invalid canonical spatial property: unsupported CRS EPSG:9999";
         let mapped = to_napi_err(&GfError::Validation(message.into()));
         assert_eq!(mapped.status, "GF_VALIDATION");
         assert_eq!(mapped.reason, message);

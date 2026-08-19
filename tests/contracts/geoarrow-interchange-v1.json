@@ -1,0 +1,128 @@
+{
+  "schema": "graphforge.geoarrow-interchange.v1",
+  "rows": { "populated": 0, "null": 1, "batchSizes": [2] },
+  "malformed": {
+    "value": {
+      "spatial_type": { "geometry": "point", "crs": "EPSG:9999" },
+      "coordinates": { "Point": [1.0, 2.0] }
+    },
+    "code": "GF_VALIDATION",
+    "message": "invalid canonical spatial property: preserved-only spatial values require extension_name and extension_metadata"
+  },
+  "cases": [
+    {
+      "name": "point",
+      "geometry": "point",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.point",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": { "Point": [-104.9903, 39.7392] },
+      "flat": [-104.9903, 39.7392]
+    },
+    {
+      "name": "mercator_point",
+      "geometry": "point",
+      "crs": "EPSG:3857",
+      "extensionName": "geoarrow.point",
+      "extensionMetadata": "{\"crs\":\"EPSG:3857\",\"crs_type\":\"authority_code\"}",
+      "coordinates": { "Point": [-11687469.0, 4825942.0] },
+      "flat": [-11687469.0, 4825942.0]
+    },
+    {
+      "name": "preserved_point",
+      "geometry": "point",
+      "crs": "OGC:CRS84",
+      "extensionName": "geoarrow.vendor_point",
+      "extensionMetadata": "{\"crs\":\"OGC:CRS84\",\"crs_type\":\"authority_code\",\"edges\":\"spherical\"}",
+      "coordinates": { "Point": [-104.9903, 39.7392] },
+      "flat": [-104.9903, 39.7392],
+      "preservedOnly": true
+    },
+    {
+      "name": "linestring",
+      "geometry": "line_string",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.linestring",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": {
+        "LineString": [
+          [-105.0, 39.7],
+          [-104.9, 39.8]
+        ]
+      },
+      "flat": [-105.0, 39.7, -104.9, 39.8]
+    },
+    {
+      "name": "polygon",
+      "geometry": "polygon",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.polygon",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": {
+        "Polygon": [
+          [
+            [-105.0, 39.7],
+            [-104.9, 39.7],
+            [-104.9, 39.8],
+            [-105.0, 39.7]
+          ]
+        ]
+      },
+      "flat": [-105.0, 39.7, -104.9, 39.7, -104.9, 39.8, -105.0, 39.7]
+    },
+    {
+      "name": "multipoint",
+      "geometry": "multi_point",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.multipoint",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": {
+        "MultiPoint": [
+          [-105.0, 39.7],
+          [-104.9, 39.8]
+        ]
+      },
+      "flat": [-105.0, 39.7, -104.9, 39.8]
+    },
+    {
+      "name": "multilinestring",
+      "geometry": "multi_line_string",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.multilinestring",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": {
+        "MultiLineString": [
+          [
+            [-105.0, 39.7],
+            [-104.9, 39.8]
+          ],
+          [
+            [-104.8, 39.9],
+            [-104.7, 40.0]
+          ]
+        ]
+      },
+      "flat": [-105.0, 39.7, -104.9, 39.8, -104.8, 39.9, -104.7, 40.0]
+    },
+    {
+      "name": "multipolygon",
+      "geometry": "multi_polygon",
+      "crs": "EPSG:4326",
+      "extensionName": "geoarrow.multipolygon",
+      "extensionMetadata": "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}",
+      "coordinates": {
+        "MultiPolygon": [
+          [
+            [
+              [-105.0, 39.7],
+              [-104.9, 39.7],
+              [-104.9, 39.8],
+              [-105.0, 39.7]
+            ]
+          ]
+        ]
+      },
+      "flat": [-105.0, 39.7, -104.9, 39.7, -104.9, 39.8, -105.0, 39.7]
+    }
+  ]
+}

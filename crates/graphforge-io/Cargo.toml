@@ -8,8 +8,10 @@ license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-graphforge-core = { version = "0.5.2", path = "../graphforge-core" }
-graphforge-storage = { version = "0.5.2", path = "../graphforge-storage" }
+arrow = { workspace = true }
+futures = { workspace = true }
+parquet = { workspace = true }
+tempfile = "3"
 thiserror = { workspace = true }
 
 [lints]

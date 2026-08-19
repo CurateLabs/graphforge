@@ -1,10 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "51fd33865c0866530edac0f1c3e735ba72354774de93966883b5020e1a1655fb",
+  "public_method_digest": "b6951843737bfb46b5f1ac5b439522e1a817471aea8ca6c67c2947e45899f768",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
+      "GraphImportSession": "release-tested",
       "GraphTransaction": "introspection",
       "RepositoryContext": "designed-only",
       "crate": "release-tested",
@@ -700,7 +701,9 @@
         "GraphForge.execute_stream",
         "GraphForge.execute_stream_owned",
         "GraphForge.execute_stream_with_params",
+        "GraphForge.execute_to_arrow_ipc_stream_with_params",
         "GraphForge.execute_to_parquet",
+        "GraphForge.execute_to_parquet_stream_with_params",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
@@ -742,8 +745,49 @@
           "symbol": "execute_to_parquet_roundtrips"
         },
         {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "streaming_parquet_and_ipc_report_progress_and_roundtrip"
+        },
+        {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "cancelled_stream_does_not_publish_destination"
+        },
+        {
           "path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
           "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"
+        }
+      ]
+    },
+    "resumable-import": {
+      "ids": [
+        "GraphForge.begin_import_session",
+        "GraphForge.cleanup_stale_import_sessions",
+        "GraphForge.resume_import_session",
+        "GraphImportSession.abort",
+        "GraphImportSession.append_arrow",
+        "GraphImportSession.checkpoint",
+        "GraphImportSession.commit",
+        "GraphImportSession.register_parquet",
+        "GraphImportSession.status",
+        "GraphImportSession.validate",
+        "GraphImportSession.validate_with_cancellation"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "arrow_session_resumes_stages_and_publishes_one_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "parquet_abort_and_missing_endpoint_preserve_prior_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "cancellation_and_missing_endpoint_are_durable_fail_closed"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts"
         }
       ]
     },
