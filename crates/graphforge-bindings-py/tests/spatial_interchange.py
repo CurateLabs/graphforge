@@ -42,6 +42,7 @@ def check_geoarrow_interchange() -> None:
     table = forge.execute(f"MATCH (n:Geometry) RETURN {projection}")
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
+    assert [batch.num_rows for batch in table.to_batches()] == [2]
     for case in FIXTURE["cases"]:
         field = table.schema.field(case["name"])
         metadata = field.metadata or {}

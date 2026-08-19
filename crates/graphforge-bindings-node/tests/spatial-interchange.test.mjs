@@ -51,6 +51,10 @@ test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
     forge.execute(`MATCH (n:Geometry) RETURN ${projection}`),
   );
   assert.equal(table.numRows, 2);
+  assert.deepEqual(
+    table.batches.map(({ numRows }) => numRows),
+    [2],
+  );
   for (const entry of fixture.cases) {
     const field = table.schema.fields.find(({ name }) => name === entry.name);
     assert.equal(
@@ -76,6 +80,6 @@ test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
         },
       }),
     (error) =>
-      error.code === "ValidationError" && !/coordinate/i.test(error.message),
+      error.code === "GF_VALIDATION" && !/coordinate/i.test(error.message),
   );
 });

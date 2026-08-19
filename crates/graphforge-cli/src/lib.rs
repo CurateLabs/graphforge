@@ -2392,6 +2392,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        assert_eq!(batches.len(), 1);
         assert_eq!(
             batches
                 .iter()
