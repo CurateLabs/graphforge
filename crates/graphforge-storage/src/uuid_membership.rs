@@ -242,9 +242,12 @@ pub fn rebuild_uuid_membership_indexes(
     let limits = limits.validate()?;
     let root = project_dir.join(INDEX_DIR);
     fs::create_dir_all(&root).map_err(storage_err)?;
+    let staging = project_dir
+        .parent()
+        .ok_or_else(|| storage_err("project directory has no staging parent"))?;
     let scratch = tempfile::Builder::new()
-        .prefix("build-")
-        .tempdir_in(&root)
+        .prefix("uuid-membership-build-")
+        .tempdir_in(staging)
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
     let node_runs = scan_to_runs(
@@ -281,8 +284,8 @@ pub fn rebuild_uuid_membership_indexes(
         &mut metrics,
     )?;
     let generation = crate::read_topology_generation(project_dir)?;
-    let nodes = publish_data(&node_tmp, &root, "nodes", generation)?;
-    let edges = publish_data(&edge_tmp, &root, "edges", generation)?;
+    let nodes = publish_data(&node_tmp, &root, staging, "nodes", generation)?;
+    let edges = publish_data(&edge_tmp, &root, staging, "edges", generation)?;
     metrics.node_count = nodes.count;
     metrics.edge_count = edges.count;
     let manifest = Manifest {
@@ -294,7 +297,7 @@ pub fn rebuild_uuid_membership_indexes(
     let mut tmp = tempfile::Builder::new()
         .prefix("manifest-")
         .suffix(".tmp")
-        .tempfile_in(&root)
+        .tempfile_in(staging)
         .map_err(storage_err)?;
     serde_json::to_writer(&mut tmp, &manifest).map_err(storage_err)?;
     tmp.flush().map_err(storage_err)?;
@@ -450,6 +453,7 @@ fn read_record(reader: &mut BufReader<File>) -> Result<Option<[u8; 16]>, GfError
 fn publish_data(
     source: &Path,
     root: &Path,
+    staging: &Path,
     kind: &str,
     generation: u64,
 ) -> Result<FileRecord, GfError> {
@@ -465,14 +469,17 @@ fn publish_data(
         let mut tmp = tempfile::Builder::new()
             .prefix(kind)
             .suffix(".tmp")
-            .tempfile_in(root)
+            .tempfile_in(staging)
             .map_err(storage_err)?;
         let mut input = File::open(source).map_err(storage_err)?;
         std::io::copy(&mut input, &mut tmp).map_err(storage_err)?;
         tmp.flush().map_err(storage_err)?;
         tmp.as_file().sync_all().map_err(storage_err)?;
-        tmp.persist(&destination)
-            .map_err(|e| storage_err(e.error))?;
+        if let Err(error) = tmp.persist(&destination)
+            && !destination.exists()
+        {
+            return Err(storage_err(error.error));
+        }
     }
     Ok(FileRecord {
         name,
@@ -633,11 +640,47 @@ mod tests {
         });
         let scratch = tempfile::Builder::new()
             .prefix("build-crash-")
-            .tempdir_in(dir.path().join(INDEX_DIR))
+            .tempdir_in(dir.path().parent().unwrap())
             .unwrap();
         fs::write(scratch.path().join("nodes-unpublished.uuidx"), [7_u8; 16]).unwrap();
         barrier.wait();
         assert_eq!(reader.join().unwrap(), vec![true]);
         assert!(UuidMembershipIndex::open(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn concurrent_rebuilds_publish_one_authenticated_snapshot() {
+        let (dir, _, _) = fixture();
+        let root = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    rebuild_uuid_membership_indexes(
+                        &root,
+                        UuidIndexBuildLimits {
+                            scan_batch_rows: 1,
+                            run_records: 1,
+                            merge_fan_in: 2,
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        let index = UuidMembershipIndex::open(&root).unwrap();
+        assert_eq!(index.count(UuidIndexKind::Node), 3);
+        assert_eq!(index.count(UuidIndexKind::Edge), 2);
+        let names = fs::read_dir(root.join(INDEX_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(names.iter().all(|name| !name.ends_with(".tmp")));
     }
 }
