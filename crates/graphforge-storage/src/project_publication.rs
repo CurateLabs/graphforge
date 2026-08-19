@@ -2060,14 +2060,19 @@ pub(crate) fn publish_atomic_bytes(
 
     let publish = || -> Result<(), AtomicPublishError> {
         let mut temp = OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&temp_path)?;
+        // Recovery may run in a separately loaded native addon while an
+        // optimistic writer is still staging its journal.  A Rust static is
+        // not an authority across those environments, so the temporary file
+        // itself carries a kernel-visible lease until replacement completes.
+        crate::file_lock::lock_exclusive(&temp)?;
         temp.write_all(bytes)?;
         after_write()?;
         temp.sync_all()?;
         after_sync()?;
-        drop(temp);
         before_replace()?;
 
         // Concurrent same-process replace of one target must not overlap
@@ -2082,7 +2087,7 @@ pub(crate) fn publish_atomic_bytes(
         let directory = crate::filesystem_admission::open_directory_handle(parent)?;
         // Existence is one snapshot; `replace_file` / `install_new_file` verify
         // regular single-link identity on the open handles.
-        match std::fs::symlink_metadata(path) {
+        let result = match std::fs::symlink_metadata(path) {
             Ok(_) => graphforge_filesystem::replace_file(
                 &directory,
                 std::ffi::OsStr::new(&temp_name),
@@ -2098,7 +2103,10 @@ pub(crate) fn publish_atomic_bytes(
                 .map_err(AtomicPublishError::Io)
             }
             Err(error) => Err(AtomicPublishError::Io(error)),
-        }
+        };
+        let unlock = crate::file_lock::unlock(&temp);
+        drop(temp);
+        result.and_then(|()| unlock.map_err(AtomicPublishError::Io))
     };
     let result = publish();
     if result.is_err() {
@@ -2175,14 +2183,32 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
         && digest.len() == 64
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        let path_metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(publication_io)?;
+        if !crate::file_lock::try_lock_exclusive(&file).map_err(publication_io)? {
+            // A live publisher owns this exact temporary inode.  Recognize it
+            // as protocol state, but never delete another environment's work.
+            return Ok(true);
+        }
+        let metadata = file.metadata().map_err(publication_io)?;
         if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || graphforge_filesystem::path_link_count(path).map_err(publication_io)? != 1
+            || graphforge_filesystem::file_link_count(&file).map_err(publication_io)? != 1
+            || graphforge_filesystem::path_identity(path).map_err(publication_io)?
+                != graphforge_filesystem::file_identity(&file).map_err(publication_io)?
         {
+            let _ = crate::file_lock::unlock(&file);
             return Ok(false);
         }
         std::fs::remove_file(path).map_err(publication_io)?;
+        crate::file_lock::unlock(&file).map_err(publication_io)?;
+        drop(file);
         sync_directory(
             path.parent()
                 .expect("atomic-write temporary directory always has a parent"),
@@ -3379,6 +3405,68 @@ mod tests {
             );
         }
         assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn cleanup_preserves_a_kernel_leased_atomic_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+        publish_atomic_bytes(
+            &target,
+            b"published\n",
+            || {
+                let temps = atomic_temp_names(root.path());
+                assert_eq!(temps.len(), 1);
+                let temp = root.path().join(&temps[0]);
+                assert!(cleanup_atomicwrite_temp(&temp).unwrap());
+                assert!(temp.exists(), "live publisher temp must not be removed");
+                Ok(())
+            },
+            || Ok(()),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published\n");
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn cross_process_cleanup_preserves_a_kernel_leased_atomic_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+        publish_atomic_bytes(
+            &target,
+            b"published\n",
+            || {
+                let temps = atomic_temp_names(root.path());
+                assert_eq!(temps.len(), 1);
+                let temp = root.path().join(&temps[0]);
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("project_publication::tests::atomic_temp_cleanup_child")
+                    .arg("--exact")
+                    .env("GRAPHFORGE_ATOMIC_TEMP_CLEANUP_CHILD", &temp)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                assert!(temp.exists(), "child process must preserve live temp");
+                Ok(())
+            },
+            || Ok(()),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published\n");
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn atomic_temp_cleanup_child() {
+        let Ok(path) = std::env::var("GRAPHFORGE_ATOMIC_TEMP_CLEANUP_CHILD") else {
+            return;
+        };
+        let path = Path::new(&path);
+        assert!(cleanup_atomicwrite_temp(path).unwrap());
+        assert!(path.exists(), "leased temp was removed by child process");
     }
 
     fn atomic_temp_names(root: &Path) -> Vec<String> {
