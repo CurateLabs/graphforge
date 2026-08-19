@@ -591,6 +591,30 @@ pub struct GraphDeltaPublicationReceipt {
     pub state_fingerprint: [u8; 32],
 }
 
+/// An owning, validated graph-tree candidate prepared for assembly into one
+/// complete project generation. Preparation never stages or publishes CURRENT.
+pub struct PreparedGraphDelta {
+    workspace: tempfile::TempDir,
+    /// Authenticated `graph/files` participant for the prepared tree.
+    pub files_participant: crate::ProjectParticipant,
+    /// Sequence assigned to the appended run.
+    pub run_sequence: u64,
+    /// Whether all canonical base Parquet digests were preserved.
+    pub preserved_base_parquet_digests: bool,
+    /// Number of unchanged non-delta base files.
+    pub unchanged_base_files: u64,
+    /// Canonical logical fingerprint after replay.
+    pub state_fingerprint: [u8; 32],
+}
+
+impl PreparedGraphDelta {
+    /// Private owning graph-tree path, valid for this value's lifetime.
+    #[must_use]
+    pub fn graph_tree_root(&self) -> &Path {
+        self.workspace.path()
+    }
+}
+
 /// Relative path for run sequence `n` (`1..=MAX`).
 #[must_use]
 pub fn delta_run_relative_path(run_sequence: u64) -> String {
@@ -1197,6 +1221,115 @@ fn bounded_materialized_fingerprint(
     Ok(hasher.finalize().into())
 }
 
+/// Prepare one owning base-plus-run graph tree without staging or publishing it.
+///
+/// # Errors
+/// Fails closed on invalid payloads, corrupt parent inventory, idempotency
+/// conflicts, or journal resource limits.
+pub fn prepare_graph_delta(
+    parent: &crate::ResolvedProjectGeneration,
+    request: &GraphDeltaPublishRequest,
+) -> Result<PreparedGraphDelta, GfError> {
+    for op in &request.operations {
+        if op.payload.expected_kind() != op.kind {
+            return Err(validation(
+                "graph delta operation kind does not match payload",
+            ));
+        }
+    }
+    let parent_inventory = parent
+        .graph_files_inventory()?
+        .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
+    let parent_tree = parent.graph_tree_root();
+    verify_graph_tree(&parent_tree, &parent_inventory)?;
+    let parent_runs = load_verified_delta_runs(&parent_tree, &parent_inventory, request.limits)?;
+    let committed_ops = parent_runs
+        .iter()
+        .flat_map(|run| run.records.iter())
+        .map(|record| (record.operation_uuid, &record.payload))
+        .collect::<BTreeMap<_, _>>();
+    for op in &request.operations {
+        if let Some(prior) = committed_ops.get(&op.operation_uuid) {
+            let message = if *prior == &op.payload {
+                "graph delta operation_uuid already committed"
+            } else {
+                "graph delta operation_uuid reused with different payload"
+            };
+            return Err(idempotency_conflict(message));
+        }
+    }
+    let next_sequence = (parent_runs.len() as u64).saturating_add(1);
+    if next_sequence > request.limits.max_runs {
+        return Err(resource_limit("graph delta runs per generation"));
+    }
+    let run_bytes = encode_delta_run(
+        next_sequence,
+        request.run_uuid,
+        request.transaction_uuid,
+        &request.operations,
+        request.limits,
+    )?;
+    let workspace = tempfile::tempdir().map_err(|error| {
+        GfError::Storage(format!("create graph delta staging directory: {error}"))
+    })?;
+    for entry in &parent_inventory.files {
+        let source = parent_tree.join(&entry.relative_path);
+        let destination = workspace.path().join(&entry.relative_path);
+        if let Some(parent_dir) = destination.parent() {
+            fs::create_dir_all(parent_dir)
+                .map_err(|error| storage("create delta staging parent", parent_dir, error))?;
+        }
+        fs::copy(&source, &destination)
+            .map_err(|error| storage("copy parent graph file", &source, error))?;
+    }
+    let new_path = workspace
+        .path()
+        .join(delta_run_relative_path(next_sequence));
+    if let Some(parent_dir) = new_path.parent() {
+        fs::create_dir_all(parent_dir)
+            .map_err(|error| storage("create deltas directory", parent_dir, error))?;
+    }
+    let mut file =
+        File::create(&new_path).map_err(|error| storage("create delta run", &new_path, error))?;
+    file.write_all(&run_bytes)
+        .map_err(|error| storage("write delta run", &new_path, error))?;
+    file.sync_all()
+        .map_err(|error| storage("flush delta run", &new_path, error))?;
+    let (inventory, files_participant) = capture_graph_files(workspace.path())?;
+    let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory);
+    let parent_base_count = parent_inventory
+        .files
+        .iter()
+        .filter(|entry| !entry.relative_path.starts_with("deltas/"))
+        .filter(|entry| !is_gfdr_path(&entry.relative_path))
+        .count() as u64;
+    let preserved_base_parquet_digests = unchanged_base_files == parent_base_count
+        && parent_inventory
+            .files
+            .iter()
+            .filter(|entry| {
+                Path::new(&entry.relative_path)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
+            })
+            .all(|parent_entry| {
+                inventory.files.iter().any(|child| {
+                    child.relative_path == parent_entry.relative_path
+                        && child.content_sha256 == parent_entry.content_sha256
+                })
+            });
+    let state_fingerprint =
+        bounded_materialized_fingerprint(workspace.path(), &inventory, request.limits)?;
+    Ok(PreparedGraphDelta {
+        workspace,
+        files_participant,
+        run_sequence: next_sequence,
+        preserved_base_parquet_digests,
+        unchanged_base_files,
+        state_fingerprint,
+    })
+}
+
 /// Publish one small-write generation that preserves unchanged base Parquet.
 ///
 /// # Errors
@@ -1281,98 +1414,10 @@ fn publish_graph_delta_after_prepare(
     }
 
     let parent = resolve_project_generation(container_root)?;
-    let parent_inventory = parent
-        .graph_files_inventory()?
-        .ok_or_else(|| validation("parent generation lacks graph/files inventory"))?;
-    let parent_tree = parent.graph_tree_root();
-    verify_graph_tree(&parent_tree, &parent_inventory)?;
-
-    let parent_runs = load_verified_delta_runs(&parent_tree, &parent_inventory, request.limits)?;
-    let mut committed_ops: BTreeMap<Uuid, GraphDeltaPayload> = BTreeMap::new();
-    for run in &parent_runs {
-        for record in &run.records {
-            committed_ops.insert(record.operation_uuid, record.payload.clone());
-        }
-    }
-    for op in &request.operations {
-        if let Some(prior) = committed_ops.get(&op.operation_uuid) {
-            if prior == &op.payload {
-                return Err(idempotency_conflict(
-                    "graph delta operation_uuid already committed",
-                ));
-            }
-            return Err(idempotency_conflict(
-                "graph delta operation_uuid reused with different payload",
-            ));
-        }
-    }
-
-    let next_sequence = (parent_runs.len() as u64).saturating_add(1);
-    if next_sequence > request.limits.max_runs {
-        return Err(resource_limit("graph delta runs per generation"));
-    }
-    let run_bytes = encode_delta_run(
-        next_sequence,
-        request.run_uuid,
-        request.transaction_uuid,
-        &request.operations,
-        request.limits,
-    )?;
-
-    let staging = tempfile::tempdir().map_err(|error| {
-        GfError::Storage(format!("create graph delta staging directory: {error}"))
-    })?;
-    for entry in &parent_inventory.files {
-        let source = parent_tree.join(&entry.relative_path);
-        let destination = staging.path().join(&entry.relative_path);
-        if let Some(parent_dir) = destination.parent() {
-            fs::create_dir_all(parent_dir)
-                .map_err(|error| storage("create delta staging parent", parent_dir, error))?;
-        }
-        fs::copy(&source, &destination)
-            .map_err(|error| storage("copy parent graph file", &source, error))?;
-    }
-    let new_relative = delta_run_relative_path(next_sequence);
-    let new_path = staging.path().join(&new_relative);
-    if let Some(parent_dir) = new_path.parent() {
-        fs::create_dir_all(parent_dir)
-            .map_err(|error| storage("create deltas directory", parent_dir, error))?;
-    }
-    {
-        let mut file = File::create(&new_path)
-            .map_err(|error| storage("create delta run", &new_path, error))?;
-        file.write_all(&run_bytes)
-            .map_err(|error| storage("write delta run", &new_path, error))?;
-        file.sync_all()
-            .map_err(|error| storage("flush delta run", &new_path, error))?;
-    }
-
-    let (inventory, files_participant) = capture_graph_files(staging.path())?;
-    let unchanged_base_files = count_preserved_base_files(&parent_inventory, &inventory);
-    let parent_base_count = parent_inventory
-        .files
-        .iter()
-        .filter(|entry| !entry.relative_path.starts_with("deltas/"))
-        .filter(|entry| !is_gfdr_path(&entry.relative_path))
-        .count() as u64;
-    let preserved_base_parquet_digests = unchanged_base_files == parent_base_count
-        && parent_inventory
-            .files
-            .iter()
-            .filter(|entry| {
-                Path::new(&entry.relative_path)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("parquet"))
-            })
-            .all(|parent_entry| {
-                inventory.files.iter().any(|child| {
-                    child.relative_path == parent_entry.relative_path
-                        && child.content_sha256 == parent_entry.content_sha256
-                })
-            });
+    let prepared = prepare_graph_delta(&parent, request)?;
 
     let mut participants = empty_workspace_participants()?;
-    participants.insert(0, files_participant);
+    participants.insert(0, prepared.files_participant.clone());
     let generation_request = ProjectGenerationRequest {
         transaction_uuid: request.transaction_uuid,
         generation_uuid: request.generation_uuid,
@@ -1388,15 +1433,12 @@ fn publish_graph_delta_after_prepare(
         ],
         participants,
     };
-    let state_fingerprint =
-        bounded_materialized_fingerprint(staging.path(), &inventory, request.limits)?;
-
     before_stage(container_root)?;
     let publication = match stage_project_generation_from_admitted_parent(
         admission,
         parent,
         &generation_request,
-        Some(staging.path()),
+        Some(prepared.graph_tree_root()),
     )? {
         ProjectStageOutcome::Staged(staged) => {
             staged.validate(|_| Ok(()), |_, _| Ok(()))?.publish()?
@@ -1406,10 +1448,10 @@ fn publish_graph_delta_after_prepare(
 
     Ok(GraphDeltaPublicationReceipt {
         publication,
-        run_sequence: next_sequence,
-        preserved_base_parquet_digests,
-        unchanged_base_files,
-        state_fingerprint,
+        run_sequence: prepared.run_sequence,
+        preserved_base_parquet_digests: prepared.preserved_base_parquet_digests,
+        unchanged_base_files: prepared.unchanged_base_files,
+        state_fingerprint: prepared.state_fingerprint,
     })
 }
 
