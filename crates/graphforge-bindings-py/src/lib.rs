@@ -33,8 +33,8 @@ use graphforge_api::{
     ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
     ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
     ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
-    TokenCountClass, WriteContext, validate_embedding_options,
+    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TemporalValue,
+    TextIndexInspection, TokenCountClass, WriteContext, validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -205,7 +205,9 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
             .collect::<PyResult<Vec<_>>>()
             .map(PropValue::List)
     } else if let Ok(dict) = value.cast::<PyDict>() {
-        if !dict.contains("spatial_type")? && !dict.contains("coordinates")? {
+        let is_spatial = dict.contains("spatial_type")? || dict.contains("coordinates")?;
+        let is_temporal = dict.contains("type")?;
+        if !is_spatial && !is_temporal {
             return Err(PyTypeError::new_err(
                 "unsupported node property type (plain nested dictionaries are not properties)",
             ));
@@ -216,23 +218,35 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
                 &GfError::Validation(format!("invalid canonical spatial property: {error}")),
             )
         })?;
-        let spatial: graphforge_api::SpatialValue =
-            serde_json::from_value(json).map_err(|error| {
+        if is_spatial {
+            let spatial: graphforge_api::SpatialValue =
+                serde_json::from_value(json).map_err(|error| {
+                    to_pyerr(
+                        value.py(),
+                        &GfError::Validation(format!(
+                            "invalid canonical spatial property: {error}"
+                        )),
+                    )
+                })?;
+            spatial.validate_interchange_profile().map_err(|error| {
                 to_pyerr(
                     value.py(),
                     &GfError::Validation(format!("invalid canonical spatial property: {error}")),
                 )
             })?;
-        spatial.validate_interchange_profile().map_err(|error| {
-            to_pyerr(
-                value.py(),
-                &GfError::Validation(format!("invalid canonical spatial property: {error}")),
-            )
-        })?;
-        Ok(PropValue::Spatial(spatial))
+            Ok(PropValue::Spatial(spatial))
+        } else {
+            let temporal = serde_json::from_value::<TemporalValue>(json).map_err(|error| {
+                PyTypeError::new_err(format!("invalid temporal property: {error}"))
+            })?;
+            temporal
+                .validate()
+                .map_err(|error| to_pyerr(value.py(), &error))?;
+            Ok(PropValue::Temporal(temporal))
+        }
     } else {
         Err(PyTypeError::new_err(
-            "unsupported node property type (expected None/bool/int/float/str/list/canonical spatial dict)",
+            "unsupported node property type (expected None/bool/int/float/str/list/temporal or canonical spatial dict)",
         ))
     }
 }
@@ -264,7 +278,7 @@ fn py_property_json(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
         Ok(serde_json::Value::Object(object))
     } else {
         Err(PyTypeError::new_err(
-            "canonical spatial properties contain only dict/list/string/number/None values",
+            "structured properties contain only dict/list/string/number/bool/None values",
         ))
     }
 }

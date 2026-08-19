@@ -6,3 +6,8 @@ filegroup(
     name = "geoarrow_v1",
     srcs = glob(["geoarrow-v1/*"]),
 )
+
+filegroup(
+    name = "temporal_v1",
+    srcs = glob(["temporal-v1/*"]),
+)

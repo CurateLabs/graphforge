@@ -29,6 +29,10 @@ _GEOARROW_FIXTURE = [
     "//tests/contracts:geoarrow-interchange-v1.json",
 ]
 
+_TEMPORAL_FIXTURE = [
+    "//tests/contracts:temporal-interchange-v1.json",
+]
+
 # Skill bundle stays at the workspace root (`//:project_skills_bundle`) so
 # `project-skills/` remains a pure distribution tree (#7 packaging contract).
 gf_cargo_build_script(
@@ -73,6 +77,16 @@ gf_rust_binary(
     name = "generate_geoarrow_fixtures",
     srcs = ["examples/generate_geoarrow_fixtures.rs"],
     compile_data = _GEOARROW_FIXTURE,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
+    },
+    deps = _CLI_DEPS + ["@crates//:parquet"],
+)
+
+gf_rust_binary(
+    name = "generate_temporal_fixtures",
+    srcs = ["examples/generate_temporal_fixtures.rs"],
+    compile_data = _TEMPORAL_FIXTURE,
     rustc_env = {
         "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
     },
