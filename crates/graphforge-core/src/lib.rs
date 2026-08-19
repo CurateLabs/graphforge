@@ -330,14 +330,41 @@ impl fmt::Display for ProjectErrorCode {
 // ---------------------------------------------------------------------------
 
 /// Coordinate reference systems certified by GraphForge's spatial v1 profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SpatialCrs {
     /// WGS 84 longitude/latitude in canonical x/y order.
-    #[serde(rename = "EPSG:4326")]
     Epsg4326,
     /// Web Mercator easting/northing in canonical x/y order.
-    #[serde(rename = "EPSG:3857")]
     Epsg3857,
+    /// Standards-valid CRS identifier preserved for interchange only.
+    Preserved(String),
+}
+
+impl serde::Serialize for SpatialCrs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Epsg4326 => "EPSG:4326",
+            Self::Epsg3857 => "EPSG:3857",
+            Self::Preserved(value) => value,
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SpatialCrs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "EPSG:4326" => Self::Epsg4326,
+            "EPSG:3857" => Self::Epsg3857,
+            _ => Self::Preserved(value),
+        })
+    }
 }
 
 /// Homogeneous geometry kinds in GraphForge's spatial v1 profile.
@@ -359,7 +386,7 @@ pub enum SpatialGeometryType {
 }
 
 /// Complete homogeneous spatial property type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SpatialType {
     /// Homogeneous geometry kind.
     pub geometry: SpatialGeometryType,
@@ -391,6 +418,46 @@ pub struct SpatialValue {
     pub spatial_type: SpatialType,
     /// Coordinates matching `spatial_type.geometry`.
     pub coordinates: SpatialCoordinates,
+    /// Original extension name when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_name: Option<String>,
+    /// Original extension metadata JSON when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_metadata: Option<String>,
+}
+
+impl SpatialValue {
+    /// Whether this value is preserved for interchange but not certified for computation.
+    #[must_use]
+    pub fn is_preserved_only(&self) -> bool {
+        matches!(self.spatial_type.crs, SpatialCrs::Preserved(_))
+            || self.extension_name.is_some()
+            || self.extension_metadata.is_some()
+    }
+
+    /// Validate the explicit envelope required for preserved-only values.
+    pub fn validate_interchange_profile(&self) -> Result<(), &'static str> {
+        if !self.is_preserved_only() {
+            return Ok(());
+        }
+        let (Some(name), Some(metadata)) = (&self.extension_name, &self.extension_metadata) else {
+            return Err(
+                "preserved-only spatial values require extension_name and extension_metadata",
+            );
+        };
+        if name.is_empty() {
+            return Err("preserved-only spatial extension_name must not be empty");
+        }
+        let trimmed = metadata.trim();
+        let valid_metadata = trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && trimmed.contains("\"crs\"")
+            && trimmed.contains(':');
+        if !valid_metadata {
+            return Err("preserved-only spatial extension_metadata must contain a CRS");
+        }
+        Ok(())
+    }
 }
 
 /// A graph property value.

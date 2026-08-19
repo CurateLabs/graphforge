@@ -276,6 +276,8 @@ mod tests {
                 crs: SpatialCrs::Epsg4326,
             },
             coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: None,
+            extension_metadata: None,
         });
         let source = graph
             .add_node(
