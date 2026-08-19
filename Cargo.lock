@@ -2164,6 +2164,7 @@ dependencies = [
  "graphforge-core",
  "graphforge-cypher",
  "graphforge-exec",
+ "graphforge-io",
  "graphforge-ir",
  "graphforge-knowledge",
  "graphforge-ontology",
@@ -2296,8 +2297,10 @@ dependencies = [
 name = "graphforge-io"
 version = "0.5.2"
 dependencies = [
- "graphforge-core",
- "graphforge-storage",
+ "arrow",
+ "futures",
+ "parquet",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
