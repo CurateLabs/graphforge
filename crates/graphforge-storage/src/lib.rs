@@ -43,11 +43,11 @@ pub use graph_delta_journal::{
     GraphDeltaPayload, GraphDeltaPublicationReceipt, GraphDeltaPublishRequest,
     GraphDeltaReplayEvidence, GraphDeltaRun, MAX_GRAPH_DELTA_PAYLOAD_BYTES,
     MAX_GRAPH_DELTA_RECORDS_PER_RUN, MAX_GRAPH_DELTA_REPLAY_MEMORY_BYTES,
-    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, ReconstructedGraphState, apply_delta_runs,
-    decode_delta_run, decode_graph_delta_value, delta_run_relative_path, encode_delta_run,
-    encode_graph_delta_value, list_delta_runs, load_verified_delta_runs,
-    materialize_replayed_graph_tree, publish_graph_delta, publish_graph_delta_with_mode,
-    reconstruct_graph_state, stage_base_graph_workspace,
+    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, PreparedGraphDelta, ReconstructedGraphState,
+    apply_delta_runs, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
+    encode_delta_run, encode_graph_delta_value, list_delta_runs, load_verified_delta_runs,
+    materialize_replayed_graph_tree, prepare_graph_delta, publish_graph_delta,
+    publish_graph_delta_with_mode, reconstruct_graph_state, stage_base_graph_workspace,
 };
 
 pub mod graph_delta_compaction;
