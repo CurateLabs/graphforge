@@ -1240,9 +1240,12 @@ fn validate_semantics(m: &Manifest, limits: PortableV2Limits) -> Result<(), Port
             ));
         }
         "ontology-only"
-            if m.components
-                .iter()
-                .any(|component| component.kind != "ontology") =>
+            if m.components.iter().any(|component| {
+                !matches!(
+                    component.kind.as_str(),
+                    "ontology" | "schema" | "compatibility"
+                )
+            }) =>
         {
             return Err(PortableV2Error::new(
                 PortableV2ErrorCode::Incompatible,
