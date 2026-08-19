@@ -13632,6 +13632,34 @@ mod tests {
         ExprLowerer::new(arena, None, var_map)
     }
 
+    #[test]
+    fn distance_rejects_preserved_only_spatial_literals_explicitly() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+
+        let mut arena = ExprArena::new();
+        let preserved = arena.push(IrExpr::Literal(IrLiteral::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: Some("geoarrow.vendor_point".into()),
+            extension_metadata: Some("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}".into()),
+        })));
+        let distance = arena.push(IrExpr::FunctionCall {
+            name: "distance".into(),
+            args: vec![preserved, preserved],
+        });
+        let vars = VarMap::new();
+        let error = make_lowerer(&arena, &vars).lower(distance).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid argument type: distance() does not compute preserved-only CRS values"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Conservative operand type-check (#956, InvalidArgumentType)
     // -----------------------------------------------------------------------
