@@ -610,7 +610,8 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 })?;
                 PropValue::Spatial(spatial)
             } else if looks_like_temporal_json(value) {
-                let temporal: graphforge_api::TemporalValue = serde_json::from_value(value.clone())
+                let normalized = normalize_temporal_json_numbers(value.clone())?;
+                let temporal: graphforge_api::TemporalValue = serde_json::from_value(normalized)
                     .map_err(|error| {
                         to_napi_err(&GfError::Validation(format!(
                             "invalid temporal node property: {error}"
@@ -651,6 +652,41 @@ fn looks_like_temporal_json(value: &serde_json::Value) -> bool {
                 )
             })
     })
+}
+
+fn normalize_temporal_json_numbers(value: serde_json::Value) -> Result<serde_json::Value> {
+    const MAX_SAFE_JS_INTEGER: f64 = 9_007_199_254_740_991.0;
+    match value {
+        serde_json::Value::Number(number) if number.is_f64() => {
+            let value = number.as_f64().ok_or_else(|| {
+                to_napi_err(&GfError::Validation("invalid temporal number".into()))
+            })?;
+            if !value.is_finite()
+                || value.fract() != 0.0
+                || !(-MAX_SAFE_JS_INTEGER..=MAX_SAFE_JS_INTEGER).contains(&value)
+            {
+                return Err(to_napi_err(&GfError::Validation(
+                    "temporal numeric fields must be finite signed integers".into(),
+                )));
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "finite integral f64 range is checked above"
+            )]
+            Ok(serde_json::Value::Number((value as i64).into()))
+        }
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(normalize_temporal_json_numbers)
+            .collect::<Result<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| Ok((key, normalize_temporal_json_numbers(value)?)))
+            .collect::<Result<serde_json::Map<_, _>>>()
+            .map(serde_json::Value::Object),
+        value => Ok(value),
+    }
 }
 
 pub(crate) fn props_from_map(

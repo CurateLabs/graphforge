@@ -25,9 +25,9 @@ def check_temporal_interchange() -> None:
     assert isinstance(table, pa.Table)
     assert table.num_rows == 2
     for case in FIXTURE["cases"]:
-        values = table.column(case["name"]).to_pylist()
-        assert values[0] is not None
-        assert values[1] is None
+        values = table.column(case["name"])
+        assert values[0].is_valid
+        assert not values[1].is_valid
     try:
         forge.add_node(
             "Temporal",
@@ -45,7 +45,7 @@ def check_published_fixtures() -> None:
         ipc_table = ipc.open_stream(source).read_all()
     parquet_table = pq.read_table(fixture_dir / "canonical.parquet")
     assert ipc_table.schema == parquet_table.schema
-    assert ipc_table.to_pylist() == parquet_table.to_pylist()
+    assert ipc_table.equals(parquet_table)
 
 
 if __name__ == "__main__":
