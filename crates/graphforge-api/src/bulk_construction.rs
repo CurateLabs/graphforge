@@ -361,8 +361,20 @@ impl GraphForge {
         validate_partition_schemas(BulkInputKind::Node, &NODE_REQUIRED, batches)?;
         let mut existing = BTreeSet::new();
         if reject_existing {
-            existing = existing_node_uuids(self)?;
-            existing.extend(existing_edge_uuids(self)?);
+            let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
+            let mut index = open_membership_index(self, BulkInputKind::Node)?;
+            existing = indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Node,
+                BulkInputKind::Node,
+            )?;
+            existing.extend(indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Edge,
+                BulkInputKind::Node,
+            )?);
         }
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
@@ -471,8 +483,20 @@ impl GraphForge {
             )?);
         }
 
-        let mut existing = existing_node_uuids(self)?;
-        existing.extend(existing_edge_uuids(self)?);
+        let candidates = normalized.identities().collect::<BTreeSet<_>>();
+        let mut index = open_membership_index(self, BulkInputKind::Node)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Node,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Node,
+        )?);
         if normalized
             .rows
             .iter()
@@ -621,13 +645,13 @@ impl GraphForge {
             ));
         }
         validate_partition_schemas(BulkInputKind::Edge, &EDGE_REQUIRED, batches)?;
-        let mut known_nodes = existing_node_uuids(self)?;
+        let endpoint_candidates = candidate_endpoint_uuids(batches)?;
+        let edge_candidates = reject_existing
+            .then(|| candidate_uuids(batches, BulkInputKind::Edge, "edge_uuid"))
+            .transpose()?;
+        let (mut known_nodes, existing_edges) =
+            existing_edge_context(self, &endpoint_candidates, edge_candidates.as_ref())?;
         known_nodes.extend(same_request_nodes.identities());
-        let existing_edges = if reject_existing {
-            existing_edge_uuids(self)?
-        } else {
-            BTreeSet::new()
-        };
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
         let mut ordinal = 0_u64;
@@ -751,7 +775,24 @@ impl GraphForge {
             )?);
         }
 
-        let existing = existing_edge_uuids(self)?;
+        let candidates = normalized
+            .rows
+            .iter()
+            .map(|row| row.edge_uuid)
+            .collect::<BTreeSet<_>>();
+        let mut index = open_membership_index(self, BulkInputKind::Edge)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Edge,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Edge,
+        )?);
         if let Some(row) = normalized
             .rows
             .iter()
@@ -1662,57 +1703,156 @@ fn generated_uuid(operation_uuid: OperationId, kind: BulkInputKind, ordinal: u64
     Uuid::from_bytes(bytes)
 }
 
-fn existing_node_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let batches = graphforge_storage::read_nodes(&graph.dir).map_err(|error| {
-        contract_error(
-            BulkInputKind::Node,
-            BulkValidationReason::ProjectState,
-            &error.to_string(),
-        )
-    })?;
-    collect_existing_uuids(
-        batches,
-        BulkInputKind::Node,
-        "node_uuid",
-        "persisted node UUID is malformed",
-    )
-}
-
-fn existing_edge_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let batches =
-        graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode).map_err(|error| {
+fn open_membership_index(
+    graph: &GraphForge,
+    input_kind: BulkInputKind,
+) -> Result<
+    std::sync::MutexGuard<'_, Option<graphforge_storage::UuidMembershipIndex>>,
+    BulkValidationError,
+> {
+    let current_generation =
+        graphforge_storage::read_topology_generation(&graph.dir).map_err(|error| {
             contract_error(
-                BulkInputKind::Edge,
+                input_kind,
                 BulkValidationReason::ProjectState,
                 &error.to_string(),
             )
         })?;
-    collect_existing_uuids(
-        batches,
-        BulkInputKind::Edge,
-        "edge_uuid",
-        "persisted edge UUID is malformed",
-    )
+    let mut cached = graph.uuid_membership_index.lock().map_err(|error| {
+        contract_error(
+            input_kind,
+            BulkValidationReason::ProjectState,
+            &error.to_string(),
+        )
+    })?;
+    if cached
+        .as_ref()
+        .is_some_and(|index| index.topology_generation() != current_generation)
+    {
+        *cached = None;
+    }
+    if !graphforge_storage::uuid_membership_index_present(&graph.dir) {
+        let has_nodes = graph.dir.join("topology/nodes.parquet").exists();
+        let has_edges = std::fs::read_dir(graph.dir.join("topology/edges"))
+            .ok()
+            .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));
+        if has_nodes || has_edges {
+            return Err(contract_error(
+                input_kind,
+                BulkValidationReason::ProjectState,
+                "UUID membership index is missing; run the bounded storage rebuild before ingest",
+            ));
+        }
+        return Ok(cached);
+    }
+    if cached.is_none() {
+        *cached = Some(
+            graphforge_storage::UuidMembershipIndex::open(&graph.dir).map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })?,
+        );
+    }
+    Ok(cached)
 }
 
-fn collect_existing_uuids(
-    batches: Vec<RecordBatch>,
+fn existing_edge_context(
+    graph: &GraphForge,
+    endpoint_candidates: &BTreeSet<Uuid>,
+    edge_candidates: Option<&BTreeSet<Uuid>>,
+) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), BulkValidationError> {
+    let mut index = open_membership_index(graph, BulkInputKind::Edge)?;
+    let known_nodes = indexed_existing(
+        index.as_mut(),
+        endpoint_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?;
+    let Some(edge_candidates) = edge_candidates else {
+        return Ok((known_nodes, BTreeSet::new()));
+    };
+    let mut existing = indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Edge,
+        BulkInputKind::Edge,
+    )?;
+    existing.extend(indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?);
+    Ok((known_nodes, existing))
+}
+
+fn indexed_existing(
+    index: Option<&mut graphforge_storage::UuidMembershipIndex>,
+    candidates: &BTreeSet<Uuid>,
+    index_kind: graphforge_storage::UuidIndexKind,
+    input_kind: BulkInputKind,
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let Some(index) = index else {
+        return Ok(BTreeSet::new());
+    };
+    let requested = candidates.iter().copied().collect::<Vec<_>>();
+    let (found, _) = index.probe(index_kind, &requested).map_err(|error| {
+        contract_error(
+            input_kind,
+            BulkValidationReason::ProjectState,
+            &error.to_string(),
+        )
+    })?;
+    Ok(requested
+        .into_iter()
+        .zip(found)
+        .filter_map(|(uuid, present)| present.then_some(uuid))
+        .collect())
+}
+
+fn candidate_uuids(
+    batches: &[RecordBatch],
     kind: BulkInputKind,
     field: &str,
-    malformed_message: &str,
 ) -> Result<BTreeSet<Uuid>, BulkValidationError> {
     let mut values = BTreeSet::new();
     for batch in batches {
-        let uuids = uuid_column(&batch, kind, field)?;
+        let uuids = uuid_column(batch, kind, field)?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
-                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                    contract_error(kind, BulkValidationReason::ProjectState, malformed_message)
+                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|error| {
+                    contract_error(
+                        kind,
+                        BulkValidationReason::SchemaMismatch,
+                        &error.to_string(),
+                    )
                 })?);
             }
         }
     }
     Ok(values)
+}
+
+fn candidate_endpoint_uuids(
+    batches: &[RecordBatch],
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let mut values = candidate_uuids(batches, BulkInputKind::Edge, "source_uuid")?;
+    values.extend(candidate_uuids(
+        batches,
+        BulkInputKind::Edge,
+        "target_uuid",
+    )?);
+    Ok(values)
+}
+
+#[cfg(test)]
+fn indexed_uuid_count(graph: &GraphForge, kind: graphforge_storage::UuidIndexKind) -> u64 {
+    graphforge_storage::UuidMembershipIndex::open(&graph.dir)
+        .expect("published graph has an authenticated UUID membership index")
+        .count(kind)
 }
 
 fn register_existing_endpoints(
@@ -1721,29 +1861,34 @@ fn register_existing_endpoints(
     endpoints: &BTreeSet<Uuid>,
 ) -> Result<(), super::GfError> {
     let mut unresolved = endpoints.clone();
-    for batch in graphforge_storage::read_nodes(dir).map_err(|error| {
-        super::GfError::Storage(format!("failed to read node topology: {error}"))
-    })? {
+    graphforge_storage::visit_nodes_batched(dir, 8_192, |batch| {
         let uuids = batch
             .column_by_name("node_uuid")
             .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
             .ok_or_else(|| {
-                super::GfError::Storage("node topology has malformed UUID column".into())
+                datafusion::error::DataFusionError::Execution(
+                    "node topology has malformed UUID column".into(),
+                )
             })?;
         let ids = batch
             .column_by_name("node_id")
             .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
             .ok_or_else(|| {
-                super::GfError::Storage("node topology has malformed ID column".into())
+                datafusion::error::DataFusionError::Execution(
+                    "node topology has malformed ID column".into(),
+                )
             })?;
         for row in 0..batch.num_rows() {
-            let uuid = Uuid::from_slice(uuids.value(row))
-                .map_err(|error| super::GfError::Storage(error.to_string()))?;
+            let uuid = Uuid::from_slice(uuids.value(row)).map_err(|error| {
+                datafusion::error::DataFusionError::Execution(error.to_string())
+            })?;
             if unresolved.remove(&uuid) {
                 writer.register_existing_node(uuid, ids.value(row));
             }
         }
-    }
+        Ok(!unresolved.is_empty())
+    })
+    .map_err(|error| super::GfError::Storage(format!("failed to read node topology: {error}")))?;
     if unresolved.is_empty() {
         Ok(())
     } else {
@@ -3501,7 +3646,10 @@ mod tests {
             })
         ));
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
     }
 
     #[test]
@@ -3540,7 +3688,10 @@ mod tests {
             *reopened.current_generation_uuid.lock().unwrap(),
             generation
         );
-        assert_eq!(existing_node_uuids(&reopened).unwrap().len(), 2);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Node),
+            2
+        );
 
         let changed = node_batch(&[uuid(924)], &["Person"], &[Some("Changed")]);
         let error = reopened
@@ -3553,7 +3704,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_node_uuids(&reopened).unwrap().len(), 2);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Node),
+            2
+        );
     }
 
     #[test]
@@ -3626,7 +3780,10 @@ mod tests {
         drop(graph);
 
         let reopened = GraphForge::new(path.to_str()).unwrap();
-        assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 256);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+            256
+        );
         assert_eq!(
             reopened
                 .execute("MATCH ()-[r:KNOWS]->() RETURN r.weight")
@@ -3637,6 +3794,19 @@ mod tests {
                 .sum::<usize>(),
             256
         );
+        let node_collision =
+            edge_batch(&[node_ids[31]], &["KNOWS"], &[node_ids[0]], &[node_ids[1]]);
+        let collision = reopened
+            .publish_bulk_edges(operation(934), &[node_collision])
+            .unwrap_err();
+        assert!(matches!(
+            collision,
+            BulkEdgePublicationError::Validation(BulkValidationError {
+                kind: BulkInputKind::Edge,
+                reason: BulkValidationReason::IdentityConflict,
+                ..
+            })
+        ));
         let replay = reopened
             .publish_bulk_edges(operation(932), std::slice::from_ref(&batch))
             .unwrap();
@@ -3661,7 +3831,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 256);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+            256
+        );
     }
 
     #[test]
@@ -3697,7 +3870,10 @@ mod tests {
             })
         ));
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
         assert_eq!(
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
@@ -3720,7 +3896,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
         assert_eq!(
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
@@ -3829,9 +4008,15 @@ mod tests {
         if expect_committed {
             assert_ne!(durable, parent);
             assert_eq!(visible, durable);
-            assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 1);
+            assert_eq!(
+                indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+                1
+            );
             let reopened = GraphForge::new(Some(&root)).unwrap();
-            assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 1);
+            assert_eq!(
+                indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+                1
+            );
             assert_eq!(
                 graph.runtime_catalog.lock().unwrap().to_record_batch(),
                 reopened.runtime_catalog.lock().unwrap().to_record_batch()
@@ -3839,7 +4024,10 @@ mod tests {
         } else {
             assert_eq!(durable, parent);
             assert_eq!(visible, parent);
-            assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+            assert_eq!(
+                indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+                0
+            );
             assert_eq!(
                 graph.runtime_catalog.lock().unwrap().to_record_batch(),
                 prior_catalog
