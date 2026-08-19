@@ -2,17 +2,17 @@
 
 use std::sync::atomic::AtomicBool;
 
+use graphforge_core::{OntologyMode, TypeId};
 use graphforge_storage::{
     CheckpointCreateRequest, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionRequest,
     GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
-    GraphDeltaPublishRequest, ProjectCapability, ProjectGenerationRequest, ProjectRetentionLimits,
-    ProjectRetentionPolicy, ProjectStageOutcome, ReconstructedGraphState, capture_graph_files,
+    GraphDeltaPublishRequest, GraphWriter, ProjectCapability, ProjectGenerationRequest,
+    ProjectRetentionLimits, ProjectRetentionPolicy, ProjectStageOutcome, capture_graph_files,
     compact_graph_delta, create_checkpoint, empty_workspace_participants, execute_project_cleanup,
     graph_delta_compaction_status, list_delta_runs, open_or_initialize_project,
     preview_graph_delta_compaction, preview_project_cleanup, publish_graph_delta,
-    reconstruct_graph_state, resolve_project_generation, stage_base_graph_workspace,
-    stage_project_generation_with_graph_tree,
+    reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
 };
 use uuid::Uuid;
 
@@ -24,27 +24,37 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
+                node_id: 1,
                 type_ids: vec![1],
+                created_at_micros: 1,
+                updated_at_micros: 1,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
+                node_id: 2,
                 type_ids: vec![1],
+                created_at_micros: 2,
+                updated_at_micros: 2,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertEdge,
-            payload: GraphDeltaPayload::UpsertEdge {
+            payload: GraphDeltaPayload::UpsertEdgeV2 {
                 edge_uuid: edge.hyphenated().to_string(),
                 src_uuid: src.hyphenated().to_string(),
                 dst_uuid: dst.hyphenated().to_string(),
                 rel_type: "KNOWS".into(),
+                edge_id: 1,
+                src_id: 1,
+                dst_id: 2,
+                created_at_micros: 3,
             },
         },
     ]
@@ -53,18 +63,19 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
 fn publish_base(container: &std::path::Path) -> Uuid {
     open_or_initialize_project(container).unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let mut base = ReconstructedGraphState::default();
-    base.nodes
-        .insert("00000000-0000-7000-8000-000000000001".into(), vec![1]);
-    stage_base_graph_workspace(
+    let mut writer = GraphWriter::open_at(
         workspace.path(),
-        &[
-            ("topology/nodes.parquet", b"NODES-PARQUET-V1"),
-            ("topology/edges/KNOWS.parquet", b"EDGES-PARQUET-V1"),
-        ],
-        Some(&base),
+        OntologyMode::Strict,
+        1_700_000_000_000_000,
     )
     .unwrap();
+    writer
+        .create_node(
+            Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap(),
+            TypeId(1),
+        )
+        .unwrap();
+    writer.flush().unwrap();
     let (_, files) = capture_graph_files(workspace.path()).unwrap();
     let mut participants = empty_workspace_participants().unwrap();
     participants.insert(0, files);

@@ -7,7 +7,6 @@
 //! reclaims subsumed inputs only via the shared retention reachability oracle
 //! (#751). Derived `indexes/adjacency/deltas/` remain unrelated.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,9 +18,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::graph_delta_journal::{
-    GRAPH_DELTA_DIR, GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaRun, ReconstructedGraphState,
+    GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaRun, ReconstructedGraphState,
     apply_delta_runs, delta_run_relative_path, encode_delta_run, list_delta_runs,
-    load_verified_delta_runs, reconstruct_graph_state, stage_base_graph_workspace,
+    load_verified_delta_runs, reconstruct_graph_state,
 };
 use crate::graph_files::{capture_graph_files, verify_graph_tree};
 use crate::project_generation::resolve_project_generation;
@@ -569,33 +568,7 @@ fn materialize_compacted_workspace(
     cancel: Option<&AtomicBool>,
 ) -> Result<(), GfError> {
     check_cancel(cancel)?;
-    let nodes_bytes = encode_canonical_nodes(&prepared.compacted_base);
-
-    let mut edges_by_rel: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (edge_uuid, (src, dst, rel)) in &prepared.compacted_base.edges {
-        let entry = edges_by_rel.entry(rel.clone()).or_default();
-        entry.extend_from_slice(edge_uuid.as_bytes());
-        entry.push(b'|');
-        entry.extend_from_slice(src.as_bytes());
-        entry.push(b'|');
-        entry.extend_from_slice(dst.as_bytes());
-        entry.push(b'\n');
-    }
-
-    let mut owned_files: Vec<(String, Vec<u8>)> =
-        vec![("topology/nodes.parquet".into(), nodes_bytes)];
-    if edges_by_rel.is_empty() {
-        owned_files.push(("topology/edges/_empty.parquet".into(), Vec::new()));
-    } else {
-        for (rel, bytes) in edges_by_rel {
-            owned_files.push((format!("topology/edges/{rel}.parquet"), bytes));
-        }
-    }
-    let file_refs: Vec<(&str, &[u8])> = owned_files
-        .iter()
-        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
-        .collect();
-    stage_base_graph_workspace(workspace, &file_refs, Some(&prepared.compacted_base))?;
+    crate::writer::write_reconstructed_graph(workspace, &prepared.compacted_base)?;
 
     for (index, ops) in prepared.suffix_ops.iter().enumerate() {
         check_cancel(cancel)?;
@@ -618,50 +591,8 @@ fn materialize_compacted_workspace(
     Ok(())
 }
 
-fn encode_canonical_nodes(state: &ReconstructedGraphState) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"GFNP\n");
-    for (uuid, types) in &state.nodes {
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        for (index, type_id) in types.iter().enumerate() {
-            if index > 0 {
-                out.push(b',');
-            }
-            out.extend_from_slice(type_id.to_string().as_bytes());
-        }
-        out.push(b'\n');
-    }
-    for ((uuid, key), value) in &state.node_properties {
-        out.extend_from_slice(b"P|");
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(key.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(value.as_bytes());
-        out.push(b'\n');
-    }
-    for ((uuid, key), value) in &state.edge_properties {
-        out.extend_from_slice(b"EP|");
-        out.extend_from_slice(uuid.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(key.as_bytes());
-        out.push(b'|');
-        out.extend_from_slice(value.as_bytes());
-        out.push(b'\n');
-    }
-    out
-}
-
 fn load_base_state_for_compaction(graph_root: &Path) -> Result<ReconstructedGraphState, GfError> {
-    let marker = graph_root.join(GRAPH_DELTA_DIR).join(".base_state.json");
-    if !marker.exists() {
-        return Ok(ReconstructedGraphState::default());
-    }
-    let bytes =
-        fs::read(&marker).map_err(|error| storage("read base state marker", &marker, error))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| corrupt(format!("invalid base state marker: {error}")))
+    crate::graph_delta_journal::load_base_state(graph_root)
 }
 
 fn report_from_prepared(
@@ -924,7 +855,7 @@ mod crash_oracle_tests {
             }
         }
         let workspace = tempfile::tempdir().unwrap();
-        stage_base_graph_workspace(
+        crate::graph_delta_journal::stage_base_graph_workspace(
             workspace.path(),
             &[
                 ("topology/nodes.parquet", b"nodes"),
@@ -990,9 +921,12 @@ mod crash_oracle_tests {
                 operations: vec![GraphDeltaOp {
                     operation_uuid: Uuid::now_v7(),
                     kind: crate::GraphDeltaOpKind::UpsertNode,
-                    payload: crate::GraphDeltaPayload::UpsertNode {
+                    payload: crate::GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                        node_id: 1,
                         type_ids: vec![1],
+                        created_at_micros: 1,
+                        updated_at_micros: 1,
                     },
                 }],
                 limits: GraphDeltaJournalLimits::default(),

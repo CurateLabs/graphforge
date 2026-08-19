@@ -148,6 +148,212 @@ struct EdgePropRow {
     props: HashMap<String, IrLiteral>,
 }
 
+type TypedPropertyRow = (String, [u8; 16], HashMap<String, IrLiteral>);
+type ReconstructedEdge<'a> = (&'a String, &'a (String, String, String));
+
+/// Materialize a verified base-plus-GFDR logical state as canonical Parquet in
+/// a private read workspace. The committed generation remains unchanged.
+#[allow(clippy::too_many_lines)] // One canonical writer keeps topology and properties atomic.
+pub(crate) fn write_reconstructed_graph(
+    dir: &Path,
+    state: &crate::graph_delta_journal::ReconstructedGraphState,
+) -> Result<(), GfError> {
+    let topology = dir.join("topology");
+    let edges_dir = topology.join("edges");
+    for path in [
+        topology.join("nodes.parquet"),
+        edges_dir.clone(),
+        dir.join("properties"),
+        dir.join("edge_properties"),
+    ] {
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|error| io_err(&error))?;
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(|error| io_err(&error))?;
+        }
+    }
+    fs::create_dir_all(&edges_dir).map_err(|error| io_err(&error))?;
+
+    let mut nodes: Vec<_> = state.nodes.iter().collect();
+    nodes.sort_by_key(|(uuid, _)| state.node_ids.get(*uuid).copied().unwrap_or(u64::MAX));
+    let uuids = fixed_uuid_array(nodes.iter().map(|(uuid, _)| uuid.as_str()))?;
+    let node_ids = UInt64Array::from(
+        nodes
+            .iter()
+            .map(|(uuid, _)| {
+                state.node_ids.get(*uuid).copied().ok_or_else(|| {
+                    pq_err(format!(
+                        "reconstructed node {uuid} is missing its surrogate id"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let primary_types = UInt32Array::from(
+        nodes
+            .iter()
+            .map(|(_, labels)| labels.first().copied().unwrap_or(u32::MAX))
+            .collect::<Vec<_>>(),
+    );
+    let nullable_label_sets =
+        arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
+            nodes
+                .iter()
+                .map(|(_, labels)| Some(labels.iter().copied().map(Some))),
+        );
+    let label_sets = arrow::array::ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt32, false)),
+        nullable_label_sets.offsets().clone(),
+        nullable_label_sets.values().clone(),
+        None,
+    );
+    let node_timestamps = nodes
+        .iter()
+        .map(|(uuid, _)| {
+            state.node_timestamps.get(*uuid).copied().ok_or_else(|| {
+                pq_err(format!(
+                    "reconstructed node {uuid} is missing its timestamps"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let created = TimestampMicrosecondArray::from(
+        node_timestamps
+            .iter()
+            .map(|timestamps| timestamps.0)
+            .collect::<Vec<_>>(),
+    )
+    .with_timezone_opt(Some(Arc::from("UTC")));
+    let updated = TimestampMicrosecondArray::from(
+        node_timestamps
+            .iter()
+            .map(|timestamps| timestamps.1)
+            .collect::<Vec<_>>(),
+    )
+    .with_timezone_opt(Some(Arc::from("UTC")));
+    let node_batch = RecordBatch::try_new(
+        TOPOLOGY_NODES_SCHEMA.clone(),
+        vec![
+            Arc::new(uuids),
+            Arc::new(node_ids),
+            Arc::new(primary_types),
+            Arc::new(label_sets),
+            Arc::new(created),
+            Arc::new(updated),
+        ],
+    )
+    .map_err(pq_err)?;
+    write_parquet_batch(&topology.join("nodes.parquet"), &node_batch)?;
+
+    let mut by_relation: std::collections::BTreeMap<&str, Vec<ReconstructedEdge<'_>>> =
+        std::collections::BTreeMap::new();
+    for (edge_uuid, edge) in &state.edges {
+        by_relation
+            .entry(&edge.2)
+            .or_default()
+            .push((edge_uuid, edge));
+    }
+    for (relation, mut edges) in by_relation {
+        edges.sort_by_key(|(uuid, _)| state.edge_ids.get(*uuid).map_or(u64::MAX, |ids| ids.0));
+        let edge_uuids = fixed_uuid_array(edges.iter().map(|(uuid, _)| uuid.as_str()))?;
+        let src_uuids = fixed_uuid_array(edges.iter().map(|(_, edge)| edge.0.as_str()))?;
+        let dst_uuids = fixed_uuid_array(edges.iter().map(|(_, edge)| edge.1.as_str()))?;
+        let ids: Vec<_> = edges
+            .iter()
+            .map(|(uuid, _)| {
+                state.edge_ids.get(*uuid).copied().ok_or_else(|| {
+                    pq_err(format!(
+                        "reconstructed edge {uuid} is missing its surrogate ids"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let created = TimestampMicrosecondArray::from(
+            edges
+                .iter()
+                .map(|(uuid, _)| {
+                    state.edge_created_at.get(*uuid).copied().ok_or_else(|| {
+                        pq_err(format!(
+                            "reconstructed edge {uuid} is missing its timestamp"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .with_timezone_opt(Some(Arc::from("UTC")));
+        let batch = RecordBatch::try_new(
+            TYPED_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(edge_uuids),
+                Arc::new(src_uuids),
+                Arc::new(dst_uuids),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(created),
+            ],
+        )
+        .map_err(pq_err)?;
+        write_parquet_batch(&edges_dir.join(format!("{relation}.parquet")), &batch)?;
+    }
+
+    let mut property_writer = GraphWriter::open_at(dir, OntologyMode::Strict, 0)?;
+    for ((uuid, key), encoded) in &state.node_properties {
+        let uuid = uuid::Uuid::parse_str(uuid).map_err(pq_err)?;
+        let value: IrLiteral = serde_json::from_str(encoded).map_err(pq_err)?;
+        let stem = state
+            .node_property_stems
+            .get(&(uuid.hyphenated().to_string(), key.clone()))
+            .ok_or_else(|| pq_err("reconstructed node property is missing its routing stem"))?;
+        property_writer.set_properties(&uuid, Some(stem), HashMap::from([(key.clone(), value)]))?;
+    }
+    for ((uuid, key), encoded) in &state.edge_properties {
+        let uuid = uuid::Uuid::parse_str(uuid).map_err(pq_err)?;
+        let value: IrLiteral = serde_json::from_str(encoded).map_err(pq_err)?;
+        let relation = state
+            .edge_property_stems
+            .get(&(uuid.hyphenated().to_string(), key.clone()))
+            .ok_or_else(|| pq_err("reconstructed edge property is missing its routing stem"))?;
+        property_writer.set_edge_properties(
+            &uuid,
+            Some(relation),
+            HashMap::from([(key.clone(), value)]),
+        )?;
+    }
+    property_writer.flush()
+}
+
+fn fixed_uuid_array<'a>(
+    values: impl Iterator<Item = &'a str>,
+) -> Result<FixedSizeBinaryArray, GfError> {
+    let values = values
+        .map(|value| {
+            uuid::Uuid::parse_str(value)
+                .map(|uuid| uuid.into_bytes().to_vec())
+                .map_err(pq_err)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    FixedSizeBinaryArray::try_from_iter(values.into_iter()).map_err(pq_err)
+}
+
+fn write_parquet_batch(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+    }
+    let file = fs::File::create(path).map_err(|error| io_err(&error))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).map_err(pq_err)?;
+    writer.write(batch).map_err(pq_err)?;
+    writer.close().map_err(pq_err)?;
+    Ok(())
+}
+
 /// Shared accessor over a buffered property row so the dynamic-schema inference
 /// (column ordering + type coercion) works identically for node properties
 /// (keyed by `node_uuid`) and edge properties (keyed by `edge_uuid`).
@@ -1633,6 +1839,36 @@ fn decode_edge_property_rows(batches: &[RecordBatch]) -> Result<Vec<EdgePropRow>
         })?;
     }
     Ok(out)
+}
+
+/// Decode every persisted node-property row while retaining its canonical
+/// [`IrLiteral`] type. This is the bounded base decoder used by authoritative
+/// graph-delta replay; callers must apply their own aggregate replay budget.
+pub(crate) fn read_all_node_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+    let mut rows = Vec::new();
+    for stem in crate::catalog::list_property_stems(dir) {
+        let batches = crate::catalog::read_properties(dir, &stem).map_err(pq_err)?;
+        rows.extend(
+            decode_property_rows(&batches)?
+                .into_iter()
+                .map(|row| (stem.clone(), row.node_uuid, row.props)),
+        );
+    }
+    Ok(rows)
+}
+
+/// Edge-property analogue of [`read_all_node_properties`].
+pub(crate) fn read_all_edge_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+    let mut rows = Vec::new();
+    for stem in crate::catalog::list_edge_property_stems(dir) {
+        let batches = crate::catalog::read_edge_properties(dir, &stem).map_err(pq_err)?;
+        rows.extend(
+            decode_edge_property_rows(&batches)?
+                .into_iter()
+                .map(|row| (stem.clone(), row.edge_uuid, row.props)),
+        );
+    }
+    Ok(rows)
 }
 
 /// Read the non-null property keys currently stored for one entity.

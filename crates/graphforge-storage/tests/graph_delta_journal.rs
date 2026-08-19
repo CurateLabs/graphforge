@@ -1,15 +1,19 @@
 //! Integration tests for the authoritative graph delta journal (#752).
 
+use std::collections::HashMap;
 use std::fs;
 
+use graphforge_core::{OntologyMode, TypeId};
+use graphforge_ir::IrLiteral;
 use graphforge_storage::{
     GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION, GraphDeltaJournalLimits, GraphDeltaOp,
     GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest, GraphFileEntry, GraphFileRole,
-    GraphFilesInventory, ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-    ReconstructedGraphState, capture_graph_files, decode_delta_run, delta_run_relative_path,
-    empty_workspace_participants, encode_delta_run, list_delta_runs, open_or_initialize_project,
-    publish_graph_delta, reconstruct_graph_state, resolve_project_generation,
-    stage_base_graph_workspace, stage_project_generation_with_graph_tree,
+    GraphFilesInventory, GraphWriter, ProjectCapability, ProjectGenerationRequest,
+    ProjectStageOutcome, capture_graph_files, decode_delta_run, decode_graph_delta_value,
+    delta_run_relative_path, empty_workspace_participants, encode_delta_run,
+    encode_graph_delta_value, list_delta_runs, materialize_replayed_graph_tree,
+    open_or_initialize_project, publish_graph_delta, read_edges, read_nodes, read_properties,
+    reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
 };
 use uuid::Uuid;
 
@@ -21,47 +25,85 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
+                node_id: 3,
                 type_ids: vec![1],
+                created_at_micros: 1_700_000_000_000_001,
+                updated_at_micros: 1_700_000_000_000_001,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertNode,
-            payload: GraphDeltaPayload::UpsertNode {
+            payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
+                node_id: 4,
                 type_ids: vec![1],
+                created_at_micros: 1_700_000_000_000_002,
+                updated_at_micros: 1_700_000_000_000_002,
             },
         },
         GraphDeltaOp {
             operation_uuid: Uuid::now_v7(),
             kind: GraphDeltaOpKind::UpsertEdge,
-            payload: GraphDeltaPayload::UpsertEdge {
+            payload: GraphDeltaPayload::UpsertEdgeV2 {
                 edge_uuid: edge.hyphenated().to_string(),
                 src_uuid: src.hyphenated().to_string(),
                 dst_uuid: dst.hyphenated().to_string(),
                 rel_type: "KNOWS".into(),
+                edge_id: 2,
+                src_id: 3,
+                dst_id: 4,
+                created_at_micros: 1_700_000_000_000_003,
+            },
+        },
+        GraphDeltaOp {
+            operation_uuid: Uuid::now_v7(),
+            kind: GraphDeltaOpKind::SetNodeProperty,
+            payload: GraphDeltaPayload::SetNodeProperty {
+                node_uuid: src.hyphenated().to_string(),
+                property_stem: "_untyped".into(),
+                key: "rank".into(),
+                value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
             },
         },
     ]
 }
 
-fn publish_base(container: &std::path::Path, parquet_a: &[u8], parquet_b: &[u8]) -> Uuid {
+fn publish_base(container: &std::path::Path) -> Uuid {
     open_or_initialize_project(container).unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let mut base = ReconstructedGraphState::default();
-    base.nodes
-        .insert("00000000-0000-7000-8000-000000000001".into(), vec![1]);
-    stage_base_graph_workspace(
+    let first = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
+    let second = Uuid::parse_str("00000000-0000-7000-8000-000000000002").unwrap();
+    let edge = Uuid::parse_str("00000000-0000-7000-8000-000000000003").unwrap();
+    let mut writer = GraphWriter::open_at(
         workspace.path(),
-        &[
-            ("topology/nodes.parquet", parquet_a),
-            ("topology/edges/KNOWS.parquet", parquet_b),
-        ],
-        Some(&base),
+        OntologyMode::Strict,
+        1_700_000_000_000_000,
     )
     .unwrap();
+    writer.create_node(first, TypeId(1)).unwrap();
+    writer.create_node(second, TypeId(1)).unwrap();
+    writer.create_edge(edge, "KNOWS", &first, &second).unwrap();
+    writer
+        .set_properties(
+            &first,
+            Some("Person"),
+            HashMap::from([
+                ("score".into(), IrLiteral::Int(42)),
+                ("active".into(), IrLiteral::Bool(true)),
+            ]),
+        )
+        .unwrap();
+    writer
+        .set_edge_properties(
+            &edge,
+            Some("KNOWS"),
+            HashMap::from([("weight".into(), IrLiteral::Float(0.5))]),
+        )
+        .unwrap();
+    writer.flush().unwrap();
     let (_, files) = capture_graph_files(workspace.path()).unwrap();
     let mut participants = empty_workspace_participants().unwrap();
     participants.insert(0, files);
@@ -113,6 +155,34 @@ fn encode_decode_round_trip_and_golden_magic() {
 }
 
 #[test]
+fn typed_property_values_round_trip_and_legacy_strings_are_rejected() {
+    let values = [
+        IrLiteral::Bool(true),
+        IrLiteral::Int(i64::MAX),
+        IrLiteral::Float(f64::NAN),
+        IrLiteral::Str("not reinterpreted".into()),
+        IrLiteral::Uuid(*Uuid::now_v7().as_bytes()),
+        IrLiteral::DateTime(1_700_000_000_000_000),
+        IrLiteral::List(vec![IrLiteral::Int(1), IrLiteral::Str("two".into())]),
+    ];
+    for value in values {
+        let encoded = encode_graph_delta_value(&value).unwrap();
+        let decoded = decode_graph_delta_value(&encoded).unwrap();
+        if matches!(value, IrLiteral::Float(number) if number.is_nan()) {
+            assert!(matches!(decoded, IrLiteral::Float(number) if number.is_nan()));
+        } else {
+            assert_eq!(decoded, value);
+        }
+    }
+    assert_eq!(
+        decode_graph_delta_value("prototype-string")
+            .unwrap_err()
+            .code(),
+        "GF_UNSUPPORTED_PROJECT_FORMAT"
+    );
+}
+
+#[test]
 fn torn_truncated_reordered_and_checksum_invalid_fail_closed() {
     let ops = sample_ops();
     let mut bytes = encode_delta_run(
@@ -146,7 +216,7 @@ fn torn_truncated_reordered_and_checksum_invalid_fail_closed() {
 #[test]
 fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     let root = tempfile::tempdir().unwrap();
-    let _base = publish_base(root.path(), b"NODES-PARQUET-V1", b"EDGES-PARQUET-V1");
+    let _base = publish_base(root.path());
     let parent = resolve_project_generation(root.path()).unwrap();
     let parent_inventory = parent.graph_files_inventory().unwrap().unwrap();
     let parent_nodes_digest = parent_inventory
@@ -159,7 +229,7 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
 
     let ops = sample_ops();
     let edge_uuid = match &ops[2].payload {
-        GraphDeltaPayload::UpsertEdge { edge_uuid, .. } => edge_uuid.clone(),
+        GraphDeltaPayload::UpsertEdgeV2 { edge_uuid, .. } => edge_uuid.clone(),
         _ => unreachable!(),
     };
     let receipt = publish_graph_delta(
@@ -196,12 +266,51 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     assert_eq!(evidence.runs_replayed, 1);
     assert!(state.edges.contains_key(&edge_uuid));
     assert_eq!(state.fingerprint(), receipt.state_fingerprint);
+
+    let view = tempfile::tempdir().unwrap();
+    let (_open, replay) = materialize_replayed_graph_tree(
+        &reopened.graph_tree_root(),
+        &inventory,
+        view.path(),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(replay.runs_replayed, 1);
+    assert_eq!(
+        read_nodes(view.path())
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        4
+    );
+    assert_eq!(
+        read_edges(view.path(), "KNOWS", OntologyMode::Strict)
+            .unwrap()
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>(),
+        2
+    );
+    assert_eq!(
+        ["Person", "_untyped"]
+            .into_iter()
+            .map(|stem| {
+                read_properties(view.path(), stem)
+                    .unwrap()
+                    .iter()
+                    .map(arrow::record_batch::RecordBatch::num_rows)
+                    .sum::<usize>()
+            })
+            .sum::<usize>(),
+        3
+    );
 }
 
 #[test]
 fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     let root = tempfile::tempdir().unwrap();
-    publish_base(root.path(), b"N", b"E");
+    publish_base(root.path());
     let ops = sample_ops();
     let transaction_uuid = Uuid::now_v7();
     let generation_uuid = Uuid::now_v7();
@@ -223,7 +332,7 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
     );
 
     let mut conflicting = ops;
-    if let GraphDeltaPayload::UpsertEdge { rel_type, .. } = &mut conflicting[2].payload {
+    if let GraphDeltaPayload::UpsertEdgeV2 { rel_type, .. } = &mut conflicting[2].payload {
         *rel_type = "OTHER".into();
     }
     let err = publish_graph_delta(
@@ -243,7 +352,7 @@ fn exact_retry_transaction_is_idempotent_and_conflict_is_typed() {
 #[test]
 fn missing_run_referenced_by_inventory_fails_closed() {
     let root = tempfile::tempdir().unwrap();
-    publish_base(root.path(), b"N", b"E");
+    publish_base(root.path());
     publish_graph_delta(
         root.path(),
         &GraphDeltaPublishRequest {
@@ -275,7 +384,7 @@ fn resource_limits_reject_tiny_run_accumulation() {
         ..GraphDeltaJournalLimits::default()
     };
     let root = tempfile::tempdir().unwrap();
-    publish_base(root.path(), b"N", b"E");
+    publish_base(root.path());
     publish_graph_delta(
         root.path(),
         &GraphDeltaPublishRequest {
@@ -304,7 +413,7 @@ fn resource_limits_reject_tiny_run_accumulation() {
 #[test]
 fn legacy_v1_project_without_deltas_remains_readable() {
     let root = tempfile::tempdir().unwrap();
-    publish_base(root.path(), b"LEGACY", b"BASE");
+    publish_base(root.path());
     let resolved = resolve_project_generation(root.path()).unwrap();
     let inventory = resolved.graph_files_inventory().unwrap().unwrap();
     assert!(
@@ -324,6 +433,23 @@ fn legacy_v1_project_without_deltas_remains_readable() {
             .nodes
             .contains_key("00000000-0000-7000-8000-000000000001")
     );
+    assert_eq!(
+        decode_graph_delta_value(
+            state
+                .node_properties
+                .get(&(
+                    "00000000-0000-7000-8000-000000000001".into(),
+                    "score".into()
+                ))
+                .unwrap()
+        )
+        .unwrap(),
+        IrLiteral::Int(42)
+    );
+    assert_eq!(state.node_ids.len(), 2);
+    assert_eq!(state.node_timestamps.len(), 2);
+    assert_eq!(state.edge_ids.len(), 1);
+    assert_eq!(state.edge_created_at.len(), 1);
 }
 
 #[test]
