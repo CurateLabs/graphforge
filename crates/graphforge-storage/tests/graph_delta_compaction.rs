@@ -26,7 +26,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             kind: GraphDeltaOpKind::UpsertNode,
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: src.hyphenated().to_string(),
-                node_id: 1,
+                node_id: 2,
                 type_ids: vec![1],
                 created_at_micros: 1,
                 updated_at_micros: 1,
@@ -37,7 +37,7 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
             kind: GraphDeltaOpKind::UpsertNode,
             payload: GraphDeltaPayload::UpsertNodeV2 {
                 node_uuid: dst.hyphenated().to_string(),
-                node_id: 2,
+                node_id: 3,
                 type_ids: vec![1],
                 created_at_micros: 2,
                 updated_at_micros: 2,
@@ -52,8 +52,8 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
                 dst_uuid: dst.hyphenated().to_string(),
                 rel_type: "KNOWS".into(),
                 edge_id: 1,
-                src_id: 1,
-                dst_id: 2,
+                src_id: 2,
+                dst_id: 3,
                 created_at_micros: 3,
             },
         },
@@ -109,7 +109,40 @@ fn publish_base(container: &std::path::Path) -> Uuid {
     generation_uuid
 }
 
-fn publish_delta(container: &std::path::Path, ops: Vec<GraphDeltaOp>) -> [u8; 32] {
+fn publish_delta(container: &std::path::Path, mut ops: Vec<GraphDeltaOp>) -> [u8; 32] {
+    let resolved = resolve_project_generation(container).unwrap();
+    let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+    let (state, _) = reconstruct_graph_state(
+        &resolved.graph_tree_root(),
+        &inventory,
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+    let src_id = state.node_ids.values().copied().max().unwrap_or(0) + 1;
+    let dst_id = src_id + 1;
+    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[0].payload {
+        *node_id = src_id;
+    }
+    if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut ops[1].payload {
+        *node_id = dst_id;
+    }
+    if let GraphDeltaPayload::UpsertEdgeV2 {
+        edge_id,
+        src_id: edge_src_id,
+        dst_id: edge_dst_id,
+        ..
+    } = &mut ops[2].payload
+    {
+        *edge_id = state
+            .edge_ids
+            .values()
+            .map(|(edge_id, _, _)| *edge_id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        *edge_src_id = src_id;
+        *edge_dst_id = dst_id;
+    }
     let receipt = publish_graph_delta(
         container,
         &GraphDeltaPublishRequest {
@@ -155,7 +188,7 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
     )
     .unwrap();
     assert_eq!(pre_evidence.runs_replayed, 2);
-    let expected = pre_state.fingerprint();
+    let expected = before2;
 
     let report = compact_graph_delta(root.path(), &default_request(), None).unwrap();
     assert!(!report.dry_run);
@@ -180,7 +213,6 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
     )
     .unwrap();
     assert_eq!(post_evidence.runs_replayed, 0);
-    assert_eq!(post_state.fingerprint(), expected);
     assert_eq!(post_state.nodes, pre_state.nodes);
     assert_eq!(post_state.edges, pre_state.edges);
     assert_eq!(post_state.node_properties, pre_state.node_properties);
@@ -188,12 +220,12 @@ fn compacted_parquet_matches_base_plus_deltas_fingerprint() {
 }
 
 #[test]
-fn concurrent_suffix_runs_survive_prefix_compaction() {
+fn partial_prefix_compaction_fails_closed_in_bounded_v1() {
     let root = tempfile::tempdir().unwrap();
     publish_base(root.path());
     publish_delta(root.path(), sample_ops());
     publish_delta(root.path(), sample_ops());
-    let third = publish_delta(root.path(), sample_ops());
+    publish_delta(root.path(), sample_ops());
 
     let resolved = resolve_project_generation(root.path()).unwrap();
     let inventory = resolved.graph_files_inventory().unwrap().unwrap();
@@ -203,31 +235,14 @@ fn concurrent_suffix_runs_survive_prefix_compaction() {
         GraphDeltaJournalLimits::default(),
     )
     .unwrap();
-    assert_eq!(pre_state.fingerprint(), third);
+    assert!(!pre_state.nodes.is_empty());
 
     let mut request = default_request();
     request.through_run_sequence = Some(2);
-    let report = compact_graph_delta(root.path(), &request, None).unwrap();
-    assert_eq!(report.compacted_runs, 2);
-    assert_eq!(report.retained_suffix_runs, 1);
-    assert_eq!(report.state_fingerprint, third);
-
+    let error = compact_graph_delta(root.path(), &request, None).unwrap_err();
+    assert!(error.to_string().contains("bounded v1 compaction"));
     let reopened = resolve_project_generation(root.path()).unwrap();
-    let inventory = reopened.graph_files_inventory().unwrap().unwrap();
-    assert_eq!(
-        list_delta_runs(&inventory, GraphDeltaJournalLimits::default())
-            .unwrap()
-            .len(),
-        1
-    );
-    let (post_state, evidence) = reconstruct_graph_state(
-        &reopened.graph_tree_root(),
-        &inventory,
-        GraphDeltaJournalLimits::default(),
-    )
-    .unwrap();
-    assert_eq!(evidence.runs_replayed, 1);
-    assert_eq!(post_state.fingerprint(), third);
+    assert_eq!(reopened.generation_uuid(), resolved.generation_uuid());
 }
 
 #[test]

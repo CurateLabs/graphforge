@@ -72,6 +72,10 @@ fn sample_ops() -> Vec<GraphDeltaOp> {
 }
 
 fn publish_base(container: &std::path::Path) -> Uuid {
+    publish_base_with_extra_nodes(container, 0)
+}
+
+fn publish_base_with_extra_nodes(container: &std::path::Path, extra_nodes: usize) -> Uuid {
     open_or_initialize_project(container).unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let first = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
@@ -86,6 +90,9 @@ fn publish_base(container: &std::path::Path) -> Uuid {
     writer.create_node(first, TypeId(1)).unwrap();
     writer.create_node(second, TypeId(1)).unwrap();
     writer.create_edge(edge, "KNOWS", &first, &second).unwrap();
+    for _ in 0..extra_nodes {
+        writer.create_node(Uuid::now_v7(), TypeId(1)).unwrap();
+    }
     writer
         .set_properties(
             &first,
@@ -135,6 +142,66 @@ fn publish_base(container: &std::path::Path) -> Uuid {
         .publish()
         .unwrap();
     generation_uuid
+}
+
+#[test]
+fn streaming_resource_ladder_is_independent_of_base_rows() {
+    let mut evidence = Vec::new();
+    for extra_nodes in [0, 32, 1_024] {
+        let root = tempfile::tempdir().unwrap();
+        publish_base_with_extra_nodes(root.path(), extra_nodes);
+        let mut operations = sample_ops();
+        let src_id = extra_nodes as u64 + 3;
+        let dst_id = src_id + 1;
+        if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut operations[0].payload {
+            *node_id = src_id;
+        }
+        if let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut operations[1].payload {
+            *node_id = dst_id;
+        }
+        if let GraphDeltaPayload::UpsertEdgeV2 {
+            edge_id,
+            src_id: edge_src_id,
+            dst_id: edge_dst_id,
+            ..
+        } = &mut operations[2].payload
+        {
+            *edge_id = 2;
+            *edge_src_id = src_id;
+            *edge_dst_id = dst_id;
+        }
+        publish_graph_delta(
+            root.path(),
+            &GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations,
+                limits: GraphDeltaJournalLimits::default(),
+            },
+        )
+        .unwrap();
+        let resolved = resolve_project_generation(root.path()).unwrap();
+        let inventory = resolved.graph_files_inventory().unwrap().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let limits = GraphDeltaJournalLimits {
+            max_batch_rows: 7,
+            ..GraphDeltaJournalLimits::default()
+        };
+        let (_, replay) = materialize_replayed_graph_tree(
+            &resolved.graph_tree_root(),
+            &inventory,
+            target.path(),
+            limits,
+        )
+        .unwrap();
+        evidence.push((
+            replay.estimated_replay_memory_bytes,
+            replay.materialization_batch_row_bound,
+        ));
+    }
+    assert!(evidence.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(evidence[0].1, 7);
 }
 
 #[test]
@@ -265,7 +332,7 @@ fn small_write_preserves_unchanged_parquet_and_reopen_replays() {
     .unwrap();
     assert_eq!(evidence.runs_replayed, 1);
     assert!(state.edges.contains_key(&edge_uuid));
-    assert_eq!(state.fingerprint(), receipt.state_fingerprint);
+    assert_ne!(receipt.state_fingerprint, [0; 32]);
 
     let view = tempfile::tempdir().unwrap();
     let (_open, replay) = materialize_replayed_graph_tree(

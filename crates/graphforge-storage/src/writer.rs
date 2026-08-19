@@ -149,11 +149,788 @@ struct EdgePropRow {
 }
 
 type TypedPropertyRow = (String, [u8; 16], HashMap<String, IrLiteral>);
+#[cfg(test)]
 type ReconstructedEdge<'a> = (&'a String, &'a (String, String, String));
+
+/// Apply a bounded GFDR overlay while scanning the canonical base in bounded
+/// Arrow batches. Only overlay identities are retained across batches.
+pub(crate) fn write_replay_overlay_streaming(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let node_path = source.join("topology/nodes.parquet");
+    let output_node_path = target.join("topology/nodes.parquet");
+    let node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
+    let reader = if node_path.exists() {
+        let node_file = fs::File::open(&node_path).map_err(|error| {
+            GfError::Storage(format!(
+                "open canonical replay nodes at {}: {error}",
+                node_path.display()
+            ))
+        })?;
+        Some(
+            ParquetRecordBatchReaderBuilder::try_new(node_file)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?,
+        )
+    } else {
+        None
+    };
+    fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
+        .map_err(|error| io_err(&error))?;
+    let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(output, TOPOLOGY_NODES_SCHEMA.clone(), None)
+            .map_err(pq_err)?;
+    for batch in reader.into_iter().flatten() {
+        let batch = batch.map_err(pq_err)?;
+        if batch.num_rows() > limits.max_batch_rows {
+            return Err(GfError::Storage(
+                "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+            ));
+        }
+        let uuids = batch
+            .column_by_name("node_uuid")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .ok_or_else(|| pq_err("canonical node_uuid column is incompatible"))?;
+        for row in 0..batch.num_rows() {
+            let uuid = uuid::Uuid::from_slice(uuids.value(row))
+                .map_err(|error| pq_err(format!("canonical node_uuid is invalid: {error}")))?
+                .hyphenated()
+                .to_string();
+            match overlay.nodes.get(&uuid) {
+                Some(Some(replacement)) => writer
+                    .write(&replay_node_batch(&[replacement])?)
+                    .map_err(pq_err)?,
+                Some(None) => {}
+                None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
+            }
+        }
+    }
+    let mut appended: Vec<_> = overlay
+        .nodes
+        .iter()
+        .filter(|(uuid, row)| row.is_some() && !node_scan.existing_overlay.contains(*uuid))
+        .filter_map(|(_, row)| row.as_ref())
+        .collect();
+    appended.sort_by_key(|row| row.node_id);
+    if !appended.is_empty() {
+        writer
+            .write(&replay_node_batch(&appended)?)
+            .map_err(pq_err)?;
+    }
+    writer.close().map_err(pq_err)?;
+
+    validate_replay_edge_endpoints(overlay, &node_scan)?;
+    stream_replay_edges(source, target, overlay, limits, &node_scan)?;
+    stream_replay_properties(
+        source,
+        target,
+        overlay,
+        limits,
+        false,
+        &node_scan.existing_overlay,
+    )?;
+    stream_replay_properties(source, target, overlay, limits, true, &HashSet::new())?;
+    Ok(())
+}
+
+struct ReplayNodeAuthority {
+    existing_overlay: HashSet<String>,
+    endpoint_ids: HashMap<String, u64>,
+    deleted_nodes: HashSet<String>,
+}
+
+fn scan_replay_node_authority(
+    node_path: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<ReplayNodeAuthority, GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let endpoint_uuids: HashSet<_> = overlay
+        .edges
+        .values()
+        .filter_map(Option::as_ref)
+        .flat_map(|edge| [edge.src_uuid.clone(), edge.dst_uuid.clone()])
+        .collect();
+    if !node_path.exists() {
+        let mut endpoint_ids = HashMap::new();
+        for (uuid, row) in &overlay.nodes {
+            if let Some(row) = row
+                && endpoint_uuids.contains(uuid)
+            {
+                endpoint_ids.insert(uuid.clone(), row.node_id);
+            }
+        }
+        return Ok(ReplayNodeAuthority {
+            existing_overlay: HashSet::new(),
+            endpoint_ids,
+            deleted_nodes: overlay
+                .nodes
+                .iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(uuid, _)| uuid.clone())
+                .collect(),
+        });
+    }
+    let input = fs::File::open(node_path).map_err(|error| {
+        GfError::Storage(format!(
+            "scan canonical replay nodes at {}: {error}",
+            node_path.display()
+        ))
+    })?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+        .map_err(pq_err)?
+        .with_batch_size(limits.max_batch_rows)
+        .build()
+        .map_err(pq_err)?;
+    let mut existing_overlay = HashSet::new();
+    let mut endpoint_ids = HashMap::new();
+    let mut prior_id = 0_u64;
+    let mut base_max = 0_u64;
+    for batch in reader {
+        let batch = batch.map_err(pq_err)?;
+        let uuids = batch
+            .column_by_name("node_uuid")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .ok_or_else(|| pq_err("canonical node_uuid column is incompatible"))?;
+        let ids = batch
+            .column_by_name("node_id")
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| pq_err("canonical node_id column is incompatible"))?;
+        for row in 0..batch.num_rows() {
+            let uuid = uuid::Uuid::from_slice(uuids.value(row))
+                .map_err(|error| pq_err(format!("canonical node_uuid is invalid: {error}")))?
+                .hyphenated()
+                .to_string();
+            let id = ids.value(row);
+            if id <= prior_id {
+                return Err(pq_err("canonical node_id order is not strictly increasing"));
+            }
+            prior_id = id;
+            base_max = id;
+            if overlay.nodes.contains_key(&uuid) {
+                existing_overlay.insert(uuid.clone());
+                if let Some(Some(replacement)) = overlay.nodes.get(&uuid)
+                    && replacement.node_id != id
+                {
+                    return Err(pq_err(
+                        "GF_UNSUPPORTED_PROJECT_FORMAT: node surrogate changed",
+                    ));
+                }
+            }
+            if endpoint_uuids.contains(&uuid) {
+                endpoint_ids.insert(uuid, id);
+            }
+        }
+    }
+    let mut new_ids = HashSet::new();
+    for (uuid, row) in &overlay.nodes {
+        if let Some(row) = row
+            && !existing_overlay.contains(uuid)
+        {
+            if row.node_id <= base_max || !new_ids.insert(row.node_id) {
+                return Err(pq_err(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: new node surrogate is not monotonic",
+                ));
+            }
+            if endpoint_uuids.contains(uuid) {
+                endpoint_ids.insert(uuid.clone(), row.node_id);
+            }
+        }
+    }
+    Ok(ReplayNodeAuthority {
+        existing_overlay,
+        endpoint_ids,
+        deleted_nodes: overlay
+            .nodes
+            .iter()
+            .filter(|(_, row)| row.is_none())
+            .map(|(uuid, _)| uuid.clone())
+            .collect(),
+    })
+}
+
+fn validate_replay_edge_endpoints(
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    nodes: &ReplayNodeAuthority,
+) -> Result<(), GfError> {
+    for edge in overlay.edges.values().filter_map(Option::as_ref) {
+        let src_id = nodes.endpoint_ids.get(&edge.src_uuid).copied();
+        let dst_id = nodes.endpoint_ids.get(&edge.dst_uuid).copied();
+        if src_id != Some(edge.src_id) || dst_id != Some(edge.dst_id) {
+            return Err(pq_err(
+                "GF_UNSUPPORTED_PROJECT_FORMAT: edge endpoint identity is missing or inconsistent",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn replay_node_batch(
+    rows: &[&crate::graph_delta_journal::ReplayNodeRow],
+) -> Result<RecordBatch, GfError> {
+    let uuids = fixed_uuid_array(rows.iter().map(|row| row.node_uuid.as_str()))?;
+    let nullable_label_sets =
+        arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
+            rows.iter()
+                .map(|row| Some(row.type_ids.iter().copied().map(Some))),
+        );
+    let label_sets = arrow::array::ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt32, false)),
+        nullable_label_sets.offsets().clone(),
+        nullable_label_sets.values().clone(),
+        None,
+    );
+    RecordBatch::try_new(
+        TOPOLOGY_NODES_SCHEMA.clone(),
+        vec![
+            Arc::new(uuids),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.node_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt32Array::from(
+                rows.iter()
+                    .map(|row| row.type_ids.first().copied().unwrap_or(u32::MAX))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(label_sets),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.created_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.updated_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+        ],
+    )
+    .map_err(pq_err)
+}
+
+#[allow(clippy::too_many_lines)] // Two bounded passes keep validation and emission consistent.
+fn stream_replay_edges(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    nodes: &ReplayNodeAuthority,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let source_dir = source.join("topology/edges");
+    let target_dir = target.join("topology/edges");
+    fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
+    let mut relations = std::collections::BTreeSet::new();
+    if source_dir.exists() {
+        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
+            let entry = entry.map_err(|error| io_err(&error))?;
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
+                let stem = path
+                    .file_stem()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or_else(|| pq_err("edge Parquet stem is not UTF-8"))?;
+                relations.insert(stem.to_owned());
+            }
+        }
+    }
+    relations.extend(
+        overlay
+            .edges
+            .values()
+            .filter_map(Option::as_ref)
+            .map(|edge| edge.rel_type.clone()),
+    );
+    for relation in relations {
+        let source_path = source_dir.join(format!("{relation}.parquet"));
+        let target_path = target_dir.join(format!("{relation}.parquet"));
+        let mut existing_overlay = HashSet::new();
+        let mut base_max = 0_u64;
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                let uuids = required_uuid_column(&batch, "edge_uuid")?;
+                let srcs = required_uuid_column(&batch, "src_uuid")?;
+                let dsts = required_uuid_column(&batch, "dst_uuid")?;
+                let ids = batch
+                    .column_by_name("edge_id")
+                    .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| pq_err("canonical edge_id column is incompatible"))?;
+                for row in 0..batch.num_rows() {
+                    let edge_uuid = canonical_uuid(uuids.value(row), "edge_uuid")?;
+                    let src_uuid = canonical_uuid(srcs.value(row), "src_uuid")?;
+                    let dst_uuid = canonical_uuid(dsts.value(row), "dst_uuid")?;
+                    if !overlay.edges.contains_key(&edge_uuid)
+                        && (nodes.deleted_nodes.contains(&src_uuid)
+                            || nodes.deleted_nodes.contains(&dst_uuid))
+                    {
+                        return Err(pq_err(
+                            "GF_UNSUPPORTED_PROJECT_FORMAT: retained edge references deleted node",
+                        ));
+                    }
+                    let id = ids.value(row);
+                    if id <= base_max {
+                        return Err(pq_err("canonical edge_id order is not strictly increasing"));
+                    }
+                    base_max = id;
+                    if overlay.edges.contains_key(&edge_uuid) {
+                        existing_overlay.insert(edge_uuid.clone());
+                        if let Some(Some(replacement)) = overlay.edges.get(&edge_uuid)
+                            && replacement.edge_id != id
+                        {
+                            return Err(pq_err(
+                                "GF_UNSUPPORTED_PROJECT_FORMAT: edge surrogate changed",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut new_ids = HashSet::new();
+        for (uuid, row) in &overlay.edges {
+            if let Some(row) = row
+                && row.rel_type == relation
+                && !existing_overlay.contains(uuid)
+                && (row.edge_id <= base_max || !new_ids.insert(row.edge_id))
+            {
+                return Err(pq_err(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: new edge surrogate is not monotonic",
+                ));
+            }
+        }
+        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(output, TYPED_EDGE_SCHEMA.clone(), None)
+                .map_err(pq_err)?;
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                if batch.num_rows() > limits.max_batch_rows {
+                    return Err(GfError::Storage(
+                        "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+                    ));
+                }
+                let uuids = batch
+                    .column_by_name("edge_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| pq_err("canonical edge_uuid column is incompatible"))?;
+                for row in 0..batch.num_rows() {
+                    let uuid = canonical_uuid(uuids.value(row), "edge_uuid")?;
+                    match overlay.edges.get(&uuid) {
+                        Some(Some(replacement)) if replacement.rel_type == relation => writer
+                            .write(&replay_edge_batch(&[replacement])?)
+                            .map_err(pq_err)?,
+                        Some(_) => {}
+                        None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
+                    }
+                }
+            }
+        }
+        let mut appended: Vec<_> = overlay
+            .edges
+            .iter()
+            .filter(|(uuid, row)| {
+                row.as_ref().is_some_and(|edge| edge.rel_type == relation)
+                    && !existing_overlay.contains(*uuid)
+            })
+            .filter_map(|(_, row)| row.as_ref())
+            .collect();
+        appended.sort_by_key(|edge| edge.edge_id);
+        if !appended.is_empty() {
+            writer
+                .write(&replay_edge_batch(&appended)?)
+                .map_err(pq_err)?;
+        }
+        writer.close().map_err(pq_err)?;
+    }
+    Ok(())
+}
+
+fn required_uuid_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a FixedSizeBinaryArray, GfError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+        .ok_or_else(|| pq_err(format!("canonical {name} column is incompatible")))
+}
+
+fn canonical_uuid(bytes: &[u8], field: &str) -> Result<String, GfError> {
+    uuid::Uuid::from_slice(bytes)
+        .map(|value| value.hyphenated().to_string())
+        .map_err(|error| pq_err(format!("canonical {field} is invalid: {error}")))
+}
+
+fn replay_edge_batch(
+    rows: &[&crate::graph_delta_journal::ReplayEdgeRow],
+) -> Result<RecordBatch, GfError> {
+    RecordBatch::try_new(
+        TYPED_EDGE_SCHEMA.clone(),
+        vec![
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.edge_uuid.as_str()),
+            )?),
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.src_uuid.as_str()),
+            )?),
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.dst_uuid.as_str()),
+            )?),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.edge_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.src_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.dst_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.created_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+        ],
+    )
+    .map_err(pq_err)
+}
+
+#[allow(clippy::too_many_lines)] // Node and edge property paths deliberately share one writer.
+fn stream_replay_properties(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    edge: bool,
+    base_overlay_entities: &HashSet<String>,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let (directory, join_field, metadata_key) = if edge {
+        (
+            "edge_properties",
+            EDGE_PROPERTY_UUID_FIELD,
+            "graphforge.rel_type",
+        )
+    } else {
+        (
+            "properties",
+            NODE_PROPERTY_UUID_FIELD,
+            "graphforge.entity_type",
+        )
+    };
+    let operations = if edge {
+        &overlay.edge_properties
+    } else {
+        &overlay.node_properties
+    };
+    let mut stems = std::collections::BTreeSet::new();
+    stems.extend(operations.keys().map(|(_, stem, _)| stem.clone()));
+    let source_dir = source.join(directory);
+    let target_dir = target.join(directory);
+    if !operations.is_empty() && source_dir.exists() {
+        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
+            let path = entry.map_err(|error| io_err(&error))?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+                && let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str)
+            {
+                stems.insert(stem.to_owned());
+            }
+        }
+    }
+    fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
+    for stem in stems {
+        let source_path = source_dir.join(format!("{stem}.parquet"));
+        let target_path = target_dir.join(format!("{stem}.parquet"));
+        let base_schema = if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .schema()
+                .clone()
+        } else {
+            Arc::new(
+                Schema::new(vec![uuid_field(join_field)]).with_metadata(
+                    [(metadata_key.to_owned(), stem.clone())]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+        };
+        let schema = replay_property_schema(
+            base_schema.as_ref(),
+            operations
+                .iter()
+                .filter(|((_, operation_stem, _), _)| operation_stem == &stem),
+        )?;
+        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(output, Arc::new(schema.clone()), None)
+                .map_err(pq_err)?;
+        let mut seen = HashSet::<String>::new();
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                if batch.num_rows() > limits.max_batch_rows {
+                    return Err(GfError::Storage(
+                        "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+                    ));
+                }
+                if edge {
+                    let mut rows = Vec::new();
+                    decode_property_batch(&batch, join_field, |uuid, mut props| {
+                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
+                        if overlay.edges.get(&key).is_some_and(Option::is_none) {
+                            return;
+                        }
+                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
+                        seen.insert(key);
+                        rows.push(EdgePropRow {
+                            edge_uuid: uuid,
+                            props,
+                        });
+                    })?;
+                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
+                } else {
+                    let mut rows = Vec::new();
+                    decode_property_batch(&batch, join_field, |uuid, mut props| {
+                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
+                        if overlay.nodes.get(&key).is_some_and(Option::is_none) {
+                            return;
+                        }
+                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
+                        seen.insert(key);
+                        rows.push(PropRow {
+                            node_uuid: uuid,
+                            props,
+                        });
+                    })?;
+                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
+                }
+            }
+        }
+        for ((entity_uuid, operation_stem, _), _) in operations {
+            if operation_stem != &stem || seen.contains(entity_uuid) {
+                continue;
+            }
+            let mut props = HashMap::new();
+            apply_streamed_property_ops(entity_uuid, &stem, operations, &mut props);
+            if props.is_empty() {
+                continue;
+            }
+            let uuid = uuid::Uuid::parse_str(entity_uuid)
+                .map_err(pq_err)?
+                .into_bytes();
+            if edge {
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[EdgePropRow {
+                        edge_uuid: uuid,
+                        props,
+                    }],
+                )?;
+            } else {
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[PropRow {
+                        node_uuid: uuid,
+                        props,
+                    }],
+                )?;
+            }
+            seen.insert(entity_uuid.clone());
+        }
+        if !edge && stem == "_untyped" {
+            for (entity_uuid, row) in &overlay.nodes {
+                if row.is_none()
+                    || base_overlay_entities.contains(entity_uuid)
+                    || seen.contains(entity_uuid)
+                {
+                    continue;
+                }
+                let uuid = uuid::Uuid::parse_str(entity_uuid)
+                    .map_err(pq_err)?
+                    .into_bytes();
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[PropRow {
+                        node_uuid: uuid,
+                        props: HashMap::new(),
+                    }],
+                )?;
+                seen.insert(entity_uuid.clone());
+            }
+        }
+        writer.close().map_err(pq_err)?;
+    }
+    Ok(())
+}
+
+fn apply_streamed_property_ops(
+    entity_uuid: &str,
+    stem: &str,
+    operations: &std::collections::BTreeMap<(String, String, String), Option<IrLiteral>>,
+    props: &mut HashMap<String, IrLiteral>,
+) {
+    for ((uuid, operation_stem, key), value) in operations {
+        if uuid != entity_uuid {
+            continue;
+        }
+        if operation_stem == stem
+            && let Some(value) = value
+        {
+            props.insert(key.clone(), value.clone());
+        } else {
+            props.remove(key);
+        }
+    }
+}
+
+fn replay_property_schema<'a>(
+    base: &Schema,
+    operations: impl Iterator<Item = (&'a (String, String, String), &'a Option<IrLiteral>)>,
+) -> Result<Schema, GfError> {
+    let mut fields: Vec<Field> = base
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect();
+    for ((_, _, key), value) in operations {
+        let Some(value) = value else { continue };
+        reject_map_property_value(key, value)?;
+        let Some(value_type) = ColType::of(value) else {
+            continue;
+        };
+        if let Some(existing) = fields.iter().find(|field| field.name() == key) {
+            let existing_type = col_type_from_data_type(existing.data_type())
+                .ok_or_else(|| pq_err(format!("unsupported canonical property type for {key}")))?;
+            if existing_type != value_type
+                && !(existing_type == ColType::HetScalar && value_type.is_scalar())
+            {
+                return Err(pq_err(format!(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: property {key} changes canonical type"
+                )));
+            }
+        } else {
+            fields.push(Field::new(key, value_type.data_type(), true));
+        }
+    }
+    Ok(Schema::new(fields).with_metadata(base.metadata().clone()))
+}
+
+fn col_type_from_data_type(data_type: &DataType) -> Option<ColType> {
+    match data_type {
+        DataType::Int64 => Some(ColType::Int),
+        DataType::Float64 => Some(ColType::Float),
+        DataType::Boolean => Some(ColType::Bool),
+        DataType::Utf8 => Some(ColType::Str),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Some(ColType::DateTime),
+        DataType::Time64(TimeUnit::Nanosecond) => Some(ColType::Time),
+        DataType::List(field) => {
+            col_type_from_data_type(field.data_type()).map(|inner| ColType::List(Box::new(inner)))
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "__het_int") => {
+            Some(ColType::HetScalar)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "months") => {
+            Some(ColType::Duration)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "epoch_day") => {
+            Some(ColType::Date)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "offset_seconds") => {
+            Some(ColType::ZonedTime)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "timezone") => {
+            Some(ColType::ZonedDateTime)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "date") => {
+            Some(ColType::LocalDateTime)
+        }
+        _ => None,
+    }
+}
+
+fn write_property_rows_with_schema<R: PropRowLike>(
+    writer: &mut parquet::arrow::ArrowWriter<fs::File>,
+    schema: &Schema,
+    uuid_field_name: &str,
+    rows: &[R],
+) -> Result<(), GfError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    columns.push(Arc::new(
+        FixedSizeBinaryArray::try_from_iter(rows.iter().map(|row| row.uuid_bytes().to_vec()))
+            .map_err(pq_err)?,
+    ));
+    for field in schema.fields().iter().skip(1) {
+        let column_type = col_type_from_data_type(field.data_type()).ok_or_else(|| {
+            pq_err(format!(
+                "unsupported canonical property type for {}",
+                field.name()
+            ))
+        })?;
+        columns.push(build_property_array(field.name(), column_type, rows));
+    }
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns).map_err(pq_err)?;
+    if batch.schema().field(0).name() != uuid_field_name {
+        return Err(pq_err("canonical property UUID field mismatch"));
+    }
+    writer.write(&batch).map_err(pq_err)
+}
 
 /// Materialize a verified base-plus-GFDR logical state as canonical Parquet in
 /// a private read workspace. The committed generation remains unchanged.
 #[allow(clippy::too_many_lines)] // One canonical writer keeps topology and properties atomic.
+#[cfg(test)]
 pub(crate) fn write_reconstructed_graph(
     dir: &Path,
     state: &crate::graph_delta_journal::ReconstructedGraphState,
@@ -342,6 +1119,7 @@ fn fixed_uuid_array<'a>(
     FixedSizeBinaryArray::try_from_iter(values.into_iter()).map_err(pq_err)
 }
 
+#[cfg(test)]
 fn write_parquet_batch(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| io_err(&error))?;

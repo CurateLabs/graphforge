@@ -291,21 +291,18 @@ mod tests {
         use graphforge_storage::{
             GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest,
             ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-            ReconstructedGraphState,
         };
 
         let graph = GraphForge::new(None).unwrap();
         let root = graph.resolved_generation.container_root();
         let workspace = tempfile::tempdir().unwrap();
-        graphforge_storage::stage_base_graph_workspace(
+        let mut writer = graphforge_storage::GraphWriter::open_at(
             workspace.path(),
-            &[
-                ("topology/nodes.parquet", b"nodes"),
-                ("topology/edges.parquet", b"edges"),
-            ],
-            Some(&ReconstructedGraphState::default()),
+            graphforge_core::OntologyMode::Strict,
+            1_700_000_000_000_000,
         )
         .unwrap();
+        writer.flush().unwrap();
         let (_, files) = graphforge_storage::capture_graph_files(workspace.path()).unwrap();
         let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
         participants.insert(0, files);
