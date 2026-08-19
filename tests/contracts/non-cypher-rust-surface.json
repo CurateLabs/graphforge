@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "51fd33865c0866530edac0f1c3e735ba72354774de93966883b5020e1a1655fb",
+  "public_method_digest": "627ae63b3f05a0b9e27e327d93f15daab2af09c6f145c654bc6942528081be0b",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -700,7 +700,9 @@
         "GraphForge.execute_stream",
         "GraphForge.execute_stream_owned",
         "GraphForge.execute_stream_with_params",
+        "GraphForge.execute_to_arrow_ipc_stream_with_params",
         "GraphForge.execute_to_parquet",
+        "GraphForge.execute_to_parquet_stream_with_params",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
@@ -740,6 +742,14 @@
         {
           "path": "crates/graphforge-api/tests/facade_methods.rs",
           "symbol": "execute_to_parquet_roundtrips"
+        },
+        {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "streaming_parquet_and_ipc_report_progress_and_roundtrip"
+        },
+        {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "cancelled_stream_does_not_publish_destination"
         },
         {
           "path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
