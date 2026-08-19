@@ -1,0 +1,108 @@
+{
+  "cases": [
+    {
+      "code": "resolution.ambiguous",
+      "disposition": "reject",
+      "name": "unqualified-person",
+      "preserves_authority": true
+    },
+    {
+      "code": "bridge.endpoint_missing",
+      "disposition": "reject",
+      "name": "upgraded-endpoint-digest",
+      "preserves_authority": true
+    },
+    {
+      "code": "dependency.cycle",
+      "disposition": "reject",
+      "name": "module-cycle",
+      "preserves_authority": true
+    },
+    {
+      "code": "dependency.missing",
+      "disposition": "reject",
+      "name": "missing-exact-dependency",
+      "preserves_authority": true
+    },
+    {
+      "code": "dependency.in_use",
+      "disposition": "reject",
+      "name": "remove-required-evidence",
+      "preserves_authority": true
+    },
+    {
+      "code": "enforcement.violation",
+      "disposition": "reject",
+      "name": "strict-unknown-science-property",
+      "preserves_authority": true
+    },
+    {
+      "code": "inventory.generation_conflict",
+      "disposition": "reject",
+      "name": "stale-preview",
+      "preserves_authority": true
+    },
+    {
+      "code": "resource.modules",
+      "disposition": "reject",
+      "name": "module-count-over-limit",
+      "preserves_authority": true
+    },
+    {
+      "code": "interchange.integrity",
+      "disposition": "reject",
+      "name": "malformed-digest",
+      "preserves_authority": true
+    },
+    {
+      "code": "lifecycle.cancelled",
+      "disposition": "cancel",
+      "name": "cancel-before-publication",
+      "preserves_authority": true
+    },
+    {
+      "code": "interchange.unsupported_future",
+      "disposition": "reject",
+      "name": "unknown-required-feature",
+      "preserves_authority": true
+    }
+  ],
+  "limits": {
+    "bridges": 10000,
+    "copy_buffer_bytes": 1048576,
+    "dependency_edges": 1000000,
+    "diagnostics": 1000,
+    "manifest_bytes": 16777216,
+    "migration_steps": 100000,
+    "modules": 10000,
+    "symbols": 10000000
+  },
+  "security_cases": [
+    {
+      "disposition": "reject_before_mutation",
+      "name": "duplicate-json-member"
+    },
+    { "disposition": "reject_before_mutation", "name": "non-nfc-identifier" },
+    {
+      "disposition": "reject_before_mutation",
+      "name": "runtime-catalog-id-in-semantic-identity"
+    },
+    {
+      "disposition": "reject_before_mutation",
+      "name": "unbounded-diagnostic-candidates"
+    },
+    {
+      "disposition": "reject_before_mutation",
+      "name": "implicit-import-adoption"
+    },
+    {
+      "disposition": "reject_before_mutation",
+      "name": "name-based-equivalence"
+    },
+    {
+      "disposition": "reject_before_mutation",
+      "name": "inventory-order-precedence"
+    }
+  ],
+  "version": 1
+}

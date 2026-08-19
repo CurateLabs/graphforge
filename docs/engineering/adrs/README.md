@@ -58,3 +58,4 @@ Keeper set after #2730 (mirrors [`../../adr/README.md`](../../adr/README.md)):
 | 0019 | Authoritative durable graph delta journal | Accepted | [`../../adr/0019-authoritative-graph-delta-journal.md`](../../adr/0019-authoritative-graph-delta-journal.md) |
 | 0020 | NTFS write-through namespace durability | Accepted | [`../../adr/0020-ntfs-write-through-namespace-durability.md`](../../adr/0020-ntfs-write-through-namespace-durability.md) |
 | 0021 | Portable project v2 package layout and identity | Proposed | [`../../adr/0021-portable-project-v2.md`](../../adr/0021-portable-project-v2.md) |
+| 0022 | Composable ontology modules and semantic bridges | Accepted | [`../../adr/0022-composable-multi-ontology.md`](../../adr/0022-composable-multi-ontology.md) |

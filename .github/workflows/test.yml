@@ -80,6 +80,9 @@ jobs:
       - name: Test text checkout byte policy
         run: python3 scripts/ci/test-text-checkout-policy.py
 
+      - name: Validate multi-ontology contract fixtures
+        run: python3 scripts/ci/multi-ontology-contract-check.py
+
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 

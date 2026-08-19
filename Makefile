@@ -207,6 +207,8 @@ pre-push-fast:  ## Run fast checks only — format, lint, type, security, docstr
 	@echo "━━━ Public API BDD policy ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@python3 scripts/ci/api-bdd-policy.py --check-issues
 	@python3 scripts/ci/test-api-bdd-policy.py
+	@echo "━━━ Multi-ontology contract fixtures ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@python3 scripts/ci/multi-ontology-contract-check.py
 	@echo "━━━ Format check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@$(MAKE) format-check
 	@echo "━━━ Lint ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
