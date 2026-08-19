@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "728b30ca64af2ec50e2621297f1c98287b101ea3e1bfe7ec5065fd2e62a57929",
+  "public_method_digest": "fdae85acac2ee4d1f4e7edf0c67cf03c01eebc56a3116366e308046cf0ea4c68",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -827,6 +827,26 @@
         {
           "path": "crates/graphforge-api/src/transaction.rs",
           "symbol": "drop_rolls_back_without_publication"
+        }
+      ]
+    },
+    "semantic-generation-diff": {
+      "ids": [
+        "GraphForge.committed_generation_identity",
+        "GraphForge.diff_committed_generations"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "generation_bound_add_is_retry_deterministic_and_every_stream_is_valid_ipc"
+        },
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "cancellation_and_resource_limit_fail_before_partial_output"
+        },
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "corrupt_and_incompatible_generations_are_typed_reload_required"
         }
       ]
     }

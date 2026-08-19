@@ -561,7 +561,11 @@ pub fn resolve_project_generation(
     }
 }
 
-pub(crate) fn resolve_verified_generation(
+/// Resolve and lease one immutable generation by its exact UUID and manifest digest.
+///
+/// This is the public identity-bound read primitive used by semantic generation
+/// consumers. It never consults `CURRENT` and never reads storage journals.
+pub fn resolve_verified_generation(
     container_root: &Path,
     generation_uuid: Uuid,
     expected_manifest_digest: [u8; 32],
