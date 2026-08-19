@@ -1597,6 +1597,130 @@ mod tests {
         assert_eq!(runtime["contract"], "graphforge-runtime-generation-map/1");
         assert!(runtime.get("host_path").is_none());
         assert!(runtime.get("secret").is_none());
+
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let expanded_target = out.path().join("expanded-project");
+        let bundle_target = out.path().join("bundle-project");
+        let mut progress = Vec::new();
+        let expanded_transaction = Uuid::new_v4();
+        let expanded_generation = Uuid::new_v4();
+        let expanded_import = crate::import_complete_portable_v2_with_progress(
+            &expanded,
+            &expanded_target,
+            expanded_transaction,
+            expanded_generation,
+            &supported,
+            limits,
+            Some(&cancelled),
+            |event| progress.push(event),
+        )
+        .unwrap();
+        assert_eq!(
+            progress.iter().map(|event| event.phase).collect::<Vec<_>>(),
+            vec![
+                crate::PortableV2ImportPhase::Verifying,
+                crate::PortableV2ImportPhase::Materialized,
+                crate::PortableV2ImportPhase::Published,
+            ]
+        );
+        let expected_package_digest = format!("sha256:{}", hex(a.package_digest));
+        assert!(progress.iter().skip(1).all(|event| {
+            event.entries > 0
+                && event.bytes > 0
+                && event.package_digest.as_deref() == Some(expected_package_digest.as_str())
+        }));
+        let bundle_import = crate::import_complete_portable_v2(
+            &first,
+            &bundle_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert_eq!(expanded_import.package_digest, bundle_import.package_digest);
+        let expanded_reopened = crate::resolve_project_generation(&expanded_target).unwrap();
+        let bundle_reopened = crate::resolve_project_generation(&bundle_target).unwrap();
+        assert_eq!(
+            expanded_reopened.capabilities(),
+            bundle_reopened.capabilities()
+        );
+        assert_eq!(
+            expanded_reopened.participant_snapshots().unwrap(),
+            bundle_reopened.participant_snapshots().unwrap()
+        );
+        let protected_generation = expanded_reopened.generation_uuid();
+        let replay = crate::import_complete_portable_v2(
+            &expanded,
+            &expanded_target,
+            expanded_transaction,
+            expanded_generation,
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert!(replay.publication.idempotent_replay);
+        assert_eq!(replay.publication.generation_uuid, protected_generation);
+        let overwrite = crate::import_complete_portable_v2(
+            &expanded,
+            &expanded_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap_err();
+        assert_eq!(overwrite.code, PortableV2ErrorCode::Io);
+        assert_eq!(
+            crate::resolve_project_generation(&expanded_target)
+                .unwrap()
+                .generation_uuid(),
+            protected_generation
+        );
+        let cancelled = AtomicBool::new(true);
+        let cancelled_target = out.path().join("cancelled-project");
+        let cancelled_error = crate::import_complete_portable_v2(
+            &expanded,
+            &cancelled_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap_err();
+        assert_eq!(cancelled_error.code, PortableV2ErrorCode::Cancelled);
+        assert!(!cancelled_target.exists());
+        fs::write(
+            expanded.join(
+                "data/components/compatibility/graphforge-runtime-map/runtime-generation.json",
+            ),
+            b"{}",
+        )
+        .unwrap();
+        let corrupt_target = out.path().join("corrupt-project");
+        let corrupt = crate::import_complete_portable_v2(
+            &expanded,
+            &corrupt_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(corrupt.code, PortableV2ErrorCode::DigestMismatch);
+        assert!(!corrupt_target.exists());
     }
 
     #[test]

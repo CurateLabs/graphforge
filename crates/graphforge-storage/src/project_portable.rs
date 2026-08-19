@@ -534,7 +534,9 @@ fn validate_capabilities(
     Ok(())
 }
 
-fn prepare_import_target(target: &Path) -> Result<Option<ResolvedProjectGeneration>, GfError> {
+pub(crate) fn prepare_import_target(
+    target: &Path,
+) -> Result<Option<ResolvedProjectGeneration>, GfError> {
     reject_symlink_components(target, "portable import target")?;
     match std::fs::symlink_metadata(target) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -738,7 +740,7 @@ fn trusted_platform_symlink(_metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     std::fs::OpenOptions::new()
@@ -748,7 +750,7 @@ fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 

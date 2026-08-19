@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -98,6 +99,20 @@ pub struct ProjectGenerationRequest {
     pub capabilities: Vec<ProjectCapability>,
     /// Complete participant set.
     pub participants: Vec<ProjectParticipant>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectFileParticipant {
+    pub participant: ProjectParticipant,
+    pub source: PathBuf,
+    pub byte_length: u64,
+    pub content_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+enum ParticipantPayloads<'a> {
+    Memory,
+    Files(&'a [ProjectFileParticipant], Option<&'a AtomicBool>, usize),
 }
 
 /// Safe participant metadata available to domain validators.
@@ -426,6 +441,46 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
             None,
             None,
             graph_tree,
+            ParticipantPayloads::Memory,
+        )
+    })();
+    result.map_err(|error| map_stage_error(request, error))
+}
+
+pub(crate) fn stage_project_generation_from_files_admitted(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    files: &[ProjectFileParticipant],
+    graph_tree: Option<&Path>,
+    cancelled: Option<&AtomicBool>,
+    copy_buffer_bytes: usize,
+) -> Result<ProjectStageOutcome, GfError> {
+    let result = (|| {
+        validate_request(request)?;
+        admission.revalidate_identity()?;
+        let root = canonical_supported_root(admission.root())?;
+        let writer_lock = acquire_writer_lock(&root, request)?;
+        let current = resolve_project_generation(&root)?;
+        if current.generation_uuid() != parent.generation_uuid()
+            || current.manifest_sha256() != parent.manifest_sha256()
+        {
+            return Err(project_error(
+                ProjectErrorCode::WriteConflict,
+                "prepared CURRENT changed before portable import publication",
+            ));
+        }
+        let identity = admission.into_identity()?;
+        stage_project_generation_inner_with_locks(
+            StagedAdmission::Exclusive(identity),
+            root,
+            PublicationLock::Exclusive(writer_lock),
+            parent,
+            request,
+            None,
+            None,
+            graph_tree,
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -473,6 +528,7 @@ fn stage_project_generation_inner(
         None,
         None,
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -503,6 +559,7 @@ fn stage_project_generation_optimistic_inner(
         None,
         Some(operation_fingerprint),
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -530,6 +587,7 @@ pub(crate) fn stage_project_generation_with_lock(
         revert,
         None,
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -546,9 +604,11 @@ fn stage_project_generation_inner_with_locks(
     revert: Option<RevertJournalExtension>,
     operation_fingerprint: Option<[u8; 32]>,
     graph_tree: Option<&Path>,
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
-    let (capabilities, participants, request_fingerprint) = request_metadata(request)?;
+    let (capabilities, participants, request_fingerprint) =
+        request_metadata_with_payloads(request, payloads)?;
     let operation_fingerprint =
         operation_fingerprint.map_or_else(|| request_fingerprint.clone(), hex_digest);
     let transactions_dir = ensure_machine_directory(&root, Path::new(TRANSACTIONS_DIR))?;
@@ -591,9 +651,9 @@ fn stage_project_generation_inner_with_locks(
         false,
     )?;
 
-    stage_participant_files(request, &generation_root, &participants)?;
+    stage_participant_files(request, &generation_root, &participants, payloads)?;
     sync_participant_directories(&generation_root.join(PARTICIPANTS_DIR), &participants)?;
-    stage_optional_graph_tree(request, &parent, &generation_root, graph_tree)?;
+    stage_optional_graph_tree(&participants, &parent, &generation_root, graph_tree)?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",
         Some(request.transaction_uuid),
@@ -925,16 +985,16 @@ fn prepare_generation_directory(
 }
 
 fn stage_optional_graph_tree(
-    request: &ProjectGenerationRequest,
+    participants: &[StagedParticipant],
     parent: &ResolvedProjectGeneration,
     generation_root: &Path,
     graph_tree: Option<&Path>,
 ) -> Result<(), GfError> {
-    let files_participant = request.participants.iter().find(|participant| {
+    let files_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == crate::GRAPH_FILES_FAMILY
     });
-    let snapshot_participant = request.participants.iter().find(|participant| {
+    let snapshot_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == "snapshot"
     });
@@ -955,14 +1015,18 @@ fn stage_optional_graph_tree(
     };
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
         || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
-        || files_participant.encoding != ProjectParticipantEncoding::Json
+        || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
             "unsupported graph files participant contract",
         ));
     }
-    let inventory = crate::decode_inventory(&files_participant.bytes)?;
+    let inventory_path = generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files_participant.relative_path);
+    let inventory =
+        crate::decode_inventory(&std::fs::read(inventory_path).map_err(publication_io)?)?;
     let parent_tree = parent.graph_tree_root();
     let source = match graph_tree {
         Some(path) => path,
@@ -1004,14 +1068,16 @@ fn stage_participant_files(
     request: &ProjectGenerationRequest,
     generation_root: &Path,
     participants: &[StagedParticipant],
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<(), GfError> {
     for metadata in participants {
-        let input = request
+        let (index, input) = request
             .participants
             .iter()
+            .enumerate()
             .find(|candidate| {
-                candidate.capability_id == metadata.capability_id
-                    && candidate.record_family_id == metadata.record_family_id
+                candidate.1.capability_id == metadata.capability_id
+                    && candidate.1.record_family_id == metadata.record_family_id
             })
             .expect("validated canonical metadata has one source participant");
         let destination = generation_root
@@ -1029,7 +1095,39 @@ fn stage_participant_files(
             .create_new(true)
             .open(&destination)
             .map_err(publication_io)?;
-        file.write_all(&input.bytes).map_err(publication_io)?;
+        match payloads {
+            ParticipantPayloads::Memory => file.write_all(&input.bytes).map_err(publication_io)?,
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
+                let source = &files[index];
+                let mut input = crate::project_portable::open_regular_nofollow(&source.source)
+                    .map_err(publication_io)?;
+                let mut hash = Sha256::new();
+                let mut copied = 0;
+                let mut buffer = vec![0; copy_buffer_bytes];
+                loop {
+                    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "portable import cancelled during staging",
+                        ));
+                    }
+                    let count = input.read(&mut buffer).map_err(publication_io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    file.write_all(&buffer[..count]).map_err(publication_io)?;
+                    hash.update(&buffer[..count]);
+                    copied += count as u64;
+                }
+                let digest: [u8; 32] = hash.finalize().into();
+                if copied != source.byte_length || digest != source.content_sha256 {
+                    return Err(project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "portable participant changed during staging",
+                    ));
+                }
+            }
+        }
         project_failpoint::hit(
             "project.after_participant_write",
             Some(request.transaction_uuid),
@@ -1696,8 +1794,20 @@ fn validate_request(request: &ProjectGenerationRequest) -> Result<(), GfError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn request_metadata(
     request: &ProjectGenerationRequest,
+) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
+    request_metadata_with_payloads(request, ParticipantPayloads::Memory)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "canonical metadata validation keeps memory and streamed sources identical"
+)]
+fn request_metadata_with_payloads(
+    request: &ProjectGenerationRequest,
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
     let mut capabilities = request.capabilities.clone();
     capabilities.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
@@ -1722,8 +1832,35 @@ fn request_metadata(
         ));
     }
     let mut participants = Vec::with_capacity(request.participants.len());
-    for participant in &request.participants {
-        let content_sha256: [u8; 32] = Sha256::digest(&participant.bytes).into();
+    for (index, participant) in request.participants.iter().enumerate() {
+        let (byte_length, content_sha256) = match payloads {
+            ParticipantPayloads::Memory => (
+                u64::try_from(participant.bytes.len()).map_err(|_| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "participant byte length exceeds u64",
+                    )
+                })?,
+                Sha256::digest(&participant.bytes).into(),
+            ),
+            ParticipantPayloads::Files(files, _, _) => {
+                let file = files.get(index).ok_or_else(|| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "missing participant file",
+                    )
+                })?;
+                if file.participant.capability_id != participant.capability_id
+                    || file.participant.record_family_id != participant.record_family_id
+                {
+                    return Err(project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "participant file identity mismatch",
+                    ));
+                }
+                (file.byte_length, file.content_sha256)
+            }
+        };
         participants.push(StagedParticipant {
             capability_id: participant.capability_id.clone(),
             capability_version: participant.capability_version,
@@ -1736,12 +1873,7 @@ fn request_metadata(
                 participant.encoding.extension()
             ),
             encoding: participant.encoding.extension().into(),
-            byte_length: u64::try_from(participant.bytes.len()).map_err(|_| {
-                project_error(
-                    ProjectErrorCode::PublicationFailed,
-                    "participant byte length exceeds u64",
-                )
-            })?,
+            byte_length,
             row_count: participant.row_count,
             schema_fingerprint: hex_digest(participant.schema_fingerprint),
             content_sha256: hex_digest(content_sha256),
