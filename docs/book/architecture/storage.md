@@ -243,9 +243,9 @@ The builder (`graphforge_storage::adjacency::build_adjacency_index`) writes one 
 relation type plus the `_all` union pair, then the manifest **last**. Relation names unusable
 as file stems (path separators, `..`, the reserved `_all`) are skipped — those relations are
 served by scan-build, but their rows still flow into the union index. The
-manifest is stamped with the pinned project-generation UUID and graph source
-fingerprint read **before** the edge scan. A newer publication can therefore
-make the result stale, never falsely fresh.
+manifest is stamped with the `topology_generation` counter read **before** the
+edge scan. A concurrent topology mutation can therefore make the result stale,
+never falsely fresh.
 
 **`index_manifest.parquet`**
 
@@ -253,8 +253,7 @@ make the result stale, never falsely fresh.
 |---|---|---|
 | `relation_type` | `Utf8` | Relation type name, or `_all` for the union index |
 | `direction` | `Utf8` | `"out"` \| `"in"` |
-| `project_generation_uuid` | `FixedSizeBinary(16)` | Committed generation pinned by the builder |
-| `graph_source_fingerprint` | `FixedSizeBinary(32)` | Canonical graph participant fingerprint |
+| `topology_generation` | `UInt64` | Counter pinned before the source scan |
 | `built_at` | `Timestamp(Microseconds, UTC)` | |
 | `node_count` | `UInt64` | Number of source nodes covered (CSR row count) |
 | `edge_count` | `UInt64` | Number of `(edge, neighbor)` entries |
@@ -284,41 +283,43 @@ Conventions:
   fragments in deterministic `(key, edge_id)` order.
 - Logical CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count`
   have no entries. Empty interior rows need no physical shard bytes.
-- In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep the logical
-  a `ShardedCsrIndex` on a persisted hit and materialize only the requested bounded
-  shard row. Legacy single-batch `.csr` files remain readable and migrate on rebuild.
+- In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep a
+  `ShardedCsrIndex` on a persisted hit and materialize only the requested logical row
+  from its bounded shard fragments. Legacy single-batch `.csr` files remain readable
+  and migrate on rebuild.
   Scan-build fallback still materializes a hash map for oracle parity.
 
 ### Rebuild and versioning semantics
 
 - **Source of truth.** A CSR is always reconstructable from `topology/edges/<REL_TYPE>.parquet`
   alone, deterministically.
-- **Generation identity.** The adjacency manifest records the committed
-  project-generation UUID and graph source fingerprint from the reader's
-  pinned snapshot. There is no absent-counter or generation-zero meaning.
+- **Generation identity.** The adjacency manifest records the topology counter
+  pinned before the source scan. A complete delta chain may advance an older
+  base to the current topology counter without copying the base CSR.
 - **Publication rule.** A graph mutation and its source fingerprint publish in
   the same immutable generation. `CURRENT` changes only after every participant
   is durable and validated.
 - **Crash-safety invariant.** A reader sees either the prior complete graph
   generation or the new complete graph generation. A failed or interrupted
   write never exposes a counter/data mismatch or committed prefix.
-- **Staleness detection.** The provider compares the manifest's source
-  fingerprint with the pinned graph participant fingerprint. A corrupt
-  accelerator is always stale, never fresh.
+- **Staleness detection.** The provider compares the manifest's topology counter
+  with the current counter and validates any required bounded delta chain. A
+  corrupt accelerator is never served as a hit.
 - **Fallback.** On mismatch (or absent index), the provider scans the typed edge tables and
   builds the adjacency in memory — yielding identical results, only slower. A stale or missing
   index can therefore never cause incorrect output.
 - **Rebuild triggers.** Lazy on first traversal when the `indexes/adjacency/` capability is
-  present, or explicit via `forge.index("adjacency", ...)`. Incremental rebuild
-  (append-delta + compaction) is deferred to v0.5.1.
+  present, or explicit via `forge.index("adjacency", ...)`. Append-only commits
+  publish bounded delta segments; a full rebuild compacts them into sharded bases.
 - **Determinism (R-ADJ-2).** Full rebuild streams each typed edge file once; `out` entries
   sort by `(src_id, edge_id)` and `in` entries by `(dst_id, edge_id)` — the `edge_id`
-  tie-break makes the CSR bytes reproducible from `topology/` alone. `_all.{out,in}.csr` are
+  tie-break makes shard bytes reproducible from `topology/` alone. `_all.{out,in}.csr.json` are
   the same sorts over the union of all typed files plus `_exploratory.parquet`. The manifest's
   `built_at` is excluded from the determinism guarantee.
 - **Bounded build.** Projected Parquet batches feed sorted spill runs. Bounded-fan-in merge
-  passes (64 runs by default) emit rows directly into hard-capped shard sinks; they never reconstruct complete edge/neighbor
-  arrays. Both edge entries and local offset rows have hard shard caps.
+  passes (64 runs by default) emit rows directly into hard-capped shard sinks; they never
+  reconstruct complete edge/neighbor arrays. Both edge entries and local offset rows have
+  hard shard caps.
   `AdjacencyBuildMetrics` exposes source rows, spill runs/bytes, shard count, and peak
   shard entries/rows for scale evidence.
 - **Build ordering.** Builders write immutable shard directories, atomically publish each
@@ -327,8 +328,8 @@ Conventions:
   directory under its visibility lock. Cancellation or failure leaves the prior directory
   active and removes unpublished spill/build state.
 - **Loader semantics** (`graphforge_exec::PersistentAdjacencyProvider`).
-  Freshness requires a non-empty manifest whose graph source fingerprint
-  equals the pinned graph participant. Fresh + row present ⇒ load
+  Freshness requires a non-empty manifest whose topology generation is current
+  directly or through a complete bounded delta chain. Fresh + row present ⇒ load
   (`adjacency=hit`); stale or torn ⇒ lazy rebuild, then serve; fresh but **no
   row** for the requested relation ⇒ scan-build *without* rebuild (rebuilding
   cannot add an unknown relation — prevents a rebuild-per-query loop); a

@@ -2487,6 +2487,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_single_batch_csr_migrates_to_shards_on_rebuild() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+
+        write_csr(&path, &expected).unwrap();
+        assert!(!sharded_csr_exists(&path));
+        assert_eq!(read_csr(&path).unwrap(), expected);
+
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        assert!(sharded_csr_exists(&path));
+        assert_eq!(read_csr(&path).unwrap(), expected);
+    }
+
+    #[test]
     fn entries_from_out_csr_rejects_malformed_offset_bounds() {
         let past_targets = CsrIndex {
             offsets: vec![0, 2],
