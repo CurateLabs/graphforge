@@ -2455,10 +2455,10 @@ fn py_generation_identity(
     })
 }
 
-fn py_identity_dict<'py>(
-    py: Python<'py>,
+fn py_identity_dict(
+    py: Python<'_>,
     identity: CommittedGenerationIdentity,
-) -> PyResult<Bound<'py, PyDict>> {
+) -> PyResult<Bound<'_, PyDict>> {
     let out = PyDict::new(py);
     out.set_item(
         "generation_uuid",
