@@ -29,6 +29,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef;
 use graphforge_core::{GraphIdentity, TypeId};
+pub use graphforge_io::{
+    ResultSinkFormat, ResultSinkOptions, ResultSinkProgress, ResultSinkReceipt,
+};
 use graphforge_ir::{
     BindError, Binder, GraphOp, GraphPlan, IrExpr, ProcedureRegistry, RuntimeCatalog,
 };
@@ -2898,12 +2901,9 @@ impl GraphForge {
 
     /// Execute `cypher` and write the result to a Parquet file at `path`.
     ///
-    /// A thin sink over [`execute`](Self::execute): the result batches are
-    /// written with a single Arrow Parquet writer (the schema — including its
-    /// `graphforge.*` metadata — is preserved; a zero-row result writes a valid
-    /// schema-only file). The write is **atomic**: batches are written to a
-    /// sibling temp file that is renamed onto `path` only after a clean close, so
-    /// a mid-write failure never leaves a torn file at the destination.
+    /// This compatibility wrapper uses the bounded streaming sink with default
+    /// limits. The write is atomic: a sibling temporary file is published only
+    /// after execution, writer finalization, and file sync all succeed.
     ///
     /// # Errors
     /// Propagates any [`execute`](Self::execute) error, or [`GfError::Storage`]
@@ -2923,50 +2923,91 @@ impl GraphForge {
         params: &HashMap<String, IrLiteral>,
         path: &str,
     ) -> Result<(), GfError> {
-        let result = self.execute_with_params(cypher, params)?;
-        let dest = std::path::Path::new(path);
-        let parent = dest
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map_or_else(
-                || std::path::PathBuf::from("."),
-                std::path::Path::to_path_buf,
-            );
-        let tmp = tempfile::NamedTempFile::new_in(&parent)
-            .map_err(|e| GfError::Storage(format!("create temp for {path}: {e}")))?;
-        {
-            // `&File: Write`, so the writer borrows the temp file and `tmp` stays
-            // owned for the atomic persist below.
-            let mut parquet_metadata = result
-                .schema
-                .metadata()
-                .iter()
-                .map(|(key, value)| {
-                    parquet::file::metadata::KeyValue::new(key.clone(), Some(value.clone()))
-                })
-                .collect::<Vec<_>>();
-            parquet_metadata.sort_unstable_by(|left, right| left.key.cmp(&right.key));
-            let writer_properties = parquet::file::properties::WriterProperties::builder()
-                .set_key_value_metadata(Some(parquet_metadata))
-                .build();
-            let mut writer = parquet::arrow::ArrowWriter::try_new(
-                tmp.as_file(),
-                Arc::clone(&result.schema),
-                Some(writer_properties),
+        self.execute_to_result_sink_with_params(
+            cypher,
+            params,
+            path,
+            ResultSinkFormat::Parquet,
+            &ResultSinkOptions::default(),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// Stream a query into an atomic Parquet result with explicit limits and
+    /// optional cooperative cancellation.
+    pub fn execute_to_parquet_stream_with_params(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        path: &str,
+        options: &ResultSinkOptions,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ResultSinkReceipt, GfError> {
+        self.execute_to_result_sink_with_params(
+            cypher,
+            params,
+            path,
+            ResultSinkFormat::Parquet,
+            options,
+            cancellation,
+        )
+    }
+
+    /// Stream a query into an atomic Arrow IPC stream file with explicit limits
+    /// and optional cooperative cancellation.
+    pub fn execute_to_arrow_ipc_stream_with_params(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        path: &str,
+        options: &ResultSinkOptions,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ResultSinkReceipt, GfError> {
+        self.execute_to_result_sink_with_params(
+            cypher,
+            params,
+            path,
+            ResultSinkFormat::ArrowIpc,
+            options,
+            cancellation,
+        )
+    }
+
+    fn execute_to_result_sink_with_params(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, IrLiteral>,
+        path: &str,
+        format: ResultSinkFormat,
+        options: &ResultSinkOptions,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<ResultSinkReceipt, GfError> {
+        cancellation.map_or(Ok(()), CancellationToken::checkpoint)?;
+        let stream = self.execute_stream_with_params(cypher, params)?;
+        let schema = stream.schema();
+        let result = self.block_on(async {
+            graphforge_io::sink_record_batch_stream(
+                stream,
+                schema,
+                std::path::Path::new(path),
+                format,
+                options,
+                || cancellation.is_some_and(CancellationToken::is_cancelled),
             )
-            .map_err(|e| GfError::Storage(e.to_string()))?;
-            for batch in &result.batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| GfError::Storage(e.to_string()))?;
-            }
-            writer
-                .close()
-                .map_err(|e| GfError::Storage(e.to_string()))?;
-        }
-        tmp.persist(dest)
-            .map_err(|e| GfError::Storage(format!("persist {path}: {e}")))?;
-        Ok(())
+            .await
+            .map_err(|error| {
+                if error.phase == "cancelled" {
+                    GfError::Api {
+                        code: ApiErrorCode::Cancelled,
+                        message: error.to_string(),
+                    }
+                } else {
+                    GfError::Storage(error.to_string())
+                }
+            })
+        })?;
+        Ok(result)
     }
 
     /// Return the storage path, if any (`None` for an in-memory instance).

@@ -10,6 +10,7 @@
 //! - collapse AST-level sugar (`IsNull`, `InList`, `StringOp`, `RegexMatch`)
 //!   into `UnaryOp` / `BinaryOp` variants handled uniformly by the executor
 
+use graphforge_core::SpatialValue;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -106,6 +107,8 @@ pub enum IrLiteral {
         /// Named IANA zone, or `None` for an offset-only datetime.
         zone: Option<String>,
     },
+    /// A canonical typed spatial property value.
+    Spatial(SpatialValue),
     /// A homogeneous list of values, persisted as an Arrow `List<inner>` column
     /// (the inner type is inferred from the elements). Stores e.g. a property
     /// whose value is `[date(…), date(…)]`. Heterogeneous lists are out of scope
@@ -152,6 +155,7 @@ impl Serialize for IrLiteral {
                 offset,
                 zone,
             } => IrLiteralSer::ZonedDateTime(*days, *nanos, *offset, zone.clone()).serialize(s),
+            Self::Spatial(value) => IrLiteralSer::Spatial(value).serialize(s),
             // Each element serialises via `IrLiteral`'s own impl (so nested
             // non-finite floats keep their tagged encoding).
             Self::List(items) => IrLiteralSer::List(items).serialize(s),
@@ -195,6 +199,7 @@ enum IrLiteralSer<'a> {
     Time(i64),
     ZonedTime(i64, i32),
     ZonedDateTime(i64, i64, i32, Option<String>),
+    Spatial(&'a SpatialValue),
     List(&'a [IrLiteral]),
     Map(&'a [(String, IrLiteral)]),
 }
@@ -290,6 +295,7 @@ impl<'de> Visitor<'de> for IrLiteralVisitor {
                     zone,
                 })
             }
+            "Spatial" => Ok(IrLiteral::Spatial(read_value_field(&mut map)?)),
             "List" => Ok(IrLiteral::List(read_value_field(&mut map)?)),
             "Map" => Ok(IrLiteral::Map(read_value_field(&mut map)?)),
             other => Err(de::Error::unknown_variant(
@@ -308,6 +314,7 @@ impl<'de> Visitor<'de> for IrLiteralVisitor {
                     "Time",
                     "ZonedTime",
                     "ZonedDateTime",
+                    "Spatial",
                     "List",
                     "Map",
                 ],

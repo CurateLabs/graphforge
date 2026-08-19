@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 192,
-  "releaseSurfaceDigest": "7b10db80d4bd05e21a94c57a7c4218e54f0d464a27dab127bdec59903afc66a0",
+  "releaseSurfaceCount": 194,
+  "releaseSurfaceDigest": "f59ec74c2dd604d3d27a096829369c54b15ba29f32fac8d4f70e4a139481751f",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -172,6 +172,13 @@
         ],
         "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
       },
+      "GraphForge.execute_to_arrow_ipc_stream_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
+        "reason": "Node binds parameters on PlanHandle before Promise-delivered Arrow IPC."
+      },
       "GraphForge.execute_to_parquet": {
         "nodeMembers": [
           "GraphForge.plan",
@@ -185,6 +192,13 @@
           "PlanHandle.sinkParquet"
         ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
+      },
+      "GraphForge.execute_to_parquet_stream_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
+        "reason": "Node binds parameters on PlanHandle before the asynchronous bounded Parquet sink."
       },
       "GraphForge.configure_provider_find_runtime": {
         "nodeMembers": [
