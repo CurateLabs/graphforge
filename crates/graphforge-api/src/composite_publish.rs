@@ -26,6 +26,78 @@ use crate::composite_transaction::{CompositeGraphMutation, CompositeTransactionR
 use crate::composite_validation::{CompositeOntologySnapshot, CompositeValidationSnapshot};
 use crate::construction::prop_literal;
 
+fn eligible_delta_operations(
+    request: &CompositeTransactionRequest,
+) -> Result<Option<Vec<graphforge_storage::GraphDeltaOp>>, GfError> {
+    if request.graph_mutations.is_empty() {
+        return Ok(None);
+    }
+    let mut operations = Vec::with_capacity(request.graph_mutations.len());
+    for (index, mutation) in request.graph_mutations.iter().enumerate() {
+        let (kind, payload) = match mutation {
+            CompositeGraphMutation::SetNodeProperty {
+                node_uuid,
+                property,
+                value,
+            } => (
+                graphforge_storage::GraphDeltaOpKind::SetNodeProperty,
+                graphforge_storage::GraphDeltaPayload::SetNodeProperty {
+                    node_uuid: node_uuid.hyphenated().to_string(),
+                    property_stem: "_untyped".into(),
+                    key: property.clone(),
+                    value: graphforge_storage::encode_graph_delta_value(&prop_literal(value)?)?,
+                },
+            ),
+            CompositeGraphMutation::RemoveNodeProperty {
+                node_uuid,
+                property,
+            } => (
+                graphforge_storage::GraphDeltaOpKind::RemoveNodeProperty,
+                graphforge_storage::GraphDeltaPayload::RemoveNodeProperty {
+                    node_uuid: node_uuid.hyphenated().to_string(),
+                    property_stem: "_untyped".into(),
+                    key: property.clone(),
+                },
+            ),
+            CompositeGraphMutation::SetEdgeProperty {
+                edge_uuid,
+                property,
+                value,
+            } => (
+                graphforge_storage::GraphDeltaOpKind::SetEdgeProperty,
+                graphforge_storage::GraphDeltaPayload::SetEdgeProperty {
+                    edge_uuid: edge_uuid.hyphenated().to_string(),
+                    property_stem: "_untyped".into(),
+                    key: property.clone(),
+                    value: graphforge_storage::encode_graph_delta_value(&prop_literal(value)?)?,
+                },
+            ),
+            CompositeGraphMutation::RemoveEdgeProperty {
+                edge_uuid,
+                property,
+            } => (
+                graphforge_storage::GraphDeltaOpKind::RemoveEdgeProperty,
+                graphforge_storage::GraphDeltaPayload::RemoveEdgeProperty {
+                    edge_uuid: edge_uuid.hyphenated().to_string(),
+                    property_stem: "_untyped".into(),
+                    key: property.clone(),
+                },
+            ),
+            _ => return Ok(None),
+        };
+        let operation_uuid = Uuid::new_v5(
+            &request.context.operation_uuid.0,
+            format!("graphforge-composite-delta-operation/1/{index}").as_bytes(),
+        );
+        operations.push(graphforge_storage::GraphDeltaOp {
+            operation_uuid,
+            kind,
+            payload,
+        });
+    }
+    Ok(Some(operations))
+}
+
 impl GraphForge {
     /// Validate, stage, and publish one composite graph + knowledge generation.
     ///
@@ -210,11 +282,35 @@ impl GraphForge {
         let recorded_at = (self.clock.lock().expect("clock lock poisoned"))()?;
 
         let publication = (|| -> Result<RecordBatch, GfError> {
+            // Select the storage route from explicit typed input before the
+            // private workspace is mutated. Capacity exhaustion deliberately
+            // falls back to canonical full-Parquet publication.
+            let prepared_delta = if !optimistic
+                && let Some(operations) = eligible_delta_operations(request)?
+            {
+                let delta_request = graphforge_storage::GraphDeltaPublishRequest {
+                    transaction_uuid,
+                    generation_uuid,
+                    run_uuid: Uuid::new_v5(&transaction_uuid, b"graphforge-composite-delta-run/1"),
+                    operations,
+                    limits: graphforge_storage::GraphDeltaJournalLimits::default(),
+                };
+                match graphforge_storage::prepare_graph_delta(parent, &delta_request) {
+                    Ok(prepared) => Some(prepared),
+                    Err(error) if error.code() == "GF_RESOURCE_LIMIT" => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
             apply_graph_mutations(self, request, &mut next_catalog, recorded_at)?;
             if self.path.is_some() {
                 crate::persist_runtime_catalog(&self.dir, &next_catalog)?;
             }
-            let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
+            let graph = match prepared_delta.as_ref() {
+                Some(prepared) => prepared.files_participant.clone(),
+                None => graphforge_storage::capture_graph_files(&self.dir)?.1,
+            };
             let participants = assemble_composite_participants(self, parent, request, graph)?;
             let capabilities = parent
                 .capabilities()
@@ -235,14 +331,22 @@ impl GraphForge {
                     root,
                     &publication,
                     content_fingerprint,
-                    Some(self.dir.as_path()),
+                    Some(
+                        prepared_delta
+                            .as_ref()
+                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
+                    ),
                     self.lifecycle_mode,
                 )?
             } else {
                 graphforge_storage::stage_project_generation_with_graph_tree_mode(
                     root,
                     &publication,
-                    Some(self.dir.as_path()),
+                    Some(
+                        prepared_delta
+                            .as_ref()
+                            .map_or(self.dir.as_path(), |prepared| prepared.graph_tree_root()),
+                    ),
                     self.lifecycle_mode,
                 )?
             };
@@ -1809,6 +1913,71 @@ mod tests {
             .execute("MATCH (n:Person) RETURN n.node_uuid AS id")
             .unwrap();
         assert_eq!(rows.batches[0].num_rows(), 2);
+    }
+
+    #[test]
+    fn eligible_property_commit_preserves_complete_generation_and_reopens_from_delta() {
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph
+            .publish_composite_transaction(graph_request(121, 122, "Initial"))
+            .unwrap();
+        enable(&graph, CapabilityId::Provenance, 123);
+        let root = graph.resolved_generation.container_root();
+        let parent = graphforge_storage::resolve_project_generation(root).unwrap();
+        let parent_graph = parent.graph_files_inventory().unwrap().unwrap();
+        let unrelated = parent
+            .participant_snapshots()
+            .unwrap()
+            .into_iter()
+            .filter(|snapshot| snapshot.capability_id != "graph")
+            .collect::<Vec<_>>();
+        let request = property_request(124, 122, "nickname", "delta-visible");
+        let first = graph
+            .publish_composite_transaction(request.clone())
+            .unwrap();
+        let retry = graph.publish_composite_transaction(request).unwrap();
+        assert_eq!(first, retry);
+
+        let published = graphforge_storage::resolve_project_generation(root).unwrap();
+        assert_eq!(
+            unrelated,
+            published
+                .participant_snapshots()
+                .unwrap()
+                .into_iter()
+                .filter(|snapshot| snapshot.capability_id != "graph")
+                .collect::<Vec<_>>()
+        );
+        let published_graph = published.graph_files_inventory().unwrap().unwrap();
+        assert_eq!(
+            graphforge_storage::list_delta_runs(&published_graph, Default::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        for entry in parent_graph.files.iter().filter(|entry| {
+            std::path::Path::new(&entry.relative_path)
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+        }) {
+            assert!(published_graph.files.iter().any(|candidate| {
+                candidate.relative_path == entry.relative_path
+                    && candidate.content_sha256 == entry.content_sha256
+            }));
+        }
+        drop(graph);
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let rows = reopened
+            .execute("MATCH (n:Person) RETURN n.nickname AS nickname")
+            .unwrap();
+        let values = rows.batches[0]
+            .column_by_name("nickname")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(values.value(0), "delta-visible");
     }
 
     #[test]
