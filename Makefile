@@ -275,7 +275,8 @@ coverage-rust:  ## Core + same-SHA Python/Node adapter Rust coverage ledger
 	@$(MAKE) check-coverage-rust
 
 codspeed-build:  ## Build the CodSpeed benchmark targets (simulation mode; see docs/development/benchmarking.md)
-	cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher -p graphforge-storage
+	cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
+	cargo codspeed build -m simulation -p graphforge-storage --bench m6_storage
 
 codspeed-build-walltime:  ## Build only M6 durable I/O benchmarks in walltime mode
 	cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io

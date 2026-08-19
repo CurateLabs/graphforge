@@ -2,10 +2,9 @@
 
 use divan::Bencher;
 use graphforge_storage::{
-    GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, decode_delta_run,
-    encode_delta_run,
+    GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
+    ReconstructedGraphState, apply_delta_runs, decode_delta_run, encode_delta_run,
 };
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -66,21 +65,42 @@ fn gfdr_decode_verify(bencher: Bencher, count: usize) {
 
 #[divan::bench(args = [1, 100, 10_000])]
 fn replay_merge_fingerprint(bencher: Bencher, operations: usize) {
-    // One bounded run across the operation ladder. Run-count limits are an
-    // admission contract, not a benchmark parameter to bypass.
-    let encoded = encode_delta_run(
+    let first = fixture(operations);
+    let mut second = fixture(operations);
+    for (index, operation) in second.iter_mut().enumerate() {
+        operation.operation_uuid = Uuid::from_u128(0x3000 + index as u128);
+        if let GraphDeltaPayload::UpsertNodeV2 {
+            updated_at_micros, ..
+        } = &mut operation.payload
+        {
+            *updated_at_micros += 1;
+        }
+    }
+    let encoded_first = encode_delta_run(
         1,
         Uuid::from_u128(10),
         Uuid::from_u128(20),
-        &fixture(operations),
+        &first,
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
+    let encoded_second = encode_delta_run(
+        2,
+        Uuid::from_u128(11),
+        Uuid::from_u128(21),
+        &second,
         GraphDeltaJournalLimits::default(),
     )
     .unwrap();
     bencher.bench(|| {
-        let mut fingerprint = Sha256::new();
-        let run = decode_delta_run(&encoded, Some(1), GraphDeltaJournalLimits::default()).unwrap();
-        fingerprint.update(&run.bytes);
-        divan::black_box(fingerprint.finalize())
+        let limits = GraphDeltaJournalLimits::default();
+        let runs = [
+            decode_delta_run(&encoded_first, Some(1), limits).unwrap(),
+            decode_delta_run(&encoded_second, Some(2), limits).unwrap(),
+        ];
+        let mut state = ReconstructedGraphState::default();
+        let evidence = apply_delta_runs(&mut state, &runs, limits).unwrap();
+        divan::black_box(evidence.state_fingerprint)
     });
 }
 

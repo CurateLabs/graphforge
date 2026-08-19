@@ -91,6 +91,13 @@ fn publish_delta(root: &std::path::Path) {
     .unwrap();
 }
 
+fn seed_generation_chain(root: &std::path::Path, delta_count: usize) {
+    publish_base(root);
+    for _ in 0..delta_count {
+        publish_delta(root);
+    }
+}
+
 #[divan::bench]
 fn durable_commit(bencher: Bencher) {
     bencher
@@ -118,6 +125,7 @@ fn durable_open(bencher: Bencher) {
         .with_inputs(|| {
             let root = tempfile::tempdir().unwrap();
             open_or_initialize_project(root.path()).unwrap();
+            seed_generation_chain(root.path(), 1);
             root
         })
         .bench_local_refs(|root| resolve_project_generation(root.path()).unwrap());
@@ -129,6 +137,7 @@ fn recovery_scan(bencher: Bencher) {
         .with_inputs(|| {
             let root = tempfile::tempdir().unwrap();
             open_or_initialize_project(root.path()).unwrap();
+            seed_generation_chain(root.path(), 1);
             root
         })
         .bench_local_refs(|root| recover_project_on_open(root.path()).unwrap());
@@ -140,6 +149,7 @@ fn reachability_scan(bencher: Bencher) {
         .with_inputs(|| {
             let root = tempfile::tempdir().unwrap();
             open_or_initialize_project(root.path()).unwrap();
+            seed_generation_chain(root.path(), 5);
             root
         })
         .bench_local_refs(|root| {
@@ -158,6 +168,7 @@ fn garbage_collection(bencher: Bencher) {
         .with_inputs(|| {
             let root = tempfile::tempdir().unwrap();
             open_or_initialize_project(root.path()).unwrap();
+            seed_generation_chain(root.path(), 5);
             root
         })
         .bench_local_refs(|root| {
