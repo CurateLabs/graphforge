@@ -691,7 +691,7 @@
         {
           "kind": "rust",
           "path": "crates/graphforge-storage/tests/graph_delta_compaction.rs",
-          "symbol": "concurrent_suffix_runs_survive_prefix_compaction"
+          "symbol": "partial_prefix_compaction_fails_closed_in_bounded_v1"
         },
         {
           "kind": "rust",

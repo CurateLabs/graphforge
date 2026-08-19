@@ -140,6 +140,14 @@ environment settings are inputs only and cannot override the selected
 generation. Authoritative small-write delta runs, when present, live under
 `graph/deltas/` inside the same generation and are inventory-verified
 ([ADR 0019](../../adr/0019-authoritative-graph-delta-journal.md)). Compaction
+and ordinary opens decode the compact base from these canonical Parquet files;
+there is no duplicate JSON graph-state authority. A delta-bearing open verifies
+the contiguous typed GFDR chain, materializes a contained private Parquet view,
+and exposes that view only after replay succeeds within its declared limits.
+Checkpoint views use the same path, so a checkpoint remains pinned to its exact
+generation. Routing stems and canonical openCypher value types are retained;
+routing-free or string-only prototype GFDR payloads fail with
+`GF_UNSUPPORTED_PROJECT_FORMAT` rather than being guessed. Compaction
 folds a verified contiguous prefix back into canonical Parquet via a new
 immutable generation (`compact_graph_delta`) and reclaims unreachable inputs
 only through the shared retention/GC oracle. They are
