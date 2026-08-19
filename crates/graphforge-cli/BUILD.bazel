@@ -69,6 +69,16 @@ gf_rust_binary(
     deps = _CLI_DEPS + [":graphforge_cli"],
 )
 
+gf_rust_binary(
+    name = "generate_geoarrow_fixtures",
+    srcs = ["examples/generate_geoarrow_fixtures.rs"],
+    compile_data = _GEOARROW_FIXTURE,
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/graphforge-cli",
+    },
+    deps = _CLI_DEPS + ["@crates//:parquet"],
+)
+
 _CLI_TEST_DATA = [":gf"] + _CONTRACT_FIXTURES
 
 _CLI_BIN_ENV = {

@@ -216,14 +216,20 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
                 &GfError::Validation(format!("invalid canonical spatial property: {error}")),
             )
         })?;
-        serde_json::from_value(json)
-            .map(PropValue::Spatial)
-            .map_err(|error| {
+        let spatial: graphforge_api::SpatialValue =
+            serde_json::from_value(json).map_err(|error| {
                 to_pyerr(
                     value.py(),
                     &GfError::Validation(format!("invalid canonical spatial property: {error}")),
                 )
-            })
+            })?;
+        spatial.validate_interchange_profile().map_err(|error| {
+            to_pyerr(
+                value.py(),
+                &GfError::Validation(format!("invalid canonical spatial property: {error}")),
+            )
+        })?;
+        Ok(PropValue::Spatial(spatial))
     } else {
         Err(PyTypeError::new_err(
             "unsupported node property type (expected None/bool/int/float/str/list/canonical spatial dict)",
