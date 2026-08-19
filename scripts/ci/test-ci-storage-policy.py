@@ -95,6 +95,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "durability-certification-evidence-${{ github.sha }}": 1,
         "native-oracle-windows-${{ github.sha }}": 1,
         "native-oracle-macos-${{ github.sha }}": 1,
+        "native-durability-aggregate-${{ github.sha }}": 1,
         "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
     }
 )
@@ -118,6 +119,8 @@ EXPECTED_ARTIFACT_DOWNLOADS = Counter(
         "Release-Candidate-evidence-${{ needs.resolve_source.outputs.release_sha }}": 1,
         "pr-python-wheel-${{ github.sha }}": 1,
         "pr-node-addon-${{ github.sha }}": 1,
+        "native-oracle-windows-${{ github.sha }}": 1,
+        "native-oracle-macos-${{ github.sha }}": 1,
     }
 )
 EXPECTED_DEPENDENCY_KEYS = Counter(
@@ -254,7 +257,15 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             f"artifact upload is not fail-closed: {name}"
         )
         publication = name.startswith(("Release-", "Binding-", "Rust-"))
-        expected_retention = "30" if publication else "1"
+        certification = name.startswith(
+            (
+                "durability-certification-evidence-",
+                "native-oracle-windows-",
+                "native-oracle-macos-",
+                "native-durability-aggregate-",
+            )
+        )
+        expected_retention = "30" if publication else "14" if certification else "1"
         assert field(step, "retention-days") == expected_retention, (
             f"artifact retention drift: {name}"
         )
@@ -289,6 +300,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "docs/development/bazel-migration-evidence/perf-sample.json"
             ),
             "${{ runner.temp }}/durability-certification-evidence",
+            "native/native-durability-aggregate.json",
             "replay-memory.txt\ncompaction-memory.txt",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
@@ -315,6 +327,8 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             "candidate/release-artifacts",
             "dist",
             "crates/graphforge-bindings-node",
+            "native/windows",
+            "native/macos",
         }, f"artifact download path drift: {selector}"
         if pattern is not None:
             assert field(step, "merge-multiple") == "true", (
@@ -327,7 +341,10 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
             assert field(step, "merge-multiple") is None, (
                 f"single artifact unexpectedly merged: {name}"
             )
-            cross_run = name != "Release-Load-${{ github.run_id }}" and not name.startswith("pr-")
+            same_run = name == "Release-Load-${{ github.run_id }}" or name.startswith(
+                ("pr-", "native-oracle-")
+            )
+            cross_run = not same_run
             if cross_run:
                 assert field(step, "github-token") == "${{ github.token }}", (
                     f"cross-run artifact has no token: {name}"
@@ -661,7 +678,7 @@ def main() -> None:
         f"{len(artifact_downloads)} consumer, {len(saved)} cache transfer producers, "
         f"{len(restored)} consumers, "
         f"{len(dependency_keys)} dependency caches, {len(sticky_keys)} bounded sticky disks, "
-        "one-day transfer and 30-day publication artifact retention"
+        "one-day transfer, 14-day certification, and 30-day publication artifact retention"
     )
 
 

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -26,6 +27,23 @@ DEFAULT_CI_HISTORIES = 8
 DEFAULT_CI_OPS = 12
 SCHEDULED_HISTORIES = 64
 SCHEDULED_OPS = 32
+REQUIRED_OPERATIONS = [
+    "ack_commit",
+    "crash_at_phase",
+    "tear_bytes",
+    "pin_reader",
+    "read_pinned",
+    "fresh_open",
+    "create_checkpoint",
+    "acquire_lease",
+    "release_lease",
+    "publish_delta_run",
+    "compact_deltas",
+    "run_gc",
+    "optimistic_write_skew",
+    "cancel_unstarted",
+    "idempotent_retry",
+]
 MATRIX_PATH = ROOT / "tests/contracts/durability-isolation-matrix.json"
 CERT_CONTRACT_PATH = ROOT / "tests/contracts/durability-certification.json"
 
@@ -59,6 +77,13 @@ def git_head() -> str:
     return (completed.stdout or "").strip() or "unknown"
 
 
+def command_version(argv: list[str]) -> str:
+    completed = subprocess.run(argv, cwd=ROOT, text=True, capture_output=True, check=False)
+    if completed.returncode != 0:
+        return "unavailable"
+    return ((completed.stdout or completed.stderr) or "").splitlines()[0].strip()
+
+
 def load_cert_contract() -> dict[str, Any]:
     try:
         value = json.loads(CERT_CONTRACT_PATH.read_text(encoding="utf-8"))
@@ -83,6 +108,37 @@ def validate_config(seed: int, histories: int, ops: int) -> None:
         raise GateError(f"certification contract seed must be {CERT_SEED}")
     if contract.get("issue") != 756 or contract.get("parent_issue") != 747:
         raise GateError("certification contract must bind issues 756 / 747")
+    observation = contract.get("production_observation")
+    if (
+        not isinstance(observation, dict)
+        or observation.get("driver") != "graphforge_api::GraphForge"
+    ):
+        raise GateError("certification must use the production GraphForge driver")
+    if observation.get("write_modes") != [
+        "single_writer",
+        "queued_writer",
+        "optimistic_multi_writer",
+    ]:
+        raise GateError("production certification must cover all write modes")
+    finite = contract.get("finite_coverage")
+    if not isinstance(finite, dict) or finite.get("operations") != REQUIRED_OPERATIONS:
+        raise GateError("certification must enumerate the complete finite transition basis")
+    if finite.get("publication_phases") != "all":
+        raise GateError("certification must cover every publication phase")
+    native = contract.get("native_oracle_artifacts")
+    if native != [
+        "native-oracle-windows-${commit}.json",
+        "native-oracle-macos-${commit}.json",
+    ]:
+        raise GateError("certification must bind both exact-SHA native oracle artifacts")
+    if contract.get("native_oracle_aggregate") != "native-durability-aggregate-${commit}.json":
+        raise GateError("certification must bind the exact-SHA native oracle aggregate")
+    versions = contract.get("versions")
+    if not isinstance(versions, dict) or versions.get("m6_benchmark_inventory") != "m6-storage-v1":
+        raise GateError("certification must freeze the merged #782 benchmark inventory")
+    benchmark = contract.get("benchmark_evidence")
+    if not isinstance(benchmark, dict) or benchmark.get("walltime_bench") != "m6_storage_io":
+        raise GateError("certification must bind the #782 walltime fixture")
     claims = contract.get("forbidden_positive_claims")
     if not isinstance(claims, list) or not claims:
         raise GateError("forbidden_positive_claims are required")
@@ -166,6 +222,70 @@ def write_evidence(output: Path, payload: dict[str, Any]) -> None:
     (output / "reproduction.txt").write_text("\n".join(commands) + "\n", encoding="utf-8")
 
 
+def load_native_oracle(path: Path, expected_platform: str) -> dict[str, Any]:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise GateError(f"cannot read native oracle {path}: {error}") from error
+    if report.get("contract") != "graphforge-native-durability-oracle/v1":
+        raise GateError(f"native oracle contract drift: {path}")
+    if report.get("platform") != expected_platform:
+        raise GateError(
+            f"native oracle platform mismatch: expected {expected_platform}, "
+            f"got {report.get('platform')!r}"
+        )
+    if not isinstance(report.get("filesystem_class"), str) or not report["filesystem_class"]:
+        raise GateError(f"native oracle filesystem class is missing: {path}")
+    if not isinstance(report.get("observations"), list) or not report["observations"]:
+        raise GateError(f"native oracle observations are missing: {path}")
+    if not isinstance(report.get("modeled_faults"), list) or not report["modeled_faults"]:
+        raise GateError(f"native oracle modeled faults are missing: {path}")
+    if not isinstance(report.get("minimized_failure"), dict):
+        raise GateError(f"native oracle minimized trace is missing: {path}")
+    return report
+
+
+def cmd_aggregate_native(args: argparse.Namespace) -> int:
+    if not re.fullmatch(r"[0-9a-f]{40}", args.expected_sha):
+        raise GateError("native aggregate expected SHA must be 40 lowercase hex characters")
+    inputs = {
+        "windows": Path(args.windows),
+        "macos": Path(args.macos),
+    }
+    reports = {
+        platform_name: load_native_oracle(path, platform_name)
+        for platform_name, path in inputs.items()
+    }
+    seeds = {report.get("seed") for report in reports.values()}
+    if len(seeds) != 1 or not all(isinstance(seed, int) for seed in seeds):
+        raise GateError("native oracle seeds do not match")
+    payload = {
+        "contract": "graphforge-native-durability-aggregate/v1",
+        "issue": 756,
+        "commit": args.expected_sha,
+        "status": "passed",
+        "platforms": [
+            {
+                "platform": platform_name,
+                "filesystem_class": reports[platform_name]["filesystem_class"],
+                "seed": reports[platform_name]["seed"],
+                "observation_count": len(reports[platform_name]["observations"]),
+                "modeled_fault_count": len(reports[platform_name]["modeled_faults"]),
+                "sha256": sha256_file(inputs[platform_name]),
+            }
+            for platform_name in ("windows", "macos")
+        ],
+    }
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        "native durability aggregate ok: "
+        f"commit={args.expected_sha} platforms=windows,macos seed={next(iter(seeds))}"
+    )
+    return 0
+
+
 def cmd_validate(_: argparse.Namespace) -> int:
     validate_config(CERT_SEED, DEFAULT_CI_HISTORIES, DEFAULT_CI_OPS)
     print(
@@ -181,6 +301,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     ops = args.ops
     validate_config(args.seed, histories, ops)
     commit = git_head()
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
     result = run_cargo_certification(histories, ops, commit, args.timeout)
     # Also run the API surface wrapper + write-skew honesty cell.
     api_argv = [
@@ -236,6 +358,99 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"{(skew.stdout or '')[-1500:]}\n{(skew.stderr or '')[-1500:]}"
         )
 
+    production_cases = [
+        [
+            "cargo",
+            "test",
+            "-p",
+            "graphforge-storage",
+            "--features",
+            "test-failpoints",
+            "--lib",
+            "project_certification::tests::finite_transition_basis_covers_every_mode_operation_and_publication_phase",
+            "--",
+            "--exact",
+            "--nocapture",
+        ],
+        [
+            "cargo",
+            "test",
+            "-p",
+            "graphforge-storage",
+            "--test",
+            "graph_delta_journal",
+            "--",
+            "--nocapture",
+        ],
+        [
+            "cargo",
+            "test",
+            "-p",
+            "graphforge-storage",
+            "--lib",
+            "project_retention::tests::checkpoint_root_and_live_lease_are_never_selected",
+            "--",
+            "--exact",
+            "--nocapture",
+        ],
+        [
+            "cargo",
+            "test",
+            "-p",
+            "graphforge-storage",
+            "--lib",
+            "graph_delta_compaction::tests::crash_oracle_before_and_after_ack_matches_frozen_contract",
+            "--",
+            "--exact",
+            "--nocapture",
+        ],
+    ]
+    for production_argv in production_cases:
+        production = subprocess.run(
+            production_argv,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=args.timeout,
+            check=False,
+        )
+        if production.returncode != 0:
+            raise GateError(
+                "production durability case failed\n"
+                f"argv={' '.join(production_argv)}\n"
+                f"{(production.stdout or '')[-1500:]}\n{(production.stderr or '')[-1500:]}"
+            )
+
+    native_path = output / f"native-oracle-{platform.system().lower()}.json"
+    native_argv = [
+        "cargo",
+        "test",
+        "-p",
+        "graphforge-storage",
+        "--features",
+        "test-failpoints",
+        "--lib",
+        "project_recovery::tests::subprocess_kill_matrix_never_exposes_a_partial_generation",
+        "--",
+        "--exact",
+        "--nocapture",
+    ]
+    native = subprocess.run(
+        native_argv,
+        cwd=ROOT,
+        env={**os.environ, "GRAPHFORGE_NATIVE_ORACLE_EVIDENCE": str(native_path)},
+        text=True,
+        capture_output=True,
+        timeout=args.timeout,
+        check=False,
+    )
+    if native.returncode != 0 or not native_path.is_file():
+        raise GateError(
+            "native subprocess oracle failed or emitted no evidence\n"
+            f"argv={' '.join(native_argv)}\n"
+            f"{(native.stdout or '')[-1500:]}\n{(native.stderr or '')[-1500:]}"
+        )
+
     payload = {
         "contract": CONTRACT,
         "issue": 756,
@@ -246,18 +461,40 @@ def cmd_run(args: argparse.Namespace) -> int:
         "untriaged_failures": 0,
         "commit": commit,
         "platform": f"{platform.system()}-{platform.machine()}-{platform.python_version()}",
-        "toolchain": "rustc-workspace",
+        "toolchain": command_version(["rustc", "--version"]),
+        "tool_versions": {
+            "cargo": command_version(["cargo", "--version"]),
+            "python": platform.python_version(),
+        },
+        "runner": os.environ.get("GRAPHFORGE_CERT_RUNNER", "local"),
+        "filesystem_class": os.environ.get("GRAPHFORGE_CERT_FILESYSTEM_CLASS", "undeclared-local"),
         "versions": {
             "durability_isolation": "graphforge-durability-isolation/1",
             "durability_certification": CONTRACT,
             "delta_journal": "adr-0019",
             "fault_oracle": "project_fault_oracle",
+            "m6_benchmark_inventory": "m6-storage-v1",
+            "m6_storage_io_fixture": "v1",
         },
+        "production_observation": load_cert_contract()["production_observation"],
+        "finite_coverage": load_cert_contract()["finite_coverage"],
+        "native_oracle_artifacts": [
+            name.replace("${commit}", commit)
+            for name in load_cert_contract()["native_oracle_artifacts"]
+        ],
+        "native_oracle_observed": {
+            "platform": platform.system().lower(),
+            "path": native_path.name,
+            "sha256": sha256_file(native_path),
+        },
+        "benchmark_evidence": load_cert_contract()["benchmark_evidence"],
         "cases": [result],
         "commands": [
             result["reproduction"],
             " ".join(api_argv),
             " ".join(skew_argv),
+            *(" ".join(argv) for argv in production_cases),
+            " ".join(native_argv),
         ],
         "claims": {
             "ssi": False,
@@ -280,7 +517,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "distributed durability",
             }:
                 raise GateError(f"evidence contains forbidden claim {forbidden!r}")
-    write_evidence(Path(args.output), payload)
+    write_evidence(output, payload)
     print(
         f"durability certification ok: seed={CERT_SEED} histories={histories} "
         f"ops={ops} untriaged=0 commit={commit}"
@@ -302,6 +539,15 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--timeout", type=int, default=900)
     run.add_argument("--output", required=True)
     run.set_defaults(func=cmd_run)
+
+    aggregate_native = sub.add_parser(
+        "aggregate-native", help="Validate and aggregate exact-SHA native oracle evidence"
+    )
+    aggregate_native.add_argument("--expected-sha", required=True)
+    aggregate_native.add_argument("--windows", required=True)
+    aggregate_native.add_argument("--macos", required=True)
+    aggregate_native.add_argument("--output", required=True)
+    aggregate_native.set_defaults(func=cmd_aggregate_native)
 
     args = parser.parse_args(argv)
     try:
