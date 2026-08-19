@@ -1368,25 +1368,7 @@ fn validate_runtime_map(
     manifest: &Manifest,
     limits: PortableV2Limits,
 ) -> Result<(), PortableV2Error> {
-    let runtime_files = manifest
-        .components
-        .iter()
-        .flat_map(|component| &component.files);
-    let descriptor = runtime_files
-        .clone()
-        .find(|file| file.path == RUNTIME_MAP_PATH);
-    if descriptor.is_none()
-        && runtime_files
-            .clone()
-            .any(|file| file.media_type == "application/vnd.graphforge.runtime-generation+json")
-    {
-        return Err(PortableV2Error::at(
-            PortableV2ErrorCode::Incompatible,
-            RUNTIME_MAP_PATH,
-            "runtime map is at the wrong path",
-        ));
-    }
-    let Some(descriptor) = descriptor else {
+    let Some(descriptor) = runtime_map_descriptor(manifest)? else {
         return Ok(());
     };
     if descriptor.media_type != "application/vnd.graphforge.runtime-generation+json"
@@ -1417,6 +1399,38 @@ fn validate_runtime_map(
             "runtime map contract",
         ));
     }
+    validate_runtime_map_contents(&runtime, manifest)
+}
+
+fn runtime_map_descriptor(manifest: &Manifest) -> Result<Option<&ManifestFile>, PortableV2Error> {
+    let runtime_files = manifest
+        .components
+        .iter()
+        .flat_map(|component| &component.files);
+    let descriptor = runtime_files
+        .clone()
+        .find(|file| file.path == RUNTIME_MAP_PATH);
+    if descriptor.is_none()
+        && runtime_files
+            .clone()
+            .any(|file| file.media_type == "application/vnd.graphforge.runtime-generation+json")
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime map is at the wrong path",
+        ));
+    }
+    let Some(descriptor) = descriptor else {
+        return Ok(None);
+    };
+    Ok(Some(descriptor))
+}
+
+fn validate_runtime_map_contents(
+    runtime: &RuntimeGenerationMap,
+    manifest: &Manifest,
+) -> Result<(), PortableV2Error> {
     let component_ids: BTreeSet<_> = manifest
         .components
         .iter()
@@ -1462,7 +1476,7 @@ fn validate_runtime_map(
         }
         prior_capability = Some(capability.capability_id.as_str());
     }
-    if let Some(graph) = runtime.graph_tree
+    if let Some(graph) = &runtime.graph_tree
         && (graph.component_id != "graph-tree"
             || !component_ids.contains(graph.component_id.as_str())
             || !runtime_ids.contains(graph.inventory_participant_id.as_str()))
