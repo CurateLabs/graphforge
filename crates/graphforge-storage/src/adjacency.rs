@@ -131,6 +131,9 @@ impl ShardedCsrIndex {
         }
         let mut prior_first = None;
         let mut edges = 0_u64;
+        if !is_normal_path_component(&manifest.shard_dir) {
+            return Err(GfError::Storage("invalid CSR shard directory name".into()));
+        }
         let root = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -146,7 +149,7 @@ impl ShardedCsrIndex {
             }
             prior_first = Some(shard.first_node);
             edges = edges.saturating_add(shard.edge_count);
-            if Path::new(&shard.file).components().count() != 1 {
+            if !is_normal_path_component(&shard.file) {
                 return Err(GfError::Storage("invalid CSR shard file name".into()));
             }
             // Authenticate and structurally validate every bounded shard at
@@ -266,6 +269,12 @@ pub fn sharded_csr_exists(path: &Path) -> bool {
 
 fn csr_artifact_exists(path: &Path) -> bool {
     path.is_file() || sharded_csr_exists(path)
+}
+
+fn is_normal_path_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 /// Write a versioned checksummed shard set and publish its manifest last.
@@ -852,7 +861,7 @@ pub fn write_csr(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
         let shard_root = std::fs::read(&sharded_manifest)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<CsrShardManifest>(&bytes).ok())
-            .filter(|manifest| Path::new(&manifest.shard_dir).components().count() == 1)
+            .filter(|manifest| is_normal_path_component(&manifest.shard_dir))
             .and_then(|manifest| path.parent().map(|parent| parent.join(manifest.shard_dir)));
         std::fs::remove_file(sharded_manifest).map_err(storage_err)?;
         if let Some(shard_root) = shard_root {
@@ -2606,6 +2615,32 @@ mod tests {
         assert!(!shard_root.exists());
         assert!(!sharded_csr_exists(&path));
         assert_eq!(read_csr(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn legacy_cleanup_rejects_parent_directory_manifest_paths() {
+        let directory = TempDir::new().unwrap();
+        let adjacency = directory.path().join("adjacency");
+        std::fs::create_dir(&adjacency).unwrap();
+        let sentinel = directory.path().join("must-remain");
+        std::fs::write(&sentinel, b"safe").unwrap();
+        let path = adjacency.join("KNOWS.out.csr");
+        let malicious = CsrShardManifest {
+            format: "graphforge.csr-shards".into(),
+            version: SHARDED_CSR_VERSION,
+            node_count: 0,
+            edge_count: 0,
+            shard_dir: "..".into(),
+            shards: Vec::new(),
+        };
+        std::fs::write(
+            path.with_extension("csr.json"),
+            serde_json::to_vec(&malicious).unwrap(),
+        )
+        .unwrap();
+
+        write_csr(&path, &sample_csr()).unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"safe");
     }
 
     #[test]
