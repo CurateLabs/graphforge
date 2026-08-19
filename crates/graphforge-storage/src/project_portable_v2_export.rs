@@ -7,20 +7,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    ResolvedProjectGeneration, verify_portable_v2,
+    ResolvedProjectGeneration, project_portable_v2::canonical_json, verify_portable_v2,
 };
 
-type GfError = PortableV2Error;
+type ExportError = PortableV2Error;
 
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
+const USTAR_MAX_ENTRY_BYTES: u64 = 0o77_777_777_777;
 
 /// Finite planner and streaming-writer budgets.
 pub type PortableV2ExportLimits = PortableV2Limits;
@@ -66,7 +66,7 @@ struct Identity {
     len: u64,
     modified: Option<std::time::SystemTime>,
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 /// Immutable pinned-generation metadata plan; contains no payload buffers.
 pub struct PortableV2ExportPlan {
     generation_uuid: Uuid,
@@ -74,6 +74,16 @@ pub struct PortableV2ExportPlan {
     manifest: Vec<u8>,
     package_digest: [u8; 32],
     payload_bytes: u64,
+}
+impl std::fmt::Debug for PortableV2ExportPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PortableV2ExportPlan")
+            .field("generation_uuid", &self.generation_uuid)
+            .field("entry_count", &self.files.len())
+            .field("package_digest", &hex(self.package_digest))
+            .field("payload_bytes", &self.payload_bytes)
+            .finish_non_exhaustive()
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Durable publication receipt with separate semantic and transport identities.
@@ -84,7 +94,7 @@ pub struct PortableV2ExportReceipt {
     pub package_digest: [u8; 32],
     /// Representation-specific transport identity.
     pub transport_digest: [u8; 32],
-    /// Semantic manifest plus payload entry count.
+    /// Verified physical package entry count, including tag records.
     pub entry_count: usize,
     /// Source payload bytes, excluding tags and manifest.
     pub payload_bytes: u64,
@@ -176,7 +186,7 @@ struct RuntimeGraphTree {
 pub fn plan_complete_portable_v2(
     g: &ResolvedProjectGeneration,
     limits: PortableV2ExportLimits,
-) -> Result<PortableV2ExportPlan, GfError> {
+) -> Result<PortableV2ExportPlan, ExportError> {
     validate_limits(limits)?;
     g.validate_complete_participant_inventory()?;
     let mut files = Vec::new();
@@ -186,7 +196,7 @@ pub fn plan_complete_portable_v2(
     let mut graph_inventory_participant = None;
     let mut total = 0;
     for d in g.participant_descriptors()? {
-        let id = portable_id(&format!("{}-{}", d.capability_id, d.record_family_id));
+        let id = portable_participant_id(&d.capability_id, &d.record_family_id);
         let kind = kind(&d.capability_id, &d.record_family_id);
         let source = g.participant_path(&d.capability_id, &d.record_family_id)?;
         let path = format!(
@@ -275,7 +285,7 @@ pub fn plan_complete_portable_v2(
             inventory_participant_id,
         }),
     };
-    let runtime_bytes = canonical(&serde_json::to_value(runtime_map).map_err(storage)?)?;
+    let runtime_bytes = canonical_json(&serde_json::to_value(runtime_map).map_err(storage)?)?;
     if runtime_bytes.len() as u64 > limits.max_manifest_bytes {
         return Err(limit("runtime compatibility map exceeds configured limit"));
     }
@@ -344,7 +354,7 @@ pub fn plan_complete_portable_v2(
     };
     let mut value = serde_json::to_value(draft).map_err(storage)?;
     value.as_object_mut().unwrap().remove("package_digest");
-    let semantic = canonical(&value)?;
+    let semantic = canonical_json(&value)?;
     let mut h = Sha256::new();
     h.update(b"graphforge-project/2\0");
     h.update(semantic);
@@ -370,7 +380,7 @@ pub fn plan_complete_portable_v2(
             authenticity: "unsigned",
         },
     };
-    let manifest = canonical(&serde_json::to_value(final_manifest).map_err(storage)?)?;
+    let manifest = canonical_json(&serde_json::to_value(final_manifest).map_err(storage)?)?;
     if manifest.len() as u64 > limits.max_manifest_bytes {
         return Err(limit("semantic manifest exceeds configured limit"));
     }
@@ -391,8 +401,15 @@ pub fn export_complete_portable_v2(
     limits: PortableV2ExportLimits,
     cancelled: &AtomicBool,
     mut progress: impl FnMut(PortableV2ExportProgress),
-) -> Result<PortableV2ExportReceipt, GfError> {
+) -> Result<PortableV2ExportReceipt, ExportError> {
     validate_limits(limits)?;
+    if output == PortableV2Output::Bundle
+        && entries(plan, limits.max_tag_manifest_bytes)?
+            .iter()
+            .any(|(_, source)| source.len() > USTAR_MAX_ENTRY_BYTES)
+    {
+        return Err(limit("bundle entry exceeds ustar size field"));
+    }
     let dst = destination.as_ref();
     reject_destination(dst)?;
     let parent = dst
@@ -442,12 +459,16 @@ pub fn export_complete_portable_v2(
         remove(&stage);
         storage(error)
     })?;
-    sync_dir(parent)?;
+    if let Err(error) = sync_dir(parent) {
+        remove(dst);
+        return Err(error);
+    }
     Ok(PortableV2ExportReceipt {
         generation_uuid: plan.generation_uuid,
         package_digest: plan.package_digest,
         transport_digest: digest,
-        entry_count: plan.files.len() + 1,
+        entry_count: usize::try_from(verified.entry_count)
+            .map_err(|_| limit("verified entry count exceeds platform capacity"))?,
         payload_bytes: plan.payload_bytes,
         output,
     })
@@ -459,7 +480,7 @@ fn expanded(
     l: PortableV2ExportLimits,
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
-) -> Result<[u8; 32], GfError> {
+) -> Result<[u8; 32], ExportError> {
     fs::create_dir(stage).map_err(storage)?;
     write_bytes(stage, "data/graphforge-project.json", &plan.manifest)?;
     let mut payload = vec![(
@@ -474,12 +495,18 @@ fn expanded(
         copy(f, &target, l.copy_buffer_bytes, cancelled, |n| {
             done += n;
             progress(PortableV2ExportProgress {
-                entries_completed: i,
+                entries_completed: i + 1,
                 bytes_completed: done,
-                entries_total: plan.files.len(),
+                entries_total: plan.files.len() + 5,
                 bytes_total: plan.payload_bytes,
             });
         })?;
+        progress(PortableV2ExportProgress {
+            entries_completed: i + 2,
+            bytes_completed: done,
+            entries_total: plan.files.len() + 5,
+            bytes_total: plan.payload_bytes,
+        });
         payload.push((f.path.clone(), f.length, f.digest));
     }
     payload.sort_by(|a, b| a.0.cmp(&b.0));
@@ -498,6 +525,12 @@ fn expanded(
         .collect::<Vec<_>>();
     let tag = inventory(&tag_rows, l.max_tag_manifest_bytes)?;
     write_bytes(stage, "tagmanifest-sha256.txt", &tag)?;
+    progress(PortableV2ExportProgress {
+        entries_completed: plan.files.len() + 5,
+        bytes_completed: done,
+        entries_total: plan.files.len() + 5,
+        bytes_total: plan.payload_bytes,
+    });
     sync_tree(stage)?;
     let mut all = payload;
     all.extend(tag_rows);
@@ -529,7 +562,7 @@ impl Src<'_> {
 fn entries(
     plan: &PortableV2ExportPlan,
     max_tag_manifest_bytes: u64,
-) -> Result<Vec<(String, Src<'_>)>, GfError> {
+) -> Result<Vec<(String, Src<'_>)>, ExportError> {
     let mut v = vec![(
         "data/graphforge-project.json".into(),
         Src::Bytes(plan.manifest.clone()),
@@ -573,7 +606,7 @@ fn bundle(
     l: PortableV2ExportLimits,
     cancelled: &impl Fn() -> bool,
     progress: &mut impl FnMut(PortableV2ExportProgress),
-) -> Result<[u8; 32], GfError> {
+) -> Result<[u8; 32], ExportError> {
     let mut items = entries(plan, l.max_tag_manifest_bytes)?;
     items.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = OpenOptions::new()
@@ -601,6 +634,12 @@ fn bundle(
             })?,
         }
         pad(&mut out, &mut h, src.len())?;
+        progress(PortableV2ExportProgress {
+            entries_completed: i + 1,
+            bytes_completed: done,
+            entries_total: items.len(),
+            bytes_total: plan.payload_bytes,
+        });
     }
     let end = [0u8; 1024];
     out.write_all(&end).map_err(storage)?;
@@ -614,7 +653,7 @@ fn inspect(
     path: &str,
     limits: PortableV2ExportLimits,
     total: &mut u64,
-) -> Result<PlannedFile, GfError> {
+) -> Result<PlannedFile, ExportError> {
     if path.len() > limits.max_path_bytes {
         return Err(limit("portable path exceeds configured limit"));
     }
@@ -659,7 +698,7 @@ fn inline_control(
     bytes: Vec<u8>,
     limits: PortableV2ExportLimits,
     total: &mut u64,
-) -> Result<PlannedFile, GfError> {
+) -> Result<PlannedFile, ExportError> {
     if path.len() > limits.max_path_bytes || bytes.len() as u64 > limits.max_entry_bytes {
         return Err(limit("control entry exceeds configured limit"));
     }
@@ -682,7 +721,7 @@ fn copy(
     size: usize,
     cancelled: &impl Fn() -> bool,
     mut tick: impl FnMut(u64),
-) -> Result<(), GfError> {
+) -> Result<(), ExportError> {
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -740,7 +779,7 @@ fn stream(
     size: usize,
     cancelled: &impl Fn() -> bool,
     mut tick: impl FnMut(u64),
-) -> Result<(), GfError> {
+) -> Result<(), ExportError> {
     if let PlannedSource::Control(bytes) = &planned.source {
         if cancelled() {
             return Err(err("GF_CANCELLED", "portable export cancelled"));
@@ -786,7 +825,7 @@ fn stream(
     }
     Ok(())
 }
-fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), GfError> {
+fn header(out: &mut File, h: &mut Sha256, path: &str, size: u64) -> Result<(), ExportError> {
     if let Ok((name, prefix)) = split(path) {
         return raw_header(out, h, name, prefix, size, b'0');
     }
@@ -811,7 +850,7 @@ fn raw_header(
     prefix: &str,
     size: u64,
     kind: u8,
-) -> Result<(), GfError> {
+) -> Result<(), ExportError> {
     let mut b = [0u8; 512];
     put(&mut b[..100], name.as_bytes());
     oct(&mut b[100..108], 0o644)?;
@@ -842,7 +881,7 @@ fn pax_path_record(path: &str) -> String {
         digits = actual_digits;
     }
 }
-fn split(p: &str) -> Result<(&str, &str), GfError> {
+fn split(p: &str) -> Result<(&str, &str), ExportError> {
     if p.len() <= 100 {
         return Ok((p, ""));
     }
@@ -854,7 +893,7 @@ fn split(p: &str) -> Result<(&str, &str), GfError> {
     }
     Err(err("GF_INVALID_PORTABLE_PATH", "path cannot fit ustar"))
 }
-fn oct(dst: &mut [u8], n: u64) -> Result<(), GfError> {
+fn oct(dst: &mut [u8], n: u64) -> Result<(), ExportError> {
     let w = dst.len() - 1;
     let s = format!("{n:0w$o}");
     if s.len() > w {
@@ -867,55 +906,17 @@ fn oct(dst: &mut [u8], n: u64) -> Result<(), GfError> {
 fn put(d: &mut [u8], s: &[u8]) {
     d[..s.len()].copy_from_slice(s);
 }
-fn emit(o: &mut File, h: &mut Sha256, b: &[u8]) -> Result<(), GfError> {
+fn emit(o: &mut File, h: &mut Sha256, b: &[u8]) -> Result<(), ExportError> {
     o.write_all(b).map_err(storage)?;
     h.update(b);
     Ok(())
 }
-fn pad(output: &mut File, digest: &mut Sha256, length: u64) -> Result<(), GfError> {
+fn pad(output: &mut File, digest: &mut Sha256, length: u64) -> Result<(), ExportError> {
     let padding = ((512 - length % 512) % 512) as usize;
     let zeroes = [0u8; 512];
     emit(output, digest, &zeroes[..padding])
 }
-fn canonical(v: &Value) -> Result<Vec<u8>, GfError> {
-    fn w(v: &Value, o: &mut Vec<u8>) -> Result<(), GfError> {
-        match v {
-            Value::Null => o.extend(b"null"),
-            Value::Bool(x) => o.extend(if *x { &b"true"[..] } else { &b"false"[..] }),
-            Value::Number(x) => o.extend(x.to_string().bytes()),
-            Value::String(x) => o.extend(serde_json::to_vec(x).map_err(storage)?),
-            Value::Array(a) => {
-                o.push(b'[');
-                for (i, x) in a.iter().enumerate() {
-                    if i > 0 {
-                        o.push(b',');
-                    }
-                    w(x, o)?;
-                }
-                o.push(b']');
-            }
-            Value::Object(m) => {
-                o.push(b'{');
-                let mut k = m.keys().collect::<Vec<_>>();
-                k.sort();
-                for (i, k) in k.into_iter().enumerate() {
-                    if i > 0 {
-                        o.push(b',');
-                    }
-                    o.extend(serde_json::to_vec(k).map_err(storage)?);
-                    o.push(b':');
-                    w(&m[k], o)?;
-                }
-                o.push(b'}');
-            }
-        }
-        Ok(())
-    }
-    let mut o = Vec::new();
-    w(v, &mut o)?;
-    Ok(o)
-}
-fn inventory(rows: &[(String, u64, [u8; 32])], limit_bytes: u64) -> Result<Vec<u8>, GfError> {
+fn inventory(rows: &[(String, u64, [u8; 32])], limit_bytes: u64) -> Result<Vec<u8>, ExportError> {
     let mut o = Vec::new();
     for (p, _, d) in rows {
         let row_bytes = 64_u64
@@ -933,7 +934,7 @@ fn inventory(rows: &[(String, u64, [u8; 32])], limit_bytes: u64) -> Result<Vec<u
     }
     Ok(o)
 }
-fn identity(m: &fs::Metadata) -> Result<Identity, GfError> {
+fn identity(m: &fs::Metadata) -> Result<Identity, ExportError> {
     if !m.is_file() || m.file_type().is_symlink() {
         return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "not a regular file"));
     }
@@ -959,7 +960,8 @@ fn identity(m: &fs::Metadata) -> Result<Identity, GfError> {
     }
 }
 #[cfg(unix)]
-fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
+fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
+    use std::path::Component;
     if fs::symlink_metadata(path)
         .map_err(storage)?
         .file_type()
@@ -967,32 +969,91 @@ fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
     {
         return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "source is a link"));
     }
-    let descriptor = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+    // Resolve fixed platform aliases (for example macOS /var -> /private/var),
+    // then pin every component of that canonical path with openat+NOFOLLOW.
+    let canonical = path.canonicalize().map_err(storage)?;
+    let components = canonical
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(Ok(value)),
+            Component::RootDir | Component::CurDir => None,
+            Component::ParentDir | Component::Prefix(_) => Some(Err(err(
+                "GF_UNSUPPORTED_ENTRY_TYPE",
+                "source path contains an unsafe component",
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some((last, parents)) = components.split_last() else {
+        return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "source is not a file"));
+    };
+    let mut directory = rustix::fs::open(
+        if canonical.is_absolute() {
+            Path::new("/")
+        } else {
+            Path::new(".")
+        },
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(storage)?;
+    for component in parents {
+        directory = rustix::fs::openat(
+            &directory,
+            *component,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(storage)?;
+    }
+    let descriptor = rustix::fs::openat(
+        &directory,
+        *last,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .map_err(storage)?;
     Ok(descriptor.into())
 }
 #[cfg(windows)]
-fn open_source_no_follow(path: &Path) -> Result<File, GfError> {
+fn open_source_no_follow(path: &Path) -> Result<File, ExportError> {
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    if fs::symlink_metadata(path)
-        .map_err(storage)?
-        .file_type()
-        .is_symlink()
-    {
-        return Err(err("GF_UNSUPPORTED_ENTRY_TYPE", "source is a link"));
-    }
-    OpenOptions::new()
+    reject_windows_reparse_components(path)?;
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
-        .map_err(storage)
+        .map_err(storage)?;
+    reject_windows_reparse_components(path)?;
+    Ok(file)
 }
-fn valid_path(p: &str) -> Result<(), GfError> {
+#[cfg(windows)]
+fn reject_windows_reparse_components(path: &Path) -> Result<(), ExportError> {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(storage)?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(err(
+                "GF_UNSUPPORTED_ENTRY_TYPE",
+                "source path contains a reparse point",
+            ));
+        }
+    }
+    Ok(())
+}
+fn valid_path(p: &str) -> Result<(), ExportError> {
     if p.len() > 4096
         || p.starts_with('/')
         || p.contains('\\')
@@ -1004,7 +1065,7 @@ fn valid_path(p: &str) -> Result<(), GfError> {
     }
     Ok(())
 }
-fn collisions(f: &[PlannedFile]) -> Result<(), GfError> {
+fn collisions(f: &[PlannedFile]) -> Result<(), ExportError> {
     let mut a = BTreeSet::new();
     let mut b = BTreeSet::new();
     for x in f {
@@ -1030,6 +1091,15 @@ fn portable_id(s: &str) -> String {
         o.insert(0, 'p');
     }
     o
+}
+fn portable_participant_id(capability: &str, family: &str) -> String {
+    let mut prefix = portable_id(&format!("{capability}-{family}"));
+    prefix.truncate(220);
+    let mut digest = Sha256::new();
+    digest.update(capability.as_bytes());
+    digest.update([0]);
+    digest.update(family.as_bytes());
+    format!("{prefix}-{}", &hex(digest.finalize().into())[..12])
 }
 fn kind(c: &str, f: &str) -> &'static str {
     if c == "graph" {
@@ -1068,7 +1138,7 @@ fn graph_media(p: &str) -> &str {
         "application/octet-stream"
     }
 }
-fn validate_limits(l: PortableV2ExportLimits) -> Result<(), GfError> {
+fn validate_limits(l: PortableV2ExportLimits) -> Result<(), ExportError> {
     if l.max_components == 0
         || l.max_entries == 0
         || l.max_manifest_bytes == 0
@@ -1081,7 +1151,7 @@ fn validate_limits(l: PortableV2ExportLimits) -> Result<(), GfError> {
     }
     Ok(())
 }
-fn reject_destination(p: &Path) -> Result<(), GfError> {
+fn reject_destination(p: &Path) -> Result<(), ExportError> {
     if p.exists() {
         return Err(err("GF_DESTINATION_EXISTS", "destination exists"));
     }
@@ -1105,16 +1175,28 @@ fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     )?;
     Ok(())
 }
-#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "redox")))]
+#[cfg(windows)]
 fn publish_no_replace(stage: &Path, destination: &Path) -> std::io::Result<()> {
     // Windows rename is non-replacing. The destination was also checked before
     // staging; any intervening creation makes this operation fail closed.
     fs::rename(stage, destination)
 }
-fn parent(p: &Path) -> Result<(), GfError> {
+#[cfg(not(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "redox",
+    windows
+)))]
+fn publish_no_replace(_: &Path, _: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace publication is unsupported on this platform",
+    ))
+}
+fn parent(p: &Path) -> Result<(), ExportError> {
     fs::create_dir_all(p.parent().unwrap()).map_err(storage)
 }
-fn write_bytes(root: &Path, p: &str, b: &[u8]) -> Result<(), GfError> {
+fn write_bytes(root: &Path, p: &str, b: &[u8]) -> Result<(), ExportError> {
     let p = root.join(p);
     parent(&p)?;
     let mut f = OpenOptions::new()
@@ -1125,7 +1207,7 @@ fn write_bytes(root: &Path, p: &str, b: &[u8]) -> Result<(), GfError> {
     f.write_all(b).map_err(storage)?;
     f.sync_all().map_err(storage)
 }
-fn sync_tree(root: &Path) -> Result<(), GfError> {
+fn sync_tree(root: &Path) -> Result<(), ExportError> {
     let mut dirs = vec![root.into()];
     let mut i = 0;
     while i < dirs.len() {
@@ -1143,8 +1225,22 @@ fn sync_tree(root: &Path) -> Result<(), GfError> {
     }
     Ok(())
 }
-fn sync_dir(p: &Path) -> Result<(), GfError> {
-    File::open(p).and_then(|f| f.sync_all()).map_err(storage)
+fn sync_dir(p: &Path) -> Result<(), ExportError> {
+    sync_directory_handle(p).map_err(storage)
+}
+#[cfg(not(windows))]
+fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
+    File::open(p)?.sync_all()
+}
+#[cfg(windows)]
+fn sync_directory_handle(p: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(p)?
+        .sync_all()
 }
 fn remove(p: &Path) {
     if p.is_dir() {
@@ -1161,11 +1257,11 @@ fn hex(d: [u8; 32]) -> String {
             output
         })
 }
-fn limit(m: &str) -> GfError {
+fn limit(m: &str) -> ExportError {
     let _ = m;
     PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "export limit exceeded")
 }
-fn err(c: &str, m: &str) -> GfError {
+fn err(c: &str, m: &str) -> ExportError {
     let code = match c {
         "GF_CANCELLED" => PortableV2ErrorCode::Cancelled,
         "GF_LIMIT_EXCEEDED" => PortableV2ErrorCode::LimitExceeded,
@@ -1179,7 +1275,7 @@ fn err(c: &str, m: &str) -> GfError {
     let _ = m;
     PortableV2Error::new(code, "portable-v2 export failed")
 }
-fn storage(e: impl std::fmt::Display) -> GfError {
+fn storage(e: impl std::fmt::Display) -> ExportError {
     let _ = e;
     PortableV2Error::new(PortableV2ErrorCode::Io, "portable-v2 I/O failed")
 }
@@ -1203,15 +1299,22 @@ mod tests {
         let first = out.path().join("first.gfpb");
         let second = out.path().join("second.gfpb");
         let cancelled = AtomicBool::new(false);
+        let mut expanded_progress = Vec::new();
         let a = export_complete_portable_v2(
             &plan,
             &expanded,
             PortableV2Output::Expanded,
             limits,
             &cancelled,
-            |_| {},
+            |progress| expanded_progress.push(progress),
         )
         .unwrap();
+        let final_progress = expanded_progress.last().unwrap();
+        assert_eq!(
+            final_progress.entries_completed,
+            final_progress.entries_total
+        );
+        assert_eq!(final_progress.bytes_completed, final_progress.bytes_total);
         let b = export_complete_portable_v2(
             &plan,
             &first,
@@ -1259,7 +1362,7 @@ mod tests {
                 "data/components/compatibility/graphforge-runtime-map/runtime-generation.json",
             ))
             .unwrap();
-        let runtime: Value = serde_json::from_slice(&runtime).unwrap();
+        let runtime: serde_json::Value = serde_json::from_slice(&runtime).unwrap();
         assert_eq!(runtime["contract"], "graphforge-runtime-generation-map/1");
         assert!(runtime.get("host_path").is_none());
         assert!(runtime.get("secret").is_none());
@@ -1353,6 +1456,10 @@ mod tests {
     fn pax_and_structural_budgets_are_canonical_without_payload_allocation() {
         assert_eq!(portable_id("graph-files"), "graph-files");
         assert_ne!(portable_id("graph-files"), "graph-tree");
+        assert_ne!(
+            portable_participant_id("a-b", "c"),
+            portable_participant_id("a", "b-c")
+        );
         let long = format!(
             "data/components/graph-data/graph-files/{}/nodes.parquet",
             "segment".repeat(40)
@@ -1376,6 +1483,20 @@ mod tests {
         assert_eq!(bytes[156], b'x');
         assert_eq!(bytes[1024..1033].as_ref(), b"PaxFiles/");
         assert_eq!(bytes[1024 + 156], b'0');
+        assert!(oct(&mut [0; 12], USTAR_MAX_ENTRY_BYTES).is_ok());
+        assert!(oct(&mut [0; 12], USTAR_MAX_ENTRY_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn plan_debug_is_content_and_host_path_free() {
+        let project = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(project.path()).unwrap();
+        let plan =
+            plan_complete_portable_v2(&generation, PortableV2ExportLimits::default()).unwrap();
+        let debug = format!("{plan:?}");
+        assert!(!debug.contains(project.path().to_string_lossy().as_ref()));
+        assert!(!debug.contains("manifest"));
+        assert!(debug.contains("entry_count"));
     }
 
     #[test]

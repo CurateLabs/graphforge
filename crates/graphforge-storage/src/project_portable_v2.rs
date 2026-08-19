@@ -457,6 +457,7 @@ fn materialize_bundle(
             continue;
         }
         let path = pending_pax.take().unwrap_or(raw_path);
+        validate_path(&path, limits.max_path_bytes)?;
         if path.starts_with("data/components/") {
             let output_path = destination.join(&path);
             create_materialized_parent(&output_path, &path)?;
@@ -983,6 +984,55 @@ fn read_entry_bytes(entries: &[Entry], path: &str) -> Result<Vec<u8>, PortableV2
         })
 }
 
+pub(crate) fn canonical_json(value: &Value) -> Result<Vec<u8>, PortableV2Error> {
+    fn write(value: &Value, output: &mut Vec<u8>) -> Result<(), PortableV2Error> {
+        match value {
+            Value::Null => output.extend_from_slice(b"null"),
+            Value::Bool(value) => output.extend_from_slice(if *value { b"true" } else { b"false" }),
+            Value::Number(value) => output.extend(value.to_string().bytes()),
+            Value::String(value) => output.extend(serde_json::to_vec(value).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidStructure,
+                    "JSON canonicalization",
+                )
+            })?),
+            Value::Array(values) => {
+                output.push(b'[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    write(value, output)?;
+                }
+                output.push(b']');
+            }
+            Value::Object(values) => {
+                output.push(b'{');
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort();
+                for (index, key) in keys.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(b',');
+                    }
+                    output.extend(serde_json::to_vec(key).map_err(|_| {
+                        PortableV2Error::new(
+                            PortableV2ErrorCode::InvalidStructure,
+                            "JSON canonicalization",
+                        )
+                    })?);
+                    output.push(b':');
+                    write(&values[key], output)?;
+                }
+                output.push(b'}');
+            }
+        }
+        Ok(())
+    }
+    let mut output = Vec::new();
+    write(value, &mut output)?;
+    Ok(output)
+}
+
 fn parse_manifest(
     bytes: &[u8],
     _limits: PortableV2Limits,
@@ -996,7 +1046,7 @@ fn parse_manifest(
             )
         })?
         .0;
-    if serde_json::to_vec(&value).map_err(|_| {
+    if canonical_json(&value).map_err(|_| {
         PortableV2Error::new(
             PortableV2ErrorCode::InvalidStructure,
             "manifest canonicalization",
@@ -1318,15 +1368,30 @@ fn validate_runtime_map(
     manifest: &Manifest,
     limits: PortableV2Limits,
 ) -> Result<(), PortableV2Error> {
-    let Some(descriptor) = manifest
+    let runtime_files = manifest
         .components
         .iter()
-        .flat_map(|component| &component.files)
-        .find(|file| file.media_type == "application/vnd.graphforge.runtime-generation+json")
-    else {
+        .flat_map(|component| &component.files);
+    let descriptor = runtime_files
+        .clone()
+        .find(|file| file.path == RUNTIME_MAP_PATH);
+    if descriptor.is_none()
+        && runtime_files
+            .clone()
+            .any(|file| file.media_type == "application/vnd.graphforge.runtime-generation+json")
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime map is at the wrong path",
+        ));
+    }
+    let Some(descriptor) = descriptor else {
         return Ok(());
     };
-    if descriptor.path != RUNTIME_MAP_PATH || descriptor.length > limits.max_manifest_bytes {
+    if descriptor.media_type != "application/vnd.graphforge.runtime-generation+json"
+        || descriptor.length > limits.max_manifest_bytes
+    {
         return Err(PortableV2Error::at(
             PortableV2ErrorCode::Incompatible,
             &descriptor.path,
@@ -1335,7 +1400,7 @@ fn validate_runtime_map(
     }
     let bytes = read_entry_bytes_from_map(map, RUNTIME_MAP_PATH)?;
     let (value, runtime) = decode_runtime_map(&bytes)?;
-    if serde_json::to_vec(&value).map_err(|_| {
+    if canonical_json(&value).map_err(|_| {
         PortableV2Error::at(
             PortableV2ErrorCode::Incompatible,
             RUNTIME_MAP_PATH,
