@@ -23,6 +23,7 @@ _API_DEPS = [
     "//crates/graphforge-cypher:graphforge_cypher",
     "//crates/graphforge-exec:graphforge_exec",
     "//crates/graphforge-ir:graphforge_ir",
+    "//crates/graphforge-io:graphforge_io",
     "//crates/graphforge-knowledge:graphforge_knowledge",
     "//crates/graphforge-ontology:graphforge_ontology",
     "//crates/graphforge-provenance:graphforge_provenance",

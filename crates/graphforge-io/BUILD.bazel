@@ -8,17 +8,9 @@ package(default_visibility = ["//visibility:public"])
 
 gf_rust_library(
     name = "graphforge_io",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-storage:graphforge_storage",
-    ],
 )
 
 gf_rust_test(
     name = "graphforge_io_test",
     crate = ":graphforge_io",
-    deps = [
-        "//crates/graphforge-core:graphforge_core",
-        "//crates/graphforge-storage:graphforge_storage",
-    ],
 )
