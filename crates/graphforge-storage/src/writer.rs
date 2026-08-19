@@ -2062,7 +2062,7 @@ impl ColType {
             Self::Time => DataType::Time64(TimeUnit::Nanosecond),
             Self::ZonedTime => DataType::Struct(crate::schemas::time_struct_fields()),
             Self::ZonedDateTime => DataType::Struct(crate::schemas::datetime_struct_fields()),
-            Self::Spatial(spatial_type, _, _) => spatial_data_type(spatial_type.clone()),
+            Self::Spatial(spatial_type, _, _) => spatial_data_type(spatial_type),
             Self::List(inner) => {
                 DataType::List(Arc::new(Field::new("item", inner.data_type(), true)))
             }
@@ -2077,7 +2077,7 @@ impl ColType {
     }
 }
 
-fn spatial_data_type(spatial_type: SpatialType) -> DataType {
+fn spatial_data_type(spatial_type: &SpatialType) -> DataType {
     let coordinate = DataType::Struct(arrow::datatypes::Fields::from(vec![
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
@@ -2097,7 +2097,7 @@ fn spatial_data_type(spatial_type: SpatialType) -> DataType {
 
 fn spatial_field(
     name: &str,
-    spatial_type: SpatialType,
+    spatial_type: &SpatialType,
     preserved_name: Option<&str>,
     preserved_metadata: Option<&str>,
     nullable: bool,
@@ -2116,9 +2116,10 @@ fn spatial_field(
         SpatialCrs::Preserved(value) => value,
     };
     let extension_name = preserved_name.unwrap_or(canonical_name);
-    let extension_metadata = preserved_metadata
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{{\"crs\":\"{crs}\",\"crs_type\":\"authority_code\"}}"));
+    let extension_metadata = preserved_metadata.map_or_else(
+        || format!("{{\"crs\":\"{crs}\",\"crs_type\":\"authority_code\"}}"),
+        ToOwned::to_owned,
+    );
     Field::new(name, spatial_data_type(spatial_type), nullable).with_metadata(HashMap::from([
         ("ARROW:extension:name".to_owned(), extension_name.to_owned()),
         ("ARROW:extension:metadata".to_owned(), extension_metadata),
@@ -2205,7 +2206,7 @@ fn build_property_columns_keyed<R: PropRowLike>(
         fields.push(match ct {
             ColType::Spatial(spatial_type, extension_name, extension_metadata) => spatial_field(
                 name,
-                spatial_type,
+                &spatial_type,
                 extension_name.as_deref(),
                 extension_metadata.as_deref(),
                 true,
@@ -2484,7 +2485,7 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
                 Some(NullBuffer::from(valid)),
             ))
         }
-        ColType::Spatial(spatial_type, _, _) => build_spatial_array(name, spatial_type, rows),
+        ColType::Spatial(spatial_type, _, _) => build_spatial_array(name, &spatial_type, rows),
         ColType::Str => {
             let mut b = StringBuilder::new();
             for row in rows {
@@ -2536,7 +2537,7 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
 
 fn coordinate_builder(capacity: usize) -> arrow::array::StructBuilder {
     use arrow::array::{ArrayBuilder, Float64Builder, StructBuilder};
-    let DataType::Struct(fields) = spatial_data_type(SpatialType {
+    let DataType::Struct(fields) = spatial_data_type(&SpatialType {
         geometry: SpatialGeometryType::Point,
         crs: SpatialCrs::Epsg4326,
     }) else {
@@ -2569,7 +2570,7 @@ fn append_coordinate(builder: &mut arrow::array::StructBuilder, coordinate: [f64
 )]
 fn build_spatial_array<R: PropRowLike>(
     name: &str,
-    spatial_type: SpatialType,
+    spatial_type: &SpatialType,
     rows: &[R],
 ) -> ArrayRef {
     use arrow::array::ListBuilder;
@@ -2583,7 +2584,7 @@ fn build_spatial_array<R: PropRowLike>(
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::Point(coordinate),
                         ..
-                    })) if *observed == spatial_type => {
+                    })) if observed == spatial_type => {
                         append_coordinate(&mut builder, *coordinate);
                     }
                     _ => builder.append(false),
@@ -2600,7 +2601,7 @@ fn build_spatial_array<R: PropRowLike>(
             let mut builder =
                 ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(Field::new(
                     child_name,
-                    spatial_data_type(SpatialType {
+                    spatial_data_type(&SpatialType {
                         geometry: SpatialGeometryType::Point,
                         crs: spatial_type.crs.clone(),
                     }),
@@ -2612,12 +2613,12 @@ fn build_spatial_array<R: PropRowLike>(
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::LineString(values),
                         ..
-                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    })) if observed == spatial_type => Some(values.as_slice()),
                     Some(IrLiteral::Spatial(SpatialValue {
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::MultiPoint(values),
                         ..
-                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    })) if observed == spatial_type => Some(values.as_slice()),
                     _ => None,
                 };
                 if let Some(coordinates) = coordinates {
@@ -2632,7 +2633,7 @@ fn build_spatial_array<R: PropRowLike>(
             Arc::new(builder.finish())
         }
         SpatialGeometryType::Polygon | SpatialGeometryType::MultiLineString => {
-            let coordinate_type = spatial_data_type(SpatialType {
+            let coordinate_type = spatial_data_type(&SpatialType {
                 geometry: SpatialGeometryType::Point,
                 crs: spatial_type.crs.clone(),
             });
@@ -2657,12 +2658,12 @@ fn build_spatial_array<R: PropRowLike>(
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::Polygon(values),
                         ..
-                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    })) if observed == spatial_type => Some(values.as_slice()),
                     Some(IrLiteral::Spatial(SpatialValue {
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::MultiLineString(values),
                         ..
-                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    })) if observed == spatial_type => Some(values.as_slice()),
                     _ => None,
                 };
                 if let Some(parts) = parts {
@@ -2680,7 +2681,7 @@ fn build_spatial_array<R: PropRowLike>(
             Arc::new(builder.finish())
         }
         SpatialGeometryType::MultiPolygon => {
-            let coordinate_type = spatial_data_type(SpatialType {
+            let coordinate_type = spatial_data_type(&SpatialType {
                 geometry: SpatialGeometryType::Point,
                 crs: spatial_type.crs.clone(),
             });
@@ -2708,7 +2709,7 @@ fn build_spatial_array<R: PropRowLike>(
                         spatial_type: observed,
                         coordinates: SpatialCoordinates::MultiPolygon(values),
                         ..
-                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    })) if observed == spatial_type => Some(values.as_slice()),
                     _ => None,
                 };
                 if let Some(polygons) = polygons {
@@ -3359,7 +3360,7 @@ pub fn decode_spatial_property_value(
         ]
         .into_iter()
         .find(|geometry| {
-            spatial_data_type(SpatialType {
+            spatial_data_type(&SpatialType {
                 geometry: *geometry,
                 crs: SpatialCrs::Epsg4326,
             }) == *field.data_type()
