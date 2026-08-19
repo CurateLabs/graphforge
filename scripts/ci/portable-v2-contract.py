@@ -11,7 +11,9 @@ from typing import NoReturn
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests/fixtures/portable-v2"
 SCHEMA = ROOT / "docs/contracts/graphforge-project-v2.schema.json"
+COMPOSITION_SCHEMA = ROOT / "docs/contracts/graphforge-ontology-composition-v1.schema.json"
 DOMAIN = b"graphforge-project/2\0"
+COMPOSITION_DOMAIN = b"graphforge-ontology-composition/1\0"
 
 
 def fail(message: str) -> NoReturn:
@@ -235,6 +237,63 @@ def main() -> None:
         digest = "sha256:" + hashlib.sha256(DOMAIN + canonical(candidate)).hexdigest()
         require(digest == vector["package_digest"], f"{vector['package_class']} digest")
         require(vector["representations"] == ["expanded", "bundle"], "representations")
+
+    multi = load_json(FIXTURES / "multi-ontology-vectors.json")
+    require(isinstance(multi, dict), "multi-ontology vectors must be an object")
+    require(multi["decision"] == "existing-versioned-compatibility", "M9 decision")
+    require(multi["component"]["kind"] == "compatibility", "M9 component kind")
+    require(multi["required_capability"] == "ontology-composition@1", "M9 capability")
+    composition_schema = load_json(COMPOSITION_SCHEMA)
+    require(isinstance(composition_schema, dict), "composition schema must be an object")
+    require(
+        composition_schema.get("$id", "").endswith(
+            "graphforge-ontology-composition-v1.schema.json"
+        ),
+        "composition schema id",
+    )
+    composition = dict(multi["composition"])
+    expected_composition = composition.pop("composition_digest")
+    actual_composition = (
+        "sha256:" + hashlib.sha256(COMPOSITION_DOMAIN + canonical(composition)).hexdigest()
+    )
+    require(actual_composition == expected_composition, "M9 composition digest")
+    module_ids = [f"{item['module_id']}@{item['version']}" for item in composition["modules"]]
+    bridge_ids = [
+        f"{item['bridge_set_id']}@{item['version']}" for item in composition["bridge_sets"]
+    ]
+    require(module_ids == sorted(set(module_ids)), "M9 module identity order")
+    require(bridge_ids == sorted(set(bridge_ids)), "M9 bridge identity order")
+    active = composition["activation_profile"]
+    require(active["active_modules"] == sorted(set(active["active_modules"])), "active modules")
+    require(
+        active["active_bridge_sets"] == sorted(set(active["active_bridge_sets"])),
+        "active bridge sets",
+    )
+    require(set(active["active_modules"]) <= set(module_ids), "active module closure")
+    require(set(active["active_bridge_sets"]) <= set(bridge_ids), "active bridge closure")
+    for bridge in composition["bridge_sets"]:
+        require(bridge["source_module"] in module_ids, "bridge source closure")
+        require(bridge["target_module"] in module_ids, "bridge target closure")
+    for feature_set in ("required_features", "optional_features"):
+        values = composition[feature_set]
+        require(values == sorted(set(values)), f"M9 {feature_set} order")
+    forbidden = {
+        "runtime_catalog_ids",
+        "host_paths",
+        "parser_versions",
+        "machine_configuration",
+        "session_state",
+        "credentials",
+        "tck_results",
+    }
+    require(set(multi["identity_exclusions"]) == forbidden, "M9 identity exclusions")
+    require(set(multi["package_classes"]) == classes, "M9 closure classes")
+    require(multi["representations"] == ["expanded", "bundle"], "M9 representations")
+    require(all(not vector["mutation"] for vector in multi["negative_vectors"]), "M9 mutation")
+    require(
+        set(multi["older_v2_reader"].values()) == {"unsupported_future-before-payload"},
+        "M9 older-reader behavior",
+    )
     print("portable-v2 contract fixtures: PASS")
 
 
