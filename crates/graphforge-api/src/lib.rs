@@ -71,6 +71,7 @@ mod embedding_refresh;
 mod embedding_spaces;
 mod epistemic_snapshot;
 mod find_execution;
+mod generation_diff;
 mod graph_inspection;
 mod graph_snapshot;
 mod gsi_profiler;
@@ -154,6 +155,10 @@ pub use import_session::{
     GraphImportSession, ImportPhase, ImportProgress, ImportSessionLimits, ImportSourceKind,
 };
 // The Arrow-backed result of [`GraphForge::execute`].
+pub use generation_diff::{
+    CommittedGenerationIdentity, GenerationDiffDisposition, GenerationDiffLimits,
+    GenerationDiffRequest, GenerationGraphDiff, GraphChangeStream, ReloadRequiredReason,
+};
 pub use graphforge_exec::validate_embedding_options;
 pub use graphforge_exec::{ExecutionResult, ExecutionStats, SendableRecordBatchStream};
 pub use graphforge_storage::{
