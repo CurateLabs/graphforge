@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::project_generation::open_or_initialize_project_admitted;
-use crate::project_portable::prepare_import_target;
+use crate::project_portable::{prepare_import_target, semantically_pristine_generation};
 use crate::project_portable_v2::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2PackageClass,
     PortableV2Report, RUNTIME_MAP_PATH, decode_runtime_map, materialize_verified_portable_v2,
@@ -114,13 +114,39 @@ pub fn import_complete_portable_v2_with_progress(
             ".{target_name}.portable-v2-{}",
             transaction_uuid.hyphenated()
         ));
+    let owner = stage.join(".graphforge-portable-v2-import-owner");
+    let mut owned_retry = false;
     if stage.exists() {
-        return Err(PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "import staging identity already exists",
-        ));
+        let expected = transaction_uuid.hyphenated().to_string();
+        if fs::read_to_string(&owner).ok().as_deref() != Some(expected.as_str()) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "import staging identity already exists",
+            ));
+        }
+        fs::remove_dir_all(&stage).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "owned import staging is unavailable",
+            )
+        })?;
+        owned_retry = true;
     }
     let report = materialize_verified_portable_v2(source, &stage, limits, cancelled)?;
+    fs::write(&owner, transaction_uuid.hyphenated().to_string()).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "cannot mark import staging ownership",
+        )
+    })?;
+    fs::File::open(&owner)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot sync import staging ownership",
+            )
+        })?;
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Materialized,
         entries: report.entry_count,
@@ -136,6 +162,7 @@ pub fn import_complete_portable_v2_with_progress(
         limits,
         cancelled,
         &report,
+        owned_retry,
     );
     let _ = fs::remove_dir_all(&stage);
     if result.is_ok() {
@@ -163,6 +190,7 @@ fn import_materialized(
     limits: PortableV2Limits,
     cancelled: Option<&AtomicBool>,
     report: &PortableV2Report,
+    owned_retry: bool,
 ) -> Result<PortableV2ImportReceipt, PortableV2Error> {
     if report.package_class != PortableV2PackageClass::Complete {
         return Err(PortableV2Error::new(
@@ -268,6 +296,15 @@ fn import_materialized(
         .map_err(storage)?
         .is_some();
     let existing = if replay {
+        Some(crate::resolve_project_generation(admission.root()).map_err(storage)?)
+    } else if owned_retry {
+        let generation = semantically_pristine_generation(admission.root()).map_err(storage)?;
+        if generation.is_none() {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "owned retry target is not pristine",
+            ));
+        }
         Some(crate::resolve_project_generation(admission.root()).map_err(storage)?)
     } else {
         prepare_import_target(admission.root()).map_err(storage)?
@@ -430,5 +467,195 @@ fn storage_or_cancel(error: GfError, cancelled: Option<&AtomicBool>) -> Portable
         PortableV2Error::new(PortableV2ErrorCode::Cancelled, "verification cancelled")
     } else {
         storage(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HELPER: &str = "project_portable_v2_import::tests::subprocess_crash_import";
+    const COOKIE: &str = "graphforge-internal-subprocess-v1";
+
+    fn supported() -> Vec<ProjectCapability> {
+        vec![
+            ProjectCapability {
+                capability_id: "graph".into(),
+                capability_version: 1,
+            },
+            ProjectCapability {
+                capability_id: "workspace".into(),
+                capability_version: 1,
+            },
+        ]
+    }
+
+    #[test]
+    fn resource_ladder_fails_before_target_admission() {
+        let source_project = tempfile::tempdir().unwrap();
+        let source_generation = crate::open_or_initialize_project(source_project.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("complete.gfproject");
+        let export_limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&source_generation, export_limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            export_limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        for (name, limits) in [
+            (
+                "entries",
+                PortableV2Limits {
+                    max_entries: 1,
+                    ..PortableV2Limits::default()
+                },
+            ),
+            (
+                "total",
+                PortableV2Limits {
+                    max_total_bytes: 1,
+                    ..PortableV2Limits::default()
+                },
+            ),
+            (
+                "entry",
+                PortableV2Limits {
+                    max_entry_bytes: 1,
+                    ..PortableV2Limits::default()
+                },
+            ),
+            (
+                "manifest",
+                PortableV2Limits {
+                    max_manifest_bytes: 1,
+                    ..PortableV2Limits::default()
+                },
+            ),
+        ] {
+            let target = package_parent.path().join(format!("target-{name}"));
+            let error = import_complete_portable_v2(
+                &package,
+                &target,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &supported(),
+                limits,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded, "{name}");
+            assert!(!target.exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn crash_windows_recover_old_or_new_and_retry_cleans_owned_residue() {
+        let source_project = tempfile::tempdir().unwrap();
+        let source_generation = crate::open_or_initialize_project(source_project.path()).unwrap();
+        let package_parent = tempfile::tempdir().unwrap();
+        let package = package_parent.path().join("complete.gfproject");
+        let limits = crate::PortableV2ExportLimits::default();
+        let plan = crate::plan_complete_portable_v2(&source_generation, limits).unwrap();
+        crate::export_complete_portable_v2(
+            &plan,
+            &package,
+            crate::PortableV2Output::Expanded,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        for failpoint in [
+            "project.after_writer_lock",
+            "project.after_participant_write",
+            "project.after_manifest_fsync",
+            "project.before_current_replace",
+            "project.after_current_replace",
+        ] {
+            let parent = tempfile::tempdir().unwrap();
+            let target = parent.path().join("project");
+            let old = crate::open_or_initialize_project(&target)
+                .unwrap()
+                .generation_uuid();
+            let transaction = Uuid::new_v4();
+            let generation = Uuid::new_v4();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(HELPER)
+                .arg("--nocapture")
+                .env("GRAPHFORGE_PORTABLE_V2_CRASH_PACKAGE", &package)
+                .env("GRAPHFORGE_PORTABLE_V2_CRASH_TARGET", &target)
+                .env(
+                    "GRAPHFORGE_PORTABLE_V2_CRASH_TRANSACTION",
+                    transaction.to_string(),
+                )
+                .env(
+                    "GRAPHFORGE_PORTABLE_V2_CRASH_GENERATION",
+                    generation.to_string(),
+                )
+                .env("GRAPHFORGE_PROJECT_FAILPOINTS", COOKIE)
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+
+            let _ = crate::recover_project_transactions(&target).unwrap();
+            let recovered = crate::resolve_project_generation(&target)
+                .unwrap()
+                .generation_uuid();
+            assert!(recovered == old || recovered == generation);
+            let receipt = import_complete_portable_v2(
+                &package,
+                &target,
+                transaction,
+                generation,
+                &supported(),
+                PortableV2Limits::default(),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("retry after {failpoint} failed: {error:?}"));
+            assert_eq!(receipt.publication.generation_uuid, generation);
+            assert_eq!(
+                crate::resolve_project_generation(&target)
+                    .unwrap()
+                    .generation_uuid(),
+                generation
+            );
+            let residue = target
+                .parent()
+                .unwrap()
+                .join(format!(".project.portable-v2-{}", transaction.hyphenated()));
+            assert!(!residue.exists(), "owned residue survived {failpoint}");
+        }
+    }
+
+    #[test]
+    fn subprocess_crash_import() {
+        let Ok(package) = std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_PACKAGE") else {
+            return;
+        };
+        let target = std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_TARGET").unwrap();
+        let transaction =
+            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_TRANSACTION").unwrap())
+                .unwrap();
+        let generation =
+            Uuid::parse_str(&std::env::var("GRAPHFORGE_PORTABLE_V2_CRASH_GENERATION").unwrap())
+                .unwrap();
+        let _ = import_complete_portable_v2(
+            package,
+            target,
+            transaction,
+            generation,
+            &supported(),
+            PortableV2Limits::default(),
+            None,
+        );
+        panic!("configured portable import failpoint did not terminate the process");
     }
 }

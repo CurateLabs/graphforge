@@ -1345,6 +1345,112 @@ mod tests {
     use super::*;
     use crate::open_or_initialize_project;
 
+    fn graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        let project = tempfile::tempdir().unwrap();
+        let parent = open_or_initialize_project(project.path()).unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
+        fs::create_dir(tree.path().join("properties")).unwrap();
+        fs::write(tree.path().join("properties/Person.parquet"), b"person").unwrap();
+        let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, inventory);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(
+                project.path(),
+                &request,
+                Some(tree.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh graph generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation)
+    }
+
+    #[test]
+    fn graph_tree_round_trips_equivalently_from_both_representations() {
+        let (_project, generation) = graph_generation();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let expanded = output.path().join("graph.gfproject");
+        let bundle = output.path().join("graph.gfpb");
+        let cancelled = AtomicBool::new(false);
+        export_complete_portable_v2(
+            &plan,
+            &expanded,
+            PortableV2Output::Expanded,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        export_complete_portable_v2(
+            &plan,
+            &bundle,
+            PortableV2Output::Bundle,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let expanded_target = output.path().join("expanded");
+        let bundle_target = output.path().join("bundle");
+        for (source, target) in [(&expanded, &expanded_target), (&bundle, &bundle_target)] {
+            crate::import_complete_portable_v2(
+                source,
+                target,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &supported,
+                limits,
+                None,
+            )
+            .unwrap();
+        }
+        let expanded = crate::resolve_project_generation(&expanded_target).unwrap();
+        let bundle = crate::resolve_project_generation(&bundle_target).unwrap();
+        assert_eq!(
+            expanded.graph_files_inventory().unwrap(),
+            bundle.graph_files_inventory().unwrap()
+        );
+        assert_eq!(
+            tree_bytes(&expanded.graph_tree_root()),
+            tree_bytes(&bundle.graph_tree_root())
+        );
+    }
+
     #[test]
     fn selection_preview_is_stable_exact_and_consumed_by_export_plan() {
         let project = tempfile::tempdir().unwrap();

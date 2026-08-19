@@ -574,8 +574,15 @@ pub(crate) fn prepare_import_target(
 }
 
 fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
-    let Ok(resolved) = resolve_project_generation(target) else {
+    let Some(generation_uuid) = semantically_pristine_generation(target)? else {
         return Ok(false);
+    };
+    has_exact_pristine_layout(target, generation_uuid)
+}
+
+pub(crate) fn semantically_pristine_generation(target: &Path) -> Result<Option<Uuid>, GfError> {
+    let Ok(resolved) = resolve_project_generation(target) else {
+        return Ok(None);
     };
     let capabilities = resolved.capabilities();
     if capabilities.len() != 2
@@ -584,7 +591,7 @@ fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
         || capabilities[1].capability_id != "workspace"
         || capabilities[1].capability_version != 1
     {
-        return Ok(false);
+        return Ok(None);
     }
     let actual = resolved.participant_snapshots()?;
     let expected = crate::workspace_participants::empty_workspace_participants()?;
@@ -605,9 +612,9 @@ fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
                 && actual.bytes == expected.bytes
         })
     {
-        return Ok(false);
+        return Ok(None);
     }
-    has_exact_pristine_layout(target, resolved.generation_uuid())
+    Ok(Some(resolved.generation_uuid()))
 }
 
 fn has_exact_pristine_layout(target: &Path, generation_uuid: Uuid) -> Result<bool, GfError> {

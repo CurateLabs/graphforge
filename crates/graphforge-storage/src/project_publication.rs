@@ -461,6 +461,13 @@ pub(crate) fn stage_project_generation_from_files_admitted(
         admission.revalidate_identity()?;
         let root = canonical_supported_root(admission.root())?;
         let writer_lock = acquire_writer_lock(&root, request)?;
+        project_failpoint::hit(
+            "project.after_writer_lock",
+            Some(request.transaction_uuid),
+            Some(request.generation_uuid),
+            "WRITER_LOCK",
+            false,
+        )?;
         let current = resolve_project_generation(&root)?;
         if current.generation_uuid() != parent.generation_uuid()
             || current.manifest_sha256() != parent.manifest_sha256()
