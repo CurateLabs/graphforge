@@ -2114,6 +2114,8 @@ impl<'a> ExprLowerer<'a> {
                 crs,
             },
             coordinates: SpatialCoordinates::Point([x, y]),
+            extension_name: None,
+            extension_metadata: None,
         })
     }
 
@@ -2149,7 +2151,7 @@ impl<'a> ExprLowerer<'a> {
                 "distance() accepts Point geometry only".into(),
             ));
         };
-        let distance = match a.spatial_type.crs {
+        let distance = match &a.spatial_type.crs {
             SpatialCrs::Epsg3857 => (bx - ax).hypot(by - ay),
             SpatialCrs::Epsg4326 => {
                 const EARTH_RADIUS_METRES: f64 = 6_371_008.8;
@@ -2159,6 +2161,11 @@ impl<'a> ExprLowerer<'a> {
                 let h = (dlat / 2.0).sin().powi(2)
                     + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
                 2.0 * EARTH_RADIUS_METRES * h.sqrt().asin()
+            }
+            SpatialCrs::Preserved(_) => {
+                return Err(LoweringError::InvalidType(
+                    "distance() does not compute preserved-only CRS values".into(),
+                ));
             }
         };
         Ok(lit(distance))

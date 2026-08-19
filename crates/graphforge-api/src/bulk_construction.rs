@@ -1198,15 +1198,6 @@ where
     for (field, array) in columns {
         owner_validation(field.name(), field)?;
         let value = if field.metadata().contains_key("ARROW:extension:name") {
-            spatial_type_from_field(field).ok_or_else(|| {
-                row_error(
-                    kind,
-                    BulkValidationReason::PropertyTypeMismatch,
-                    ordinal,
-                    field.name(),
-                    "spatial field metadata is not canonical",
-                )
-            })?;
             if array.is_null(row) {
                 PropValue::Null
             } else {
@@ -1245,24 +1236,45 @@ fn preflight_spatial_columns(
     columns: &[(&Field, &ArrayRef)],
 ) -> Result<(), BulkValidationError> {
     for (field, array) in columns {
-        let Some(spatial) = spatial_type_from_field(field) else {
+        let Some(_) = field.metadata().get("ARROW:extension:name") else {
             continue;
         };
-        spatial
-            .validate_array(
-                field,
-                array.as_ref(),
-                graphforge_ontology::SpatialValidationLimits::default(),
-            )
-            .map_err(|error| {
-                row_error(
+        if let Some(spatial) = spatial_type_from_field(field) {
+            spatial
+                .validate_array(
+                    field,
+                    array.as_ref(),
+                    graphforge_ontology::SpatialValidationLimits::default(),
+                )
+                .map_err(|error| {
+                    row_error(
+                        kind,
+                        BulkValidationReason::PropertyTypeMismatch,
+                        first_ordinal,
+                        field.name(),
+                        error.code(),
+                    )
+                })?;
+        } else {
+            let limits = graphforge_ontology::SpatialValidationLimits::default();
+            let metadata = field
+                .metadata()
+                .get("ARROW:extension:metadata")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .filter(|value| value.get("crs").is_some());
+            if metadata.is_none()
+                || array.len() > limits.max_geometries
+                || array.get_array_memory_size() > limits.max_bytes
+            {
+                return Err(row_error(
                     kind,
                     BulkValidationReason::PropertyTypeMismatch,
                     first_ordinal,
                     field.name(),
-                    error.code(),
-                )
-            })?;
+                    "preserved spatial field has malformed metadata or exceeds its resource limit",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2196,6 +2208,66 @@ mod tests {
         assert_eq!(error.row_ordinal, Some(40));
         assert_eq!(error.field.as_deref(), Some("location"));
         assert_eq!(error.message, "GF_SPATIAL_COORDINATE_OUT_OF_RANGE");
+    }
+
+    #[test]
+    fn preserved_spatial_bulk_preflight_accepts_explicit_metadata_and_rejects_malformed() {
+        use std::collections::HashMap;
+
+        let array: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-104.9903])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7392])) as ArrayRef,
+            ),
+        ]));
+        let field =
+            Field::new("location", array.data_type().clone(), true).with_metadata(HashMap::from([
+                (
+                    "ARROW:extension:name".into(),
+                    "geoarrow.vendor_point".into(),
+                ),
+                (
+                    "ARROW:extension:metadata".into(),
+                    "{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}".into(),
+                ),
+            ]));
+        preflight_spatial_columns(BulkInputKind::Node, 0, &[(&field, &array)]).unwrap();
+        let value =
+            normalize_properties(
+                BulkInputKind::Node,
+                0,
+                0,
+                &[(&field, &array)],
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        let PropValue::Spatial(value) = &value["location"] else {
+            panic!("preserved field must remain spatial");
+        };
+        assert_eq!(
+            value.extension_name.as_deref(),
+            Some("geoarrow.vendor_point")
+        );
+        assert_eq!(
+            value.extension_metadata.as_deref(),
+            Some("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}")
+        );
+
+        let malformed =
+            Field::new("location", array.data_type().clone(), true).with_metadata(HashMap::from([
+                (
+                    "ARROW:extension:name".into(),
+                    "geoarrow.vendor_point".into(),
+                ),
+                ("ARROW:extension:metadata".into(), "{}".into()),
+            ]));
+        let error =
+            preflight_spatial_columns(BulkInputKind::Node, 0, &[(&malformed, &array)]).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
     }
 
     #[test]

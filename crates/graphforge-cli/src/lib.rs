@@ -2399,6 +2399,8 @@ mod tests {
                         "crs": case["crs"],
                     },
                     "coordinates": case["coordinates"],
+                    "extension_name": case.get("preservedOnly").and_then(|value| value.as_bool()).unwrap_or(false).then(|| case["extensionName"].clone()),
+                    "extension_metadata": case.get("preservedOnly").and_then(|value| value.as_bool()).unwrap_or(false).then(|| case["extensionMetadata"].clone()),
                 }))
                 .unwrap();
                 (name, PropValue::Spatial(spatial))

@@ -596,11 +596,18 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
-            PropValue::Spatial(serde_json::from_value(value.clone()).map_err(|error| {
+            let spatial: graphforge_api::SpatialValue = serde_json::from_value(value.clone())
+                .map_err(|error| {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid canonical spatial property: {error}"
+                    )))
+                })?;
+            spatial.validate_interchange_profile().map_err(|error| {
                 to_napi_err(&GfError::Validation(format!(
                     "invalid canonical spatial property: {error}"
                 )))
-            })?)
+            })?;
+            PropValue::Spatial(spatial)
         }
     })
 }

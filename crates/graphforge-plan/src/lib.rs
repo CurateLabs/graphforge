@@ -1128,6 +1128,8 @@ fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
         IrLiteral::Spatial(value) => {
             15u8.hash(state);
             value.spatial_type.hash(state);
+            value.extension_name.hash(state);
+            value.extension_metadata.hash(state);
             hash_spatial_coordinates(&value.coordinates, state);
         }
         IrLiteral::List(items) => {
