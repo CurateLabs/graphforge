@@ -21,6 +21,18 @@ def spatial_value(case: dict[str, object]) -> dict[str, object]:
     }
 
 
+def flatten_coordinates(value: object) -> list[float]:
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, dict):
+        if set(value) == {"x", "y"}:
+            return [float(value["x"]), float(value["y"])]
+        return [item for child in value.values() for item in flatten_coordinates(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in flatten_coordinates(child)]
+    raise AssertionError(f"unexpected Arrow coordinate value {type(value)!r}")
+
+
 def check_geoarrow_interchange() -> None:
     forge = gf.GraphForge()
     properties = {case["name"]: spatial_value(case) for case in FIXTURE["cases"]}
@@ -36,7 +48,7 @@ def check_geoarrow_interchange() -> None:
         assert metadata[b"ARROW:extension:name"].decode() == case["extensionName"]
         assert metadata[b"ARROW:extension:metadata"].decode() == case["extensionMetadata"]
         values = table.column(case["name"]).to_pylist()
-        assert values[0] is not None
+        assert flatten_coordinates(values[0]) == case["flat"]
         assert values[1] is None
 
     try:

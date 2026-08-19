@@ -21,6 +21,20 @@ const spatialValue = (entry) => ({
   coordinates: entry.coordinates,
 });
 
+const flattenCoordinates = (value) => {
+  if (typeof value === "number") return [value];
+  if (value && typeof value === "object" && "x" in value && "y" in value) {
+    return [value.x, value.y];
+  }
+  if (value && typeof value[Symbol.iterator] === "function") {
+    return [...value].flatMap(flattenCoordinates);
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).flatMap(flattenCoordinates);
+  }
+  throw new TypeError(`unexpected Arrow coordinate value ${typeof value}`);
+};
+
 test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
   const forge = new GraphForge();
   forge.addNode(
@@ -47,7 +61,10 @@ test("GeoArrow metadata values nulls and errors remain Rust-owned", () => {
       field.metadata.get("ARROW:extension:metadata"),
       entry.extensionMetadata,
     );
-    assert.notEqual(table.getChild(entry.name).get(0), null);
+    assert.deepEqual(
+      flattenCoordinates(table.getChild(entry.name).get(0)),
+      entry.flat,
+    );
     assert.equal(table.getChild(entry.name).get(1), null);
   }
   assert.throws(
