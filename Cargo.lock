@@ -2227,6 +2227,7 @@ dependencies = [
  "arrow",
  "clap",
  "graphforge-api",
+ "parquet",
  "serde",
  "serde_json",
  "tempfile",

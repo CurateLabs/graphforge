@@ -19,6 +19,12 @@ const fixture = JSON.parse(
 const spatialValue = (entry) => ({
   spatial_type: { geometry: entry.geometry, crs: entry.crs },
   coordinates: entry.coordinates,
+  ...(entry.preservedOnly
+    ? {
+        extension_name: entry.extensionName,
+        extension_metadata: entry.extensionMetadata,
+      }
+    : {}),
 });
 
 const flattenCoordinates = (value) => {

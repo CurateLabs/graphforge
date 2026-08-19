@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "fc2fde2f24531eec1b6edd2d4e097ac5220a690f9ab5cb82903f379ef124493f",
+  "sha256": "225aeeb03cdecb6ccf50890e813c0151d419c70cca5f7cb3debf27eb9a5c6c36",
   "entries": [
     {
       "name": "graphforge-api",
@@ -523,6 +523,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "parquet",
+          "req": "^58",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {

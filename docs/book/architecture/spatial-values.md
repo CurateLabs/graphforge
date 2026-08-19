@@ -22,10 +22,19 @@ properties:
 ```
 
 The geometry catalog is `point`, `linestring`, `polygon`, `multipoint`,
-`multilinestring`, and `multipolygon`. The only accepted CRSs are EPSG:4326 and
-EPSG:3857. Axis order is always x/y: longitude/latitude for EPSG:4326 and
+`multilinestring`, and `multipolygon`. The computationally certified CRSs are
+EPSG:4326 and EPSG:3857. Axis order is always x/y: longitude/latitude for EPSG:4326 and
 easting/northing for EPSG:3857. GraphForge never infers a CRS, swaps axes, or
 silently converts coordinates.
+
+Standards-valid fields using one of these physical geometry layouts may carry
+another CRS or extension name as a **preserved-only profile**. Such values must
+provide the exact extension name and metadata envelope. GraphForge retains that
+metadata, coordinates, offsets, nesting, and nulls through Arrow ingestion,
+Parquet storage, reopen, queries, IPC, and export. It does not claim those
+profiles are computationally equivalent to a certified CRS: `point()` rejects
+unsupported CRS construction and `distance()` rejects preserved-only values
+instead of converting, inferring, or swapping axes.
 
 Geometry collections, mixed-geometry columns, Z/M coordinates, arbitrary CRS
 conversion, WKB, WKT, and GeoJSON are outside spatial v1.
@@ -77,3 +86,5 @@ provider, or any visualization library.
 The Rust type, schema, metadata, and validation foundation is the first part of
 issue #797. Persistence/query round trips, Python/Node/CLI exposure, and
 cross-host fixtures are tracked as native children of that close-gate issue.
+The published conformance catalog and independent-reader procedure are in
+[GeoArrow producer conformance](geoarrow-conformance.md).

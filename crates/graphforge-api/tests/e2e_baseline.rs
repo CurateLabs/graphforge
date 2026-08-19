@@ -5135,4 +5135,14 @@ fn certified_spatial_point_and_distance_execute_in_rust() {
             .contains("does not implicitly reproject mixed CRS"),
         "{error}"
     );
+
+    let error = gf
+        .execute("RETURN point({x: 0, y: 0, crs: 'OGC:CRS84'})")
+        .expect_err("point must reject preserved-only CRS construction");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported spatial CRS `OGC:CRS84` for point() computation"),
+        "{error}"
+    );
 }

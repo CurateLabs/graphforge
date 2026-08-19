@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 105,
+  "cargo_target_count": 106,
   "targets": [
     {
       "package": "graphforge-api",
@@ -612,6 +612,16 @@
       "bazel_label": "//crates/graphforge-cli:gf",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "generate_geoarrow_fixtures",
+      "class": "example",
+      "source": "crates/graphforge-cli/examples/generate_geoarrow_fixtures.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:generate_geoarrow_fixtures",
+      "exception_id": null,
+      "notes": "#802 deterministic GeoArrow interchange fixture generator"
     },
     {
       "package": "graphforge-cli",
