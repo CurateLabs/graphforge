@@ -364,6 +364,8 @@ pub struct GraphForge {
     read_only: bool,
     /// Generation UUID whose graph snapshot was hydrated into `dir`.
     current_generation_uuid: Arc<Mutex<uuid::Uuid>>,
+    /// Authenticated UUID index handle cached for one topology generation.
+    uuid_membership_index: Mutex<Option<graphforge_storage::UuidMembershipIndex>>,
     /// Injected durable-write UTC microsecond clock.
     clock: Mutex<Arc<dyn Fn() -> Result<i64, GfError> + Send + Sync>>,
     /// Project directory backing topology/properties Parquet files. For an
@@ -524,6 +526,7 @@ impl GraphForge {
             resolved_generation,
             read_only: false,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
+            uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
                 dir.clone(),
@@ -678,6 +681,7 @@ impl GraphForge {
             resolved_generation,
             read_only,
             current_generation_uuid: Arc::new(Mutex::new(generation_uuid)),
+            uuid_membership_index: Mutex::new(None),
             clock: Mutex::new(Arc::new(system_time_micros)),
             adjacency_provider: Arc::new(graphforge_exec::PersistentAdjacencyProvider::new(
                 dir.clone(),
@@ -1110,6 +1114,12 @@ impl GraphForge {
             ));
         }
 
+        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir)? {
+            graphforge_storage::rebuild_uuid_membership_indexes(
+                &self.dir,
+                graphforge_storage::UuidIndexBuildLimits::default(),
+            )?;
+        }
         let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
         let participants = graph_publication_participants(
@@ -1197,6 +1207,12 @@ impl GraphForge {
             return Err(GfError::Validation(
                 "project generation changed before graph publication".into(),
             ));
+        }
+        if !graphforge_storage::uuid_membership_index_is_fresh(&self.dir)? {
+            graphforge_storage::rebuild_uuid_membership_indexes(
+                &self.dir,
+                graphforge_storage::UuidIndexBuildLimits::default(),
+            )?;
         }
         let graph = graphforge_storage::capture_graph_files(&self.dir)?.1;
         let provenance_enabled = parent.capability("provenance")?.is_some();
