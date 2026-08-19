@@ -12,6 +12,8 @@ on:
     branches: ["main"]
   # Lets CodSpeed trigger a backtest run to seed the baseline.
   workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
 
 permissions:
   contents: read
@@ -42,10 +44,59 @@ jobs:
           tool: cargo-codspeed@5.0.1
 
       - name: Build benchmark targets
-        run: cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
+        run: |
+          cargo codspeed build -m simulation -p graphforge-core -p graphforge-cypher
+          cargo codspeed build -m simulation -p graphforge-storage --bench m6_storage
+
+      - name: Verify fail-closed M6 benchmark inventory
+        run: python3 scripts/ci/check-m6-benchmarks.py
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
         with:
           mode: simulation
           run: cargo codspeed run
+
+  m6-walltime:
+    name: M6 Durable Walltime (Blacksmith 4 vCPU Ubuntu 24.04)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+      - uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
+        with:
+          tool: cargo-codspeed@5.0.1
+      - name: Build durable filesystem benchmarks only
+        run: cargo codspeed build -m walltime -p graphforge-storage --bench m6_storage_io
+      - uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: walltime
+          run: cargo codspeed run
+
+  m6-memory-fallback:
+    name: M6 Scheduled Peak Memory Artifact
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
+        with:
+          toolchain: "1.96.0"
+      - name: Compile M6 storage benchmarks
+        run: cargo bench -p graphforge-storage --bench m6_storage --bench m6_storage_io --no-run
+      - name: Record replay peak resident memory
+        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench m6_storage replay_merge_fingerprint -- --sample-count 10 2> replay-memory.txt
+      - name: Record compaction peak resident memory
+        run: /usr/bin/time -v cargo bench -p graphforge-storage --bench m6_storage_io spill_compaction -- --sample-count 10 2> compaction-memory.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404
+          path: |
+            replay-memory.txt
+            compaction-memory.txt
+          if-no-files-found: error
+          retention-days: 1
