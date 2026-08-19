@@ -16,7 +16,62 @@
     "durability_isolation": "graphforge-durability-isolation/1",
     "durability_certification": "graphforge-durability-certification/1",
     "delta_journal": "adr-0019",
-    "fault_oracle": "project_fault_oracle"
+    "fault_oracle": "project_fault_oracle",
+    "m6_benchmark_inventory": "m6-storage-v1",
+    "m6_storage_io_fixture": "v1"
+  },
+  "production_observation": {
+    "driver": "graphforge_api::GraphForge",
+    "write_modes": [
+      "single_writer",
+      "queued_writer",
+      "optimistic_multi_writer"
+    ],
+    "required_fields": [
+      "selected_generation_uuid",
+      "query_state",
+      "pinned_query_state",
+      "checkpoint_roots",
+      "cleanup_selected_generation_uuid"
+    ]
+  },
+  "finite_coverage": {
+    "method": "enumerated_transition_basis_plus_seeded_histories",
+    "operations": [
+      "ack_commit",
+      "crash_at_phase",
+      "tear_bytes",
+      "pin_reader",
+      "read_pinned",
+      "fresh_open",
+      "create_checkpoint",
+      "acquire_lease",
+      "release_lease",
+      "publish_delta_run",
+      "compact_deltas",
+      "run_gc",
+      "optimistic_write_skew",
+      "cancel_unstarted",
+      "idempotent_retry"
+    ],
+    "write_modes": [
+      "single_writer",
+      "queued_writer",
+      "optimistic_multi_writer"
+    ],
+    "publication_phases": "all"
+  },
+  "native_oracle_artifacts": [
+    "native-oracle-windows-${commit}.json",
+    "native-oracle-macos-${commit}.json"
+  ],
+  "native_oracle_aggregate": "native-durability-aggregate-${commit}.json",
+  "benchmark_evidence": {
+    "baseline_commit": "aeb46d1b012d40e8a0af7873af9152b3aab752c6",
+    "walltime_host": "blacksmith-4vcpu-ubuntu-2404",
+    "simulation_bench": "m6_storage",
+    "walltime_bench": "m6_storage_io",
+    "memory_fallback": "/usr/bin/time -v"
   },
   "forbidden_positive_claims": [
     "ACID",
