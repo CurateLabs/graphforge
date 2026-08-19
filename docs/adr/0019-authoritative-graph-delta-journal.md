@@ -96,7 +96,8 @@ Compaction is a normal project-generation transaction:
 1. Pin CURRENT and select a verified contiguous run prefix
    (`1..=through_run_sequence`, or all runs).
 2. Merge base + prefix under explicit memory, spill, disk, and cancellation
-   budgets into a new canonical Parquet base (plus `.base_state.json`).
+   budgets into a new canonical Parquet base. No JSON sidecar is graph-state
+   authority; replay always begins from the manifest-verified Parquet files.
 3. Re-encode any later suffix runs contiguously onto the child generation so
    post-snapshot deltas remain visible.
 4. Verify counts/schemas/ordering/checksums and the canonical graph fingerprint

@@ -3414,6 +3414,30 @@ fn hydrate_graph_workspace(
         let inventory = graphforge_storage::decode_inventory(&files.bytes)?;
         let tree = generation.graph_tree_root();
         graphforge_storage::verify_graph_tree(&tree, &inventory)?;
+        let has_authoritative_deltas = !graphforge_storage::list_delta_runs(
+            &inventory,
+            graphforge_storage::GraphDeltaJournalLimits::default(),
+        )?
+        .is_empty();
+        if has_authoritative_deltas {
+            let workspace = Arc::new(
+                tempfile::Builder::new()
+                    .prefix("graphforge-graph-replay-")
+                    .tempdir()
+                    .map_err(|error| {
+                        GfError::Storage(format!(
+                            "failed to create graph replay workspace: {error}"
+                        ))
+                    })?,
+            );
+            let (evidence, _replay) = graphforge_storage::materialize_replayed_graph_tree(
+                &tree,
+                &inventory,
+                workspace.path(),
+                graphforge_storage::GraphDeltaJournalLimits::default(),
+            )?;
+            return Ok((workspace.path().to_path_buf(), workspace, evidence));
+        }
         if read_only {
             let guard = Arc::new(
                 tempfile::Builder::new()
