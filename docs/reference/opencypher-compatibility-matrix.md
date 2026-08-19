@@ -31,7 +31,7 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 - Writing: CREATE, SET, REMOVE, DELETE, DETACH DELETE
 - Advanced: OPTIONAL MATCH, UNION, UNWIND, variable-length paths
 - Temporal: All date/time types and functions (100% complete)
-- Spatial: Point and distance functions (100% complete)
+- Spatial: legacy documentation only; executable `point()`/`distance()` Cypher support is not yet certified
 - Pattern matching: All node/relationship pattern variations, pattern predicates
 - Predicate functions: all(), any(), none(), single(), exists(), isEmpty()
 - List operations: extract(), filter(), reduce(), slicing, negative indexing
@@ -182,12 +182,12 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 | hour(), minute(), second() | ✅ Complete | 8 | evaluator.py | Time accessors |
 | truncate() | ✅ Complete | 4 | evaluator.py | Temporal truncation; compact parsing and truncate variants (v0.3.8) |
 
-#### Spatial Functions (2 total: 2 complete) ✅ COMPLETE CATEGORY
+#### Spatial Functions (2 documented, 0 currently certified)
 
 | Function | Status | TCK Scenarios | File | Notes |
 |----------|--------|---------------|------|-------|
-| point() | ✅ Complete | 6 | evaluator.py | Point creation (2D/3D) |
-| distance() | ✅ Complete | 4 | evaluator.py | Distance calculation |
+| point() | ⚠️ Documentation only | 0 | — | Not part of the canonical GeoArrow property contract |
+| distance() | ⚠️ Documentation only | 0 | — | No executable Rust query implementation is currently certified |
 
 #### Path Functions (3 total: 3 complete) ✅ COMPLETE CATEGORY
 

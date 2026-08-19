@@ -149,6 +149,8 @@ pub enum PropertyValueType {
     List,
     /// Key-value map (string keys, heterogeneous values).
     Map,
+    /// Homogeneous two-dimensional GeoArrow geometry with explicit CRS.
+    Spatial(crate::spatial::SpatialType),
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +336,10 @@ constraints:
             PropertyValueType::DateTime,
             PropertyValueType::List,
             PropertyValueType::Map,
+            PropertyValueType::Spatial(crate::spatial::SpatialType {
+                geometry: crate::spatial::SpatialGeometryType::Point,
+                crs: crate::spatial::SpatialCrs::Epsg4326,
+            }),
         ];
         for t in &types {
             let json = serde_json::to_string(t).unwrap();
