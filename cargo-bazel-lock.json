@@ -1,5 +1,5 @@
 {
-  "checksum": "c79eadabcf22e7d0d308d31294a7d03c7538b15a3276913e4a72497bfc36f979",
+  "checksum": "e2a8b06a6d2ec90b3c7752d4f68cf0ac1d0df9be549b22ee81da847751192bf9",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13846,6 +13846,11 @@
         },
         "deps_dev": {
           "common": [
+            {
+              "id": "codspeed-divan-compat 5.0.1",
+              "target": "codspeed_divan_compat",
+              "alias": "divan"
+            },
             {
               "id": "wait-timeout 0.2.1",
               "target": "wait_timeout"

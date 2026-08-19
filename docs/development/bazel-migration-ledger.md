@@ -151,6 +151,8 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-rel` | `logical_plan_golden` | `integration-test` | `crates/graphforge-rel/tests/logical_plan_golden.rs` | `//crates/graphforge-rel:logical_plan_golden` | `mapped` | #8 |
 | `graphforge-search` | `graphforge_search` | `lib` | `crates/graphforge-search/src/lib.rs` | `//crates/graphforge-search:graphforge_search` | `mapped` | #9; unit tests `//crates/graphforge-search:graphforge_search_test` |
 | `graphforge-storage` | `graphforge_storage` | `lib` | `crates/graphforge-storage/src/lib.rs` | `//crates/graphforge-storage:graphforge_storage` | `mapped` | #10 early / #9; Bazel enables `test-failpoints` for api subprocess unification; unit tests `//crates/graphforge-storage:graphforge_storage_test` |
+| `graphforge-storage` | `m6_storage` | `bench` | `crates/graphforge-storage/benches/m6_storage.rs` | — | `exception` | RT-codspeed-bench; #782 diagnostic simulation/hardware evidence |
+| `graphforge-storage` | `m6_storage_io` | `bench` | `crates/graphforge-storage/benches/m6_storage_io.rs` | — | `exception` | RT-codspeed-bench; #782 stable-runner walltime evidence |
 | `graphforge-storage` | `adjacency_delta_write` | `integration-test` | `crates/graphforge-storage/tests/adjacency_delta_write.rs` | `//crates/graphforge-storage:adjacency_delta_write` | `mapped` | #8 |
 | `graphforge-storage` | `filtered_read` | `integration-test` | `crates/graphforge-storage/tests/filtered_read.rs` | `//crates/graphforge-storage:filtered_read` | `mapped` | #8 |
 | `graphforge-storage` | `graph_delta_journal` | `integration-test` | `crates/graphforge-storage/tests/graph_delta_journal.rs` | `//crates/graphforge-storage:graph_delta_journal` | `mapped` | #8 / #752 |

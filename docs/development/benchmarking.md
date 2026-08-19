@@ -70,7 +70,36 @@ still execute the targets as ordinary divan benchmarks:
 ```bash
 cargo bench -p graphforge-core --bench canonical
 cargo bench -p graphforge-cypher --bench compile
+cargo bench -p graphforge-storage --bench m6_storage
+cargo bench -p graphforge-storage --bench m6_storage_io -- --sample-count 1
 ```
+
+## M6 storage evidence
+
+`m6_storage` uses synthetic, versioned fixtures and the `1 / 100 / 10,000`
+operation ladder. GFDR framing, checksum verification, replay/merge fingerprints,
+reachability, and transaction classification belong to CPU simulation; fixture
+construction and correctness assertions stay outside timed closures.
+
+Durable open, recovery, commit, garbage collection, spill, and compaction are
+filesystem walltime measurements, not CPU-simulation claims. Scheduled/manual
+hardware evidence records the exact runner image, CPU allocation, head/base SHA,
+fixture version, and artifact URL. Until CodSpeed memory mode is available on
+the project runner, replay and compaction peak-resident counters are emitted as
+an explicit scheduled hardware artifact. CodSpeed remains diagnostic only:
+Bazel tests, deterministic fault models, and native platform lanes are the
+correctness authority. Material regressions must be repaired or documented with
+their measured tradeoff; samples and thresholds must not be weakened.
+
+The frozen pre-M6 comparison commit is
+`aeb46d1b012d40e8a0af7873af9152b3aab752c6`, the first parent immediately
+before the #777 replay merge. The walltime host contract is the pinned
+`blacksmith-4vcpu-ubuntu-2404` runner, Rust 1.96.0, `m6_storage_io` fixture v1,
+and CodSpeed walltime mode. The scheduled memory fallback uses that same host
+contract and uploads `/usr/bin/time -v` peak-resident output for replay and
+spill/compaction, named with the exact head SHA. Certification #756 records the
+base/head SHAs, result URLs or artifact IDs, benchmark mode and any accepted
+tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
 
 ## Adding a benchmark
 
@@ -83,7 +112,8 @@ cargo bench -p graphforge-cypher --bench compile
 4. Adding a dev-dependency changes the Cargo feature graph, so refresh the Bazel
    drift fingerprint with
    `python3 scripts/ci/cargo-bazel-drift-check.py --write` and repin
-   `cargo-bazel-lock.json` (`CARGO_BAZEL_REPIN=1 bazelisk mod deps @crates`).
+   `cargo-bazel-lock.json`
+   (`CARGO_BAZEL_REPIN=1 bazelisk build --repo_env=CARGO_BAZEL_REPIN=1 //:first_party_libs`).
 
 ## Related manual benchmarks
 
