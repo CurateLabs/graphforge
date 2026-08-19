@@ -236,16 +236,16 @@ fn corrupt_generation_counter_is_miss_without_rebuild() {
 }
 
 #[test]
-fn missing_csr_file_with_fresh_manifest_rebuilds_and_repairs() {
+fn missing_csr_artifact_with_fresh_manifest_rebuilds_and_repairs() {
     let dir = TempDir::new().unwrap();
     write_diamond(dir.path());
     build_adjacency_index(dir.path(), TS).unwrap();
-    std::fs::remove_file(graphforge_storage::adjacency::csr_path(
+    let csr_path = graphforge_storage::adjacency::csr_path(
         dir.path(),
         "KNOWS",
         graphforge_storage::adjacency::Direction::Out,
-    ))
-    .unwrap();
+    );
+    std::fs::remove_file(csr_path.with_extension("csr.json")).unwrap();
 
     let provider = persistent(dir.path(), OntologyMode::Strict);
     assert_eq!(
@@ -259,15 +259,8 @@ fn missing_csr_file_with_fresh_manifest_rebuilds_and_repairs() {
             .adjacency("KNOWS", Direction::Out)
             .unwrap()
     );
-    // The lazy rebuild restored the file.
-    assert!(
-        graphforge_storage::adjacency::csr_path(
-            dir.path(),
-            "KNOWS",
-            graphforge_storage::adjacency::Direction::Out
-        )
-        .exists()
-    );
+    // The lazy rebuild restored the sharded artifact.
+    assert!(graphforge_storage::adjacency::sharded_csr_exists(&csr_path));
 }
 
 // ---------------------------------------------------------------------------
