@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 103,
+  "cargo_target_count": 105,
   "targets": [
     {
       "package": "graphforge-api",
@@ -962,6 +962,26 @@
       "bazel_label": "//crates/graphforge-search:graphforge_search",
       "exception_id": null,
       "notes": "#9; unit tests `//crates/graphforge-search:graphforge_search_test`"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "m6_storage",
+      "class": "bench",
+      "source": "crates/graphforge-storage/benches/m6_storage.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "#782 CodSpeed M6 diagnostics; simulation and hardware modes are not correctness authority"
+    },
+    {
+      "package": "graphforge-storage",
+      "target": "m6_storage_io",
+      "class": "bench",
+      "source": "crates/graphforge-storage/benches/m6_storage_io.rs",
+      "status": "exception",
+      "bazel_label": null,
+      "exception_id": "RT-codspeed-bench",
+      "notes": "#782 durable M6 CodSpeed walltime diagnostics; not correctness authority"
     },
     {
       "package": "graphforge-storage",
