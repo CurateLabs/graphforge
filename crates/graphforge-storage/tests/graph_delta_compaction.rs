@@ -7,12 +7,15 @@ use graphforge_storage::{
     CheckpointCreateRequest, GRAPH_CAPABILITY_ID, GRAPH_CAPABILITY_VERSION,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionRequest,
     GraphDeltaJournalLimits, GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload,
-    GraphDeltaPublishRequest, GraphWriter, ProjectCapability, ProjectGenerationRequest,
-    ProjectRetentionLimits, ProjectRetentionPolicy, ProjectStageOutcome, capture_graph_files,
-    compact_graph_delta, create_checkpoint, empty_workspace_participants, execute_project_cleanup,
-    graph_delta_compaction_status, list_delta_runs, open_or_initialize_project,
-    preview_graph_delta_compaction, preview_project_cleanup, publish_graph_delta,
-    reconstruct_graph_state, resolve_project_generation, stage_project_generation_with_graph_tree,
+    GraphDeltaPublishRequest, GraphWriter, MAX_COMPACTION_CANCELLATION_CHECK_ROWS,
+    MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES, MAX_COMPACTION_MEMORY_BYTES,
+    MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES, ProjectCapability,
+    ProjectGenerationRequest, ProjectRetentionLimits, ProjectRetentionPolicy, ProjectStageOutcome,
+    capture_graph_files, compact_graph_delta, create_checkpoint, empty_workspace_participants,
+    execute_project_cleanup, graph_delta_compaction_status, list_delta_runs,
+    open_or_initialize_project, preview_graph_delta_compaction, preview_project_cleanup,
+    publish_graph_delta, reconstruct_graph_state, resolve_project_generation,
+    stage_project_generation_with_graph_tree,
 };
 use uuid::Uuid;
 
@@ -392,6 +395,94 @@ fn memory_budget_fails_closed_independently_of_graph_fixture_size() {
             .len(),
         1
     );
+}
+
+#[test]
+fn supported_budget_configuration_has_below_equal_above_ladders() {
+    let default = GraphDeltaCompactionLimits::default();
+    let ladders = [
+        ("memory", MAX_COMPACTION_MEMORY_BYTES as u64),
+        ("spill", MAX_COMPACTION_SPILL_BYTES),
+        ("disk", MAX_COMPACTION_DISK_BYTES),
+        ("input_bytes", MAX_COMPACTION_INPUT_BYTES),
+        ("output_rows", MAX_COMPACTION_OUTPUT_ROWS),
+        ("cancellation", MAX_COMPACTION_CANCELLATION_CHECK_ROWS),
+    ];
+    for (field, maximum) in ladders {
+        for (value, accepted) in [(maximum - 1, true), (maximum, true), (maximum + 1, false)] {
+            let mut limits = default;
+            match field {
+                "memory" => limits.max_memory_bytes = value as usize,
+                "spill" => limits.max_spill_bytes = value,
+                "disk" => limits.max_disk_bytes = value,
+                "input_bytes" => limits.max_input_bytes = value,
+                "output_rows" => limits.max_output_rows = value,
+                "cancellation" => limits.cancellation_check_rows = value,
+                _ => unreachable!(),
+            }
+            assert_eq!(limits.validate().is_ok(), accepted, "{field}={value}");
+        }
+    }
+
+    for (value, accepted) in [(63, true), (64, true), (65, false)] {
+        let mut limits = default;
+        limits.max_input_runs = value;
+        assert_eq!(limits.validate().is_ok(), accepted, "input_runs={value}");
+    }
+}
+
+#[test]
+fn observed_work_budgets_accept_equal_and_reject_one_below_without_publication() {
+    let root = tempfile::tempdir().unwrap();
+    publish_base(root.path());
+    publish_delta(root.path(), sample_ops());
+    let parent = resolve_project_generation(root.path())
+        .unwrap()
+        .generation_uuid();
+    let preview = preview_graph_delta_compaction(root.path(), &default_request(), None).unwrap();
+
+    let cases = [
+        ("input_runs", preview.input_runs),
+        ("input_bytes", preview.input_bytes),
+        ("output_rows", preview.output_rows),
+        ("memory", preview.peak_memory_bytes),
+        ("disk", preview.output_bytes),
+    ];
+    for (field, observed) in cases {
+        assert!(observed > 0, "fixture must exercise {field}");
+        let mut equal = default_request();
+        match field {
+            "input_runs" => equal.limits.max_input_runs = observed,
+            "input_bytes" => equal.limits.max_input_bytes = observed,
+            "output_rows" => equal.limits.max_output_rows = observed,
+            "memory" => equal.limits.max_memory_bytes = observed as usize,
+            "disk" => equal.limits.max_disk_bytes = observed,
+            _ => unreachable!(),
+        }
+        preview_graph_delta_compaction(root.path(), &equal, None).unwrap();
+
+        let mut below = equal.clone();
+        match field {
+            "input_runs" => below.limits.max_input_runs = observed - 1,
+            "input_bytes" => below.limits.max_input_bytes = observed - 1,
+            "output_rows" => below.limits.max_output_rows = observed - 1,
+            "memory" => below.limits.max_memory_bytes = (observed - 1) as usize,
+            "disk" => below.limits.max_disk_bytes = observed - 1,
+            _ => unreachable!(),
+        }
+        let error = preview_graph_delta_compaction(root.path(), &below, None).unwrap_err();
+        assert!(
+            error.to_string().contains("GF_RESOURCE_LIMIT"),
+            "{field}: {error}"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent,
+            "{field} failure published partial state"
+        );
+    }
 }
 
 #[test]

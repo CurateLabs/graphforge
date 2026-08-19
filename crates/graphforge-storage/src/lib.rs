@@ -52,11 +52,15 @@ pub use graph_delta_journal::{
 
 pub mod graph_delta_compaction;
 pub use graph_delta_compaction::{
-    DEFAULT_COMPACTION_MAX_DISK_BYTES, DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
+    DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS, DEFAULT_COMPACTION_MAX_DISK_BYTES,
+    DEFAULT_COMPACTION_MAX_INPUT_BYTES, DEFAULT_COMPACTION_MAX_INPUT_RUNS,
+    DEFAULT_COMPACTION_MAX_MEMORY_BYTES, DEFAULT_COMPACTION_MAX_OUTPUT_ROWS,
     DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
-    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
-    compact_graph_delta_with_mode, graph_delta_compaction_status,
+    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus,
+    MAX_COMPACTION_CANCELLATION_CHECK_ROWS, MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES,
+    MAX_COMPACTION_MEMORY_BYTES, MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES,
+    compact_graph_delta, compact_graph_delta_with_mode, graph_delta_compaction_status,
     graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
     preview_graph_delta_compaction_with_mode,
 };
