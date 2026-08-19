@@ -596,18 +596,34 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
-            let spatial: graphforge_api::SpatialValue = serde_json::from_value(value.clone())
-                .map_err(|error| {
+            if looks_like_spatial_json(value) {
+                let spatial: graphforge_api::SpatialValue = serde_json::from_value(value.clone())
+                    .map_err(|error| {
                     to_napi_err(&GfError::Validation(format!(
                         "invalid canonical spatial property: {error}"
                     )))
                 })?;
-            spatial.validate_interchange_profile().map_err(|error| {
-                to_napi_err(&GfError::Validation(format!(
-                    "invalid canonical spatial property: {error}"
-                )))
-            })?;
-            PropValue::Spatial(spatial)
+                spatial.validate_interchange_profile().map_err(|error| {
+                    to_napi_err(&GfError::Validation(format!(
+                        "invalid canonical spatial property: {error}"
+                    )))
+                })?;
+                PropValue::Spatial(spatial)
+            } else if looks_like_temporal_json(value) {
+                let normalized = normalize_temporal_json_numbers(value.clone())?;
+                let temporal: graphforge_api::TemporalValue = serde_json::from_value(normalized)
+                    .map_err(|error| {
+                        to_napi_err(&GfError::Validation(format!(
+                            "invalid temporal node property: {error}"
+                        )))
+                    })?;
+                temporal.validate().map_err(|error| to_napi_err(&error))?;
+                PropValue::Temporal(temporal)
+            } else {
+                return Err(to_napi_err(&GfError::Validation(
+                    UNSUPPORTED_PROP_TYPE_MSG.into(),
+                )));
+            }
         }
     })
 }
@@ -616,6 +632,61 @@ fn looks_like_spatial_json(value: &serde_json::Value) -> bool {
     value.as_object().is_some_and(|object| {
         object.contains_key("spatial_type") || object.contains_key("coordinates")
     })
+}
+
+fn looks_like_temporal_json(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "date"
+                        | "utc_date_time"
+                        | "local_time"
+                        | "offset_time"
+                        | "local_date_time"
+                        | "zoned_date_time"
+                        | "duration"
+                )
+            })
+    })
+}
+
+fn normalize_temporal_json_numbers(value: serde_json::Value) -> Result<serde_json::Value> {
+    const MAX_SAFE_JS_INTEGER: f64 = 9_007_199_254_740_991.0;
+    match value {
+        serde_json::Value::Number(number) if number.is_f64() => {
+            let value = number.as_f64().ok_or_else(|| {
+                to_napi_err(&GfError::Validation("invalid temporal number".into()))
+            })?;
+            if !value.is_finite()
+                || value.fract() != 0.0
+                || !(-MAX_SAFE_JS_INTEGER..=MAX_SAFE_JS_INTEGER).contains(&value)
+            {
+                return Err(to_napi_err(&GfError::Validation(
+                    "temporal numeric fields must be finite signed integers".into(),
+                )));
+            }
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "finite integral f64 range is checked above"
+            )]
+            Ok(serde_json::Value::Number((value as i64).into()))
+        }
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(normalize_temporal_json_numbers)
+            .collect::<Result<Vec<_>>>()
+            .map(serde_json::Value::Array),
+        serde_json::Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| Ok((key, normalize_temporal_json_numbers(value)?)))
+            .collect::<Result<serde_json::Map<_, _>>>()
+            .map(serde_json::Value::Object),
+        value => Ok(value),
+    }
 }
 
 pub(crate) fn props_from_map(
@@ -628,7 +699,7 @@ pub(crate) fn props_from_map(
         .collect()
 }
 
-const UNSUPPORTED_PROP_TYPE_MSG: &str = "unsupported node property type (expected null/boolean/number/string/array/canonical spatial object)";
+const UNSUPPORTED_PROP_TYPE_MSG: &str = "unsupported node property type (expected null/boolean/number/string/array/temporal or canonical spatial object)";
 
 /// Convert a JS property bag, raising a real `TypeError` for unsupported values
 /// (functions, symbols, nested plain objects).
@@ -728,7 +799,7 @@ fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
                     format!("failed to read object property: {}", error.reason),
                 )
             })?;
-            if !is_array && !looks_like_spatial_json(&json) {
+            if !is_array && !looks_like_spatial_json(&json) && !looks_like_temporal_json(&json) {
                 return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
             }
             json_to_prop_value(&json)
@@ -7426,6 +7497,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use graphforge_api::TemporalValue;
 
     #[test]
     fn query_uuid_tag_is_exact_and_strings_stay_strings() {
@@ -7495,6 +7567,28 @@ mod tests {
     fn rejects_unsigned_property_values_above_i64() {
         let error = json_to_prop_value(&serde_json::json!(u64::MAX)).unwrap_err();
         assert_eq!(error.status, "ValidationError");
+    }
+
+    #[test]
+    fn temporal_json_preserves_calendar_offset_and_zone_components() {
+        let value = json_to_prop_value(&serde_json::json!({
+            "type": "zoned_date_time",
+            "epoch_days": 19_932,
+            "nanos": 5_400_000_000_000_i64,
+            "offset_seconds": -21_600,
+            "zone": "America/Denver"
+        }))
+        .unwrap();
+        assert_eq!(
+            value,
+            PropValue::Temporal(TemporalValue::ZonedDateTime {
+                epoch_days: 19_932,
+                nanos: 5_400_000_000_000,
+                offset_seconds: -21_600,
+                zone: Some("America/Denver".into()),
+            })
+        );
+        assert!(json_to_prop_value(&serde_json::json!({"nested": true})).is_err());
     }
 
     #[test]
