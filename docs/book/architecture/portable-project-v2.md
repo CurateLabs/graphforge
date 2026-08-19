@@ -169,3 +169,49 @@ even when the declared package exceeds 16 GiB.
 
 See the [fixture guide](../../../tests/fixtures/portable-v2/README.md) for the
 positive, negative, and structural conformance vectors.
+
+## Complete-package exporter
+
+`graphforge_storage::plan_complete_portable_v2` resolves a current generation
+or checkpoint before planning and retains that generation's lease. The plan is
+a bounded index of portable paths, lengths, digests, and source identities; it
+never contains payload bytes and never follows `CURRENT` again. File-backed
+graph shards come only from the committed graph-files inventory. Runtime files
+such as `CURRENT`, leases, locks, journals, attempts, trash, caches, host paths,
+and secrets are therefore not export candidates.
+
+`export_complete_portable_v2` streams that same plan to either representation.
+The copy buffer, entry count, per-entry bytes, and total declared bytes are
+finite caller-visible limits. Progress contains aggregate entry and byte counts
+only. Cancellation is observed before entries and copy-buffer operations.
+Sources are opened as regular files and compared with their planned identity,
+length, modification state, and digest after streaming; links, special files,
+mutation, short reads, and digest changes fail closed.
+
+Every complete export also carries one canonical, authenticated compatibility
+control component. It maps portable participant IDs back to runtime capability
+and record-family versions, encoding, schema fingerprint, row count, and graph
+placement. The map is bounded and reversible, but deliberately contains no
+host path, lease, credential, or secret. The shared verifier rejects duplicate
+JSON members, unknown fields, non-canonical bytes, unsupported encodings, and
+references that are not authenticated by the semantic manifest.
+
+`materialize_verified_portable_v2` exposes the verified component entries to
+the importer through a new private directory. It fully verifies before writing,
+streams with the configured copy buffer, verifies the source again before
+returning, and removes the directory on cancellation, mutation, or failure.
+Expanded and bundle forms therefore yield the same component tree without
+making unverified bytes available to project publication.
+
+Expanded output is built in a unique sibling directory, synced bottom-up, and
+published with a no-replace atomic rename. Bundles use a unique sibling file,
+canonical header order and PAX paths, exactly two end blocks, and the same
+no-replace publication. Until the final rename, neither representation exposes
+the requested destination. Cancellation, I/O failure, disk exhaustion, source
+mutation, or destination creation removes the private partial output and never
+overwrites an existing destination. Re-running an unchanged plan produces the
+same package digest and bundle bytes; the two representations intentionally
+have distinct transport digests.
+
+Portable v1 remains available through `export_portable_project`. It is a
+separate explicit contract and is never emitted with v2 markers.
