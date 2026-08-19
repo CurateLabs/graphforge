@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 194,
-  "releaseSurfaceDigest": "f59ec74c2dd604d3d27a096829369c54b15ba29f32fac8d4f70e4a139481751f",
+  "releaseSurfaceCount": 205,
+  "releaseSurfaceDigest": "549c020e5163437593001d94c900b964700b6722d124fc8d36c39f0cbdafbf7a",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -25,7 +25,8 @@
     "epistemic": "epistemic",
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
     "compatibility": "arrowIpc",
-    "transaction-maintenance": "transactionMaintenance"
+    "transaction-maintenance": "transactionMaintenance",
+    "resumable-import": "lifecycleConstruction"
   },
   "classification": {
     "equivalent": [
@@ -228,6 +229,7 @@
     "notExposedDefaults": {
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
+      "GraphImportSession": "Rust owns durable staged import sessions; binding projection is tracked separately.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
     }

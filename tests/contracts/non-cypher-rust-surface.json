@@ -1,10 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "627ae63b3f05a0b9e27e327d93f15daab2af09c6f145c654bc6942528081be0b",
+  "public_method_digest": "b6951843737bfb46b5f1ac5b439522e1a817471aea8ca6c67c2947e45899f768",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
+      "GraphImportSession": "release-tested",
       "GraphTransaction": "introspection",
       "RepositoryContext": "designed-only",
       "crate": "release-tested",
@@ -754,6 +755,39 @@
         {
           "path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
           "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"
+        }
+      ]
+    },
+    "resumable-import": {
+      "ids": [
+        "GraphForge.begin_import_session",
+        "GraphForge.cleanup_stale_import_sessions",
+        "GraphForge.resume_import_session",
+        "GraphImportSession.abort",
+        "GraphImportSession.append_arrow",
+        "GraphImportSession.checkpoint",
+        "GraphImportSession.commit",
+        "GraphImportSession.register_parquet",
+        "GraphImportSession.status",
+        "GraphImportSession.validate",
+        "GraphImportSession.validate_with_cancellation"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "arrow_session_resumes_stages_and_publishes_one_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "parquet_abort_and_missing_endpoint_preserve_prior_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "cancellation_and_missing_endpoint_are_durable_fail_closed"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts"
         }
       ]
     },

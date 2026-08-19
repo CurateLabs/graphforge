@@ -330,6 +330,59 @@ pub fn bulk_receipt_schema() -> SchemaRef {
 }
 
 impl GraphForge {
+    pub(crate) fn import_base_membership(
+        &self,
+        candidates: &[Uuid],
+        kind: graphforge_storage::UuidIndexKind,
+        input_kind: BulkInputKind,
+    ) -> Result<Vec<bool>, BulkValidationError> {
+        let mut index = open_membership_index(self, input_kind)?;
+        let Some(index) = index.as_mut() else {
+            return Ok(vec![false; candidates.len()]);
+        };
+        index
+            .probe(kind, candidates)
+            .map(|(found, _)| found)
+            .map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })
+    }
+
+    pub(crate) fn normalize_import_nodes(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+    ) -> Result<ValidatedBulkNodes, BulkValidationError> {
+        self.normalize_bulk_nodes(operation_uuid, batches, false)
+    }
+
+    pub(crate) fn normalize_import_edges(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+        imported_endpoints: &BTreeSet<Uuid>,
+    ) -> Result<ValidatedBulkEdges, BulkValidationError> {
+        let empty_nodes = ValidatedBulkNodes {
+            rows: Vec::new(),
+            operation_uuid,
+            source_generation_uuid: *self
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned"),
+        };
+        self.normalize_bulk_edges(
+            operation_uuid,
+            batches,
+            &empty_nodes,
+            false,
+            Some(imported_endpoints),
+        )
+    }
+
     /// Normalize and validate every Arrow node row without writing storage,
     /// the runtime catalog, ontology state, or project generations.
     pub fn validate_bulk_nodes(
@@ -622,7 +675,7 @@ impl GraphForge {
                 &error.to_string(),
             )
         })?;
-        self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true)
+        self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true, None)
     }
 
     fn normalize_bulk_edges(
@@ -631,6 +684,7 @@ impl GraphForge {
         batches: &[RecordBatch],
         same_request_nodes: &ValidatedBulkNodes,
         reject_existing: bool,
+        additional_known_nodes: Option<&BTreeSet<Uuid>>,
     ) -> Result<ValidatedBulkEdges, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
@@ -651,6 +705,9 @@ impl GraphForge {
             .transpose()?;
         let (mut known_nodes, existing_edges) =
             existing_edge_context(self, &endpoint_candidates, edge_candidates.as_ref())?;
+        if let Some(additional) = additional_known_nodes {
+            known_nodes.extend(additional.iter().copied());
+        }
         known_nodes.extend(same_request_nodes.identities());
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
@@ -751,7 +808,8 @@ impl GraphForge {
                 .lock()
                 .expect("generation UUID lock poisoned"),
         };
-        let normalized = self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false)?;
+        let normalized =
+            self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false, None)?;
         if normalized.rows.is_empty() {
             return Ok(edge_receipt(&normalized.rows, operation_uuid, Uuid::nil())?);
         }
@@ -1855,7 +1913,7 @@ fn indexed_uuid_count(graph: &GraphForge, kind: graphforge_storage::UuidIndexKin
         .count(kind)
 }
 
-fn register_existing_endpoints(
+pub(crate) fn register_existing_endpoints(
     writer: &mut graphforge_storage::GraphWriter,
     dir: &std::path::Path,
     endpoints: &BTreeSet<Uuid>,
