@@ -7,6 +7,20 @@
       "payload_hex": "42616749742d56657273696f6e3a20312e300a5461672d46696c652d4368617261637465722d456e636f64696e673a205554462d380a",
       "archive_length": 2048,
       "archive_sha256": "e98bf20bc575a5806358369257dbef90a8e71a5471e508ca07e3b01dad026b04"
+    },
+    {
+      "name": "canonical-ustar-prefix-path",
+      "path": "data/components/graph-data/core/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "payload_hex": "7b7d",
+      "archive_length": 2048,
+      "archive_sha256": "1b80844eab76975c7c9bcb8cd7a2ca9d559a01eb8b802390ed7c8becabc44986"
+    },
+    {
+      "name": "canonical-local-pax-path-record",
+      "path": "data/components/graph-data/core/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "payload_hex": "7b7d",
+      "archive_length": 3072,
+      "archive_sha256": "82ad972222558c10255f9a727e7d1aa7f51de4fd796ffbc81ab638e5cac38311"
     }
   ]
 }

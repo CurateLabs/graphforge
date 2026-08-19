@@ -16,3 +16,16 @@ def test_portable_v2_contract_corpus() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == "portable-v2 contract fixtures: PASS"
+
+
+def test_portable_v2_contract_corpus_under_optimized_python() -> None:
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [sys.executable, "-O", str(root / "scripts/ci/portable-v2-contract.py")],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "portable-v2 contract fixtures: PASS"
