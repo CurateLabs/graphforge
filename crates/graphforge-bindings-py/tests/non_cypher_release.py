@@ -134,7 +134,7 @@ EVIDENCE = {
         "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
     },
     "semantic-generation-diff": {
-        "non_cypher_release.py": ["check_native_artifact_and_no_fallback"],
+        "generation_diff.py": ["check_generation_diff"],
     },
 }
 

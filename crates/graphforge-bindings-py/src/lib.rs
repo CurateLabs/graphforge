@@ -20,21 +20,23 @@ use graphforge_api::{
     AlgorithmEmbeddingDistance, AlgorithmEmbeddingNormalization,
     AlgorithmEmbeddingPublicationRequest, BulkEdgePublicationError, BulkNodePublicationError,
     CallerEmbeddingBatchRequest, CallerEmbeddingBatchRow, CallerEmbeddingDistance,
-    CallerEmbeddingNormalization, CapabilityId, EmbeddingAnalyzeOptions, EmbeddingOptions,
-    EmbeddingRefreshFailureClass, EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus,
-    EmbeddingRefreshProjectPolicy, EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState,
-    EmbeddingSpaceFreshnessInspection, EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo,
-    EmbeddingSpaceProducer, EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult,
-    FastRpOptions, FindDiagnostic, FindExecutionOptions, FindRerankOptions, GfError,
+    CallerEmbeddingNormalization, CapabilityId, CommittedGenerationIdentity,
+    EmbeddingAnalyzeOptions, EmbeddingOptions, EmbeddingRefreshFailureClass,
+    EmbeddingRefreshInspection, EmbeddingRefreshOutcomeStatus, EmbeddingRefreshProjectPolicy,
+    EmbeddingRefreshSpacePolicy, EmbeddingRefreshWorkerState, EmbeddingSpaceFreshnessInspection,
+    EmbeddingSpaceFreshnessState, EmbeddingSpaceInfo, EmbeddingSpaceProducer,
+    EmbeddingSpaceReadDecision, EmbeddingTokenCountClass, ExecutionResult, FastRpOptions,
+    FindDiagnostic, FindExecutionOptions, FindRerankOptions, GenerationDiffDisposition,
+    GenerationDiffLimits, GenerationDiffRequest, GenerationGraphDiff, GfError, GraphChangeStream,
     GraphDirectedness, GraphForgeOptions, GraphSageAggregator, GraphSageOptions,
     GraphScaleIndexProfile, HashGnnOptions, InvocationDescriptor, InvocationError, IrLiteral,
     Node2VecOptions, NodeSelector, OpenRouterProviderSession, OpenRouterProviderSessionConfig,
     OpenRouterWireLimits, OperationId, ProjectWriteMode, PropValue, ProviderBatchLimits,
     ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
     ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
-    ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TemporalValue,
-    TextIndexInspection, TokenCountClass, WriteContext, validate_embedding_options,
+    ProviderExecutionLimits, ProviderRequestLimits, ReloadRequiredReason, RerankAdvisoryPolicy,
+    RerankFailurePolicy, RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream,
+    TemporalValue, TextIndexInspection, TokenCountClass, WriteContext, validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -43,6 +45,7 @@ use pyo3::exceptions::{
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyList};
+use uuid::Uuid;
 
 // Python exception hierarchy (re-exported as `graphforge.exceptions`): a
 // `GraphForgeError` base so callers can catch broadly, plus one subclass per
@@ -2427,6 +2430,102 @@ pub struct PyCancellationToken {
     pub(crate) inner: graphforge_api::CancellationToken,
 }
 
+fn py_generation_identity(
+    py: Python<'_>,
+    generation_uuid: &Bound<'_, PyAny>,
+    manifest_sha256: &Bound<'_, PyAny>,
+) -> PyResult<CommittedGenerationIdentity> {
+    let uuid_bytes: Vec<u8> = generation_uuid.extract()?;
+    let manifest: Vec<u8> = manifest_sha256.extract()?;
+    let generation_uuid = Uuid::from_slice(&uuid_bytes).map_err(|_| {
+        to_pyerr(
+            py,
+            &GfError::Validation("generation_uuid must contain exactly 16 bytes".into()),
+        )
+    })?;
+    let manifest_sha256: [u8; 32] = manifest.try_into().map_err(|_| {
+        to_pyerr(
+            py,
+            &GfError::Validation("manifest_sha256 must contain exactly 32 bytes".into()),
+        )
+    })?;
+    Ok(CommittedGenerationIdentity {
+        generation_uuid,
+        manifest_sha256,
+    })
+}
+
+fn py_identity_dict(
+    py: Python<'_>,
+    identity: CommittedGenerationIdentity,
+) -> PyResult<Bound<'_, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item(
+        "generation_uuid",
+        PyBytes::new(py, identity.generation_uuid.as_bytes()),
+    )?;
+    out.set_item(
+        "manifest_sha256",
+        PyBytes::new(py, &identity.manifest_sha256),
+    )?;
+    Ok(out)
+}
+
+fn py_change_stream<'py>(
+    py: Python<'py>,
+    stream: &GraphChangeStream,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("row_count", stream.row_count)?;
+    out.set_item("ipc", PyBytes::new(py, &stream.ipc))?;
+    Ok(out)
+}
+
+fn py_generation_diff<'py>(
+    py: Python<'py>,
+    diff: &GenerationGraphDiff,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("kind", "ready")?;
+    out.set_item("source", py_identity_dict(py, diff.source)?)?;
+    out.set_item("target", py_identity_dict(py, diff.target)?)?;
+    for (name, stream) in [
+        ("added_nodes", &diff.added_nodes),
+        ("removed_nodes", &diff.removed_nodes),
+        ("modified_nodes", &diff.modified_nodes),
+        ("added_edges", &diff.added_edges),
+        ("removed_edges", &diff.removed_edges),
+        ("modified_edges", &diff.modified_edges),
+    ] {
+        out.set_item(name, py_change_stream(py, stream)?)?;
+    }
+    let node_properties = PyDict::new(py);
+    for (uuid, names) in &diff.modified_node_properties {
+        node_properties.set_item(PyBytes::new(py, uuid.as_bytes()), names)?;
+    }
+    let edge_properties = PyDict::new(py);
+    for (uuid, names) in &diff.modified_edge_properties {
+        edge_properties.set_item(PyBytes::new(py, uuid.as_bytes()), names)?;
+    }
+    out.set_item("modified_node_properties", node_properties)?;
+    out.set_item("modified_edge_properties", edge_properties)?;
+    out.set_item(
+        "checkpoint_binding",
+        PyBytes::new(py, &diff.checkpoint_binding),
+    )?;
+    Ok(out)
+}
+
+fn reload_reason(reason: ReloadRequiredReason) -> &'static str {
+    match reason {
+        ReloadRequiredReason::GenerationUnavailable => "generation_unavailable",
+        ReloadRequiredReason::IdentityMismatch => "identity_mismatch",
+        ReloadRequiredReason::CorruptGeneration => "corrupt_generation",
+        ReloadRequiredReason::IncompatibleGraph => "incompatible_graph",
+        ReloadRequiredReason::ResourceLimit => "resource_limit",
+    }
+}
+
 #[pymethods]
 impl PyCancellationToken {
     #[new]
@@ -2640,6 +2739,55 @@ impl GraphForge {
             .detach(|| self.inner.revert_to_checkpoint(request))
             .map_err(|error| to_pyerr(py, &error))?;
         result_to_pyarrow(py, &result)
+    }
+
+    /// Return the exact binary identity of the selected committed generation.
+    fn committed_generation_identity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let identity = self
+            .inner
+            .committed_generation_identity()
+            .map_err(|error| to_pyerr(py, &error))?;
+        Ok(py_identity_dict(py, identity)?.into_any().unbind())
+    }
+
+    /// Return Rust-owned semantic Arrow IPC changes between two generations.
+    #[pyo3(signature = (*, source_generation_uuid, source_manifest_sha256, target_generation_uuid, target_manifest_sha256, max_records_per_generation=1_000_000, max_output_bytes=268_435_456, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn diff_committed_generations(
+        &self,
+        py: Python<'_>,
+        source_generation_uuid: &Bound<'_, PyAny>,
+        source_manifest_sha256: &Bound<'_, PyAny>,
+        target_generation_uuid: &Bound<'_, PyAny>,
+        target_manifest_sha256: &Bound<'_, PyAny>,
+        max_records_per_generation: usize,
+        max_output_bytes: usize,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        self.ensure_open()?;
+        let request = GenerationDiffRequest {
+            source: py_generation_identity(py, source_generation_uuid, source_manifest_sha256)?,
+            target: py_generation_identity(py, target_generation_uuid, target_manifest_sha256)?,
+            limits: GenerationDiffLimits {
+                max_records_per_generation,
+                max_output_bytes,
+            },
+            cancellation: cancellation.map(|token| token.inner.clone()),
+        };
+        let disposition = py
+            .detach(|| self.inner.diff_committed_generations(&request))
+            .map_err(|error| to_pyerr(py, &error))?;
+        let out = match disposition {
+            GenerationDiffDisposition::Ready(diff) => py_generation_diff(py, &diff)?,
+            GenerationDiffDisposition::ReloadRequired(reason) => {
+                let out = PyDict::new(py);
+                out.set_item("kind", "reload_required")?;
+                out.set_item("reason", reload_reason(reason))?;
+                out
+            }
+        };
+        Ok(out.into_any().unbind())
     }
 
     /// Diff two checkpoint/current endpoints through the Rust-owned engine.
