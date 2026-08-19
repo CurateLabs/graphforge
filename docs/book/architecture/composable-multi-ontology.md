@@ -1,7 +1,7 @@
 # Composable multi-ontology contract
 
 This document is normative. **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, and
-**MAY** have their RFC 2119 meanings. ADR 0022 records the decision.
+**MAY** have their RFC 2119 meanings. ADR 0023 records the decision.
 
 ## Stable identities and references
 

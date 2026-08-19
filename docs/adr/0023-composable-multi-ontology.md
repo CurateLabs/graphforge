@@ -1,4 +1,4 @@
-# ADR 0022: Composable ontology modules and semantic bridges
+# ADR 0023: Composable ontology modules and semantic bridges
 
 **Status:** Accepted  
 **Date:** 2026-08-19  

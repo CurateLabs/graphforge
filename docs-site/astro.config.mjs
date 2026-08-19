@@ -286,8 +286,8 @@ export default defineConfig({
                   slug: 'adr/0021-portable-project-v2',
                 },
                 {
-                  label: '0022 Composable multi-ontology',
-                  slug: 'adr/0022-composable-multi-ontology',
+                  label: '0023 Composable multi-ontology',
+                  slug: 'adr/0023-composable-multi-ontology',
                 },
               ],
             },

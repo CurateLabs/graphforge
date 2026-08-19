@@ -2197,6 +2197,22 @@ mod tests {
     }
 
     #[test]
+    fn pre_m9_reader_rejects_required_ontology_composition_before_payload_access() {
+        let mut value: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/portable-v2/ontology-only.manifest.json"
+        ))
+        .unwrap();
+        let capabilities = value["requirements"]["capabilities"]
+            .as_array_mut()
+            .unwrap();
+        capabilities.push(Value::String("ontology-composition@1".into()));
+        capabilities.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        let manifest: Manifest = serde_json::from_value(value).unwrap();
+        let error = validate_semantics(&manifest, PortableV2Limits::default()).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::UnsupportedFuture);
+    }
+
+    #[test]
     fn expanded_full_and_structure_only_have_honest_distinct_integrity() {
         let root = package();
         let full = verify_portable_v2(

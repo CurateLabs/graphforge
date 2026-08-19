@@ -138,7 +138,7 @@ const PAGES = [
   'adr/0019-authoritative-graph-delta-journal.md',
   'adr/0020-ntfs-write-through-namespace-durability.md',
   'adr/0021-portable-project-v2.md',
-  'adr/0022-composable-multi-ontology.md',
+  'adr/0023-composable-multi-ontology.md',
   'releases/roadmap.md',
   'legal/licensing.md',
   'community/security.md',
