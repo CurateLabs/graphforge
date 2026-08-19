@@ -64,31 +64,22 @@ fn gfdr_decode_verify(bencher: Bencher, count: usize) {
     });
 }
 
-#[divan::bench(args = [1, 100])]
-fn replay_merge_fingerprint(bencher: Bencher, runs: usize) {
-    let encoded: Vec<_> = (0..runs)
-        .map(|index| {
-            encode_delta_run(
-                index as u64 + 1,
-                Uuid::from_u128(10 + index as u128),
-                Uuid::from_u128(20 + index as u128),
-                &fixture(1),
-                GraphDeltaJournalLimits::default(),
-            )
-            .unwrap()
-        })
-        .collect();
+#[divan::bench(args = [1, 100, 10_000])]
+fn replay_merge_fingerprint(bencher: Bencher, operations: usize) {
+    // One bounded run across the operation ladder. Run-count limits are an
+    // admission contract, not a benchmark parameter to bypass.
+    let encoded = encode_delta_run(
+        1,
+        Uuid::from_u128(10),
+        Uuid::from_u128(20),
+        &fixture(operations),
+        GraphDeltaJournalLimits::default(),
+    )
+    .unwrap();
     bencher.bench(|| {
         let mut fingerprint = Sha256::new();
-        for (index, bytes) in encoded.iter().enumerate() {
-            let run = decode_delta_run(
-                bytes,
-                Some(index as u64 + 1),
-                GraphDeltaJournalLimits::default(),
-            )
-            .unwrap();
-            fingerprint.update(&run.bytes);
-        }
+        let run = decode_delta_run(&encoded, Some(1), GraphDeltaJournalLimits::default()).unwrap();
+        fingerprint.update(&run.bytes);
         divan::black_box(fingerprint.finalize())
     });
 }

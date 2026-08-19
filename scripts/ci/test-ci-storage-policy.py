@@ -95,6 +95,7 @@ EXPECTED_ARTIFACT_UPLOADS = Counter(
         "durability-certification-evidence-${{ github.sha }}": 1,
         "native-oracle-windows-${{ github.sha }}": 1,
         "native-oracle-macos-${{ github.sha }}": 1,
+        "m6-memory-${{ github.sha }}-blacksmith-4vcpu-ubuntu-2404": 1,
     }
 )
 EXPECTED_ARTIFACT_DOWNLOADS = Counter(
@@ -288,6 +289,7 @@ def artifact_contracts(text: str) -> tuple[list[str], list[str]]:
                 "docs/development/bazel-migration-evidence/perf-sample.json"
             ),
             "${{ runner.temp }}/durability-certification-evidence",
+            "replay-memory.txt\ncompaction-memory.txt",
         }, f"artifact upload contains unapproved bytes: {path}"
         uploaded.append(name)
     for step in action_steps(text, "actions/download-artifact@"):

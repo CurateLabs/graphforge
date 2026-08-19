@@ -7,13 +7,20 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = {
     "m6_storage.rs": {
-        "gfdr_encode", "gfdr_decode_verify", "replay_merge_fingerprint",
-        "manifest_reachability", "transaction_classification",
+        "gfdr_encode",
+        "gfdr_decode_verify",
+        "replay_merge_fingerprint",
+        "manifest_reachability",
+        "transaction_classification",
         "transaction_stage_and_classify",
     },
     "m6_storage_io.rs": {
-        "durable_open", "durable_commit", "recovery_scan", "reachability_scan",
-        "garbage_collection", "spill_compaction",
+        "durable_open",
+        "durable_commit",
+        "recovery_scan",
+        "reachability_scan",
+        "garbage_collection",
+        "spill_compaction",
     },
 }
 
