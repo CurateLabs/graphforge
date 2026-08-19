@@ -9,7 +9,6 @@ import pyarrow as pa
 
 import graphforge as gf
 
-
 FIXTURE = json.loads(
     (Path(__file__).parents[3] / "tests/contracts/geoarrow-interchange-v1.json").read_text()
 )
@@ -17,7 +16,7 @@ FIXTURE = json.loads(
 
 def spatial_value(case: dict[str, object]) -> dict[str, object]:
     return {
-        "spatial_type": {"geometry": case["geometry"], "crs": FIXTURE["crs"]},
+        "spatial_type": {"geometry": case["geometry"], "crs": case["crs"]},
         "coordinates": case["coordinates"],
     }
 
@@ -35,7 +34,7 @@ def check_geoarrow_interchange() -> None:
         field = table.schema.field(case["name"])
         metadata = field.metadata or {}
         assert metadata[b"ARROW:extension:name"].decode() == case["extensionName"]
-        assert metadata[b"ARROW:extension:metadata"].decode() == FIXTURE["extensionMetadata"]
+        assert metadata[b"ARROW:extension:metadata"].decode() == case["extensionMetadata"]
         values = table.column(case["name"]).to_pylist()
         assert values[0] is not None
         assert values[1] is None

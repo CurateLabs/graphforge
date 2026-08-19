@@ -2364,7 +2364,7 @@ mod tests {
                 let spatial: SpatialValue = serde_json::from_value(serde_json::json!({
                     "spatial_type": {
                         "geometry": case["geometry"],
-                        "crs": fixture["crs"],
+                        "crs": case["crs"],
                     },
                     "coordinates": case["coordinates"],
                 }))
@@ -2408,7 +2408,7 @@ mod tests {
             );
             assert_eq!(
                 field.metadata()["ARROW:extension:metadata"],
-                fixture["extensionMetadata"]
+                case["extensionMetadata"]
             );
             assert!(batches[0].column_by_name(name).unwrap().is_null(1));
         }
