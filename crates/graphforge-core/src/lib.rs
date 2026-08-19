@@ -329,6 +329,126 @@ impl fmt::Display for ProjectErrorCode {
 // PropValue — minimal property value type
 // ---------------------------------------------------------------------------
 
+/// Consumer-neutral temporal values accepted at GraphForge data boundaries.
+///
+/// Calendar and wall-clock components remain separate: durations are never
+/// collapsed into elapsed nanoseconds, and zone-bearing datetimes retain both
+/// the observed UTC offset and optional IANA zone identifier.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TemporalValue {
+    /// Calendar duration with independent months, days, seconds, and nanoseconds.
+    Duration {
+        /// Calendar months.
+        months: i64,
+        /// Calendar days.
+        days: i64,
+        /// Whole elapsed seconds below the calendar components.
+        seconds: i64,
+        /// Sub-second nanoseconds.
+        nanos: i64,
+    },
+    /// UTC instant as microseconds from the Unix epoch.
+    UtcDateTime {
+        /// Signed microseconds from the Unix epoch.
+        epoch_micros: i64,
+    },
+    /// Calendar date as days from the Unix epoch.
+    Date {
+        /// Signed days from the Unix epoch.
+        epoch_days: i64,
+    },
+    /// Local date and time without an offset or zone.
+    LocalDateTime {
+        /// Signed days from the Unix epoch.
+        epoch_days: i64,
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+    },
+    /// Local wall-clock time without an offset.
+    LocalTime {
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+    },
+    /// Wall-clock time with its explicit UTC offset in seconds.
+    OffsetTime {
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+        /// Signed UTC offset in seconds.
+        offset_seconds: i32,
+    },
+    /// Date and time with an explicit offset and optional IANA zone identity.
+    ZonedDateTime {
+        /// Signed days from the Unix epoch in the represented local date.
+        epoch_days: i64,
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+        /// Signed observed UTC offset in seconds.
+        offset_seconds: i32,
+        /// Optional IANA zone identity; `None` means offset-only.
+        zone: Option<String>,
+    },
+}
+
+impl TemporalValue {
+    /// Validate the canonical ranges shared by scalar and bulk ingestion.
+    pub fn validate(&self) -> Result<(), GfError> {
+        const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+        const MAX_OFFSET_SECONDS: i32 = 18 * 60 * 60;
+        let validate_time = |nanos: i64| {
+            if (0..NANOS_PER_DAY).contains(&nanos) {
+                Ok(())
+            } else {
+                Err(GfError::Validation(
+                    "temporal nanoseconds must be within one day".into(),
+                ))
+            }
+        };
+        let validate_offset = |offset: i32| {
+            if (-MAX_OFFSET_SECONDS..=MAX_OFFSET_SECONDS).contains(&offset) {
+                Ok(())
+            } else {
+                Err(GfError::Validation(
+                    "temporal UTC offset must be within plus or minus 18 hours".into(),
+                ))
+            }
+        };
+        match self {
+            Self::Duration { nanos, .. } if !(-999_999_999..=999_999_999).contains(nanos) => {
+                Err(GfError::Validation(
+                    "duration nanoseconds must be between -999999999 and 999999999".into(),
+                ))
+            }
+            Self::LocalDateTime { nanos, .. } | Self::LocalTime { nanos } => validate_time(*nanos),
+            Self::OffsetTime {
+                nanos,
+                offset_seconds,
+            } => {
+                validate_time(*nanos)?;
+                validate_offset(*offset_seconds)
+            }
+            Self::ZonedDateTime {
+                nanos,
+                offset_seconds,
+                zone,
+                ..
+            } => {
+                validate_time(*nanos)?;
+                validate_offset(*offset_seconds)?;
+                if let Some(zone) = zone
+                    && (zone.is_empty() || zone.len() > 255 || zone.chars().any(char::is_control))
+                {
+                    return Err(GfError::Validation(
+                        "temporal zone must be nonempty, control-free UTF-8 up to 255 bytes".into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// A graph property value.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -345,6 +465,8 @@ pub enum PropValue {
     Str(String),
     /// Ordered list.
     List(Vec<PropValue>),
+    /// Typed temporal value with consumer-neutral Arrow semantics.
+    Temporal(TemporalValue),
 }
 
 impl fmt::Display for PropValue {
@@ -365,6 +487,7 @@ impl fmt::Display for PropValue {
                 }
                 write!(f, "]")
             }
+            Self::Temporal(value) => write!(f, "temporal({value:?})"),
         }
     }
 }

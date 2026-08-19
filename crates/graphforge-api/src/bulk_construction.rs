@@ -20,7 +20,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, LargeListArray, LargeStringArray, ListArray, StringArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    StructArray, Time64NanosecondArray, TimestampMicrosecondArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -1118,6 +1119,25 @@ fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String>
                 value.to_owned()
             ))
         }
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, timezone)
+            if timezone.as_deref() == Some("UTC") =>
+        {
+            scalar!(TimestampMicrosecondArray, |epoch_micros| {
+                PropValue::Temporal(graphforge_core::TemporalValue::UtcDateTime { epoch_micros })
+            })
+        }
+        DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond) => {
+            let nanos = array
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .ok_or_else(|| "Arrow array does not match its schema".to_owned())?
+                .value(row);
+            validate_wall_clock_nanos(nanos)?;
+            Ok(PropValue::Temporal(
+                graphforge_core::TemporalValue::LocalTime { nanos },
+            ))
+        }
+        DataType::Struct(fields) => temporal_struct_value(array, row, fields),
         DataType::List(_) => {
             let values = array
                 .as_any()
@@ -1141,6 +1161,103 @@ fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String>
                 .map(PropValue::List)
         }
         other => Err(format!("unsupported property type {other}")),
+    }
+}
+
+fn temporal_struct_value(
+    array: &dyn Array,
+    row: usize,
+    fields: &arrow::datatypes::Fields,
+) -> Result<PropValue, String> {
+    use graphforge_core::TemporalValue;
+    let values = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| "Arrow array does not match its schema".to_owned())?;
+    let names = fields
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let i64_at = |name: &str| -> Result<i64, String> {
+        let column = values
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| format!("temporal field {name} is not Int64"))?;
+        (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| format!("temporal field {name} is null for a present value"))
+    };
+    let nanos_at = |name: &str| -> Result<i64, String> {
+        let column = values
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<Time64NanosecondArray>())
+            .ok_or_else(|| format!("temporal field {name} is not Time64(Nanosecond)"))?;
+        let nanos = (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| format!("temporal field {name} is null for a present value"))?;
+        validate_wall_clock_nanos(nanos)?;
+        Ok(nanos)
+    };
+    let offset = || -> Result<i32, String> {
+        let column = values
+            .column_by_name("offset")
+            .and_then(|column| column.as_any().downcast_ref::<Int32Array>())
+            .ok_or_else(|| "temporal field offset is not Int32".to_owned())?;
+        let value = (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| "temporal field offset is null for a present value".to_owned())?;
+        if !(-64_800..=64_800).contains(&value) {
+            return Err("temporal offset exceeds the certified +/-18 hour range".to_owned());
+        }
+        Ok(value)
+    };
+    let temporal = match names.as_slice() {
+        ["months", "days", "seconds", "nanos"] => TemporalValue::Duration {
+            months: i64_at("months")?,
+            days: i64_at("days")?,
+            seconds: i64_at("seconds")?,
+            nanos: i64_at("nanos")?,
+        },
+        ["epoch_day"] => TemporalValue::Date {
+            epoch_days: i64_at("epoch_day")?,
+        },
+        ["date", "time"] => TemporalValue::LocalDateTime {
+            epoch_days: i64_at("date")?,
+            nanos: nanos_at("time")?,
+        },
+        ["time", "offset"] => TemporalValue::OffsetTime {
+            nanos: nanos_at("time")?,
+            offset_seconds: offset()?,
+        },
+        ["date", "time", "offset", "zone"] => {
+            let zones = values
+                .column_by_name("zone")
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| "temporal field zone is not Utf8".to_owned())?;
+            let zone = (!zones.is_null(row)).then(|| zones.value(row).to_owned());
+            if zone.as_ref().is_some_and(|zone| {
+                zone.is_empty() || zone.len() > 255 || zone.chars().any(char::is_control)
+            }) {
+                return Err("temporal zone identity is malformed".to_owned());
+            }
+            TemporalValue::ZonedDateTime {
+                epoch_days: i64_at("date")?,
+                nanos: nanos_at("time")?,
+                offset_seconds: offset()?,
+                zone,
+            }
+        }
+        _ => return Err("unsupported temporal struct contract".to_owned()),
+    };
+    Ok(PropValue::Temporal(temporal))
+}
+
+fn validate_wall_clock_nanos(nanos: i64) -> Result<(), String> {
+    const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+    if (0..NANOS_PER_DAY).contains(&nanos) {
+        Ok(())
+    } else {
+        Err("temporal wall-clock nanoseconds are outside one day".to_owned())
     }
 }
 
@@ -1313,10 +1430,10 @@ fn validate_ontology_field(
                 DataType::List(_) | DataType::LargeList(_)
             )
         }
-        PropertyValueType::Duration
-        | PropertyValueType::DateTime
-        | PropertyValueType::Map
-        | PropertyValueType::Spatial(_) => false,
+        PropertyValueType::Duration | PropertyValueType::DateTime => {
+            field.data_type() == &expected_arrow
+        }
+        PropertyValueType::Map | PropertyValueType::Spatial(_) => false,
     };
     if !compatible {
         return Err(row_error(
@@ -1379,7 +1496,7 @@ fn validate_property_type(
 }
 
 fn property_data_type_supported(data_type: &DataType) -> bool {
-    match data_type {
+    (match data_type {
         DataType::List(field) | DataType::LargeList(field) => {
             property_data_type_supported(field.data_type())
         }
@@ -1397,7 +1514,16 @@ fn property_data_type_supported(data_type: &DataType) -> bool {
                 | DataType::Float64
                 | DataType::Utf8
                 | DataType::LargeUtf8
+                | DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
         ),
+    }) || {
+        matches!(data_type, DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) if zone.as_deref() == Some("UTC"))
+            || matches!(data_type, DataType::Struct(fields)
+        if fields == &graphforge_storage::schemas::duration_struct_fields()
+            || fields == &graphforge_storage::schemas::date_struct_fields()
+            || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
+            || fields == &graphforge_storage::schemas::time_struct_fields()
+            || fields == &graphforge_storage::schemas::datetime_struct_fields())
     }
 }
 
@@ -2197,6 +2323,39 @@ mod tests {
         for (array, expected) in cases {
             assert_eq!(property_value_at(array.as_ref(), 0).unwrap(), expected);
         }
+
+        let utc =
+            TimestampMicrosecondArray::from(vec![1_700_000_000_123_456_i64]).with_timezone("UTC");
+        assert_eq!(
+            property_value_at(&utc, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::UtcDateTime {
+                epoch_micros: 1_700_000_000_123_456,
+            })
+        );
+        let local_time = Time64NanosecondArray::from(vec![12_345_i64]);
+        assert_eq!(
+            property_value_at(&local_time, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::LocalTime { nanos: 12_345 })
+        );
+        let duration = StructArray::new(
+            graphforge_storage::schemas::duration_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![-2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![-4])),
+                Arc::new(Int64Array::from(vec![5])),
+            ],
+            None,
+        );
+        assert_eq!(
+            property_value_at(&duration, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::Duration {
+                months: -2,
+                days: 3,
+                seconds: -4,
+                nanos: 5,
+            })
+        );
 
         let nullable = StringArray::from(vec![None::<&str>]);
         assert_eq!(property_value_at(&nullable, 0).unwrap(), PropValue::Null);

@@ -33,8 +33,8 @@ use graphforge_api::{
     ProviderCapabilities, ProviderCapability, ProviderEmbeddingDistance,
     ProviderEmbeddingNormalization, ProviderEmbeddingPlanInspection, ProviderEmbeddingPlanRequest,
     ProviderExecutionLimits, ProviderRequestLimits, RerankAdvisoryPolicy, RerankFailurePolicy,
-    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TextIndexInspection,
-    TokenCountClass, WriteContext, validate_embedding_options,
+    RuntimeGuard, SearchIndexOptions, SendableRecordBatchStream, TemporalValue,
+    TextIndexInspection, TokenCountClass, WriteContext, validate_embedding_options,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{
@@ -204,9 +204,29 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
             .map(|item| py_to_prop_value(&item))
             .collect::<PyResult<Vec<_>>>()
             .map(PropValue::List)
+    } else if let Ok(dict) = value.cast::<PyDict>() {
+        let mut object = serde_json::Map::with_capacity(dict.len());
+        for (key, value) in dict {
+            let key = key.extract::<String>()?;
+            let value = if value.is_none() {
+                serde_json::Value::Null
+            } else if let Ok(value) = value.extract::<String>() {
+                serde_json::Value::String(value)
+            } else if value.is_instance_of::<PyInt>() {
+                serde_json::Value::Number(value.extract::<i64>()?.into())
+            } else {
+                return Err(PyTypeError::new_err(
+                    "temporal fields must be strings, integers, or None",
+                ));
+            };
+            object.insert(key, value);
+        }
+        serde_json::from_value::<TemporalValue>(serde_json::Value::Object(object))
+            .map(PropValue::Temporal)
+            .map_err(|error| PyTypeError::new_err(format!("invalid temporal property: {error}")))
     } else {
         Err(PyTypeError::new_err(
-            "unsupported node property type (expected None/bool/int/float/str/list)",
+            "unsupported node property type (expected None/bool/int/float/str/list/temporal dict)",
         ))
     }
 }

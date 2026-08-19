@@ -596,13 +596,11 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 .collect::<Result<Vec<_>>>()?,
         ),
         Value::Object(_) => {
-            // Nested plain objects are unsupported property values. Callers that
-            // need a JS `TypeError` (add_node / add_edge) must go through
-            // [`props_from_js_object`]; this serde path is used by composite
-            // JSON inputs and keeps a ValidationError for domain mapping.
-            return Err(to_napi_err(&GfError::Validation(
-                "unsupported node property type (expected null/boolean/number/string/array)".into(),
-            )));
+            PropValue::Temporal(serde_json::from_value(value.clone()).map_err(|error| {
+                to_napi_err(&GfError::Validation(format!(
+                    "invalid temporal node property: {error}"
+                )))
+            })?)
         }
     })
 }
@@ -618,7 +616,7 @@ pub(crate) fn props_from_map(
 }
 
 const UNSUPPORTED_PROP_TYPE_MSG: &str =
-    "unsupported node property type (expected null/boolean/number/string/array)";
+    "unsupported node property type (expected null/boolean/number/string/array/temporal object)";
 
 /// Convert a JS property bag, raising a real `TypeError` for unsupported values
 /// (functions, symbols, nested plain objects).
@@ -703,24 +701,28 @@ fn js_unknown_to_prop_value(env: Env, value: Unknown<'_>) -> Result<PropValue> {
             let object = unsafe { value.cast::<Object>() }.map_err(|error| {
                 type_error(env, format!("expected object property: {}", error.reason))
             })?;
-            if !object.is_array().map_err(|error| {
+            let is_array = object.is_array().map_err(|error| {
                 type_error(
                     env,
                     format!("failed to inspect array property: {}", error.reason),
                 )
-            })? {
-                return Err(type_error(env, UNSUPPORTED_PROP_TYPE_MSG));
-            }
+            })?;
             let json = unsafe {
                 <serde_json::Value as FromNapiValue>::from_napi_value(env.raw(), object.raw())
             }
             .map_err(|error| {
                 type_error(
                     env,
-                    format!("failed to read array property: {}", error.reason),
+                    format!("failed to read object property: {}", error.reason),
                 )
             })?;
-            json_to_prop_value(&json)
+            json_to_prop_value(&json).map_err(|error| {
+                if is_array {
+                    error
+                } else {
+                    type_error(env, format!("invalid temporal property: {}", error.reason))
+                }
+            })
         }
         ValueType::Function
         | ValueType::Symbol
@@ -7415,6 +7417,7 @@ mod tests {
     use std::thread;
 
     use super::*;
+    use graphforge_api::TemporalValue;
 
     #[test]
     fn query_uuid_tag_is_exact_and_strings_stay_strings() {
@@ -7484,6 +7487,28 @@ mod tests {
     fn rejects_unsigned_property_values_above_i64() {
         let error = json_to_prop_value(&serde_json::json!(u64::MAX)).unwrap_err();
         assert_eq!(error.status, "ValidationError");
+    }
+
+    #[test]
+    fn temporal_json_preserves_calendar_offset_and_zone_components() {
+        let value = json_to_prop_value(&serde_json::json!({
+            "type": "zoned_date_time",
+            "epoch_days": 19_932,
+            "nanos": 5_400_000_000_000_i64,
+            "offset_seconds": -21_600,
+            "zone": "America/Denver"
+        }))
+        .unwrap();
+        assert_eq!(
+            value,
+            PropValue::Temporal(TemporalValue::ZonedDateTime {
+                epoch_days: 19_932,
+                nanos: 5_400_000_000_000,
+                offset_seconds: -21_600,
+                zone: Some("America/Denver".into()),
+            })
+        );
+        assert!(json_to_prop_value(&serde_json::json!({"nested": true})).is_err());
     }
 
     #[test]

@@ -151,6 +151,10 @@ fn selector_literal(value: &PropValue) -> Result<IrLiteral, GfError> {
         PropValue::Float(value) if value.is_finite() => Ok(IrLiteral::Float(*value)),
         PropValue::Float(_) => Err(validation("node selector value must be finite")),
         PropValue::Str(value) => Ok(IrLiteral::Str(value.clone())),
+        PropValue::Temporal(value) => {
+            value.validate()?;
+            Ok(crate::construction::temporal_literal(value))
+        }
         PropValue::List(values) => values
             .iter()
             .map(selector_literal)
