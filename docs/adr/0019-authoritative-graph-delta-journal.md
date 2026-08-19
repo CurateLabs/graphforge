@@ -98,8 +98,9 @@ Compaction is a normal project-generation transaction:
 2. Merge base + prefix under explicit memory, spill, disk, and cancellation
    budgets into a new canonical Parquet base. No JSON sidecar is graph-state
    authority; replay always begins from the manifest-verified Parquet files.
-3. Re-encode any later suffix runs contiguously onto the child generation so
-   post-snapshot deltas remain visible.
+3. Bounded v1 compacts the full verified chain. A partial prefix is rejected
+   before staging; a later concurrent generation wins independently through
+   the normal single-writer publication contract.
 4. Verify counts/schemas/ordering/checksums and the canonical graph fingerprint
    against the pre-compaction full chain before CURRENT publication.
 5. Reclaim subsumed input generations only through the shared retention
@@ -115,6 +116,26 @@ Crash before CURRENT leaves the prior base/deltas authoritative; after
 acknowledgement the compacted generation is authoritative. Named checkpoints
 and live reader leases retain exact prior bytes because the parent generation
 remains reachable until the shared oracle proves otherwise.
+
+The public `GraphDeltaCompactionLimits` envelope is finite and validated before
+materialization. Defaults / supported maxima are:
+
+| Field | Default | Maximum | Typed failure |
+|---|---:|---:|---|
+| `max_memory_bytes` | 64 MiB | 1 GiB | `GF_RESOURCE_LIMIT` |
+| `max_spill_bytes` | 256 MiB | 4 GiB | `GF_RESOURCE_LIMIT` |
+| `max_disk_bytes` | 512 MiB | 8 GiB | `GF_RESOURCE_LIMIT` |
+| `max_input_runs` | 64 | 64 | `GF_RESOURCE_LIMIT` |
+| `max_input_bytes` | 1 GiB | 8 GiB | `GF_RESOURCE_LIMIT` |
+| `max_output_rows` | 100 million | 1 billion | `GF_RESOURCE_LIMIT` |
+| `cancellation_check_rows` | 8,192 | 1,048,576 | `GF_RESOURCE_LIMIT` |
+
+The cancellation cadence cannot be smaller than the configured Arrow batch,
+so every poll occurs on a bounded batch boundary. Preview performs the same
+validation and merge planning without staging or changing CURRENT. Reports
+carry input/output runs, rows and bytes, peak logical memory, spill bytes,
+elapsed milliseconds, and the canonical state fingerprint. Spill and walltime
+measurements are diagnostics for #782, never correctness authority.
 
 Unsupported mutation kinds are rejected **before** acknowledgement. Supported
 kinds cover the create / update / delete surfaces required by current graph

@@ -37,6 +37,26 @@ pub const DEFAULT_COMPACTION_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_COMPACTION_MAX_SPILL_BYTES: u64 = 256 * 1024 * 1024;
 /// Default staged output disk budget for one compaction invocation.
 pub const DEFAULT_COMPACTION_MAX_DISK_BYTES: u64 = 512 * 1024 * 1024;
+/// Maximum supported logical memory budget.
+pub const MAX_COMPACTION_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+/// Maximum supported spill-byte budget.
+pub const MAX_COMPACTION_SPILL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Maximum supported staged output disk budget.
+pub const MAX_COMPACTION_DISK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default and supported maximum aggregate input runs.
+pub const DEFAULT_COMPACTION_MAX_INPUT_RUNS: u64 = 64;
+/// Default aggregate encoded input-byte budget.
+pub const DEFAULT_COMPACTION_MAX_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+/// Maximum supported aggregate encoded input-byte budget.
+pub const MAX_COMPACTION_INPUT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+/// Default maximum canonical output rows.
+pub const DEFAULT_COMPACTION_MAX_OUTPUT_ROWS: u64 = 100_000_000;
+/// Maximum supported canonical output rows.
+pub const MAX_COMPACTION_OUTPUT_ROWS: u64 = 1_000_000_000;
+/// Default cancellation polling cadence in rows.
+pub const DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS: u64 = 8_192;
+/// Maximum supported cancellation polling cadence in rows.
+pub const MAX_COMPACTION_CANCELLATION_CHECK_ROWS: u64 = 1_048_576;
 /// Spill directory name under the project-local spill root.
 pub const GRAPH_DELTA_COMPACTION_SPILL_DIR: &str = "graph-delta-compaction";
 
@@ -51,6 +71,14 @@ pub struct GraphDeltaCompactionLimits {
     pub max_spill_bytes: u64,
     /// Maximum staged generation bytes before CURRENT publish.
     pub max_disk_bytes: u64,
+    /// Maximum aggregate verified input runs.
+    pub max_input_runs: u64,
+    /// Maximum aggregate encoded bytes across the compacted run prefix.
+    pub max_input_bytes: u64,
+    /// Maximum canonical topology rows emitted.
+    pub max_output_rows: u64,
+    /// Maximum rows processed between cancellation checks.
+    pub cancellation_check_rows: u64,
 }
 
 impl Default for GraphDeltaCompactionLimits {
@@ -60,6 +88,10 @@ impl Default for GraphDeltaCompactionLimits {
             max_memory_bytes: DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
             max_spill_bytes: DEFAULT_COMPACTION_MAX_SPILL_BYTES,
             max_disk_bytes: DEFAULT_COMPACTION_MAX_DISK_BYTES,
+            max_input_runs: DEFAULT_COMPACTION_MAX_INPUT_RUNS,
+            max_input_bytes: DEFAULT_COMPACTION_MAX_INPUT_BYTES,
+            max_output_rows: DEFAULT_COMPACTION_MAX_OUTPUT_ROWS,
+            cancellation_check_rows: DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS,
         }
     }
 }
@@ -70,14 +102,29 @@ impl GraphDeltaCompactionLimits {
     /// # Errors
     /// Returns `GF_RESOURCE_LIMIT` when any hard budget is zero.
     pub fn validate(self) -> Result<Self, GfError> {
-        if self.max_memory_bytes == 0 {
+        if self.max_memory_bytes == 0 || self.max_memory_bytes > MAX_COMPACTION_MEMORY_BYTES {
             return Err(resource_limit("compaction max_memory_bytes"));
         }
-        if self.max_spill_bytes == 0 {
+        if self.max_spill_bytes == 0 || self.max_spill_bytes > MAX_COMPACTION_SPILL_BYTES {
             return Err(resource_limit("compaction max_spill_bytes"));
         }
-        if self.max_disk_bytes == 0 {
+        if self.max_disk_bytes == 0 || self.max_disk_bytes > MAX_COMPACTION_DISK_BYTES {
             return Err(resource_limit("compaction max_disk_bytes"));
+        }
+        if self.max_input_runs == 0 || self.max_input_runs > DEFAULT_COMPACTION_MAX_INPUT_RUNS {
+            return Err(resource_limit("compaction max_input_runs"));
+        }
+        if self.max_input_bytes == 0 || self.max_input_bytes > MAX_COMPACTION_INPUT_BYTES {
+            return Err(resource_limit("compaction max_input_bytes"));
+        }
+        if self.max_output_rows == 0 || self.max_output_rows > MAX_COMPACTION_OUTPUT_ROWS {
+            return Err(resource_limit("compaction max_output_rows"));
+        }
+        if self.cancellation_check_rows == 0
+            || self.cancellation_check_rows > MAX_COMPACTION_CANCELLATION_CHECK_ROWS
+            || self.cancellation_check_rows < self.journal.max_batch_rows as u64
+        {
+            return Err(resource_limit("compaction cancellation_check_rows"));
         }
         Ok(self)
     }
@@ -437,6 +484,7 @@ struct PreparedCompaction {
     input_rows: u64,
     output_rows: u64,
     input_bytes: u64,
+    output_bytes: u64,
     spill_bytes: u64,
     peak_memory_bytes: u64,
     expected_fingerprint: [u8; 32],
@@ -466,6 +514,17 @@ fn prepare_compaction(
             "graph delta compaction requires at least one verified run",
         ));
     }
+    if input_runs > limits.max_input_runs {
+        return Err(resource_limit("compaction aggregate input runs"));
+    }
+    let input_bytes = runs.iter().try_fold(0_u64, |total, run| {
+        total
+            .checked_add(run.bytes.len() as u64)
+            .ok_or_else(|| resource_limit("compaction aggregate input bytes"))
+    })?;
+    if input_bytes > limits.max_input_bytes {
+        return Err(resource_limit("compaction aggregate input bytes"));
+    }
 
     let through = request.through_run_sequence.unwrap_or(input_runs);
     if through == 0 || through > input_runs {
@@ -491,10 +550,21 @@ fn prepare_compaction(
         limits.journal,
     )?;
     let (materialized_inventory, _) = capture_graph_files(materialized.path())?;
+    let output_bytes = materialized_inventory.total_byte_length;
+    if output_bytes > limits.max_disk_bytes {
+        return Err(resource_limit("compaction staged disk bytes"));
+    }
     let expected_fingerprint = inventory_state_fingerprint(&materialized_inventory);
     let input_rows = runs.iter().map(|run| run.records.len() as u64).sum();
-    let input_bytes = runs.iter().map(|run| run.bytes.len() as u64).sum();
-    let output_rows = canonical_topology_rows(materialized.path(), limits.journal.max_batch_rows)?;
+    let output_rows = canonical_topology_rows(
+        materialized.path(),
+        limits.journal.max_batch_rows,
+        limits.cancellation_check_rows,
+        cancel,
+    )?;
+    if output_rows > limits.max_output_rows {
+        return Err(resource_limit("compaction output rows"));
+    }
     let peak_memory_bytes = replay.estimated_replay_memory_bytes;
     enforce_memory(peak_memory_bytes, limits.max_memory_bytes)?;
     Ok(PreparedCompaction {
@@ -505,6 +575,7 @@ fn prepare_compaction(
         input_rows,
         output_rows,
         input_bytes,
+        output_bytes,
         spill_bytes: 0,
         peak_memory_bytes,
         expected_fingerprint,
@@ -543,7 +614,12 @@ fn inventory_state_fingerprint(inventory: &GraphFilesInventory) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn canonical_topology_rows(root: &Path, batch_rows: usize) -> Result<u64, GfError> {
+fn canonical_topology_rows(
+    root: &Path,
+    batch_rows: usize,
+    cancellation_check_rows: u64,
+    cancel: Option<&AtomicBool>,
+) -> Result<u64, GfError> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let mut paths = vec![root.join("topology/nodes.parquet")];
     let edges = root.join("topology/edges");
@@ -563,6 +639,7 @@ fn canonical_topology_rows(root: &Path, batch_rows: usize) -> Result<u64, GfErro
         }
     }
     let mut rows = 0_u64;
+    let mut rows_since_cancel = 0_u64;
     for path in paths {
         let input =
             File::open(&path).map_err(|error| storage("open compacted topology", &path, error))?;
@@ -577,6 +654,11 @@ fn canonical_topology_rows(root: &Path, batch_rows: usize) -> Result<u64, GfErro
             rows = rows
                 .checked_add(batch.num_rows() as u64)
                 .ok_or_else(|| resource_limit("compaction topology rows"))?;
+            rows_since_cancel = rows_since_cancel.saturating_add(batch.num_rows() as u64);
+            if rows_since_cancel >= cancellation_check_rows {
+                check_cancel(cancel)?;
+                rows_since_cancel = 0;
+            }
         }
     }
     Ok(rows)
@@ -599,7 +681,7 @@ fn report_from_prepared(
         input_rows: prepared.input_rows,
         output_rows: prepared.output_rows,
         input_bytes: prepared.input_bytes,
-        output_bytes: 0,
+        output_bytes: prepared.output_bytes,
         spill_bytes: prepared.spill_bytes,
         peak_memory_bytes: prepared.peak_memory_bytes,
         elapsed_ms,
@@ -643,6 +725,8 @@ fn replay_compaction_receipt(
         output_rows: canonical_topology_rows(
             materialized.path(),
             request.limits.journal.max_batch_rows,
+            request.limits.cancellation_check_rows,
+            None,
         )?,
         input_bytes: evidence.run_bytes_validated,
         output_bytes: inventory.total_byte_length,
