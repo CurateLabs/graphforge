@@ -44,6 +44,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
@@ -59,6 +60,212 @@ pub const ALL_RELATIONS_STEM: &str = "_all";
 
 /// File name of the adjacency index manifest within `indexes/adjacency/`.
 pub const MANIFEST_FILE: &str = "index_manifest.parquet";
+
+const SHARDED_CSR_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CsrShardRecord {
+    first_node: u64,
+    node_count: u64,
+    edge_count: u64,
+    file: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CsrShardManifest {
+    format: String,
+    version: u32,
+    node_count: u64,
+    edge_count: u64,
+    shard_dir: String,
+    shards: Vec<CsrShardRecord>,
+}
+
+/// Bounded reader for a versioned sharded CSR. Opening validates the small
+/// manifest; row access reads and authenticates only the containing shard.
+#[derive(Clone, Debug)]
+pub struct ShardedCsrIndex {
+    root: PathBuf,
+    manifest: CsrShardManifest,
+}
+
+impl ShardedCsrIndex {
+    /// Open the shard manifest beside the legacy logical `.csr` path.
+    pub fn open(path: &Path) -> Result<Self, GfError> {
+        let manifest_path = path.with_extension("csr.json");
+        let bytes = std::fs::read(&manifest_path).map_err(storage_err)?;
+        let manifest: CsrShardManifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+        if manifest.format != "graphforge.csr-shards" || manifest.version != SHARDED_CSR_VERSION {
+            return Err(GfError::Storage(format!(
+                "unsupported sharded CSR manifest {}",
+                manifest_path.display()
+            )));
+        }
+        let mut expected = 0_u64;
+        let mut edges = 0_u64;
+        for shard in &manifest.shards {
+            if shard.first_node != expected || shard.node_count == 0 {
+                return Err(GfError::Storage("invalid CSR shard boundary chain".into()));
+            }
+            expected = expected.saturating_add(shard.node_count);
+            edges = edges.saturating_add(shard.edge_count);
+            if Path::new(&shard.file).components().count() != 1 {
+                return Err(GfError::Storage("invalid CSR shard file name".into()));
+            }
+        }
+        if expected != manifest.node_count || edges != manifest.edge_count {
+            return Err(GfError::Storage(
+                "CSR shard manifest counts disagree".into(),
+            ));
+        }
+        Ok(Self {
+            root: path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&manifest.shard_dir),
+            manifest,
+        })
+    }
+
+    /// Total logical source rows across all shards.
+    #[must_use]
+    pub const fn node_count(&self) -> u64 {
+        self.manifest.node_count
+    }
+
+    /// Total adjacency entries across all shards.
+    #[must_use]
+    pub const fn edge_count(&self) -> u64 {
+        self.manifest.edge_count
+    }
+
+    /// Read one logical row without loading unrelated shards.
+    pub fn row(&self, node_id: u64) -> Result<Vec<(u64, u64)>, GfError> {
+        if node_id >= self.manifest.node_count {
+            return Ok(Vec::new());
+        }
+        let shard = self
+            .manifest
+            .shards
+            .binary_search_by(|candidate| {
+                if node_id < candidate.first_node {
+                    std::cmp::Ordering::Greater
+                } else if node_id >= candidate.first_node.saturating_add(candidate.node_count) {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .map_err(|_| GfError::Storage("CSR shard boundary lookup failed".into()))?;
+        let record = &self.manifest.shards[shard];
+        let path = self.root.join(&record.file);
+        let bytes = std::fs::read(&path).map_err(|error| {
+            GfError::Storage(format!("missing CSR shard {}: {error}", path.display()))
+        })?;
+        if sha256_hex(&bytes) != record.sha256 {
+            return Err(GfError::Storage(format!(
+                "CSR shard checksum mismatch: {}",
+                record.file
+            )));
+        }
+        let csr = read_csr_bytes(&bytes, &path)?;
+        if csr.node_count() != record.node_count || csr.edge_count() != record.edge_count {
+            return Err(GfError::Storage(format!(
+                "CSR shard count mismatch: {}",
+                record.file
+            )));
+        }
+        Ok(csr.row(node_id - record.first_node).iter().collect())
+    }
+}
+
+/// Write a versioned checksummed shard set and publish its manifest last.
+/// This compatibility helper accepts an in-memory CSR; streaming builders use
+/// the same shard writer while producing one bounded shard at a time.
+pub fn write_sharded_csr(path: &Path, csr: &CsrIndex, max_edges: usize) -> Result<(), GfError> {
+    csr.validate()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| GfError::Storage("CSR path has no parent".into()))?;
+    std::fs::create_dir_all(parent).map_err(storage_err)?;
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("csr");
+    let shard_dir = format!("{stem}.{}.d", uuid::Uuid::new_v4().as_simple());
+    let root = parent.join(&shard_dir);
+    std::fs::create_dir(&root).map_err(storage_err)?;
+    let result = (|| {
+        let mut records = Vec::new();
+        let mut first_node = 0_u64;
+        let mut shard = CsrIndex {
+            offsets: vec![0],
+            ..CsrIndex::default()
+        };
+        for node in 0..csr.node_count() {
+            let row = csr.row(node);
+            if shard.node_count() > 0
+                && shard.edge_ids.len().saturating_add(row.len()) > max_edges.max(1)
+            {
+                records.push(write_csr_shard(&root, first_node, &shard, records.len())?);
+                first_node = node;
+                shard = CsrIndex {
+                    offsets: vec![0],
+                    ..CsrIndex::default()
+                };
+            }
+            shard.edge_ids.extend_from_slice(row.edge_ids);
+            shard.neighbor_ids.extend_from_slice(row.neighbor_ids);
+            shard.offsets.push(shard.edge_count());
+        }
+        if shard.node_count() > 0 || records.is_empty() {
+            records.push(write_csr_shard(&root, first_node, &shard, records.len())?);
+        }
+        let manifest = CsrShardManifest {
+            format: "graphforge.csr-shards".into(),
+            version: SHARDED_CSR_VERSION,
+            node_count: csr.node_count(),
+            edge_count: csr.edge_count(),
+            shard_dir,
+            shards: records,
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(storage_err)?;
+        let manifest_path = path.with_extension("csr.json");
+        let mut temp = tempfile::Builder::new()
+            .prefix(stem)
+            .suffix(".json.tmp")
+            .tempfile_in(parent)
+            .map_err(storage_err)?;
+        use std::io::Write as _;
+        temp.write_all(&bytes).map_err(storage_err)?;
+        temp.as_file().sync_all().map_err(storage_err)?;
+        persist_temp(temp, &manifest_path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    result
+}
+
+fn write_csr_shard(
+    root: &Path,
+    first_node: u64,
+    shard: &CsrIndex,
+    ordinal: usize,
+) -> Result<CsrShardRecord, GfError> {
+    let file = format!("{ordinal:020}.csr");
+    let path = root.join(&file);
+    write_csr(&path, shard)?;
+    let bytes = std::fs::read(&path).map_err(storage_err)?;
+    Ok(CsrShardRecord {
+        first_node,
+        node_count: shard.node_count(),
+        edge_count: shard.edge_count(),
+        file,
+        sha256: sha256_hex(&bytes),
+    })
+}
 
 fn storage_err(e: impl std::fmt::Display) -> GfError {
     GfError::Storage(e.to_string())
@@ -425,6 +632,20 @@ pub fn read_csr(path: &Path) -> Result<CsrIndex, GfError> {
         .map_err(|e| GfError::Storage(format!("cannot open CSR file {}: {e}", path.display())))?;
     let reader = FileReader::try_new(file, None)
         .map_err(|e| GfError::Storage(format!("invalid CSR file {}: {e}", path.display())))?;
+    decode_csr(reader, path)
+}
+
+fn read_csr_bytes(bytes: &[u8], path: &Path) -> Result<CsrIndex, GfError> {
+    let reader = FileReader::try_new(std::io::Cursor::new(bytes), None).map_err(|error| {
+        GfError::Storage(format!("invalid CSR shard {}: {error}", path.display()))
+    })?;
+    decode_csr(reader, path)
+}
+
+fn decode_csr<R: std::io::Read + std::io::Seek>(
+    reader: FileReader<R>,
+    path: &Path,
+) -> Result<CsrIndex, GfError> {
     if reader.schema().fields() != ADJACENCY_CSR_SCHEMA.fields() {
         return Err(GfError::Storage(format!(
             "CSR file {} has unexpected schema {:?}",
@@ -479,6 +700,16 @@ pub fn read_csr(path: &Path) -> Result<CsrIndex, GfError> {
     }
     csr.validate()?;
     Ok(csr)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
 }
 
 /// Replace `index_manifest.parquet` with `rows`, atomically.
@@ -1821,6 +2052,36 @@ mod tests {
             edge_ids: vec![10, 11, 12, 13],
             neighbor_ids: vec![1, 2, 0, 1],
         }
+    }
+
+    #[test]
+    fn sharded_csr_crosses_boundaries_and_rejects_missing_or_corrupt_shards() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!((reader.node_count(), reader.edge_count()), (3, 4));
+        for node in 0..expected.node_count() {
+            assert_eq!(
+                reader.row(node).unwrap(),
+                expected.row(node).iter().collect::<Vec<_>>()
+            );
+        }
+
+        let first = reader.root.join(&reader.manifest.shards[0].file);
+        let original = std::fs::read(&first).unwrap();
+        std::fs::write(&first, b"corrupt").unwrap();
+        assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
+        std::fs::write(&first, original).unwrap();
+        std::fs::remove_file(&first).unwrap();
+        assert!(
+            reader
+                .row(0)
+                .unwrap_err()
+                .to_string()
+                .contains("missing CSR shard")
+        );
     }
 
     #[test]
