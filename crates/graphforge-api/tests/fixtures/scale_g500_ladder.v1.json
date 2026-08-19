@@ -1,0 +1,58 @@
+{
+  "schema": "graphforge-billion-edge-ladder/1",
+  "schema_version": "1",
+  "objective": "Bounded-memory Graph500-parameter (ef=16 undirected Kronecker) scale ladder that measures the first envelope bottleneck on the public GraphForge facade. Engineering-green, NOT Official-track and NOT TEPS. Certification of one billion live edges is #745, not this profile.",
+  "seed": 1,
+  "edgefactor": 16,
+  "initiator": { "A": 0.57, "B": 0.19, "C": 0.19, "D": 0.05 },
+  "policy": {
+    "directionality": "undirected",
+    "self_loops": "drop",
+    "duplicates": "drop",
+    "canonicalization": "sorted_lo_hi_pair",
+    "identity": "uuidv7(vertex_index + 1)",
+    "reconciliation": "raw_attempts == live_unique_edges + self_loops_rejected + duplicates_rejected"
+  },
+  "envelope": {
+    "rss_bytes": 137438953472,
+    "disk_bytes": 1099511627776,
+    "timeout_s": 86400,
+    "note": "128 GiB peak RSS, 1 TiB local NVMe, 24 hours (M5 #735 host envelope)."
+  },
+  "metrics": [
+    "raw_attempts",
+    "self_loops_rejected",
+    "duplicates_rejected",
+    "live_unique_edges",
+    "wall_time_s",
+    "rss_peak_bytes",
+    "disk_used_bytes"
+  ],
+  "invocation": "CARGO_TARGET_DIR=/tmp/cargo-g500-ladder make bench-g500-ladder",
+  "rungs": [
+    {
+      "id": "S10",
+      "scale": 10,
+      "buffer_edges": 4096,
+      "tier": "ci",
+      "note": "Small always-on validation rung. buffer_edges is intentionally below the rung's edge count so the external sort/spill/merge path is exercised in normal CI."
+    },
+    {
+      "id": "S20",
+      "scale": 20,
+      "buffer_edges": 8388608,
+      "tier": "provisioned",
+      "note": "Historical baseline (parity with the #710 SCALE-20 reference client)."
+    },
+    { "id": "S22", "scale": 22, "buffer_edges": 16777216, "tier": "provisioned" },
+    { "id": "S24", "scale": 24, "buffer_edges": 33554432, "tier": "provisioned" },
+    { "id": "S25", "scale": 25, "buffer_edges": 67108864, "tier": "provisioned" },
+    {
+      "id": "S26",
+      "scale": 26,
+      "buffer_edges": 134217728,
+      "tier": "provisioned",
+      "note": "SCALE-26/ef=16 = 1,073,741,824 raw attempts. Live persisted edges after self-loop and duplicate policy may fall below one billion; raw attempts MUST NOT be reported as live."
+    }
+  ]
+}

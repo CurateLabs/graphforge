@@ -187,6 +187,17 @@ gf_rust_integration_test(
 )
 
 gf_rust_integration_test(
+    name = "scale_g500_ladder",
+    srcs = ["tests/scale_g500_ladder.rs"],
+    compile_data = ["tests/fixtures/scale_g500_ladder.v1.json"],
+    crate = ":graphforge_api",
+    data = _API_TEST_DATA,
+    size = "large",
+    timeout = "long",
+    deps = _API_DEPS,
+)
+
+gf_rust_integration_test(
     name = "adjacency_scale_evidence",
     srcs = ["tests/adjacency_scale_evidence.rs"],
     crate = ":graphforge_api",
@@ -504,6 +515,7 @@ test_suite(
         ":public_facade_remaining_conformance",
         ":public_lifecycle_conformance",
         ":release_load_construction",
+        ":scale_g500_ladder",
         ":scale_g500_scale20",
         ":strict_runtime_properties",
         ":value_access_semantics",
