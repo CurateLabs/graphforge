@@ -329,6 +329,70 @@ impl fmt::Display for ProjectErrorCode {
 // PropValue — minimal property value type
 // ---------------------------------------------------------------------------
 
+/// Coordinate reference systems certified by GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SpatialCrs {
+    /// WGS 84 longitude/latitude in canonical x/y order.
+    #[serde(rename = "EPSG:4326")]
+    Epsg4326,
+    /// Web Mercator easting/northing in canonical x/y order.
+    #[serde(rename = "EPSG:3857")]
+    Epsg3857,
+}
+
+/// Homogeneous geometry kinds in GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialGeometryType {
+    /// One x/y coordinate.
+    Point,
+    /// One ordered sequence of vertices.
+    LineString,
+    /// One polygon represented as ordered rings.
+    Polygon,
+    /// A collection of points.
+    MultiPoint,
+    /// A collection of line strings.
+    MultiLineString,
+    /// A collection of polygons.
+    MultiPolygon,
+}
+
+/// Complete homogeneous spatial property type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SpatialType {
+    /// Homogeneous geometry kind.
+    pub geometry: SpatialGeometryType,
+    /// Coordinate reference system for every coordinate.
+    pub crs: SpatialCrs,
+}
+
+/// Canonical f64 coordinate payload for one spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SpatialCoordinates {
+    /// Point coordinate.
+    Point([f64; 2]),
+    /// Line-string vertices.
+    LineString(Vec<[f64; 2]>),
+    /// Polygon rings and their vertices.
+    Polygon(Vec<Vec<[f64; 2]>>),
+    /// Multi-point coordinates.
+    MultiPoint(Vec<[f64; 2]>),
+    /// Multi-line-string vertices.
+    MultiLineString(Vec<Vec<[f64; 2]>>),
+    /// Multi-polygon rings and vertices.
+    MultiPolygon(Vec<Vec<Vec<[f64; 2]>>>),
+}
+
+/// One canonical typed spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpatialValue {
+    /// Geometry kind and CRS.
+    pub spatial_type: SpatialType,
+    /// Coordinates matching `spatial_type.geometry`.
+    pub coordinates: SpatialCoordinates,
+}
+
 /// A graph property value.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -345,6 +409,8 @@ pub enum PropValue {
     Str(String),
     /// Ordered list.
     List(Vec<PropValue>),
+    /// Canonical typed spatial value.
+    Spatial(SpatialValue),
 }
 
 impl fmt::Display for PropValue {
@@ -365,6 +431,11 @@ impl fmt::Display for PropValue {
                 }
                 write!(f, "]")
             }
+            Self::Spatial(value) => write!(
+                f,
+                "spatial({:?}, {:?})",
+                value.spatial_type, value.coordinates
+            ),
         }
     }
 }

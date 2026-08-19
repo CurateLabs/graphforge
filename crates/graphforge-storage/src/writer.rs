@@ -63,7 +63,10 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use graphforge_core::uuid::{Uuid, to_bytes};
-use graphforge_core::{GfError, OntologyMode, TypeId};
+use graphforge_core::{
+    GfError, OntologyMode, SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType,
+    SpatialValue, TypeId,
+};
 use graphforge_ir::IrLiteral;
 
 /// Identity, labels, and properties of a buffered node matched by MERGE.
@@ -1020,6 +1023,7 @@ enum ColType {
     Time,
     ZonedTime,
     ZonedDateTime,
+    Spatial(SpatialType),
     /// A homogeneous `List<inner>` column (#1006).
     List(Box<ColType>),
 }
@@ -1043,6 +1047,7 @@ impl ColType {
             IrLiteral::Time(_) => Some(Self::Time),
             IrLiteral::ZonedTime { .. } => Some(Self::ZonedTime),
             IrLiteral::ZonedDateTime { .. } => Some(Self::ZonedDateTime),
+            IrLiteral::Spatial(value) => Some(Self::Spatial(value.spatial_type)),
             // A homogeneous list: infer the inner type from the first non-null
             // element. A list whose elements are all null (or an empty list)
             // yields no type and the column falls back to `Str`. (#1006)
@@ -1068,6 +1073,7 @@ impl ColType {
             Self::Time => DataType::Time64(TimeUnit::Nanosecond),
             Self::ZonedTime => DataType::Struct(crate::schemas::time_struct_fields()),
             Self::ZonedDateTime => DataType::Struct(crate::schemas::datetime_struct_fields()),
+            Self::Spatial(spatial_type) => spatial_data_type(*spatial_type),
             Self::List(inner) => {
                 DataType::List(Arc::new(Field::new("item", inner.data_type(), true)))
             }
@@ -1080,6 +1086,46 @@ impl ColType {
             Self::Int | Self::Float | Self::Bool | Self::Str | Self::HetScalar
         )
     }
+}
+
+fn spatial_data_type(spatial_type: SpatialType) -> DataType {
+    let coordinate = DataType::Struct(arrow::datatypes::Fields::from(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let list = |name: &str, child| DataType::List(Arc::new(Field::new(name, child, false)));
+    match spatial_type.geometry {
+        SpatialGeometryType::Point => coordinate,
+        SpatialGeometryType::LineString => list("vertices", coordinate),
+        SpatialGeometryType::Polygon => list("rings", list("vertices", coordinate)),
+        SpatialGeometryType::MultiPoint => list("points", coordinate),
+        SpatialGeometryType::MultiLineString => list("linestrings", list("vertices", coordinate)),
+        SpatialGeometryType::MultiPolygon => {
+            list("polygons", list("rings", list("vertices", coordinate)))
+        }
+    }
+}
+
+fn spatial_field(name: &str, spatial_type: SpatialType, nullable: bool) -> Field {
+    let extension_name = match spatial_type.geometry {
+        SpatialGeometryType::Point => "geoarrow.point",
+        SpatialGeometryType::LineString => "geoarrow.linestring",
+        SpatialGeometryType::Polygon => "geoarrow.polygon",
+        SpatialGeometryType::MultiPoint => "geoarrow.multipoint",
+        SpatialGeometryType::MultiLineString => "geoarrow.multilinestring",
+        SpatialGeometryType::MultiPolygon => "geoarrow.multipolygon",
+    };
+    let crs = match spatial_type.crs {
+        SpatialCrs::Epsg4326 => "EPSG:4326",
+        SpatialCrs::Epsg3857 => "EPSG:3857",
+    };
+    Field::new(name, spatial_data_type(spatial_type), nullable).with_metadata(HashMap::from([
+        ("ARROW:extension:name".to_owned(), extension_name.to_owned()),
+        (
+            "ARROW:extension:metadata".to_owned(),
+            format!("{{\"crs\":\"{crs}\",\"crs_type\":\"authority_code\"}}"),
+        ),
+    ]))
 }
 
 fn heterogeneous_scalar_fields() -> arrow::datatypes::Fields {
@@ -1159,7 +1205,10 @@ fn build_property_columns_keyed<R: PropRowLike>(
     let mut fields: Vec<Field> = vec![uuid_field(uuid_field_name)];
     for name in &order {
         let ct = col_types.get(name).cloned().unwrap_or(ColType::Str);
-        fields.push(Field::new(name, ct.data_type(), true));
+        fields.push(match ct {
+            ColType::Spatial(spatial_type) => spatial_field(name, spatial_type, true),
+            _ => Field::new(name, ct.data_type(), true),
+        });
     }
     let meta: HashMap<String, String> = [(meta_key.to_owned(), meta_value.to_owned())]
         .into_iter()
@@ -1432,6 +1481,7 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
                 Some(NullBuffer::from(valid)),
             ))
         }
+        ColType::Spatial(spatial_type) => build_spatial_array(name, spatial_type, rows),
         ColType::Str => {
             let mut b = StringBuilder::new();
             for row in rows {
@@ -1477,6 +1527,197 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
                 child,
                 Some(NullBuffer::from(valid)),
             ))
+        }
+    }
+}
+
+fn coordinate_builder(capacity: usize) -> arrow::array::StructBuilder {
+    use arrow::array::{ArrayBuilder, Float64Builder, StructBuilder};
+    let DataType::Struct(fields) = spatial_data_type(SpatialType {
+        geometry: SpatialGeometryType::Point,
+        crs: SpatialCrs::Epsg4326,
+    }) else {
+        unreachable!()
+    };
+    StructBuilder::new(
+        fields,
+        vec![
+            Box::new(Float64Builder::with_capacity(capacity)) as Box<dyn ArrayBuilder>,
+            Box::new(Float64Builder::with_capacity(capacity)),
+        ],
+    )
+}
+
+fn append_coordinate(builder: &mut arrow::array::StructBuilder, coordinate: [f64; 2]) {
+    builder
+        .field_builder::<Float64Builder>(0)
+        .expect("canonical x builder")
+        .append_value(coordinate[0]);
+    builder
+        .field_builder::<Float64Builder>(1)
+        .expect("canonical y builder")
+        .append_value(coordinate[1]);
+    builder.append(true);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "six canonical GeoArrow nesting shapes share one exhaustive writer"
+)]
+fn build_spatial_array<R: PropRowLike>(
+    name: &str,
+    spatial_type: SpatialType,
+    rows: &[R],
+) -> ArrayRef {
+    use arrow::array::ListBuilder;
+
+    match spatial_type.geometry {
+        SpatialGeometryType::Point => {
+            let mut builder = coordinate_builder(rows.len());
+            for row in rows {
+                match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::Point(coordinate),
+                    })) if *observed == spatial_type => {
+                        append_coordinate(&mut builder, *coordinate);
+                    }
+                    _ => builder.append(false),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::LineString | SpatialGeometryType::MultiPoint => {
+            let child_name = if spatial_type.geometry == SpatialGeometryType::LineString {
+                "vertices"
+            } else {
+                "points"
+            };
+            let mut builder =
+                ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(Field::new(
+                    child_name,
+                    spatial_data_type(SpatialType {
+                        geometry: SpatialGeometryType::Point,
+                        crs: spatial_type.crs,
+                    }),
+                    false,
+                )));
+            for row in rows {
+                let coordinates = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::LineString(values),
+                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiPoint(values),
+                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(coordinates) = coordinates {
+                    for coordinate in coordinates {
+                        append_coordinate(builder.values(), *coordinate);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::Polygon | SpatialGeometryType::MultiLineString => {
+            let coordinate_type = spatial_data_type(SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: spatial_type.crs,
+            });
+            let inner = ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(Field::new(
+                "vertices",
+                coordinate_type.clone(),
+                false,
+            )));
+            let outer_name = if spatial_type.geometry == SpatialGeometryType::Polygon {
+                "rings"
+            } else {
+                "linestrings"
+            };
+            let mut builder = ListBuilder::new(inner).with_field(Arc::new(Field::new(
+                outer_name,
+                DataType::List(Arc::new(Field::new("vertices", coordinate_type, false))),
+                false,
+            )));
+            for row in rows {
+                let parts = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::Polygon(values),
+                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiLineString(values),
+                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(parts) = parts {
+                    for coordinates in parts {
+                        for coordinate in coordinates {
+                            append_coordinate(builder.values().values(), *coordinate);
+                        }
+                        builder.values().append(true);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::MultiPolygon => {
+            let coordinate_type = spatial_data_type(SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: spatial_type.crs,
+            });
+            let vertices = ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(
+                Field::new("vertices", coordinate_type.clone(), false),
+            ));
+            let rings_type = DataType::List(Arc::new(Field::new(
+                "vertices",
+                coordinate_type.clone(),
+                false,
+            )));
+            let rings = ListBuilder::new(vertices).with_field(Arc::new(Field::new(
+                "rings",
+                rings_type.clone(),
+                false,
+            )));
+            let mut builder = ListBuilder::new(rings).with_field(Arc::new(Field::new(
+                "polygons",
+                DataType::List(Arc::new(Field::new("rings", rings_type, false))),
+                false,
+            )));
+            for row in rows {
+                let polygons = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiPolygon(values),
+                    })) if *observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(polygons) = polygons {
+                    for rings in polygons {
+                        for coordinates in rings {
+                            for coordinate in coordinates {
+                                append_coordinate(builder.values().values().values(), *coordinate);
+                            }
+                            builder.values().values().append(true);
+                        }
+                        builder.values().append(true);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
         }
     }
 }
@@ -1586,6 +1827,9 @@ fn literal_to_string(lit: &IrLiteral) -> String {
             "{days}d{nanos}ns{offset:+}s{}",
             zone.as_deref().unwrap_or("")
         ),
+        IrLiteral::Spatial(value) => {
+            serde_json::to_string(value).expect("canonical spatial values are serializable")
+        }
         // A list in a mixed (stringified) column: a deterministic bracketed form.
         IrLiteral::List(items) => {
             let parts: Vec<String> = items.iter().map(literal_to_string).collect();
@@ -1837,6 +2081,9 @@ fn decode_value(
     use arrow::array::{
         Array, BooleanArray, Int32Array, Int64Array, ListArray, StructArray, Time64NanosecondArray,
     };
+    if field.metadata().contains_key("ARROW:extension:name") {
+        return decode_spatial_value(col, field, r);
+    }
     Ok(match field.data_type() {
         DataType::Int64 => IrLiteral::Int(downcast::<Int64Array>(col, field)?.value(r)),
         DataType::Float64 => IrLiteral::Float(downcast::<Float64Array>(col, field)?.value(r)),
@@ -2034,6 +2281,160 @@ fn decode_value(
             )));
         }
     })
+}
+
+fn decode_spatial_value(col: &ArrayRef, field: &Field, row: usize) -> Result<IrLiteral, GfError> {
+    decode_spatial_property_value(col.as_ref(), field, row).map(IrLiteral::Spatial)
+}
+
+/// Decode one canonical GeoArrow property row without reconstructing geometry
+/// in a language binding.
+#[allow(
+    clippy::too_many_lines,
+    reason = "six canonical GeoArrow nesting shapes share one exhaustive decoder"
+)]
+pub fn decode_spatial_property_value(
+    col: &dyn arrow::array::Array,
+    field: &Field,
+    row: usize,
+) -> Result<SpatialValue, GfError> {
+    use arrow::array::{Array, ListArray, StructArray};
+    let extension_name = field
+        .metadata()
+        .get("ARROW:extension:name")
+        .ok_or_else(|| GfError::Storage("spatial field missing extension name".into()))?;
+    let geometry = match extension_name.as_str() {
+        "geoarrow.point" => SpatialGeometryType::Point,
+        "geoarrow.linestring" => SpatialGeometryType::LineString,
+        "geoarrow.polygon" => SpatialGeometryType::Polygon,
+        "geoarrow.multipoint" => SpatialGeometryType::MultiPoint,
+        "geoarrow.multilinestring" => SpatialGeometryType::MultiLineString,
+        "geoarrow.multipolygon" => SpatialGeometryType::MultiPolygon,
+        _ => {
+            return Err(GfError::Storage(
+                "unsupported spatial extension name".into(),
+            ));
+        }
+    };
+    let metadata = field
+        .metadata()
+        .get("ARROW:extension:metadata")
+        .ok_or_else(|| GfError::Storage("spatial field missing extension metadata".into()))?;
+    let crs = if metadata.contains("EPSG:4326") {
+        SpatialCrs::Epsg4326
+    } else if metadata.contains("EPSG:3857") {
+        SpatialCrs::Epsg3857
+    } else {
+        return Err(GfError::Storage("unsupported spatial CRS metadata".into()));
+    };
+    let coordinates = match geometry {
+        SpatialGeometryType::Point => SpatialCoordinates::Point(read_coordinate(
+            col.as_any()
+                .downcast_ref::<StructArray>()
+                .ok_or_else(|| GfError::Storage("spatial point is not a struct".into()))?,
+            row,
+        )?),
+        SpatialGeometryType::LineString | SpatialGeometryType::MultiPoint => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial geometry is not a list".into()))?
+                .value(row);
+            let values =
+                read_coordinates(value.as_any().downcast_ref::<StructArray>().ok_or_else(
+                    || GfError::Storage("spatial coordinate payload is not a struct".into()),
+                )?)?;
+            if geometry == SpatialGeometryType::LineString {
+                SpatialCoordinates::LineString(values)
+            } else {
+                SpatialCoordinates::MultiPoint(values)
+            }
+        }
+        SpatialGeometryType::Polygon | SpatialGeometryType::MultiLineString => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial geometry is not a nested list".into()))?
+                .value(row);
+            let lists = value
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial parts are not lists".into()))?;
+            let mut parts = Vec::with_capacity(lists.len());
+            for index in 0..lists.len() {
+                let coordinates = lists.value(index);
+                parts.push(read_coordinates(
+                    coordinates
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .ok_or_else(|| {
+                            GfError::Storage("spatial coordinates are not structs".into())
+                        })?,
+                )?);
+            }
+            if geometry == SpatialGeometryType::Polygon {
+                SpatialCoordinates::Polygon(parts)
+            } else {
+                SpatialCoordinates::MultiLineString(parts)
+            }
+        }
+        SpatialGeometryType::MultiPolygon => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("multipolygon is not a nested list".into()))?
+                .value(row);
+            let polygons = value
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("multipolygon polygons are not lists".into()))?;
+            let mut decoded = Vec::with_capacity(polygons.len());
+            for polygon_index in 0..polygons.len() {
+                let polygon = polygons.value(polygon_index);
+                let rings = polygon
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(|| GfError::Storage("multipolygon rings are not lists".into()))?;
+                let mut decoded_rings = Vec::with_capacity(rings.len());
+                for ring_index in 0..rings.len() {
+                    let coordinates = rings.value(ring_index);
+                    decoded_rings.push(read_coordinates(
+                        coordinates
+                            .as_any()
+                            .downcast_ref::<StructArray>()
+                            .ok_or_else(|| {
+                                GfError::Storage("multipolygon coordinates are not structs".into())
+                            })?,
+                    )?);
+                }
+                decoded.push(decoded_rings);
+            }
+            SpatialCoordinates::MultiPolygon(decoded)
+        }
+    };
+    Ok(SpatialValue {
+        spatial_type: SpatialType { geometry, crs },
+        coordinates,
+    })
+}
+
+fn read_coordinates(array: &arrow::array::StructArray) -> Result<Vec<[f64; 2]>, GfError> {
+    use arrow::array::Array;
+    (0..array.len())
+        .map(|index| read_coordinate(array, index))
+        .collect()
+}
+
+fn read_coordinate(array: &arrow::array::StructArray, row: usize) -> Result<[f64; 2], GfError> {
+    let x = array
+        .column_by_name("x")
+        .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| GfError::Storage("spatial x coordinate is not Float64".into()))?;
+    let y = array
+        .column_by_name("y")
+        .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| GfError::Storage("spatial y coordinate is not Float64".into()))?;
+    Ok([x.value(row), y.value(row)])
 }
 
 /// Downcast a column to a concrete Arrow array type, erroring with the column
@@ -3343,6 +3744,121 @@ mod tests {
             reopened
                 .get(&to_bytes(&propertyless))
                 .is_none_or(HashMap::is_empty)
+        );
+    }
+
+    #[test]
+    fn canonical_spatial_properties_round_trip_with_exact_geoarrow_metadata() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let other = new_v7();
+        let edge = new_v7();
+        let spatial = |geometry, coordinates| {
+            IrLiteral::Spatial(SpatialValue {
+                spatial_type: SpatialType {
+                    geometry,
+                    crs: SpatialCrs::Epsg4326,
+                },
+                coordinates,
+            })
+        };
+        let values = HashMap::from([
+            (
+                "point".into(),
+                spatial(
+                    SpatialGeometryType::Point,
+                    SpatialCoordinates::Point([-104.9903, 39.7392]),
+                ),
+            ),
+            (
+                "line".into(),
+                spatial(
+                    SpatialGeometryType::LineString,
+                    SpatialCoordinates::LineString(vec![[0.0, 1.0], [2.0, 3.0]]),
+                ),
+            ),
+            (
+                "polygon".into(),
+                spatial(
+                    SpatialGeometryType::Polygon,
+                    SpatialCoordinates::Polygon(vec![vec![[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]]),
+                ),
+            ),
+            (
+                "multipoint".into(),
+                spatial(
+                    SpatialGeometryType::MultiPoint,
+                    SpatialCoordinates::MultiPoint(vec![[4.0, 5.0], [6.0, 7.0]]),
+                ),
+            ),
+            (
+                "multiline".into(),
+                spatial(
+                    SpatialGeometryType::MultiLineString,
+                    SpatialCoordinates::MultiLineString(vec![vec![[8.0, 9.0], [10.0, 11.0]]]),
+                ),
+            ),
+            (
+                "multipolygon".into(),
+                spatial(
+                    SpatialGeometryType::MultiPolygon,
+                    SpatialCoordinates::MultiPolygon(vec![vec![vec![
+                        [0.0, 0.0],
+                        [2.0, 0.0],
+                        [0.0, 0.0],
+                    ]]]),
+                ),
+            ),
+        ]);
+
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        writer.create_node(other, TypeId(0)).unwrap();
+        writer.create_edge(edge, "ROUTE", &node, &other).unwrap();
+        writer.set_properties(&node, None, values.clone()).unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("ROUTE"),
+                HashMap::from([("location".into(), values["point"].clone())]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let node_schema =
+            crate::catalog::discover_parquet_schema(&node_props_path(dir.path(), "_untyped"))
+                .unwrap();
+        for (name, extension_name) in [
+            ("point", "geoarrow.point"),
+            ("line", "geoarrow.linestring"),
+            ("polygon", "geoarrow.polygon"),
+            ("multipoint", "geoarrow.multipoint"),
+            ("multiline", "geoarrow.multilinestring"),
+            ("multipolygon", "geoarrow.multipolygon"),
+        ] {
+            let field = node_schema.field_with_name(name).unwrap();
+            assert_eq!(field.metadata()["ARROW:extension:name"], extension_name);
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
+            );
+        }
+        assert_eq!(
+            read_node_props(dir.path(), "_untyped")[&to_bytes(&node)],
+            values
+        );
+        assert_eq!(
+            read_edge_props(dir.path(), "ROUTE")[&to_bytes(&edge)]["location"],
+            values["point"]
+        );
+
+        // Opening and flushing again exercises the persisted decode/re-encode path.
+        let mut reopened =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        reopened.flush().unwrap();
+        assert_eq!(
+            read_node_props(dir.path(), "_untyped")[&to_bytes(&node)],
+            values
         );
     }
 

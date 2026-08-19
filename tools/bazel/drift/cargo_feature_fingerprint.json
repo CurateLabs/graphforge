@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "f0f3a23ccc03ccd52bf1069449439d497a89cf23092e7964695e76e1babba756",
+  "sha256": "152024b320001a8bb664bebdb03e8044d3a52541a72e29f282fa25e6597c8122",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1491,6 +1491,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": "dev",
+          "target": null
+        },
+        {
+          "name": "serde_json",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
           "target": null
         },
         {

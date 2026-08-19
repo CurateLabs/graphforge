@@ -2384,6 +2384,7 @@ dependencies = [
  "graphforge-plan",
  "graphforge-storage",
  "insta",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
 ]
