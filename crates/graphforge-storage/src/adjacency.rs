@@ -1310,15 +1310,24 @@ fn merge_keyed_runs_to_csr(
     runs: &[PathBuf],
     checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
 ) -> Result<CsrIndex, GfError> {
+    let mut keyed = Vec::new();
+    merge_keyed_runs(runs, checkpoint, &mut |entry| {
+        keyed.push(entry);
+        Ok(())
+    })?;
+    Ok(csr_from_sorted_keyed(&keyed))
+}
+
+fn merge_keyed_runs(
+    runs: &[PathBuf],
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+    emit: &mut dyn FnMut((u64, u64, u64)) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
     if runs.is_empty() {
-        return Ok(CsrIndex {
-            offsets: vec![0],
-            edge_ids: Vec::new(),
-            neighbor_ids: Vec::new(),
-        });
+        return Ok(());
     }
 
     let mut cursors: Vec<RunCursor> = runs
@@ -1333,12 +1342,6 @@ fn merge_keyed_runs_to_csr(
         }
     }
 
-    let mut csr = CsrIndex {
-        offsets: vec![0],
-        edge_ids: Vec::new(),
-        neighbor_ids: Vec::new(),
-    };
-    let mut current_node: Option<u64> = None;
     let mut seen = 0u64;
     while let Some(Reverse((key, edge, neighbor, idx))) = heap.pop() {
         if seen.is_multiple_of(65_536) {
@@ -1346,43 +1349,30 @@ fn merge_keyed_runs_to_csr(
         }
         seen += 1;
 
-        match current_node {
-            None => {
-                for _ in 0..key {
-                    csr.offsets.push(csr.edge_count());
-                }
-                current_node = Some(key);
-            }
-            Some(node) if key > node => {
-                // Close `node`, then emit empty rows for (node+1)..key.
-                csr.offsets.push(csr.edge_count());
-                let mut fill = node + 1;
-                while fill < key {
-                    csr.offsets.push(csr.edge_count());
-                    fill += 1;
-                }
-                current_node = Some(key);
-            }
-            Some(node) if key == node => {}
-            Some(node) => {
-                return Err(GfError::Storage(format!(
-                    "adjacency spill merge produced non-sorted keys ({node} then {key})"
-                )));
-            }
-        }
-
-        csr.edge_ids.push(edge);
-        csr.neighbor_ids.push(neighbor);
+        emit((key, edge, neighbor))?;
 
         cursors[idx].pull()?;
         if let Some((k, e, n)) = cursors[idx].current {
             heap.push(Reverse((k, e, n, idx)));
         }
     }
-    if current_node.is_some() {
-        csr.offsets.push(csr.edge_count());
+    Ok(())
+}
+
+fn csr_from_sorted_keyed(keyed: &[(u64, u64, u64)]) -> CsrIndex {
+    let mut csr = CsrIndex {
+        offsets: vec![0],
+        ..CsrIndex::default()
+    };
+    for &(key, edge, neighbor) in keyed {
+        while csr.node_count() <= key {
+            csr.offsets.push(csr.edge_count());
+        }
+        csr.edge_ids.push(edge);
+        csr.neighbor_ids.push(neighbor);
+        *csr.offsets.last_mut().expect("offset") = csr.edge_count();
     }
-    Ok(csr)
+    csr
 }
 
 fn stream_build_groups(
