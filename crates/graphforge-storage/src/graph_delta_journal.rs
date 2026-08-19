@@ -1819,15 +1819,12 @@ mod crash_oracle_tests {
     fn publish_graph_base(root: &Path) {
         crate::open_or_initialize_project(root).unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        stage_base_graph_workspace(
-            workspace.path(),
-            &[
-                ("topology/nodes.parquet", b"nodes"),
-                ("topology/edges.parquet", b"edges"),
-            ],
-            Some(&ReconstructedGraphState::default()),
-        )
-        .unwrap();
+        let node_uuid = Uuid::now_v7().hyphenated().to_string();
+        let mut state = ReconstructedGraphState::default();
+        state.nodes.insert(node_uuid.clone(), vec![1]);
+        state.node_ids.insert(node_uuid.clone(), 1);
+        state.node_timestamps.insert(node_uuid, (1, 1));
+        crate::writer::write_reconstructed_graph(workspace.path(), &state).unwrap();
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
@@ -1940,7 +1937,12 @@ mod crash_oracle_tests {
     fn prepared_delta_fails_busy_behind_a_live_current_writer() {
         let root = tempfile::tempdir().unwrap();
         publish_graph_base(root.path());
-        let prepared = one_node_request();
+        let mut prepared = one_node_request();
+        let GraphDeltaPayload::UpsertNodeV2 { node_id, .. } = &mut prepared.operations[0].payload
+        else {
+            unreachable!();
+        };
+        *node_id = 2;
         let (concurrent_generation, concurrent) = stage_graph_clone(root.path());
 
         let error = publish_graph_delta_after_prepare(
@@ -1951,7 +1953,7 @@ mod crash_oracle_tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.code(), "GF_WRITER_BUSY");
+        assert_eq!(error.code(), "GF_WRITER_BUSY", "{error:?}");
         concurrent
             .validate(|_| Ok(()), |_, _| Ok(()))
             .unwrap()
