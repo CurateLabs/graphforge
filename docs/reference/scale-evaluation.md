@@ -267,7 +267,7 @@ until published.
 | Progressive / first-fail stop + evidence artifacts (Official track) | Yes | Spec + issue links for product claims |
 | Dedicated runners / disk budgets | Yes | No |
 | Normal GitHub Actions CI for Graph500 Toy+ / LDBC SF≥1 | No | Must not |
-| Thin reference clients | May call | Optional only; no bulk generators. In-tree Official-parameter client: [perf-g500-scale20.md](../development/perf-g500-scale20.md) (SCALE-6 CI smoke + ignored SCALE-20; not `track: official`) |
+| Thin reference clients | May call | Optional only; no bulk generators. In-tree Official-parameter client: [perf-g500-scale20.md](../development/perf-g500-scale20.md) (SCALE-6 CI smoke + ignored SCALE-20; not `track: official`) and bounded first-fail ladder [perf-g500-ladder.md](../development/perf-g500-ladder.md) (#736; SCALE-10 CI + ignored SCALE-20→26) |
 | Chunked ingest / CSR / Cypher via GraphForge APIs | Invokes published APIs | Engine + thin bindings |
 
 ### Expected inputs
@@ -391,11 +391,26 @@ silently mix.
 `track: "official"`, and `teps` stays null. SCALE-6 is CI; SCALE-20 is
 `make bench-g500-scale20` only.
 
+### In-tree bounded billion-edge scale ladder (#736)
+
+[perf-g500-ladder.md](../development/perf-g500-ladder.md) extends the
+Official-parameter client with a versioned, **bounded-memory** ladder
+(SCALE-20 → SCALE-26). Unlike the SCALE-20 client it does **not** retain raw
+tuples in memory: it spills sorted runs and k-way merges, so peak resident
+edges are independent of total edge count. Every attempted rung reconciles
+`raw_attempts == live_unique_edges + self_loops_rejected + duplicates_rejected`,
+and the ladder stops at the **first** envelope (RSS / disk / time) violation
+rather than making an unsupported SCALE-26 claim. Host envelope is 128 GiB RSS /
+1 TiB NVMe / 24 h. Still **not** Official-track and **not** TEPS, and it does
+**not** certify one billion live edges (that is #745). SCALE-10 is CI; larger
+rungs are `make bench-g500-ladder` only.
+
 ---
 
 ## Further reading
 
 - [Official-parameter SCALE-20 client](../development/perf-g500-scale20.md) — public-facade engineering green (not Official-track)
+- [Bounded billion-edge scale ladder](../development/perf-g500-ladder.md) — M5 #736 first-fail contract (bounded memory, not a billion-edge claim)
 - [Graph Scale Index](graph-scale-index.md) — size axis (node band + density)
 - [Scale Limits](scale-limits.md) — product envelopes; disk-limited DataFusion framing
 - [LDBC full suite](../guide/datasets/ldbc.md) — SNB, Graphalytics, FinBench, SPB
