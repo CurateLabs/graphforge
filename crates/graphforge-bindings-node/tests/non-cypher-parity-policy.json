@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 205,
-  "releaseSurfaceDigest": "549c020e5163437593001d94c900b964700b6722d124fc8d36c39f0cbdafbf7a",
+  "releaseSurfaceCount": 207,
+  "releaseSurfaceDigest": "01f642d893eeb78b9493363d6c4ac5eea6744e0a970b60a9e6a456fe9892a886",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -26,7 +26,8 @@
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
     "compatibility": "arrowIpc",
     "transaction-maintenance": "transactionMaintenance",
-    "resumable-import": "lifecycleConstruction"
+    "resumable-import": "lifecycleConstruction",
+    "semantic-generation-diff": "arrowIpc"
   },
   "classification": {
     "equivalent": [

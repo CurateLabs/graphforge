@@ -70,6 +70,7 @@ pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
     ProjectParticipantDescriptor, ProjectParticipantSnapshot, ResolvedProjectGeneration,
     open_or_initialize_ephemeral_project, open_or_initialize_project, resolve_project_generation,
+    resolve_verified_generation,
 };
 
 mod project_failpoint;
