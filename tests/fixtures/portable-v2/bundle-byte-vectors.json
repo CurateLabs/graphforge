@@ -1,0 +1,12 @@
+{
+  "contract": "graphforge-portable-v2-bundle-bytes/1",
+  "vectors": [
+    {
+      "name": "canonical-bagit-header-payload-padding-and-end",
+      "path": "bagit.txt",
+      "payload_hex": "42616749742d56657273696f6e3a20312e300a5461672d46696c652d4368617261637465722d456e636f64696e673a205554462d380a",
+      "archive_length": 2048,
+      "archive_sha256": "e98bf20bc575a5806358369257dbef90a8e71a5471e508ca07e3b01dad026b04"
+    }
+  ]
+}

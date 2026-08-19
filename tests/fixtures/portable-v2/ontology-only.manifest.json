@@ -1,0 +1,34 @@
+{
+  "components": [
+    {
+      "kind": "ontology",
+      "length": 2,
+      "media_type": "application/json",
+      "participant_id": "core-ontology",
+      "path": "data/components/ontology/core-ontology/ontology.json",
+      "required_dependencies": [],
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    }
+  ],
+  "format": "graphforge-project/2",
+  "package_class": "ontology-only",
+  "package_digest": "sha256:446c6bf556e4c55035d5124cb32746e45b6397478397f0897b592c8724946732",
+  "requirements": {
+    "capabilities": ["ontology@1"],
+    "dependency_rule": "required-transitive-closure/1"
+  },
+  "selection": {
+    "omissions": [],
+    "redactions": [],
+    "roots": ["core-ontology"]
+  },
+  "source_generation": {
+    "generation_uuid": "018f0f4e-7b8c-7000-8000-000000000783",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "states": {
+    "authenticity": "unsigned",
+    "compatibility": "supported",
+    "integrity": "verified"
+  }
+}

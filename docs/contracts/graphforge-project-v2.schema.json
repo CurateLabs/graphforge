@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphforge.sh/contracts/graphforge-project-v2.schema.json",
+  "title": "GraphForge portable project v2 semantic manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "package_digest", "package_class", "source_generation", "selection", "components", "requirements", "states"],
+  "properties": {
+    "format": { "const": "graphforge-project/2" },
+    "package_digest": { "$ref": "#/$defs/digest" },
+    "package_class": { "enum": ["complete", "ontology-only", "component-selective", "graph-data-subset"] },
+    "source_generation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["generation_uuid", "manifest_sha256"],
+      "properties": {
+        "generation_uuid": { "$ref": "#/$defs/uuid" },
+        "manifest_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["roots", "omissions", "redactions"],
+      "properties": {
+        "roots": { "$ref": "#/$defs/idList" },
+        "omissions": { "$ref": "#/$defs/idList" },
+        "redactions": { "$ref": "#/$defs/idList" },
+        "graph_subset": {
+          "type": "object", "additionalProperties": false,
+          "required": ["selector", "closure"],
+          "properties": {
+            "selector": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "closure": { "enum": ["selected-only", "induced-edges", "referential"] }
+          }
+        }
+      }
+    },
+    "components": {
+      "type": "array", "maxItems": 10000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "participant_id", "media_type", "path", "length", "sha256", "required_dependencies"],
+        "properties": {
+          "kind": { "enum": ["ontology", "schema", "migration", "settings", "graph-data", "derived-artifact", "evidence", "provenance", "compatibility"] },
+          "participant_id": { "$ref": "#/$defs/id" },
+          "media_type": { "type": "string", "pattern": "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", "maxLength": 255 },
+          "path": { "$ref": "#/$defs/path" },
+          "length": { "type": "integer", "minimum": 0, "maximum": 17592186044416 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "required_dependencies": { "$ref": "#/$defs/idList" }
+        }
+      }
+    },
+    "requirements": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capabilities", "dependency_rule"],
+      "properties": {
+        "capabilities": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*@[1-9][0-9]*$" } },
+        "dependency_rule": { "const": "required-transitive-closure/1" }
+      }
+    },
+    "states": {
+      "type": "object", "additionalProperties": false,
+      "required": ["integrity", "compatibility", "authenticity"],
+      "properties": {
+        "integrity": { "enum": ["not_checked", "verified", "failed"] },
+        "compatibility": { "enum": ["not_checked", "supported", "unsupported_future", "unsupported_legacy", "failed"] },
+        "authenticity": { "enum": ["not_evaluated", "unsigned", "verified", "failed"] }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "format": "uuid", "not": { "const": "00000000-0000-0000-0000-000000000000" } },
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[a-z][a-z0-9._-]*$" },
+    "idList": { "type": "array", "maxItems": 10000, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
+    "path": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^(?!.*(?:/\\.{1,2})(?:/|$))data/components/[a-z][a-z0-9-]*/[a-z][a-z0-9._-]*/[^\\\\/\\u0000-\\u001f\\u007f]+(?:/[^\\\\/\\u0000-\\u001f\\u007f]+)*$" }
+  }
+}

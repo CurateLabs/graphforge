@@ -1,0 +1,10 @@
+"""Normative portable project v2 conformance corpus."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(glob(["*"], exclude = ["BUILD.bazel"]))
+
+filegroup(
+    name = "fixtures",
+    srcs = glob(["*"], exclude = ["BUILD.bazel"]),
+)

@@ -1,0 +1,11 @@
+{
+  "contract": "graphforge-portable-v2-positive/1",
+  "vectors": [
+    {"package_class":"complete","package_digest":"sha256:14bf32bdb3dcf7237cc17c5b0348134e13dc77ccc0eec19772424f73c51507fb","representations":["expanded","bundle"]},
+    {"package_class":"ontology-only","package_digest":"sha256:446c6bf556e4c55035d5124cb32746e45b6397478397f0897b592c8724946732","representations":["expanded","bundle"]},
+    {"package_class":"component-selective","package_digest":"sha256:94cf52aafaf75c144d5f2458a36af385ab564e6359a7c41aac339e99a65bd921","representations":["expanded","bundle"]},
+    {"package_class":"graph-data-subset","package_digest":"sha256:46a4a029d51e30ad7df58f9faa4326ca629c12bf939a36bbc4ba0842b4699d8c","representations":["expanded","bundle"]}
+  ],
+  "manifest_template": "ontology-only.manifest.json",
+  "derivation": "replace package_class; for graph-data-subset add selection.graph_subset={closure:induced-edges,selector:nodes:all}; remove package_digest; canonicalize with RFC8785; hash graphforge-project/2 NUL plus canonical bytes"
+}
