@@ -221,7 +221,7 @@ def validate_native_oracle_artifact(
         f"name: native-oracle-{artifact_slug}-${{{{ github.sha }}}}",
         f"path: {NATIVE_ORACLE_ARTIFACT_PATH}",
         "if-no-files-found: error",
-        "retention-days: 1",
+        "retention-days: 14",
     )
     assert "continue-on-error" not in upload_step
 
@@ -294,7 +294,7 @@ def validate_native_workflow_negative_fixtures() -> None:
           name: native-oracle-windows-${{{{ github.sha }}}}
           path: {NATIVE_ORACLE_ARTIFACT_PATH}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
       - run: >-
           {INJECTED_OPERATION_ERROR_COMMAND}
       - run: >-
@@ -324,7 +324,7 @@ def validate_native_workflow_negative_fixtures() -> None:
           name: native-oracle-macos-${{{{ github.sha }}}}
           path: {NATIVE_ORACLE_ARTIFACT_PATH}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
       - run: >-
           {INJECTED_OPERATION_ERROR_COMMAND}
       - run: >-

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { tableFromIPC } from "apache-arrow";
 import { GraphForge } from "../index.js";
 
 const OP_COMMIT = "018f0f4e-7b8c-7000-8000-000000007501";
@@ -11,6 +12,7 @@ const OP_ROLLBACK = "018f0f4e-7b8c-7000-8000-000000007502";
 const OP_DROP = "018f0f4e-7b8c-7000-8000-000000007503";
 const OP_SEED = "018f0f4e-7b8c-7000-8000-000000007504";
 const OP_CERT = "018f0f4e-7b8c-7000-8000-000000007560";
+const OP_CERT_CHECKPOINT = "018f0f4e-7b8c-7000-8000-000000007562";
 const NODE_BULK = "018f0f4e-7b8c-7000-8000-000000007511";
 const NODE_GHOST = "018f0f4e-7b8c-7000-8000-000000007512";
 const NODE_CERT = "018f0f4e-7b8c-7000-8000-000000007561";
@@ -95,5 +97,17 @@ test("certification observations agree across reopen", async () => {
     const reopened = new GraphForge(root);
     const again = reopened.projectOpenRecovery();
     assert.equal(again.selectedGenerationUuid, generation);
+    const names = tableFromIPC(
+      reopened.execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name"),
+    );
+    assert.deepEqual([...names.getChild("name").toArray()], ["Cert"]);
+    await reopened.checkpoint({
+      name: "certification",
+      idempotencyKey: OP_CERT_CHECKPOINT,
+    });
+    const reachability = reopened.inspectProjectReachability();
+    assert.ok(reachability.checkpointRoots.includes(generation));
+    const cleanup = reopened.previewProjectCleanup();
+    assert.equal(cleanup.selectedGenerationUuid, generation);
   });
 });

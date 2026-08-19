@@ -1018,6 +1018,100 @@ pub fn minimize_oracle_failure(seed: u64, phase: PublicationPhase) -> Vec<u64> {
 mod tests {
     use super::*;
 
+    fn finite_transition_basis() -> Vec<HistoryOp> {
+        let mut operations = vec![
+            HistoryOp::AckCommit {
+                writer: ModelId(1),
+                generation: ModelId(1),
+            },
+            HistoryOp::TearBytes { tear_current: true },
+            HistoryOp::TearBytes {
+                tear_current: false,
+            },
+            HistoryOp::PinReader { reader: ModelId(1) },
+            HistoryOp::ReadPinned { reader: ModelId(1) },
+            HistoryOp::FreshOpen {
+                observer: ModelId(1),
+            },
+            HistoryOp::CreateCheckpoint {
+                checkpoint: ModelId(0),
+            },
+            HistoryOp::AcquireLease { lease: ModelId(0) },
+            HistoryOp::ReleaseLease { lease: ModelId(0) },
+            HistoryOp::PublishDeltaRun { run: ModelId(1) },
+            HistoryOp::CompactDeltas {
+                generation: ModelId(1),
+                subsumed: vec![ModelId(1)],
+            },
+            HistoryOp::RunGc,
+            HistoryOp::OptimisticWriteSkew {
+                left: ModelId(1),
+                right: ModelId(2),
+                account: ModelId(99),
+            },
+            HistoryOp::CancelUnstarted { writer: ModelId(1) },
+            HistoryOp::IdempotentRetry {
+                transaction: ModelId(1),
+            },
+        ];
+        operations.extend(
+            PublicationPhase::all()
+                .iter()
+                .copied()
+                .map(|phase| HistoryOp::CrashAtPhase { phase }),
+        );
+        operations
+    }
+
+    #[test]
+    fn finite_transition_basis_covers_every_mode_operation_and_publication_phase() {
+        let operations = finite_transition_basis();
+        let names: BTreeSet<_> = operations.iter().map(op_name).collect();
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "ack_commit",
+                "cancel_unstarted",
+                "compact_deltas",
+                "crash_at_phase",
+                "create_checkpoint",
+                "fresh_open",
+                "idempotent_retry",
+                "acquire_lease",
+                "pin_reader",
+                "publish_delta_run",
+                "read_pinned",
+                "release_lease",
+                "run_gc",
+                "optimistic_write_skew",
+                "tear_bytes",
+            ])
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| matches!(op, HistoryOp::CrashAtPhase { .. }))
+                .count(),
+            PublicationPhase::all().len()
+        );
+        for mode in [
+            ModelWriteMode::SingleWriter,
+            ModelWriteMode::QueuedWriter,
+            ModelWriteMode::OptimisticMultiWriter,
+        ] {
+            for (index, operation) in operations.iter().enumerate() {
+                run_history(
+                    CERT_SEED + index as u64,
+                    mode,
+                    std::slice::from_ref(operation),
+                )
+                .unwrap_or_else(|report| {
+                    panic!("finite basis failed mode={mode:?} op={operation:?}: {report:?}")
+                });
+            }
+        }
+    }
+
     #[test]
     fn bounded_ci_state_space_passes_without_untriaged_failures() {
         let evidence = run_certification_suite();

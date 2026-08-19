@@ -168,15 +168,29 @@ There are four CI surfaces for concurrency and durability contracts:
    publishes a new Parquet generation through the same CURRENT path and reclaims
    subsumed inputs only after acknowledgement via that shared oracle.
 4. **Seeded durability/isolation certification** (`Durability Certification Gate`)
-   — integrated reference state machine in
-   `crates/graphforge-storage/src/project_certification.rs`
+   — independent reference model in
+   `crates/graphforge-storage/src/project_certification.rs`, compared at each
+   certified boundary with production `graphforge_api::GraphForge` opens,
+   transactions, queries, checkpoints, reachability, cleanup, delta replay, and
+   compaction. Rust, Python, Node, and CLI probes normalize the same generation,
+   query-state, checkpoint-root, and recovery observations; bindings never own
+   a second model or storage implementation.
    (`graphforge-durability-certification/1`, published seed `7560`). Required CI
    runs the bounded history budget; the scheduled/manual lane raises
    `GRAPHFORGE_CERT_HISTORIES` / `GRAPHFORGE_CERT_OPS`, records declared counts,
-   minimized traces, commands, platform/tool versions, and artifact digests, and
+   minimized traces, commands, exact commit, runner/filesystem class,
+   platform/tool versions, and artifact digests, and
    fails closed on the first untriaged invariant (no seed retries). Evidence and
    docs make no SSI, universal-filesystem, or distributed-durability claim;
    optimistic write-skew remains `allowed_documented_not_ssi`.
+
+The deterministic fault oracle and native POSIX/Windows subprocess kill lanes
+remain the process-death and persistent-media authority. Required CI aggregates
+the Windows and macOS reports under the exact tested SHA and rejects a missing,
+empty, wrong-platform, or mixed-seed report; the production history runner does
+not model a successful API call as proof of a process crash. M6 CPU-simulation, durable walltime, and peak
+RSS fallback evidence use the frozen `m6-storage-v1` / `m6_storage_io` fixture
+contract documented in [Benchmarking](../../development/benchmarking.md).
 
 The finite Rust recovery ledger remains
 `tests/contracts/concurrency-recovery-matrix.json` and is validated by
