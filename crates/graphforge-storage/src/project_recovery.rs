@@ -654,6 +654,25 @@ pub(crate) enum GenerationCleanupOutcome {
     Retained,
 }
 
+/// Probe `lease.lock` and release any acquired handle before returning.
+///
+/// Windows rejects renaming or deleting a directory while a descendant file
+/// handle is still live. Recovery already holds `writer.lock`; exclusive lease
+/// acquisition proves no live readers. The handle must not remain open across
+/// the trash rename.
+fn generation_lease_is_idle(generation_path: &Path) -> Result<bool, GfError> {
+    let lease_path = generation_path.join("lease.lock");
+    if !lease_path.exists() {
+        return Ok(true);
+    }
+    let lease = open_regular_lock(&lease_path)?;
+    if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
+        return Ok(false);
+    }
+    crate::file_lock::unlock(&lease).map_err(storage_io)?;
+    Ok(true)
+}
+
 /// Move an unreachable generation to trash and delete it (ADR 0013 GC path).
 ///
 /// Rechecks reachability and `CURRENT` under the caller's writer lock before
@@ -684,16 +703,9 @@ pub(crate) fn cleanup_unreachable_generation(
         return Ok(GenerationCleanupOutcome::Absent);
     }
     reject_real_directory(&generation_path)?;
-    let lease_path = generation_path.join("lease.lock");
-    let _lease = if lease_path.exists() {
-        let lease = open_regular_lock(&lease_path)?;
-        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
-            return Ok(GenerationCleanupOutcome::SkippedLiveLease);
-        }
-        Some(lease)
-    } else {
-        None
-    };
+    if !generation_lease_is_idle(&generation_path)? {
+        return Ok(GenerationCleanupOutcome::SkippedLiveLease);
+    }
 
     let current = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     if current.generation_uuid() == generation_uuid {
@@ -778,16 +790,9 @@ fn cleanup_abandoned_generation(
         return Ok(removed);
     }
     reject_real_directory(&generation_path)?;
-    let lease_path = generation_path.join("lease.lock");
-    let _lease = if lease_path.exists() {
-        let lease = open_regular_lock(&lease_path)?;
-        if !crate::file_lock::try_lock_exclusive(&lease).map_err(storage_io)? {
-            return Ok(0);
-        }
-        Some(lease)
-    } else {
-        None
-    };
+    if !generation_lease_is_idle(&generation_path)? {
+        return Ok(0);
+    }
 
     let current = resolve_project_generation(root).map_err(map_recovery_resolution)?;
     if current.generation_uuid() == generation_uuid {
@@ -967,12 +972,19 @@ pub(crate) fn recovery_corrupt(cause: &str) -> GfError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::project_fault_oracle::{
+        AuthorityClass, DurabilityProfile, FaultOracleReport, InjectedOperationResult,
+        PersistenceOpKind, PublicationIds, PublicationPhase, TornTarget, default_durable_ids,
+        minimized_omission_report_for_profile, publication_ops_for_profile,
+        simulate_crash_for_profile, simulate_injected_operation, simulate_torn_bytes_for_profile,
+    };
     use crate::{
         ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
         ProjectParticipantEncoding, ProjectStageOutcome, open_or_initialize_project,
@@ -983,6 +995,7 @@ mod tests {
     const WRITER_HELPER: &str = "project_recovery::tests::subprocess_publication_writer";
     const RECOVERY_HELPER: &str = "project_recovery::tests::subprocess_recovery_runner";
     const INITIALIZER_HELPER: &str = "project_recovery::tests::subprocess_initializer";
+    const NATIVE_ORACLE_SEED: u64 = 0x7493;
     const PRE_COMMIT_FAILPOINTS: &[&str] = &[
         "project.after_writer_lock",
         "project.after_journal_preparing",
@@ -1006,6 +1019,30 @@ mod tests {
         "project.after_root_fsync",
         "project.after_journal_published",
     ];
+
+    #[derive(serde::Serialize)]
+    struct NativeOracleObservation {
+        phase: PublicationPhase,
+        failpoint: &'static str,
+        child_exit_code: Option<i32>,
+        native: AuthorityClass,
+        simulated: AuthorityClass,
+        expected: AuthorityClass,
+        durable_op_ids: Vec<u64>,
+        operation_trace: Vec<String>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct NativeOracleEvidence {
+        contract: &'static str,
+        platform: &'static str,
+        filesystem_class: String,
+        profile: DurabilityProfile,
+        seed: u64,
+        observations: Vec<NativeOracleObservation>,
+        modeled_faults: Vec<FaultOracleReport>,
+        minimized_failure: FaultOracleReport,
+    }
 
     fn wait_for_writer_lock_release(root: &Path) {
         let lock = open_regular_lock(&root.join(LOCKS_DIR).join(WRITER_LOCK_FILE)).unwrap();
@@ -1176,8 +1213,29 @@ mod tests {
         assert_eq!(second.aborted_journals, 0);
     }
 
+    fn classify_native_authority(root: &Path, parent: Uuid, generation: Uuid) -> AuthorityClass {
+        match resolve_project_generation(root) {
+            Ok(resolved) if resolved.generation_uuid() == parent => AuthorityClass::PriorGeneration,
+            Ok(resolved) if resolved.generation_uuid() == generation => {
+                AuthorityClass::NewGeneration
+            }
+            Err(error) if error.code() == "GF_PROJECT_CORRUPT" => AuthorityClass::Corrupt,
+            Ok(_) | Err(_) => AuthorityClass::Unexpected,
+        }
+    }
+
     #[test]
     fn subprocess_kill_matrix_never_exposes_a_partial_generation() {
+        let admission_parent = tempfile::tempdir().unwrap();
+        let evidence = crate::filesystem_admission::filesystem_durability_preflight(
+            admission_parent.path().join("native-oracle-project"),
+        )
+        .unwrap();
+        let profile = DurabilityProfile::for_admitted_filesystem_class(&evidence.filesystem_class)
+            .expect("admitted filesystem has an oracle profile");
+        assert_eq!(profile, DurabilityProfile::native());
+        let mut observed_phases = BTreeSet::new();
+        let mut observations = Vec::new();
         for (failpoint, committed) in PRE_COMMIT_FAILPOINTS
             .iter()
             .map(|name| (*name, false))
@@ -1201,6 +1259,45 @@ mod tests {
                 Some(crate::project_failpoint::exit_code()),
                 "{failpoint} did not terminate at the named boundary"
             );
+            if let Some(phase) = PublicationPhase::from_failpoint(failpoint) {
+                assert!(
+                    observed_phases.insert(phase),
+                    "native matrix repeated modeled phase {failpoint}"
+                );
+                let native = classify_native_authority(root.path(), parent, generation_uuid);
+                let ids = PublicationIds::from_seed(NATIVE_ORACLE_SEED);
+                let ops = publication_ops_for_profile(ids, phase, profile);
+                let durable = default_durable_ids(&ops, phase);
+                let simulated =
+                    simulate_crash_for_profile(NATIVE_ORACLE_SEED, phase, &durable, profile)
+                        .unwrap();
+
+                eprintln!(
+                    "native_oracle_crosscheck platform={} seed={} phase={} native={native:?} simulated={:?}",
+                    std::env::consts::OS,
+                    NATIVE_ORACLE_SEED,
+                    phase.failpoint(),
+                    simulated.actual,
+                );
+                assert_eq!(
+                    native, simulated.actual,
+                    "native process-kill result disagreed with simulator at {failpoint}"
+                );
+                assert_eq!(
+                    simulated.actual, simulated.expected,
+                    "simulator disagreed with its contract at {failpoint}"
+                );
+                observations.push(NativeOracleObservation {
+                    phase,
+                    failpoint: phase.failpoint(),
+                    child_exit_code: status.code(),
+                    native,
+                    simulated: simulated.actual,
+                    expected: simulated.expected,
+                    durable_op_ids: simulated.durable_op_ids,
+                    operation_trace: simulated.operation_trace,
+                });
+            }
             assert_reopen(
                 root.path(),
                 if committed { generation_uuid } else { parent },
@@ -1208,6 +1305,146 @@ mod tests {
                 committed,
             );
         }
+        let expected_phases = PublicationPhase::all()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            observed_phases, expected_phases,
+            "native matrix must cover every shared oracle phase exactly once"
+        );
+        let modeled_faults = [
+            InjectedOperationResult::FileFlushError,
+            InjectedOperationResult::NamespaceBarrierError,
+            InjectedOperationResult::ReplacementNotPerformed,
+            InjectedOperationResult::ReplacementStateUnknownPrior,
+            InjectedOperationResult::ReplacementStateUnknownNew,
+        ]
+        .into_iter()
+        .map(|injected| simulate_injected_operation(NATIVE_ORACLE_SEED, profile, injected).unwrap())
+        .chain([
+            simulate_torn_bytes_for_profile(NATIVE_ORACLE_SEED, TornTarget::Current, profile)
+                .unwrap(),
+            simulate_torn_bytes_for_profile(NATIVE_ORACLE_SEED, TornTarget::Manifest, profile)
+                .unwrap(),
+        ])
+        .collect::<Vec<_>>();
+        assert!(modeled_faults.iter().all(|fault| {
+            !fault.acknowledged
+                && fault.actual == fault.expected
+                && fault.actual != AuthorityClass::Unexpected
+        }));
+
+        let minimize_phase = PublicationPhase::AfterRootFsync;
+        let minimize_ids = PublicationIds::from_seed(NATIVE_ORACLE_SEED);
+        let minimize_ops = publication_ops_for_profile(minimize_ids, minimize_phase, profile);
+        let current_replace_id = minimize_ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    &op.kind,
+                    PersistenceOpKind::AtomicReplace { path, .. } if path == CURRENT_FILE
+                )
+            })
+            .map(|op| op.id)
+            .unwrap();
+        let mut initial_omissions = BTreeSet::from([current_replace_id]);
+        if let Some(root_fsync_id) = minimize_ops
+            .iter()
+            .find(|op| matches!(&op.kind, PersistenceOpKind::FsyncDir { path } if path == "."))
+            .map(|op| op.id)
+        {
+            initial_omissions.insert(root_fsync_id);
+        }
+        let minimized_failure = minimized_omission_report_for_profile(
+            NATIVE_ORACLE_SEED,
+            minimize_phase,
+            &initial_omissions,
+            profile,
+            |fault| fault.actual == AuthorityClass::PriorGeneration,
+        );
+        assert_eq!(
+            minimized_failure.minimized_op_ids.as_ref().map(Vec::len),
+            Some(initial_omissions.len())
+        );
+
+        let report = NativeOracleEvidence {
+            contract: "graphforge-native-durability-oracle/v1",
+            platform: std::env::consts::OS,
+            filesystem_class: evidence.filesystem_class,
+            profile,
+            seed: NATIVE_ORACLE_SEED,
+            observations,
+            modeled_faults,
+            minimized_failure,
+        };
+        let encoded = serde_json::to_vec_pretty(&report).unwrap();
+        let output_path = std::env::var_os("GRAPHFORGE_NATIVE_ORACLE_EVIDENCE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("TEST_UNDECLARED_OUTPUTS_DIR").map(|directory| {
+                    PathBuf::from(directory)
+                        .join(format!("native-oracle-{}.json", std::env::consts::OS))
+                })
+            });
+        if let Some(path) = output_path {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, &encoded).unwrap();
+        }
+        let digest = Sha256::digest(&encoded)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        eprintln!(
+            "native_oracle_evidence contract={} platform={} filesystem_class={} seed={} phases={} sha256={}",
+            report.contract,
+            report.platform,
+            report.filesystem_class,
+            report.seed,
+            report.observations.len(),
+            digest
+        );
+    }
+
+    #[test]
+    fn recovery_gc_releases_generation_lease_before_directory_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = open_or_initialize_project(root.path())
+            .unwrap()
+            .generation_uuid();
+        let abandoned = Uuid::now_v7();
+        let status = spawn_writer(
+            root.path(),
+            Uuid::now_v7(),
+            abandoned,
+            "graph",
+            "project.after_manifest_write",
+        );
+        assert_eq!(status.code(), Some(crate::project_failpoint::exit_code()));
+        let generation_path = root
+            .path()
+            .join(GENERATIONS_DIR)
+            .join(abandoned.hyphenated().to_string());
+        assert!(
+            generation_path.join("lease.lock").exists(),
+            "after_manifest_write is the first publication boundary that creates lease.lock"
+        );
+
+        let report = recover_project_transactions(root.path()).unwrap();
+        assert_eq!(report.selected_generation_uuid, parent);
+        assert!(report.removed_generations >= 1);
+        assert!(
+            !generation_path.exists(),
+            "abandoned generation with lease.lock must be removable after the lease handle is released"
+        );
+        assert_eq!(
+            resolve_project_generation(root.path())
+                .unwrap()
+                .generation_uuid(),
+            parent
+        );
     }
 
     #[test]
@@ -1322,10 +1559,17 @@ mod tests {
 
     #[test]
     fn injected_operation_errors_report_exact_commit_state() {
+        let admission_parent = tempfile::tempdir().unwrap();
+        let evidence = crate::filesystem_admission::filesystem_durability_preflight(
+            admission_parent.path().join("native-error-oracle-project"),
+        )
+        .unwrap();
+        let profile = DurabilityProfile::for_admitted_filesystem_class(&evidence.filesystem_class)
+            .expect("admitted filesystem has an oracle profile");
         for failpoint in PRE_COMMIT_FAILPOINTS
             .iter()
             .copied()
-            .chain(std::iter::once("project.after_current_replace"))
+            .chain(POST_COMMIT_FAILPOINTS.iter().copied())
         {
             let root = tempfile::tempdir().unwrap();
             let parent = open_or_initialize_project(root.path())
@@ -1341,7 +1585,25 @@ mod tests {
                 &format!("{failpoint}.error"),
             );
             assert!(status.success(), "{failpoint}.error helper failed");
-            let committed = failpoint == "project.after_current_replace";
+            let committed = POST_COMMIT_FAILPOINTS.contains(&failpoint);
+            let native = classify_native_authority(root.path(), parent, generation_uuid);
+            let injected = match failpoint {
+                "project.after_current_replace" => {
+                    InjectedOperationResult::ReplacementStateUnknownNew
+                }
+                "project.after_root_fsync" | "project.after_journal_published" => {
+                    InjectedOperationResult::NamespaceBarrierError
+                }
+                _ => InjectedOperationResult::FileFlushError,
+            };
+            let simulated =
+                simulate_injected_operation(NATIVE_ORACLE_SEED, profile, injected).unwrap();
+            assert!(!simulated.acknowledged);
+            assert_eq!(simulated.actual, simulated.expected);
+            assert_eq!(
+                native, simulated.actual,
+                "native reconciliation disagreed with {injected:?} at {failpoint}"
+            );
             assert_reopen(
                 root.path(),
                 if committed { generation_uuid } else { parent },
@@ -1833,15 +2095,14 @@ mod tests {
         })();
         let error = result.expect_err("configured failpoint did not fire");
         assert_eq!(error.code(), "GF_PUBLICATION_FAILED");
-        assert!(
-            error
-                .to_string()
-                .contains(if active == "project.after_current_replace.error" {
-                    "committed=true"
-                } else {
-                    "committed=false"
-                })
-        );
+        let committed = active
+            .strip_suffix(".error")
+            .is_some_and(|failpoint| POST_COMMIT_FAILPOINTS.contains(&failpoint));
+        assert!(error.to_string().contains(if committed {
+            "committed=true"
+        } else {
+            "committed=false"
+        }));
     }
 
     #[test]
