@@ -1,6 +1,7 @@
 //! Verification-first, bounded portable-v2 project import.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -114,39 +115,15 @@ pub fn import_complete_portable_v2_with_progress(
             ".{target_name}.portable-v2-{}",
             transaction_uuid.hyphenated()
         ));
-    let owner = stage.join(".graphforge-portable-v2-import-owner");
-    let mut owned_retry = false;
-    if stage.exists() {
-        let expected = transaction_uuid.hyphenated().to_string();
-        if fs::read_to_string(&owner).ok().as_deref() != Some(expected.as_str()) {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "import staging identity already exists",
-            ));
+    let (owner, owned_retry) = claim_stage(&stage, target_name, transaction_uuid, generation_uuid)?;
+    let report = match materialize_verified_portable_v2(source, &stage, limits, cancelled) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = fs::remove_file(&owner);
+            let _ = sync_parent(&owner);
+            return Err(error);
         }
-        fs::remove_dir_all(&stage).map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "owned import staging is unavailable",
-            )
-        })?;
-        owned_retry = true;
-    }
-    let report = materialize_verified_portable_v2(source, &stage, limits, cancelled)?;
-    fs::write(&owner, transaction_uuid.hyphenated().to_string()).map_err(|_| {
-        PortableV2Error::new(
-            PortableV2ErrorCode::Io,
-            "cannot mark import staging ownership",
-        )
-    })?;
-    fs::File::open(&owner)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| {
-            PortableV2Error::new(
-                PortableV2ErrorCode::Io,
-                "cannot sync import staging ownership",
-            )
-        })?;
+    };
     progress(PortableV2ImportProgress {
         phase: PortableV2ImportPhase::Materialized,
         entries: report.entry_count,
@@ -165,6 +142,8 @@ pub fn import_complete_portable_v2_with_progress(
         owned_retry,
     );
     let _ = fs::remove_dir_all(&stage);
+    let _ = fs::remove_file(&owner);
+    let _ = sync_parent(&owner);
     if result.is_ok() {
         progress(PortableV2ImportProgress {
             phase: PortableV2ImportPhase::Published,
@@ -174,6 +153,100 @@ pub fn import_complete_portable_v2_with_progress(
         });
     }
     result
+}
+
+fn claim_stage(
+    stage: &Path,
+    target_name: &str,
+    transaction_uuid: Uuid,
+    generation_uuid: Uuid,
+) -> Result<(PathBuf, bool), PortableV2Error> {
+    let owner = stage.with_file_name(format!(
+        ".{target_name}.portable-v2-{}.owner",
+        transaction_uuid.hyphenated()
+    ));
+    let expected = transaction_uuid.hyphenated().to_string();
+    let mut owned_retry = false;
+    if owner.exists() && fs::read_to_string(&owner).ok().as_deref() != Some(expected.as_str()) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "import staging identity already exists",
+        ));
+    }
+    if stage.exists() {
+        if fs::read_to_string(&owner).ok().as_deref() != Some(expected.as_str()) {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "import staging identity already exists",
+            ));
+        }
+        fs::remove_dir_all(stage).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "owned import staging is unavailable",
+            )
+        })?;
+        owned_retry = true;
+    }
+    if owner.exists() {
+        owned_retry = true;
+    } else {
+        let mut marker = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&owner)
+            .map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::Io,
+                    "cannot claim import staging ownership",
+                )
+            })?;
+        marker.write_all(expected.as_bytes()).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot mark import staging ownership",
+            )
+        })?;
+        marker.sync_all().map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::Io,
+                "cannot sync import staging ownership",
+            )
+        })?;
+        sync_parent(&owner)?;
+    }
+    crate::project_failpoint::hit(
+        "portable_import.after_owner",
+        Some(transaction_uuid),
+        Some(generation_uuid),
+        "IMPORT_OWNER",
+        false,
+    )
+    .map_err(storage)?;
+    Ok((owner, owned_retry))
+}
+
+fn sync_parent(path: &Path) -> Result<(), PortableV2Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    sync_directory_handle(parent).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync import staging parent")
+    })
+}
+
+#[cfg(not(windows))]
+fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_directory_handle(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
 }
 
 #[expect(clippy::too_many_arguments, reason = "import authority is explicit")]
@@ -572,6 +645,7 @@ mod tests {
         .unwrap();
 
         for failpoint in [
+            "portable_import.after_owner",
             "project.after_writer_lock",
             "project.after_participant_write",
             "project.after_manifest_fsync",
@@ -632,6 +706,11 @@ mod tests {
                 .unwrap()
                 .join(format!(".project.portable-v2-{}", transaction.hyphenated()));
             assert!(!residue.exists(), "owned residue survived {failpoint}");
+            let owner_residue = residue.with_file_name(format!(
+                "{}.owner",
+                residue.file_name().unwrap().to_string_lossy()
+            ));
+            assert!(!owner_residue.exists(), "owned marker survived {failpoint}");
         }
     }
 
