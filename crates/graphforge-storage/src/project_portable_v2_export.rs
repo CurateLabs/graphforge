@@ -225,7 +225,7 @@ pub fn plan_complete_portable_v2(
         });
     }
     if let Some(inv) = g.graph_files_inventory()? {
-        let id = "graph-files".to_owned();
+        let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
             let source = g.graph_tree_root().join(&e.relative_path);
@@ -271,7 +271,7 @@ pub fn plan_complete_portable_v2(
             .collect(),
         participants: &runtime_participants,
         graph_tree: graph_inventory_participant.map(|inventory_participant_id| RuntimeGraphTree {
-            component_id: "graph-files",
+            component_id: "graph-tree",
             inventory_participant_id,
         }),
     };
@@ -1351,6 +1351,8 @@ mod tests {
 
     #[test]
     fn pax_and_structural_budgets_are_canonical_without_payload_allocation() {
+        assert_eq!(portable_id("graph-files"), "graph-files");
+        assert_ne!(portable_id("graph-files"), "graph-tree");
         let long = format!(
             "data/components/graph-data/graph-files/{}/nodes.parquet",
             "segment".repeat(40)

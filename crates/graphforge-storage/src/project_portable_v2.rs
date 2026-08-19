@@ -1398,7 +1398,7 @@ fn validate_runtime_map(
         prior_capability = Some(capability.capability_id.as_str());
     }
     if let Some(graph) = runtime.graph_tree
-        && (graph.component_id != "graph-files"
+        && (graph.component_id != "graph-tree"
             || !component_ids.contains(graph.component_id.as_str())
             || !runtime_ids.contains(graph.inventory_participant_id.as_str()))
     {
