@@ -9,28 +9,31 @@
 //! ```text
 //! indexes/adjacency/
 //! ├── index_manifest.parquet    ADJACENCY_MANIFEST_SCHEMA (Parquet)
-//! ├── WORKS_AT.out.csr          ADJACENCY_CSR_SCHEMA (Arrow IPC)
-//! ├── WORKS_AT.in.csr
-//! └── _all.out.csr              union across relation types
+//! ├── WORKS_AT.out.csr.json     versioned/checksummed shard manifest
+//! ├── WORKS_AT.out.csr.shards-<digest>.d/
+//! ├── WORKS_AT.in.csr.json
+//! └── _all.out.csr.json         union across relation types
 //! ```
 //!
 //! # Build ordering convention
 //!
-//! Builders MUST write all CSR files first and `index_manifest.parquet`
-//! **last**. A crash mid-build then leaves the manifest absent or carrying the
+//! Builders MUST write immutable shard files, publish each shard manifest
+//! atomically, and write `index_manifest.parquet` **last**. A crash mid-build
+//! then leaves the manifest absent or carrying the
 //! old `topology_generation`, so the index reads as stale and the provider
 //! falls back to scan-and-build — a torn build can cost a rebuild, never
 //! correctness.
 //!
 //! # CSR encoding
 //!
-//! A `.csr` file is a single-batch Arrow IPC file with one column,
+//! Each bounded shard `.csr` file is Arrow IPC with one column,
 //! `adjacency: LargeList<Struct{edge_id, neighbor_id}>` and one row per
-//! surrogate `node_id` in `0..node_count`. The list offsets buffer is the CSR
+//! local surrogate range. A high-degree logical row may continue in the next
+//! shard. The list offsets buffer is the CSR
 //! offsets array; the struct child is the targets array. See
 //! [`ADJACENCY_CSR_SCHEMA`] and `docs/book/architecture/storage.md` §Derived
-//! Indexes. The in-memory [`CsrIndex`] exposes the logical `offsets`/`targets`
-//! model directly, so consumers never deal with the list encoding.
+//! Indexes. [`ShardedCsrIndex`] resolves only the shard(s) containing a requested
+//! row. Legacy single-batch [`CsrIndex`] files remain readable until rebuild.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,7 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
@@ -59,6 +63,442 @@ pub const ALL_RELATIONS_STEM: &str = "_all";
 
 /// File name of the adjacency index manifest within `indexes/adjacency/`.
 pub const MANIFEST_FILE: &str = "index_manifest.parquet";
+
+const SHARDED_CSR_VERSION: u32 = 1;
+/// Default maximum adjacency entries materialized in one persisted CSR shard.
+pub const DEFAULT_CSR_SHARD_EDGES: usize = 1_048_576;
+/// Default maximum local CSR rows (offset entries minus one) per shard.
+pub const DEFAULT_CSR_SHARD_NODES: usize = 1_048_576;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CsrShardRecord {
+    first_node: u64,
+    node_count: u64,
+    edge_count: u64,
+    file: String,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CsrShardManifest {
+    format: String,
+    version: u32,
+    node_count: u64,
+    edge_count: u64,
+    shard_dir: String,
+    shards: Vec<CsrShardRecord>,
+}
+
+/// Aggregate bounded-resource evidence for one adjacency build.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AdjacencyBuildMetrics {
+    /// Projected source rows consumed from Parquet.
+    pub source_rows: u64,
+    /// Sorted spill runs written across relation and union accumulators.
+    pub spill_runs: u64,
+    /// Peak bytes charged to the spill session.
+    pub spill_bytes: u64,
+    /// Persisted CSR shards written across every relation/direction pair.
+    pub csr_shards: u64,
+    /// Largest number of entries retained by a CSR shard sink.
+    pub peak_shard_edges: u64,
+    /// Largest number of local CSR rows retained by a shard sink.
+    pub peak_shard_nodes: u64,
+}
+
+/// Bounded reader for a versioned sharded CSR. Opening validates the small
+/// manifest; row access reads and authenticates only the containing shard.
+#[derive(Clone, Debug)]
+pub struct ShardedCsrIndex {
+    root: PathBuf,
+    manifest: CsrShardManifest,
+    // One decoded shard is enough to make sequential row traversal O(shards)
+    // while keeping reader memory bounded by the configured shard limit.
+    cache: std::sync::Arc<std::sync::Mutex<Option<(String, CsrIndex)>>>,
+}
+
+impl ShardedCsrIndex {
+    /// Open the shard manifest beside the legacy logical `.csr` path.
+    pub fn open(path: &Path) -> Result<Self, GfError> {
+        let manifest_path = path.with_extension("csr.json");
+        let bytes = std::fs::read(&manifest_path).map_err(storage_err)?;
+        let manifest: CsrShardManifest = serde_json::from_slice(&bytes).map_err(storage_err)?;
+        if manifest.format != "graphforge.csr-shards" || manifest.version != SHARDED_CSR_VERSION {
+            return Err(GfError::Storage(format!(
+                "unsupported sharded CSR manifest {}",
+                manifest_path.display()
+            )));
+        }
+        let mut prior_first = None;
+        let mut edges = 0_u64;
+        if !is_normal_path_component(&manifest.shard_dir) {
+            return Err(GfError::Storage("invalid CSR shard directory name".into()));
+        }
+        let root = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&manifest.shard_dir);
+        for shard in &manifest.shards {
+            if shard.node_count == 0
+                || shard.first_node.saturating_add(shard.node_count) > manifest.node_count
+                || prior_first.is_some_and(|prior| shard.first_node < prior)
+            {
+                return Err(GfError::Storage(
+                    "invalid CSR shard boundary ordering".into(),
+                ));
+            }
+            prior_first = Some(shard.first_node);
+            edges = edges.saturating_add(shard.edge_count);
+            if !is_normal_path_component(&shard.file) {
+                return Err(GfError::Storage("invalid CSR shard file name".into()));
+            }
+            // Authenticate and structurally validate every bounded shard at
+            // open. Runtime row reads then cannot discover latent corruption
+            // through the infallible traversal interface.
+            let shard_path = root.join(&shard.file);
+            let shard_bytes = std::fs::read(&shard_path).map_err(|error| {
+                GfError::Storage(format!("missing CSR shard {}: {error}", shard.file))
+            })?;
+            if sha256_hex(&shard_bytes) != shard.sha256 {
+                return Err(GfError::Storage(format!(
+                    "CSR shard checksum mismatch: {}",
+                    shard.file
+                )));
+            }
+            let decoded = read_csr_bytes(&shard_bytes, &shard_path)?;
+            if decoded.node_count() != shard.node_count || decoded.edge_count() != shard.edge_count
+            {
+                return Err(GfError::Storage(format!(
+                    "CSR shard count mismatch: {}",
+                    shard.file
+                )));
+            }
+        }
+        if edges != manifest.edge_count {
+            return Err(GfError::Storage(
+                "CSR shard manifest counts disagree".into(),
+            ));
+        }
+        Ok(Self {
+            root,
+            manifest,
+            cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// Total logical source rows across all shards.
+    #[must_use]
+    pub const fn node_count(&self) -> u64 {
+        self.manifest.node_count
+    }
+
+    /// Total adjacency entries across all shards.
+    #[must_use]
+    pub const fn edge_count(&self) -> u64 {
+        self.manifest.edge_count
+    }
+
+    /// Read one logical row without loading unrelated shards.
+    pub fn row(&self, node_id: u64) -> Result<Vec<(u64, u64)>, GfError> {
+        if node_id >= self.manifest.node_count {
+            return Ok(Vec::new());
+        }
+        // A single high-degree row may span adjacent hard-capped shards. The
+        // manifest is ordered by `first_node`, so stop once starts pass the key.
+        let end = self
+            .manifest
+            .shards
+            .partition_point(|record| record.first_node <= node_id);
+        let mut start = end;
+        while start > 0 {
+            let prior = &self.manifest.shards[start - 1];
+            if node_id >= prior.first_node.saturating_add(prior.node_count) {
+                break;
+            }
+            start -= 1;
+        }
+        let mut output = Vec::new();
+        for record in &self.manifest.shards[start..end] {
+            output.extend(self.read_record_row(record, node_id)?);
+        }
+        Ok(output)
+    }
+
+    fn read_record_row(
+        &self,
+        record: &CsrShardRecord,
+        node_id: u64,
+    ) -> Result<Vec<(u64, u64)>, GfError> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| GfError::Storage("CSR shard cache lock poisoned".into()))?;
+        if let Some((file, csr)) = cache.as_ref()
+            && file == &record.file
+        {
+            return Ok(csr.row(node_id - record.first_node).iter().collect());
+        }
+        let path = self.root.join(&record.file);
+        let bytes = std::fs::read(&path).map_err(|error| {
+            GfError::Storage(format!("missing CSR shard {}: {error}", path.display()))
+        })?;
+        if sha256_hex(&bytes) != record.sha256 {
+            return Err(GfError::Storage(format!(
+                "CSR shard checksum mismatch: {}",
+                record.file
+            )));
+        }
+        let csr = read_csr_bytes(&bytes, &path)?;
+        if csr.node_count() != record.node_count || csr.edge_count() != record.edge_count {
+            return Err(GfError::Storage(format!(
+                "CSR shard count mismatch: {}",
+                record.file
+            )));
+        }
+        let output = csr.row(node_id - record.first_node).iter().collect();
+        *cache = Some((record.file.clone(), csr));
+        Ok(output)
+    }
+}
+
+/// Whether the versioned sharded representation is published for `path`.
+#[must_use]
+pub fn sharded_csr_exists(path: &Path) -> bool {
+    path.with_extension("csr.json").is_file()
+}
+
+fn csr_artifact_exists(path: &Path) -> bool {
+    path.is_file() || sharded_csr_exists(path)
+}
+
+fn is_normal_path_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+/// Write a versioned checksummed shard set and publish its manifest last.
+/// This compatibility helper accepts an in-memory CSR; streaming builders use
+/// the same shard writer while producing one bounded shard at a time.
+pub fn write_sharded_csr(path: &Path, csr: &CsrIndex, max_edges: usize) -> Result<(), GfError> {
+    csr.validate()?;
+    let mut writer = ShardedCsrWriter::create(path, max_edges, DEFAULT_CSR_SHARD_NODES)?;
+    for node in 0..csr.node_count() {
+        for (edge, neighbor) in csr.row(node).iter() {
+            writer.emit((node, edge, neighbor))?;
+        }
+    }
+    writer.finish(csr.node_count()).map(|_| ())
+}
+
+/// Row-emitting bounded sink used directly by the external-run merge.
+struct ShardedCsrWriter {
+    path: PathBuf,
+    root: PathBuf,
+    shard_dir: String,
+    max_edges: usize,
+    max_nodes: usize,
+    records: Vec<CsrShardRecord>,
+    shard: CsrIndex,
+    first_node: Option<u64>,
+    last_key: Option<u64>,
+    edge_count: u64,
+    peak_shard_edges: u64,
+    peak_shard_nodes: u64,
+    owned_root: Option<PathBuf>,
+    finished: bool,
+}
+
+impl ShardedCsrWriter {
+    fn create(path: &Path, max_edges: usize, max_nodes: usize) -> Result<Self, GfError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| GfError::Storage("CSR path has no parent".into()))?;
+        std::fs::create_dir_all(parent).map_err(storage_err)?;
+        let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("csr");
+        let shard_dir = format!("{stem}.{}.d", uuid::Uuid::new_v4().as_simple());
+        let root = parent.join(&shard_dir);
+        std::fs::create_dir(&root).map_err(storage_err)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            owned_root: Some(root.clone()),
+            root,
+            shard_dir,
+            max_edges: max_edges.max(1),
+            max_nodes: max_nodes.max(1),
+            records: Vec::new(),
+            shard: CsrIndex {
+                offsets: vec![0],
+                ..CsrIndex::default()
+            },
+            first_node: None,
+            last_key: None,
+            edge_count: 0,
+            peak_shard_edges: 0,
+            peak_shard_nodes: 0,
+            finished: false,
+        })
+    }
+
+    fn emit(&mut self, (key, edge, neighbor): (u64, u64, u64)) -> Result<(), GfError> {
+        if self.shard.edge_ids.len() >= self.max_edges
+            || self.first_node.is_some_and(|first| {
+                key.saturating_sub(first) >= u64::try_from(self.max_nodes).unwrap_or(u64::MAX)
+            })
+        {
+            self.flush()?;
+        }
+        let first = *self.first_node.get_or_insert(key);
+        if key < self.last_key.unwrap_or(key) {
+            return Err(GfError::Storage(
+                "CSR shard sink received unsorted row keys".into(),
+            ));
+        }
+        let local = key - first;
+        while self.shard.node_count() <= local {
+            self.shard.offsets.push(self.shard.edge_count());
+        }
+        self.shard.edge_ids.push(edge);
+        self.shard.neighbor_ids.push(neighbor);
+        *self.shard.offsets.last_mut().expect("offset exists") = self.shard.edge_count();
+        self.last_key = Some(key);
+        self.edge_count = self.edge_count.saturating_add(1);
+        self.peak_shard_edges = self.peak_shard_edges.max(self.shard.edge_count());
+        self.peak_shard_nodes = self.peak_shard_nodes.max(self.shard.node_count());
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), GfError> {
+        let Some(first) = self.first_node else {
+            return Ok(());
+        };
+        self.records.push(write_csr_shard(
+            &self.root,
+            first,
+            &self.shard,
+            self.records.len(),
+        )?);
+        self.shard = CsrIndex {
+            offsets: vec![0],
+            ..CsrIndex::default()
+        };
+        self.first_node = None;
+        self.last_key = None;
+        Ok(())
+    }
+
+    fn finish(mut self, node_count: u64) -> Result<(u64, u64, u64), GfError> {
+        use std::io::Write as _;
+
+        self.flush()?;
+        let mut identity = Sha256::new();
+        identity.update(b"graphforge/csr-shards/v1\0");
+        identity.update(node_count.to_le_bytes());
+        identity.update(self.edge_count.to_le_bytes());
+        for record in &self.records {
+            identity.update(record.first_node.to_le_bytes());
+            identity.update(record.node_count.to_le_bytes());
+            identity.update(record.edge_count.to_le_bytes());
+            identity.update(record.sha256.as_bytes());
+        }
+        let digest = sha256_hex(&identity.finalize());
+        let stem = self
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("csr");
+        let stable_dir = format!("{stem}.shards-{}.d", &digest[..24]);
+        let stable_root = self
+            .path
+            .parent()
+            .expect("validated parent")
+            .join(&stable_dir);
+        if stable_root.exists() && shard_set_matches(&stable_root, &self.records) {
+            std::fs::remove_dir_all(&self.root).map_err(storage_err)?;
+            self.owned_root = None;
+        } else {
+            if stable_root.exists() {
+                std::fs::remove_dir_all(&stable_root).map_err(storage_err)?;
+            }
+            std::fs::rename(&self.root, &stable_root).map_err(storage_err)?;
+            self.owned_root = Some(stable_root.clone());
+        }
+        self.root = stable_root;
+        self.shard_dir = stable_dir;
+        let manifest = CsrShardManifest {
+            format: "graphforge.csr-shards".into(),
+            version: SHARDED_CSR_VERSION,
+            node_count,
+            edge_count: self.edge_count,
+            shard_dir: self.shard_dir.clone(),
+            shards: std::mem::take(&mut self.records),
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(storage_err)?;
+        let parent = self.path.parent().expect("validated parent");
+        let mut temp = tempfile::Builder::new()
+            .prefix(stem)
+            .suffix(".json.tmp")
+            .tempfile_in(parent)
+            .map_err(storage_err)?;
+        temp.write_all(&bytes).map_err(storage_err)?;
+        temp.as_file().sync_all().map_err(storage_err)?;
+        persist_temp(temp, &self.path.with_extension("csr.json"))?;
+        self.finished = true;
+        Ok((
+            manifest.shards.len() as u64,
+            self.peak_shard_edges,
+            self.peak_shard_nodes,
+        ))
+    }
+}
+
+impl Drop for ShardedCsrWriter {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Some(root) = self.owned_root.as_ref()
+        {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+}
+
+fn shard_set_matches(root: &Path, records: &[CsrShardRecord]) -> bool {
+    for record in records {
+        let path = root.join(&record.file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            return false;
+        };
+        if sha256_hex(&bytes) != record.sha256 {
+            return false;
+        }
+        let Ok(csr) = read_csr_bytes(&bytes, &path) else {
+            return false;
+        };
+        if csr.node_count() != record.node_count || csr.edge_count() != record.edge_count {
+            return false;
+        }
+    }
+    true
+}
+
+fn write_csr_shard(
+    root: &Path,
+    first_node: u64,
+    shard: &CsrIndex,
+    ordinal: usize,
+) -> Result<CsrShardRecord, GfError> {
+    let file = format!("{ordinal:020}.csr");
+    let path = root.join(&file);
+    write_csr(&path, shard)?;
+    let bytes = std::fs::read(&path).map_err(storage_err)?;
+    Ok(CsrShardRecord {
+        first_node,
+        node_count: shard.node_count(),
+        edge_count: shard.edge_count(),
+        file,
+        sha256: sha256_hex(&bytes),
+    })
+}
 
 fn storage_err(e: impl std::fmt::Display) -> GfError {
     GfError::Storage(e.to_string())
@@ -412,7 +852,23 @@ pub fn write_csr(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
         FileWriter::try_new(tmp.as_file(), &ADJACENCY_CSR_SCHEMA).map_err(storage_err)?;
     writer.write(&batch).map_err(storage_err)?;
     writer.finish().map_err(storage_err)?;
-    persist_temp(tmp, path)
+    persist_temp(tmp, path)?;
+    // Explicit legacy writes are a supported migration/testing seam. Make the
+    // representation choice unambiguous so a stale sharded manifest cannot
+    // shadow the newly published single-batch file.
+    let sharded_manifest = path.with_extension("csr.json");
+    if sharded_manifest.exists() {
+        let shard_root = std::fs::read(&sharded_manifest)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CsrShardManifest>(&bytes).ok())
+            .filter(|manifest| is_normal_path_component(&manifest.shard_dir))
+            .and_then(|manifest| path.parent().map(|parent| parent.join(manifest.shard_dir)));
+        std::fs::remove_file(sharded_manifest).map_err(storage_err)?;
+        if let Some(shard_root) = shard_root {
+            let _ = std::fs::remove_dir_all(shard_root);
+        }
+    }
+    Ok(())
 }
 
 /// Read a CSR file written by [`write_csr`] back into a [`CsrIndex`].
@@ -421,10 +877,40 @@ pub fn write_csr(path: &Path, csr: &CsrIndex) -> Result<(), GfError> {
 /// Returns [`GfError::Storage`] if the file is missing, is not an Arrow IPC
 /// file with [`ADJACENCY_CSR_SCHEMA`], or decodes to an invalid CSR.
 pub fn read_csr(path: &Path) -> Result<CsrIndex, GfError> {
+    if sharded_csr_exists(path) {
+        let sharded = ShardedCsrIndex::open(path)?;
+        let mut csr = CsrIndex {
+            offsets: vec![0],
+            ..CsrIndex::default()
+        };
+        for node in 0..sharded.node_count() {
+            for (edge, neighbor) in sharded.row(node)? {
+                csr.edge_ids.push(edge);
+                csr.neighbor_ids.push(neighbor);
+            }
+            csr.offsets.push(csr.edge_count());
+        }
+        csr.validate()?;
+        return Ok(csr);
+    }
     let file = File::open(path)
         .map_err(|e| GfError::Storage(format!("cannot open CSR file {}: {e}", path.display())))?;
     let reader = FileReader::try_new(file, None)
         .map_err(|e| GfError::Storage(format!("invalid CSR file {}: {e}", path.display())))?;
+    decode_csr(reader, path)
+}
+
+fn read_csr_bytes(bytes: &[u8], path: &Path) -> Result<CsrIndex, GfError> {
+    let reader = FileReader::try_new(std::io::Cursor::new(bytes), None).map_err(|error| {
+        GfError::Storage(format!("invalid CSR shard {}: {error}", path.display()))
+    })?;
+    decode_csr(reader, path)
+}
+
+fn decode_csr<R: std::io::Read + std::io::Seek>(
+    reader: FileReader<R>,
+    path: &Path,
+) -> Result<CsrIndex, GfError> {
     if reader.schema().fields() != ADJACENCY_CSR_SCHEMA.fields() {
         return Err(GfError::Storage(format!(
             "CSR file {} has unexpected schema {:?}",
@@ -479,6 +965,16 @@ pub fn read_csr(path: &Path) -> Result<CsrIndex, GfError> {
     }
     csr.validate()?;
     Ok(csr)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
 }
 
 /// Replace `index_manifest.parquet` with `rows`, atomically.
@@ -593,6 +1089,8 @@ pub const DEFAULT_ADJACENCY_BATCH_SIZE: usize = 8_192;
 /// copies. Peak working set remains a function of this budget (and the
 /// configured memory/spill caps), not total edge count.
 pub const DEFAULT_ADJACENCY_CHUNK_ROWS: usize = 1_048_576;
+/// Maximum sorted runs opened concurrently by one merge pass.
+pub const DEFAULT_ADJACENCY_MERGE_FAN_IN: usize = 64;
 
 /// Spill subdirectory name under the artifact adjacency directory when no
 /// explicit spill root is configured.
@@ -611,6 +1109,7 @@ const BYTES_PER_KEYED_ENTRY: u64 = 24;
 /// project-local `.spill` root) and are removed on success, failure, or
 /// cancellation.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct AdjacencyBuildOptions {
     /// Maximum projected edge rows retained in memory per relation/union
     /// accumulator before flushing a sorted spill run.
@@ -626,6 +1125,13 @@ pub struct AdjacencyBuildOptions {
     /// Soft memory budget used to shrink [`chunk_rows`](Self::chunk_rows) when
     /// set. Does not replace the hard spill-byte cap.
     pub memory_budget_bytes: Option<u64>,
+    /// Hard upper bound on adjacency entries retained by one CSR shard sink.
+    /// A single high-degree row is split across consecutive shards when needed.
+    pub shard_max_edges: usize,
+    /// Hard upper bound on local CSR rows (offset entries minus one) per shard.
+    pub shard_max_nodes: usize,
+    /// Maximum spill runs opened in one k-way merge pass (minimum 2).
+    pub merge_fan_in: usize,
 }
 
 impl Default for AdjacencyBuildOptions {
@@ -636,6 +1142,9 @@ impl Default for AdjacencyBuildOptions {
             spill_dir: None,
             spill_max_bytes: None,
             memory_budget_bytes: None,
+            shard_max_edges: DEFAULT_CSR_SHARD_EDGES,
+            shard_max_nodes: DEFAULT_CSR_SHARD_NODES,
+            merge_fan_in: DEFAULT_ADJACENCY_MERGE_FAN_IN,
         }
     }
 }
@@ -647,6 +1156,9 @@ impl AdjacencyBuildOptions {
     pub fn effective(&self) -> Self {
         let mut out = self.clone();
         out.batch_size = out.batch_size.max(1);
+        out.shard_max_edges = out.shard_max_edges.max(1);
+        out.shard_max_nodes = out.shard_max_nodes.max(1);
+        out.merge_fan_in = out.merge_fan_in.max(2);
         let mut chunk = out.chunk_rows.max(1);
         if let Some(budget) = out.memory_budget_bytes.filter(|b| *b > 0) {
             // Leave headroom for out+in keyed copies (~2×) plus CSR/merge state.
@@ -739,6 +1251,24 @@ pub fn build_adjacency_index_into_with_options(
     options: &AdjacencyBuildOptions,
     mut checkpoint: impl FnMut() -> Result<(), GfError>,
 ) -> Result<Vec<AdjacencyManifestRow>, GfError> {
+    build_adjacency_index_into_with_metrics(
+        source_project_dir,
+        artifact_project_dir,
+        built_at_micros,
+        options,
+        &mut checkpoint,
+    )
+    .map(|(manifest, _)| manifest)
+}
+
+/// Bounded build returning explicit source/spill/shard resource counters.
+pub fn build_adjacency_index_into_with_metrics(
+    source_project_dir: &Path,
+    artifact_project_dir: &Path,
+    built_at_micros: i64,
+    options: &AdjacencyBuildOptions,
+    mut checkpoint: impl FnMut() -> Result<(), GfError>,
+) -> Result<(Vec<AdjacencyManifestRow>, AdjacencyBuildMetrics), GfError> {
     checkpoint()?;
     // Generation BEFORE the scan — see the race note in the doc comment.
     let generation = crate::generation::read_topology_generation(source_project_dir)?;
@@ -757,25 +1287,39 @@ pub fn build_adjacency_index_into_with_options(
         base.join(format!("build-{}", uuid::Uuid::new_v4().as_simple()))
     };
     let mut spill = SpillSession::create(&spill_root)?.with_max_bytes(options.spill_max_bytes);
+    let mut metrics = AdjacencyBuildMetrics::default();
 
     let build_result = (|| {
-        let mut groups =
-            stream_build_groups(source_project_dir, &options, &mut spill, &mut checkpoint)?;
+        let mut groups = stream_build_groups(
+            source_project_dir,
+            &options,
+            &mut spill,
+            &mut metrics,
+            &mut checkpoint,
+        )?;
         checkpoint()?;
 
         let mut manifest = Vec::new();
         let mut write_pair = |stem: &str, group: &mut EntryGroup| -> Result<(), GfError> {
             for direction in [Direction::Out, Direction::In] {
                 checkpoint()?;
-                let csr = group.finish_csr(direction, &mut spill, &mut checkpoint)?;
-                write_csr(&csr_path(artifact_project_dir, stem, direction), &csr)?;
+                let outcome = group.finish_sharded_csr(
+                    direction,
+                    &csr_path(artifact_project_dir, stem, direction),
+                    &options,
+                    &mut spill,
+                    &mut checkpoint,
+                )?;
+                metrics.csr_shards = metrics.csr_shards.saturating_add(outcome.shards);
+                metrics.peak_shard_edges = metrics.peak_shard_edges.max(outcome.peak_shard_edges);
+                metrics.peak_shard_nodes = metrics.peak_shard_nodes.max(outcome.peak_shard_nodes);
                 manifest.push(AdjacencyManifestRow {
                     relation_type: stem.to_owned(),
                     direction,
                     topology_generation: generation,
                     built_at_micros,
-                    node_count: csr.node_count(),
-                    edge_count: csr.edge_count(),
+                    node_count: outcome.node_count,
+                    edge_count: outcome.edge_count,
                 });
             }
             Ok(())
@@ -804,13 +1348,15 @@ pub fn build_adjacency_index_into_with_options(
         // survive, so the new base + those is immediately fresh. Manifest first,
         // prune after: a crash between leaves dead segments a later prune removes.
         crate::adjacency_delta::prune_delta_segments(artifact_project_dir, generation);
-        Ok(manifest)
+        metrics.spill_runs = spill.run_counter;
+        metrics.spill_bytes = spill.peak_bytes;
+        Ok((manifest, metrics.clone()))
     })();
 
     match build_result {
-        Ok(manifest) => {
+        Ok(result) => {
             spill.cleanup();
-            Ok(manifest)
+            Ok(result)
         }
         Err(error) => {
             spill.cleanup();
@@ -823,7 +1369,8 @@ pub fn build_adjacency_index_into_with_options(
 /// and failure cannot leave temporary runs behind as a published artifact.
 struct SpillSession {
     root: PathBuf,
-    bytes_written: u64,
+    bytes_current: u64,
+    peak_bytes: u64,
     max_bytes: Option<u64>,
     run_counter: u64,
     cleaned: bool,
@@ -836,7 +1383,8 @@ impl SpillSession {
         std::fs::create_dir_all(root).map_err(storage_err)?;
         Ok(Self {
             root: root.to_path_buf(),
-            bytes_written: 0,
+            bytes_current: 0,
+            peak_bytes: 0,
             max_bytes: None,
             run_counter: 0,
             cleaned: false,
@@ -856,14 +1404,22 @@ impl SpillSession {
     }
 
     fn account_write(&mut self, bytes: u64) -> Result<(), GfError> {
-        self.bytes_written = self.bytes_written.saturating_add(bytes);
+        self.bytes_current = self.bytes_current.saturating_add(bytes);
+        self.peak_bytes = self.peak_bytes.max(self.bytes_current);
         if let Some(max) = self.max_bytes
-            && self.bytes_written > max
+            && self.bytes_current > max
         {
             return Err(resource_limit(format!(
                 "adjacency build spill exceeded max_bytes ({max})"
             )));
         }
+        Ok(())
+    }
+
+    fn remove_run(&mut self, path: &Path) -> Result<(), GfError> {
+        let bytes = std::fs::metadata(path).map_err(storage_err)?.len();
+        std::fs::remove_file(path).map_err(storage_err)?;
+        self.bytes_current = self.bytes_current.saturating_sub(bytes);
         Ok(())
     }
 
@@ -964,31 +1520,82 @@ impl EntryGroup {
         Ok(())
     }
 
-    fn finish_csr(
+    fn finish_sharded_csr(
         &mut self,
         direction: Direction,
+        path: &Path,
+        options: &AdjacencyBuildOptions,
         spill: &mut SpillSession,
         checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
-    ) -> Result<CsrIndex, GfError> {
-        let runs = match direction {
-            Direction::Out => &self.out_runs,
-            Direction::In => &self.in_runs,
+    ) -> Result<ShardedWriteOutcome, GfError> {
+        let had_runs = match direction {
+            Direction::Out => !self.out_runs.is_empty(),
+            Direction::In => !self.in_runs.is_empty(),
         };
-        if runs.is_empty() {
-            // Fast path: never spilled — identical to the pre-#336 builder.
-            return Ok(csr_from_entries(&self.buffer, direction));
-        }
-        // Spill residual as a final run so merge sees only sorted runs.
-        if !self.buffer.is_empty() {
+        if had_runs && !self.buffer.is_empty() {
             self.flush(spill, checkpoint)?;
         }
-        let runs = match direction {
-            Direction::Out => &self.out_runs,
-            Direction::In => &self.in_runs,
+        if had_runs {
+            let runs = match direction {
+                Direction::Out => &mut self.out_runs,
+                Direction::In => &mut self.in_runs,
+            };
+            compact_keyed_runs(
+                runs,
+                options.merge_fan_in,
+                &self.label,
+                direction,
+                spill,
+                checkpoint,
+            )?;
+        }
+        let mut writer =
+            ShardedCsrWriter::create(path, options.shard_max_edges, options.shard_max_nodes)?;
+        let mut max_key = None::<u64>;
+        let mut emit = |entry: (u64, u64, u64)| {
+            max_key = Some(max_key.map_or(entry.0, |prior| prior.max(entry.0)));
+            writer.emit(entry)
         };
-        checkpoint()?;
-        merge_keyed_runs_to_csr(runs, checkpoint)
+        if had_runs {
+            let runs = match direction {
+                Direction::Out => &self.out_runs,
+                Direction::In => &self.in_runs,
+            };
+            merge_keyed_runs(runs, checkpoint, &mut emit)?;
+        } else {
+            // The no-spill fast path remains bounded by `chunk_rows`.
+            let mut keyed: Vec<_> = match direction {
+                Direction::Out => self.buffer.clone(),
+                Direction::In => self
+                    .buffer
+                    .iter()
+                    .map(|&(src, edge, dst)| (dst, edge, src))
+                    .collect(),
+            };
+            keyed.sort_unstable_by_key(|&(key, edge, _)| (key, edge));
+            for entry in keyed {
+                emit(entry)?;
+            }
+        }
+        let node_count = max_key.map_or(0, |key| key.saturating_add(1));
+        let edge_count = writer.edge_count;
+        let (shards, peak_shard_edges, peak_shard_nodes) = writer.finish(node_count)?;
+        Ok(ShardedWriteOutcome {
+            node_count,
+            edge_count,
+            shards,
+            peak_shard_edges,
+            peak_shard_nodes,
+        })
     }
+}
+
+struct ShardedWriteOutcome {
+    node_count: u64,
+    edge_count: u64,
+    shards: u64,
+    peak_shard_edges: u64,
+    peak_shard_nodes: u64,
 }
 
 fn write_keyed_run(
@@ -1075,19 +1682,94 @@ impl RunCursor {
     }
 }
 
-fn merge_keyed_runs_to_csr(
+fn compact_keyed_runs(
+    runs: &mut Vec<PathBuf>,
+    fan_in: usize,
+    label: &str,
+    direction: Direction,
+    spill: &mut SpillSession,
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    let fan_in = fan_in.max(2);
+    while runs.len() > fan_in {
+        let mut next = Vec::with_capacity(runs.len().div_ceil(fan_in));
+        for chunk in runs.chunks(fan_in) {
+            checkpoint()?;
+            if chunk.len() == 1 {
+                next.push(chunk[0].clone());
+                continue;
+            }
+            let output = spill.next_run_path(label, direction);
+            merge_keyed_runs_to_run(chunk, &output, spill, checkpoint)?;
+            for input in chunk {
+                spill.remove_run(input)?;
+            }
+            next.push(output);
+        }
+        *runs = next;
+    }
+    Ok(())
+}
+
+fn keyed_run_count(path: &Path) -> Result<u64, GfError> {
+    use std::io::Read;
+    let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(storage_err)?);
+    let mut header = [0_u8; 20];
+    file.read_exact(&mut header).map_err(storage_err)?;
+    if &header[..8] != SPILL_RUN_MAGIC
+        || u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) != SPILL_RUN_VERSION
+    {
+        return Err(GfError::Storage(format!(
+            "adjacency spill run {} has invalid header",
+            path.display()
+        )));
+    }
+    Ok(u64::from_le_bytes(
+        header[12..20].try_into().expect("eight bytes"),
+    ))
+}
+
+fn merge_keyed_runs_to_run(
+    inputs: &[PathBuf],
+    output: &Path,
+    spill: &mut SpillSession,
+    checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
+) -> Result<(), GfError> {
+    use std::io::{BufWriter, Write};
+    let count = inputs.iter().try_fold(0_u64, |total, path| {
+        keyed_run_count(path).map(|count| total.saturating_add(count))
+    })?;
+    let bytes = 20_u64.saturating_add(count.saturating_mul(BYTES_PER_KEYED_ENTRY));
+    spill.account_write(bytes)?;
+    let mut writer =
+        BufWriter::with_capacity(1 << 20, std::fs::File::create(output).map_err(storage_err)?);
+    writer.write_all(SPILL_RUN_MAGIC).map_err(storage_err)?;
+    writer
+        .write_all(&SPILL_RUN_VERSION.to_le_bytes())
+        .map_err(storage_err)?;
+    writer
+        .write_all(&count.to_le_bytes())
+        .map_err(storage_err)?;
+    merge_keyed_runs(inputs, checkpoint, &mut |(key, edge, neighbor)| {
+        writer.write_all(&key.to_le_bytes()).map_err(storage_err)?;
+        writer.write_all(&edge.to_le_bytes()).map_err(storage_err)?;
+        writer
+            .write_all(&neighbor.to_le_bytes())
+            .map_err(storage_err)
+    })?;
+    writer.flush().map_err(storage_err)
+}
+
+fn merge_keyed_runs(
     runs: &[PathBuf],
     checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
-) -> Result<CsrIndex, GfError> {
+    emit: &mut dyn FnMut((u64, u64, u64)) -> Result<(), GfError>,
+) -> Result<(), GfError> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
     if runs.is_empty() {
-        return Ok(CsrIndex {
-            offsets: vec![0],
-            edge_ids: Vec::new(),
-            neighbor_ids: Vec::new(),
-        });
+        return Ok(());
     }
 
     let mut cursors: Vec<RunCursor> = runs
@@ -1102,12 +1784,6 @@ fn merge_keyed_runs_to_csr(
         }
     }
 
-    let mut csr = CsrIndex {
-        offsets: vec![0],
-        edge_ids: Vec::new(),
-        neighbor_ids: Vec::new(),
-    };
-    let mut current_node: Option<u64> = None;
     let mut seen = 0u64;
     while let Some(Reverse((key, edge, neighbor, idx))) = heap.pop() {
         if seen.is_multiple_of(65_536) {
@@ -1115,49 +1791,21 @@ fn merge_keyed_runs_to_csr(
         }
         seen += 1;
 
-        match current_node {
-            None => {
-                for _ in 0..key {
-                    csr.offsets.push(csr.edge_count());
-                }
-                current_node = Some(key);
-            }
-            Some(node) if key > node => {
-                // Close `node`, then emit empty rows for (node+1)..key.
-                csr.offsets.push(csr.edge_count());
-                let mut fill = node + 1;
-                while fill < key {
-                    csr.offsets.push(csr.edge_count());
-                    fill += 1;
-                }
-                current_node = Some(key);
-            }
-            Some(node) if key == node => {}
-            Some(node) => {
-                return Err(GfError::Storage(format!(
-                    "adjacency spill merge produced non-sorted keys ({node} then {key})"
-                )));
-            }
-        }
-
-        csr.edge_ids.push(edge);
-        csr.neighbor_ids.push(neighbor);
+        emit((key, edge, neighbor))?;
 
         cursors[idx].pull()?;
         if let Some((k, e, n)) = cursors[idx].current {
             heap.push(Reverse((k, e, n, idx)));
         }
     }
-    if current_node.is_some() {
-        csr.offsets.push(csr.edge_count());
-    }
-    Ok(csr)
+    Ok(())
 }
 
 fn stream_build_groups(
     project_dir: &Path,
     options: &AdjacencyBuildOptions,
     spill: &mut SpillSession,
+    metrics: &mut AdjacencyBuildMetrics,
     checkpoint: &mut dyn FnMut() -> Result<(), GfError>,
 ) -> Result<std::collections::BTreeMap<String, EntryGroup>, GfError> {
     spill.max_bytes = options.spill_max_bytes;
@@ -1185,6 +1833,7 @@ fn stream_build_groups(
                 None
             };
             for i in 0..batch.num_rows() {
+                metrics.source_rows = metrics.source_rows.saturating_add(1);
                 let entry = (src_ids.value(i), edge_ids.value(i), dst_ids.value(i));
                 groups
                     .get_mut(ALL_RELATIONS_STEM)
@@ -1465,7 +2114,7 @@ pub fn validate_adjacency_index_against(
         };
         let expected = csr_from_entries(expected_entries, row.direction);
         let path = csr_path(artifact_project_dir, &row.relation_type, row.direction);
-        if !path.exists() {
+        if !csr_artifact_exists(&path) {
             issues.push(AdjacencyValidationIssue::MissingCsr {
                 rel: row.relation_type.clone(),
                 direction: row.direction,
@@ -1579,7 +2228,7 @@ pub fn inspect_adjacency_index(project_dir: &Path) -> Result<AdjacencyInspection
         Vec::new()
     };
     let union_path = csr_path(project_dir, ALL_RELATIONS_STEM, Direction::Out);
-    if !union_path.exists() {
+    if !csr_artifact_exists(&union_path) {
         return Ok(AdjacencyInspection {
             source_generation,
             source_fingerprint,
@@ -1821,6 +2470,177 @@ mod tests {
             edge_ids: vec![10, 11, 12, 13],
             neighbor_ids: vec![1, 2, 0, 1],
         }
+    }
+
+    #[test]
+    fn sharded_csr_crosses_boundaries_and_rejects_missing_or_corrupt_shards() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!((reader.node_count(), reader.edge_count()), (3, 4));
+        for node in 0..expected.node_count() {
+            assert_eq!(
+                reader.row(node).unwrap(),
+                expected.row(node).iter().collect::<Vec<_>>()
+            );
+        }
+
+        let first = reader.root.join(&reader.manifest.shards[0].file);
+        let original = std::fs::read(&first).unwrap();
+        std::fs::write(&first, b"corrupt").unwrap();
+        assert!(reader.row(0).unwrap_err().to_string().contains("checksum"));
+        std::fs::write(&first, original).unwrap();
+        std::fs::remove_file(&first).unwrap();
+        assert!(
+            reader
+                .row(0)
+                .unwrap_err()
+                .to_string()
+                .contains("missing CSR shard")
+        );
+    }
+
+    #[test]
+    fn sequential_rows_reuse_only_the_current_authenticated_shard() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 8).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(reader.row(0).unwrap(), vec![(10, 1), (11, 2)]);
+        std::fs::remove_file(reader.root.join(&reader.manifest.shards[0].file)).unwrap();
+        assert_eq!(reader.row(2).unwrap(), vec![(12, 0), (13, 1)]);
+    }
+
+    #[test]
+    fn deterministic_rebuild_repairs_a_corrupt_stable_shard_set() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        std::fs::write(
+            reader.root.join(&reader.manifest.shards[0].file),
+            b"corrupt",
+        )
+        .unwrap();
+
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        assert_eq!(read_csr(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn failed_manifest_republish_does_not_delete_reused_live_shards() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let manifest_path = path.with_extension("csr.json");
+        let saved_manifest = directory.path().join("saved-manifest.json");
+        let expected = sample_csr();
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        std::fs::rename(&manifest_path, &saved_manifest).unwrap();
+        std::fs::create_dir(&manifest_path).unwrap();
+
+        assert!(write_sharded_csr(&path, &expected, 2).is_err());
+        std::fs::remove_dir(&manifest_path).unwrap();
+        std::fs::rename(&saved_manifest, &manifest_path).unwrap();
+        assert_eq!(read_csr(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn high_degree_row_spans_hard_capped_shards_in_order() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = CsrIndex {
+            offsets: vec![0, 7],
+            edge_ids: (10..17).collect(),
+            neighbor_ids: (20..27).collect(),
+        };
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(reader.manifest.shards.len(), 4);
+        assert!(
+            reader
+                .manifest
+                .shards
+                .iter()
+                .all(|shard| shard.edge_count <= 2)
+        );
+        assert!(
+            reader
+                .manifest
+                .shards
+                .iter()
+                .all(|shard| shard.first_node == 0)
+        );
+        assert_eq!(
+            reader.row(0).unwrap(),
+            expected.row(0).iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sparse_surrogate_gap_cannot_expand_one_shard_offsets() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let mut writer = ShardedCsrWriter::create(&path, 8, 2).unwrap();
+        writer.emit((0, 1, 100)).unwrap();
+        writer.emit((1_000_000, 2, 0)).unwrap();
+        let (shards, _, peak_nodes) = writer.finish(1_000_001).unwrap();
+        assert_eq!(shards, 2);
+        assert!(peak_nodes <= 2);
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        assert_eq!(reader.row(0).unwrap(), vec![(1, 100)]);
+        assert_eq!(reader.row(999_999).unwrap(), Vec::<(u64, u64)>::new());
+        assert_eq!(reader.row(1_000_000).unwrap(), vec![(2, 0)]);
+    }
+
+    #[test]
+    fn legacy_single_batch_csr_migrates_to_shards_on_rebuild() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("KNOWS.out.csr");
+        let expected = sample_csr();
+
+        write_csr(&path, &expected).unwrap();
+        assert!(!sharded_csr_exists(&path));
+        assert_eq!(read_csr(&path).unwrap(), expected);
+
+        write_sharded_csr(&path, &expected, 2).unwrap();
+        let shard_root = ShardedCsrIndex::open(&path).unwrap().root;
+        assert!(sharded_csr_exists(&path));
+        assert_eq!(read_csr(&path).unwrap(), expected);
+
+        write_csr(&path, &expected).unwrap();
+        assert!(!shard_root.exists());
+        assert!(!sharded_csr_exists(&path));
+        assert_eq!(read_csr(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn legacy_cleanup_rejects_parent_directory_manifest_paths() {
+        let directory = TempDir::new().unwrap();
+        let adjacency = directory.path().join("adjacency");
+        std::fs::create_dir(&adjacency).unwrap();
+        let sentinel = directory.path().join("must-remain");
+        std::fs::write(&sentinel, b"safe").unwrap();
+        let path = adjacency.join("KNOWS.out.csr");
+        let malicious = CsrShardManifest {
+            format: "graphforge.csr-shards".into(),
+            version: SHARDED_CSR_VERSION,
+            node_count: 0,
+            edge_count: 0,
+            shard_dir: "..".into(),
+            shards: Vec::new(),
+        };
+        std::fs::write(
+            path.with_extension("csr.json"),
+            serde_json::to_vec(&malicious).unwrap(),
+        )
+        .unwrap();
+
+        write_csr(&path, &sample_csr()).unwrap();
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"safe");
     }
 
     #[test]
@@ -2206,18 +3026,19 @@ mod tests {
         // KNOWS out/in + _all out/in.
         assert_eq!(rows.len(), 4);
 
-        let knows_out = std::fs::read(csr_path(dir.path(), "KNOWS", Direction::Out)).unwrap();
-        let all_in =
-            std::fs::read(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::In)).unwrap();
+        let knows_path = csr_path(dir.path(), "KNOWS", Direction::Out);
+        let all_in_path = csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::In);
+        let knows_out = std::fs::read(knows_path.with_extension("csr.json")).unwrap();
+        let all_in = std::fs::read(all_in_path.with_extension("csr.json")).unwrap();
 
         // Rebuild: byte-identical CSR files (R-ADJ-2).
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
         assert_eq!(
-            std::fs::read(csr_path(dir.path(), "KNOWS", Direction::Out)).unwrap(),
+            std::fs::read(knows_path.with_extension("csr.json")).unwrap(),
             knows_out
         );
         assert_eq!(
-            std::fs::read(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::In)).unwrap(),
+            std::fs::read(all_in_path.with_extension("csr.json")).unwrap(),
             all_in
         );
 
@@ -2447,7 +3268,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-        std::fs::write(csr_path(dir.path(), "KNOWS", Direction::In), b"garbage").unwrap();
+        let path = csr_path(dir.path(), "KNOWS", Direction::In);
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        std::fs::write(
+            reader.root.join(&reader.manifest.shards[0].file),
+            b"garbage",
+        )
+        .unwrap();
 
         let inspection = inspect_adjacency_index(dir.path()).unwrap();
         assert_eq!(inspection.state, AdjacencyFreshnessState::Incompatible);
@@ -2466,12 +3293,17 @@ mod tests {
             match case {
                 "manifest" => std::fs::write(manifest_path(dir.path()), b"corrupt").unwrap(),
                 "missing-union" => {
-                    std::fs::remove_file(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out))
-                        .unwrap();
+                    std::fs::remove_file(
+                        csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out)
+                            .with_extension("csr.json"),
+                    )
+                    .unwrap();
                 }
                 "corrupt-union" => {
+                    let path = csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out);
+                    let reader = ShardedCsrIndex::open(&path).unwrap();
                     std::fs::write(
-                        csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out),
+                        reader.root.join(&reader.manifest.shards[0].file),
                         b"corrupt",
                     )
                     .unwrap();
@@ -2605,7 +3437,13 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-        std::fs::write(csr_path(dir.path(), "KNOWS", Direction::In), b"garbage").unwrap();
+        let path = csr_path(dir.path(), "KNOWS", Direction::In);
+        let reader = ShardedCsrIndex::open(&path).unwrap();
+        std::fs::write(
+            reader.root.join(&reader.manifest.shards[0].file),
+            b"garbage",
+        )
+        .unwrap();
 
         let issues = validate_adjacency_index(dir.path()).unwrap();
         assert_eq!(issues.len(), 1);
@@ -2621,7 +3459,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_diamond(dir.path());
         build_adjacency_index(dir.path(), BUILD_TS).unwrap();
-        std::fs::remove_file(csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out)).unwrap();
+        std::fs::remove_file(
+            csr_path(dir.path(), ALL_RELATIONS_STEM, Direction::Out).with_extension("csr.json"),
+        )
+        .unwrap();
 
         let issues = validate_adjacency_index(dir.path()).unwrap();
         assert_eq!(
@@ -2875,8 +3716,11 @@ mod tests {
             spill_dir: None,
             spill_max_bytes: None,
             memory_budget_bytes: None,
+            shard_max_edges: 2,
+            shard_max_nodes: 2,
+            merge_fan_in: 2,
         };
-        build_adjacency_index_into_with_options(
+        let (_, metrics) = build_adjacency_index_into_with_metrics(
             dir.path(),
             dir.path(),
             BUILD_TS,
@@ -2884,6 +3728,16 @@ mod tests {
             &mut || Ok(()),
         )
         .unwrap();
+        assert_eq!(metrics.source_rows, 6);
+        assert!(metrics.spill_runs >= 8);
+        assert!(metrics.csr_shards >= 4);
+        assert!(metrics.peak_shard_edges <= 2);
+        assert!(metrics.peak_shard_nodes <= 2);
+        assert!(sharded_csr_exists(&csr_path(
+            dir.path(),
+            "KNOWS",
+            Direction::Out
+        )));
 
         assert_eq!(
             read_csr(&csr_path(dir.path(), "KNOWS", Direction::Out)).unwrap(),
@@ -2924,6 +3778,9 @@ mod tests {
             spill_dir: Some(spill.clone()),
             spill_max_bytes: None,
             memory_budget_bytes: None,
+            shard_max_edges: 2,
+            shard_max_nodes: 2,
+            merge_fan_in: 2,
         };
         let mut checkpoints = 0usize;
         let err = build_adjacency_index_into_with_options(
@@ -2982,6 +3839,9 @@ mod tests {
             spill_dir: None,
             spill_max_bytes: Some(1), // impossible for any real run file
             memory_budget_bytes: None,
+            shard_max_edges: 2,
+            shard_max_nodes: 2,
+            merge_fan_in: 2,
         };
         let err = build_adjacency_index_into_with_options(
             dir.path(),
