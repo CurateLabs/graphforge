@@ -221,12 +221,13 @@ changes results — only speed.
 indexes/
 └── adjacency/
     ├── index_manifest.parquet
-    ├── WORKS_AT.out.csr
-    ├── WORKS_AT.in.csr
-    ├── OWNS.out.csr
-    ├── OWNS.in.csr
-    ├── _all.out.csr          # union across relation types (for via=None)
-    └── _all.in.csr
+    ├── WORKS_AT.out.csr.json       # versioned shard-set manifest
+    ├── WORKS_AT.out.csr.shards-<digest>.d/
+    │   ├── 00000000000000000000.csr
+    │   └── ...
+    ├── WORKS_AT.in.csr.json
+    ├── OWNS.{out,in}.csr.json
+    └── _all.{out,in}.csr.json      # union across relation types
 ```
 
 The builder (`graphforge_storage::adjacency::build_adjacency_index`) writes one `{out, in}` pair per
@@ -249,14 +250,15 @@ make the result stale, never falsely fresh.
 | `node_count` | `UInt64` | Number of source nodes covered (CSR row count) |
 | `edge_count` | `UInt64` | Number of `(edge, neighbor)` entries |
 
-**CSR file (`<REL_TYPE>.<dir>.csr`)** — single-batch Arrow IPC, one column, one row per
-surrogate `node_id ∈ 0..node_count`:
+**Sharded CSR (`<REL_TYPE>.<dir>.csr.json`)** — a versioned JSON manifest names an
+immutable, content-addressed shard directory. Each bounded shard is Arrow IPC with one
+column and covers a contiguous local surrogate range:
 
 | Column | Arrow type | Notes |
 |---|---|---|
 | `adjacency` | `LargeList<Struct { edge_id: UInt64, neighbor_id: UInt64 }>` | Row `i` holds the adjacency entries of surrogate `node_id = i`, in CSR order |
 
-This is the CSR structure in its idiomatic Arrow encoding — the two logical arrays cannot be
+Within each shard this is the CSR structure in its idiomatic Arrow encoding — the two logical arrays cannot be
 two top-level columns because a RecordBatch requires equal column lengths. The list's offsets
 buffer **is** the CSR offsets array (length `node_count + 1`, `Int64`, starting at 0,
 monotone), and the flattened struct child **is** the targets array (length `edge_count`):
@@ -267,13 +269,16 @@ Conventions:
 - **Empty graph**: a zero-row batch — logical `offsets == [0]`, empty targets. The offsets
   array is never empty.
 - **Node with no neighbors**: an empty list (`offsets[i] == offsets[i+1]`).
-- CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count` simply
-  have no entries.
+- The shard manifest records format/version, total node/edge counts, ordered boundaries,
+  per-shard counts, and SHA-256 checksums. A row may span consecutive shards when a
+  high-degree vertex exceeds the configured hard edge cap; readers concatenate those
+  fragments in deterministic `(key, edge_id)` order.
+- Logical CSR rows cover exactly `node_id ∈ 0..node_count`; surrogates beyond `node_count`
+  have no entries. Empty interior rows need no physical shard bytes.
 - In-memory consumers (`graphforge_exec::AdjacencyProvider`) keep the logical
-  `offsets` / parallel `edge_ids`+`neighbor_ids` model on a persisted hit
-  (#340 CSR-native views); the list encoding remains a file-format detail
-  (`graphforge_storage::adjacency::CsrIndex`). Scan-build fallback still
-  materializes a hash map for oracle parity.
+  a `ShardedCsrIndex` on a persisted hit and materialize only the requested bounded
+  shard row. Legacy single-batch `.csr` files remain readable and migrate on rebuild.
+  Scan-build fallback still materializes a hash map for oracle parity.
 
 ### Rebuild and versioning semantics
 
@@ -302,8 +307,16 @@ Conventions:
   tie-break makes the CSR bytes reproducible from `topology/` alone. `_all.{out,in}.csr` are
   the same sorts over the union of all typed files plus `_exploratory.parquet`. The manifest's
   `built_at` is excluded from the determinism guarantee.
-- **Build ordering.** Builders write all CSR files first and `index_manifest.parquet`
-  **last**, so a torn build reads as stale (absent/old manifest), never as fresh.
+- **Bounded build.** Projected Parquet batches feed sorted spill runs. Bounded-fan-in merge
+  passes (64 runs by default) emit rows directly into hard-capped shard sinks; they never reconstruct complete edge/neighbor
+  arrays. Both edge entries and local offset rows have hard shard caps.
+  `AdjacencyBuildMetrics` exposes source rows, spill runs/bytes, shard count, and peak
+  shard entries/rows for scale evidence.
+- **Build ordering.** Builders write immutable shard directories, atomically publish each
+  shard-set manifest, and write `index_manifest.parquet` **last**. The public facade builds
+  in a same-filesystem private directory, validates it, then swaps the complete adjacency
+  directory under its visibility lock. Cancellation or failure leaves the prior directory
+  active and removes unpublished spill/build state.
 - **Loader semantics** (`graphforge_exec::PersistentAdjacencyProvider`).
   Freshness requires a non-empty manifest whose graph source fingerprint
   equals the pinned graph participant. Fresh + row present ⇒ load

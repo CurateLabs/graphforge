@@ -377,6 +377,9 @@ impl GraphForge {
             spill_dir,
             spill_max_bytes: policy.spill_max_bytes,
             memory_budget_bytes: Some(policy.memory_budget_bytes),
+            shard_max_edges: graphforge_storage::adjacency::DEFAULT_CSR_SHARD_EDGES,
+            shard_max_nodes: graphforge_storage::adjacency::DEFAULT_CSR_SHARD_NODES,
+            merge_fan_in: graphforge_storage::adjacency::DEFAULT_ADJACENCY_MERGE_FAN_IN,
         }
         .effective()
     }
