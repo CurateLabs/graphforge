@@ -14,6 +14,7 @@ OP_ROLLBACK = "018f0f4e-7b8c-7000-8000-000000007502"
 OP_DROP = "018f0f4e-7b8c-7000-8000-000000007503"
 OP_CLI = "018f0f4e-7b8c-7000-8000-000000007504"
 OP_CERT = "018f0f4e-7b8c-7000-8000-000000007560"
+OP_CERT_CHECKPOINT = "018f0f4e-7b8c-7000-8000-000000007562"
 NODE_BULK = "018f0f4e-7b8c-7000-8000-000000007511"
 NODE_GHOST = "018f0f4e-7b8c-7000-8000-000000007512"
 NODE_CERT = "018f0f4e-7b8c-7000-8000-000000007561"
@@ -125,6 +126,17 @@ def check_certification_observation_parity(project: Path) -> None:
     reopened = g.GraphForge(str(project))
     again = reopened.project_open_recovery()
     assert again["selected_generation_uuid"] == generation
+    names = (
+        reopened.execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+        .column("name")
+        .to_pylist()
+    )
+    assert "Cert" in names
+    reopened.checkpoint(name="certification", idempotency_key=OP_CERT_CHECKPOINT)
+    reachability = reopened.inspect_project_reachability()
+    assert generation in reachability["checkpoint_roots"]
+    cleanup = reopened.preview_project_cleanup()
+    assert cleanup["selected_generation_uuid"] == generation
     code, stdout, _stderr = _cli_execute(
         [
             "gf",
