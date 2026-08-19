@@ -47,11 +47,15 @@ pub struct PortableV2ExportProgress {
 }
 #[derive(Debug, Clone)]
 struct PlannedFile {
-    source: PathBuf,
+    source: PlannedSource,
     path: String,
     length: u64,
     digest: [u8; 32],
-    identity: Identity,
+}
+#[derive(Debug, Clone)]
+enum PlannedSource {
+    File { path: PathBuf, identity: Identity },
+    Control(Vec<u8>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Identity {
@@ -135,6 +139,34 @@ struct States {
     compatibility: &'static str,
     authenticity: &'static str,
 }
+#[derive(Serialize)]
+struct RuntimeGenerationMap<'a> {
+    contract: &'static str,
+    capabilities: Vec<RuntimeCapability>,
+    participants: &'a [RuntimeParticipant],
+    graph_tree: Option<RuntimeGraphTree>,
+}
+#[derive(Serialize)]
+struct RuntimeCapability {
+    capability_id: String,
+    capability_version: u32,
+}
+#[derive(Serialize)]
+struct RuntimeParticipant {
+    participant_id: String,
+    capability_id: String,
+    capability_version: u32,
+    record_family_id: String,
+    record_version: u32,
+    encoding: String,
+    schema_fingerprint: String,
+    row_count: u64,
+}
+#[derive(Serialize)]
+struct RuntimeGraphTree {
+    component_id: &'static str,
+    inventory_participant_id: String,
+}
 
 /// Plan every canonical participant of one already-pinned generation.
 #[expect(
@@ -150,6 +182,8 @@ pub fn plan_complete_portable_v2(
     let mut files = Vec::new();
     let mut components = Vec::new();
     let mut roots = Vec::new();
+    let mut runtime_participants = Vec::new();
+    let mut graph_inventory_participant = None;
     let mut total = 0;
     for d in g.participant_descriptors()? {
         let id = portable_id(&format!("{}-{}", d.capability_id, d.record_family_id));
@@ -168,6 +202,21 @@ pub fn plan_complete_portable_v2(
         };
         files.push(f);
         roots.push(id.clone());
+        if d.capability_id == crate::GRAPH_CAPABILITY_ID
+            && d.record_family_id == crate::GRAPH_FILES_FAMILY
+        {
+            graph_inventory_participant = Some(id.clone());
+        }
+        runtime_participants.push(RuntimeParticipant {
+            participant_id: id.clone(),
+            capability_id: d.capability_id,
+            capability_version: d.capability_version,
+            record_family_id: d.record_family_id,
+            record_version: d.record_version,
+            encoding: d.encoding,
+            schema_fingerprint: hex(d.schema_fingerprint),
+            row_count: d.row_count,
+        });
         components.push(Component {
             kind: kind.into(),
             participant_id: id,
@@ -205,6 +254,51 @@ pub fn plan_complete_portable_v2(
             files: owned,
         });
     }
+    runtime_participants.sort_by(|left, right| {
+        left.participant_id
+            .as_bytes()
+            .cmp(right.participant_id.as_bytes())
+    });
+    let runtime_map = RuntimeGenerationMap {
+        contract: "graphforge-runtime-generation-map/1",
+        capabilities: g
+            .capabilities()
+            .into_iter()
+            .map(|capability| RuntimeCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect(),
+        participants: &runtime_participants,
+        graph_tree: graph_inventory_participant.map(|inventory_participant_id| RuntimeGraphTree {
+            component_id: "graph-files",
+            inventory_participant_id,
+        }),
+    };
+    let runtime_bytes = canonical(&serde_json::to_value(runtime_map).map_err(storage)?)?;
+    if runtime_bytes.len() as u64 > limits.max_manifest_bytes {
+        return Err(limit("runtime compatibility map exceeds configured limit"));
+    }
+    let runtime_path =
+        "data/components/compatibility/graphforge-runtime-map/runtime-generation.json";
+    let runtime_file = inline_control(runtime_path, runtime_bytes, limits, &mut total)?;
+    let runtime_component_file = ComponentFile {
+        media_type: "application/vnd.graphforge.runtime-generation+json".into(),
+        path: runtime_path.into(),
+        length: runtime_file.length,
+        sha256: hex(runtime_file.digest),
+    };
+    files.push(runtime_file);
+    roots.push("graphforge-runtime-map".into());
+    components.push(Component {
+        kind: "compatibility".into(),
+        participant_id: "graphforge-runtime-map".into(),
+        required_dependencies: runtime_participants
+            .iter()
+            .map(|participant| participant.participant_id.clone())
+            .collect(),
+        files: vec![runtime_component_file],
+    });
     if files.len() as u64 > limits.max_entries {
         return Err(limit("entry count exceeds configured limit"));
     }
@@ -551,11 +645,35 @@ fn inspect(
         return Err(err("GF_SOURCE_CHANGED", "source changed during planning"));
     }
     Ok(PlannedFile {
-        source: source.into(),
+        source: PlannedSource::File {
+            path: source.into(),
+            identity: before,
+        },
         path: path.into(),
         length: bytes_read,
         digest: digest.finalize().into(),
-        identity: before,
+    })
+}
+fn inline_control(
+    path: &str,
+    bytes: Vec<u8>,
+    limits: PortableV2ExportLimits,
+    total: &mut u64,
+) -> Result<PlannedFile, GfError> {
+    if path.len() > limits.max_path_bytes || bytes.len() as u64 > limits.max_entry_bytes {
+        return Err(limit("control entry exceeds configured limit"));
+    }
+    *total = total
+        .checked_add(bytes.len() as u64)
+        .ok_or_else(|| limit("size overflow"))?;
+    if *total > limits.max_total_bytes {
+        return Err(limit("total too large"));
+    }
+    Ok(PlannedFile {
+        path: path.into(),
+        length: bytes.len() as u64,
+        digest: Sha256::digest(&bytes).into(),
+        source: PlannedSource::Control(bytes),
     })
 }
 fn copy(
@@ -565,15 +683,31 @@ fn copy(
     cancelled: &impl Fn() -> bool,
     mut tick: impl FnMut(u64),
 ) -> Result<(), GfError> {
-    let mut input = open_source_no_follow(&planned.source)?;
-    if identity(&input.metadata().map_err(storage)?)? != planned.identity {
-        return Err(err("GF_SOURCE_CHANGED", "source changed"));
-    }
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(target)
         .map_err(storage)?;
+    if let PlannedSource::Control(bytes) = &planned.source {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        output.write_all(bytes).map_err(storage)?;
+        output.sync_all().map_err(storage)?;
+        tick(bytes.len() as u64);
+        return Ok(());
+    }
+    let PlannedSource::File {
+        path,
+        identity: planned_identity,
+    } = &planned.source
+    else {
+        unreachable!("control source returned above")
+    };
+    let mut input = open_source_no_follow(path)?;
+    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
+        return Err(err("GF_SOURCE_CHANGED", "source changed"));
+    }
     let mut buffer = vec![0; size];
     let mut digest = Sha256::new();
     let mut bytes_read = 0;
@@ -593,7 +727,7 @@ fn copy(
     output.sync_all().map_err(storage)?;
     if bytes_read != planned.length
         || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != planned.identity
+        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -607,8 +741,24 @@ fn stream(
     cancelled: &impl Fn() -> bool,
     mut tick: impl FnMut(u64),
 ) -> Result<(), GfError> {
-    let mut input = open_source_no_follow(&planned.source)?;
-    if identity(&input.metadata().map_err(storage)?)? != planned.identity {
+    if let PlannedSource::Control(bytes) = &planned.source {
+        if cancelled() {
+            return Err(err("GF_CANCELLED", "portable export cancelled"));
+        }
+        out.write_all(bytes).map_err(storage)?;
+        transport.update(bytes);
+        tick(bytes.len() as u64);
+        return Ok(());
+    }
+    let PlannedSource::File {
+        path,
+        identity: planned_identity,
+    } = &planned.source
+    else {
+        unreachable!("control source returned above")
+    };
+    let mut input = open_source_no_follow(path)?;
+    if identity(&input.metadata().map_err(storage)?)? != *planned_identity {
         return Err(err("GF_SOURCE_CHANGED", "source changed"));
     }
     let mut buffer = vec![0; size];
@@ -630,7 +780,7 @@ fn stream(
     }
     if bytes_read != planned.length
         || <[u8; 32]>::from(digest.finalize()) != planned.digest
-        || identity(&input.metadata().map_err(storage)?)? != planned.identity
+        || identity(&input.metadata().map_err(storage)?)? != *planned_identity
     {
         return Err(err("GF_SOURCE_CHANGED", "source changed during export"));
     }
@@ -1082,10 +1232,37 @@ mod tests {
         .unwrap();
         assert_eq!(a.package_digest, b.package_digest);
         assert_eq!(b, c);
-        assert_eq!(fs::read(first).unwrap(), fs::read(second).unwrap());
+        assert_eq!(fs::read(&first).unwrap(), fs::read(second).unwrap());
         assert_eq!(&fs::read(expanded.join("bagit.txt")).unwrap(), BAGIT);
         assert!(!expanded.join("CURRENT").exists());
         assert!(!expanded.join("lease.lock").exists());
+        let expanded_stage = out.path().join("expanded-stage");
+        let bundle_stage = out.path().join("bundle-stage");
+        let expanded_report = crate::materialize_verified_portable_v2(
+            &expanded,
+            &expanded_stage,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        let bundle_report = crate::materialize_verified_portable_v2(
+            &first,
+            &bundle_stage,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert_eq!(expanded_report.package_digest, bundle_report.package_digest);
+        assert_eq!(tree_bytes(&expanded_stage), tree_bytes(&bundle_stage));
+        let runtime =
+            fs::read(expanded_stage.join(
+                "data/components/compatibility/graphforge-runtime-map/runtime-generation.json",
+            ))
+            .unwrap();
+        let runtime: Value = serde_json::from_slice(&runtime).unwrap();
+        assert_eq!(runtime["contract"], "graphforge-runtime-generation-map/1");
+        assert!(runtime.get("host_path").is_none());
+        assert!(runtime.get("secret").is_none());
     }
 
     #[test]
@@ -1148,7 +1325,14 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(), b"attacker");
         assert_eq!(fs::read_dir(out.path()).unwrap().count(), 1);
 
-        let source = &plan.files[0].source;
+        let source = plan
+            .files
+            .iter()
+            .find_map(|file| match &file.source {
+                PlannedSource::File { path, .. } => Some(path),
+                PlannedSource::Control(_) => None,
+            })
+            .unwrap();
         let original = fs::read(source).unwrap();
         fs::write(source, vec![b'x'; original.len()]).unwrap();
         let mutated = out.path().join("mutated.gfpb");
@@ -1247,5 +1431,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::InvalidStructure);
         assert_eq!(total, 0);
+    }
+
+    fn tree_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(root: &Path, directory: &Path, output: &mut Vec<(String, Vec<u8>)>) {
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    walk(root, &entry.path(), output);
+                } else {
+                    output.push((
+                        entry
+                            .path()
+                            .strip_prefix(root)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace(std::path::MAIN_SEPARATOR, "/"),
+                        fs::read(entry.path()).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut output = Vec::new();
+        walk(root, root, &mut output);
+        output.sort_by(|left, right| left.0.cmp(&right.0));
+        output
     }
 }

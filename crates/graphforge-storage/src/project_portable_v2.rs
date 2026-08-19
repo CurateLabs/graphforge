@@ -11,12 +11,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
+const RUNTIME_MAP_PATH: &str =
+    "data/components/compatibility/graphforge-runtime-map/runtime-generation.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
 
@@ -212,6 +214,38 @@ struct ManifestFile {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RuntimeGenerationMap {
+    contract: String,
+    capabilities: Vec<RuntimeCapability>,
+    participants: Vec<RuntimeParticipant>,
+    graph_tree: Option<RuntimeGraphTree>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCapability {
+    capability_id: String,
+    capability_version: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeParticipant {
+    participant_id: String,
+    capability_id: String,
+    capability_version: u32,
+    record_family_id: String,
+    record_version: u32,
+    encoding: String,
+    schema_fingerprint: String,
+    row_count: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeGraphTree {
+    component_id: String,
+    inventory_participant_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Requirements {
     capabilities: Vec<String>,
     dependency_rule: String,
@@ -266,6 +300,318 @@ pub fn verify_portable_v2(
     }
 }
 
+/// Fully verify a package, then stream its authenticated component entries
+/// into a new private directory for an importer. The destination is removed on
+/// every error and is never a project publication boundary.
+pub fn materialize_verified_portable_v2(
+    source: impl AsRef<Path>,
+    destination: impl AsRef<Path>,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<PortableV2Report, PortableV2Error> {
+    let source = source.as_ref();
+    let destination = destination.as_ref();
+    if destination.exists() {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Io,
+            "materialization destination exists",
+        ));
+    }
+    let before = fs::metadata(source)
+        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "source unavailable"))?;
+    let report = verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled)?;
+    fs::create_dir(destination).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create materialization")
+    })?;
+    let result = if before.is_dir() {
+        materialize_expanded(source, destination, limits, cancelled)
+    } else {
+        materialize_bundle(source, destination, limits, cancelled)
+    };
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(destination);
+        return Err(error);
+    }
+    let after = fs::metadata(source).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::ConcurrentMutation,
+            "source disappeared",
+        )
+    })?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        let _ = fs::remove_dir_all(destination);
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::ConcurrentMutation,
+            "source changed after verification",
+        ));
+    }
+    let after_report =
+        verify_portable_v2(source, PortableV2Mode::Full, limits, cancelled).map_err(|_| {
+            PortableV2Error::new(
+                PortableV2ErrorCode::ConcurrentMutation,
+                "source changed during materialization",
+            )
+        });
+    let after_report = match after_report {
+        Ok(after_report) => after_report,
+        Err(error) => {
+            let _ = fs::remove_dir_all(destination);
+            return Err(error);
+        }
+    };
+    if report.package_digest != after_report.package_digest
+        || report.transport_digest != after_report.transport_digest
+    {
+        let _ = fs::remove_dir_all(destination);
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::ConcurrentMutation,
+            "source changed during materialization",
+        ));
+    }
+    Ok(report)
+}
+
+fn materialize_expanded(
+    source: &Path,
+    destination: &Path,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut paths = Vec::new();
+    walk(source, source, &mut paths, limits, cancelled)?;
+    for relative in paths
+        .into_iter()
+        .filter(|path| path.starts_with("data/components/"))
+    {
+        check_cancel(cancelled)?;
+        let input_path = source.join(&relative);
+        let before = fs::metadata(&input_path).map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stat entry")
+        })?;
+        let output_path = destination.join(&relative);
+        create_materialized_parent(&output_path, &relative)?;
+        let mut input = File::open(&input_path).map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot open entry")
+        })?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .map_err(|_| {
+                PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot stage entry")
+            })?;
+        copy_materialized(&mut input, &mut output, limits.copy_buffer_bytes, cancelled)?;
+        output.sync_all().map_err(|_| {
+            PortableV2Error::at(PortableV2ErrorCode::Io, &relative, "cannot sync entry")
+        })?;
+        let after = fs::metadata(&input_path).map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                &relative,
+                "entry disappeared",
+            )
+        })?;
+        if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::ConcurrentMutation,
+                &relative,
+                "entry changed during materialization",
+            ));
+        }
+    }
+    sync_materialized_tree(destination)
+}
+
+fn materialize_bundle(
+    source: &Path,
+    destination: &Path,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut input = File::open(source)
+        .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot reopen bundle"))?;
+    let mut pending_pax = None;
+    loop {
+        check_cancel(cancelled)?;
+        let mut header = [0u8; 512];
+        input.read_exact(&mut header).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated bundle")
+        })?;
+        if header.iter().all(|byte| *byte == 0) {
+            let mut second = [0u8; 512];
+            input.read_exact(&mut second).map_err(|_| {
+                PortableV2Error::new(
+                    PortableV2ErrorCode::InvalidStructure,
+                    "truncated end marker",
+                )
+            })?;
+            break;
+        }
+        let size = parse_octal(&header[124..136])?;
+        let raw_path = header_path(&header)?;
+        if header[156] == b'x' {
+            let bytes = read_unhashed_payload(&mut input, size, limits.max_path_bytes + 32)?;
+            pending_pax = Some(parse_pax(std::str::from_utf8(&bytes).map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::InvalidPath, "PAX path is not UTF-8")
+            })?)?);
+            continue;
+        }
+        let path = pending_pax.take().unwrap_or(raw_path);
+        if path.starts_with("data/components/") {
+            let output_path = destination.join(&path);
+            create_materialized_parent(&output_path, &path)?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output_path)
+                .map_err(|_| {
+                    PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot stage entry")
+                })?;
+            copy_exact_materialized(
+                &mut input,
+                &mut output,
+                size,
+                limits.copy_buffer_bytes,
+                cancelled,
+            )?;
+            output.sync_all().map_err(|_| {
+                PortableV2Error::at(PortableV2ErrorCode::Io, &path, "cannot sync entry")
+            })?;
+        } else {
+            skip_exact(&mut input, size, limits.copy_buffer_bytes, cancelled)?;
+        }
+        skip_padding(&mut input, size)?;
+    }
+    sync_materialized_tree(destination)
+}
+
+fn create_materialized_parent(path: &Path, entry: &str) -> Result<(), PortableV2Error> {
+    fs::create_dir_all(path.parent().expect("component entry has a parent")).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Io,
+            entry,
+            "cannot create staged parent",
+        )
+    })
+}
+fn copy_materialized(
+    input: &mut File,
+    output: &mut impl Write,
+    buffer_size: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut buffer = vec![0; buffer_size];
+    loop {
+        check_cancel(cancelled)?;
+        let count = input
+            .read(&mut buffer)
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read entry"))?;
+        if count == 0 {
+            return Ok(());
+        }
+        output
+            .write_all(&buffer[..count])
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
+    }
+}
+fn copy_exact_materialized(
+    input: &mut File,
+    output: &mut impl Write,
+    length: u64,
+    buffer_size: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut remaining = length;
+    let mut buffer = vec![0; buffer_size];
+    while remaining > 0 {
+        check_cancel(cancelled)?;
+        let count = usize::try_from(remaining.min(buffer_size as u64)).unwrap();
+        input.read_exact(&mut buffer[..count]).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated payload")
+        })?;
+        output
+            .write_all(&buffer[..count])
+            .map_err(|_| PortableV2Error::new(PortableV2ErrorCode::Io, "cannot stage entry"))?;
+        remaining -= count as u64;
+    }
+    Ok(())
+}
+fn skip_exact(
+    input: &mut File,
+    length: u64,
+    buffer_size: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), PortableV2Error> {
+    let mut sink = std::io::sink();
+    copy_exact_materialized(input, &mut sink, length, buffer_size, cancelled)
+}
+fn skip_padding(input: &mut File, length: u64) -> Result<(), PortableV2Error> {
+    let padding = (512 - length % 512) % 512;
+    let mut bytes = [0u8; 512];
+    input
+        .read_exact(&mut bytes[..padding as usize])
+        .map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::InvalidStructure, "truncated padding")
+        })?;
+    Ok(())
+}
+fn read_unhashed_payload(
+    input: &mut File,
+    length: u64,
+    limit: usize,
+) -> Result<Vec<u8>, PortableV2Error> {
+    if length > limit as u64 {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "PAX path exceeds limit",
+        ));
+    }
+    let length = usize::try_from(length).map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "PAX path exceeds limit")
+    })?;
+    let mut bytes = vec![0; length];
+    input.read_exact(&mut bytes).map_err(|_| {
+        PortableV2Error::new(
+            PortableV2ErrorCode::InvalidStructure,
+            "truncated PAX payload",
+        )
+    })?;
+    skip_padding(input, length as u64)?;
+    Ok(bytes)
+}
+fn sync_materialized_tree(root: &Path) -> Result<(), PortableV2Error> {
+    let mut directories = vec![root.to_owned()];
+    let mut index = 0;
+    while index < directories.len() {
+        for entry in fs::read_dir(&directories[index]).map_err(|_| {
+            PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read staged directory")
+        })? {
+            let entry = entry.map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "cannot read staged entry")
+            })?;
+            if entry
+                .file_type()
+                .map_err(|_| {
+                    PortableV2Error::new(PortableV2ErrorCode::Io, "cannot inspect staged entry")
+                })?
+                .is_dir()
+            {
+                directories.push(entry.path());
+            }
+        }
+        index += 1;
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        File::open(directory)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| {
+                PortableV2Error::new(PortableV2ErrorCode::Io, "cannot sync staged directory")
+            })?;
+    }
+    Ok(())
+}
+
 fn verify_expanded(
     root: &Path,
     mode: PortableV2Mode,
@@ -304,7 +650,7 @@ fn verify_expanded(
             path,
             length,
             limits.copy_buffer_bytes,
-            retained(path),
+            retained_limit(path, limits),
             cancelled,
         )?;
         let after = fs::metadata(&full).map_err(|_| {
@@ -501,7 +847,7 @@ fn verify_bundle(
             size,
             &mut transport,
             limits.copy_buffer_bytes,
-            retained(&entry_path),
+            retained_limit(&entry_path, limits),
             cancelled,
         )?;
         entries.push(Entry {
@@ -599,6 +945,7 @@ fn validate_package(
     }
     validate_semantics(&manifest, limits)?;
     validate_bag_manifests(&map, &manifest)?;
+    validate_runtime_map(&map, &manifest, limits)?;
     let full = mode == PortableV2Mode::Full;
     Ok(PortableV2Report {
         contract: "graphforge-portable-verify/2",
@@ -966,6 +1313,137 @@ fn validate_bag_manifests(
     Ok(())
 }
 
+fn validate_runtime_map(
+    map: &BTreeMap<&str, &Entry>,
+    manifest: &Manifest,
+    limits: PortableV2Limits,
+) -> Result<(), PortableV2Error> {
+    let Some(descriptor) = manifest
+        .components
+        .iter()
+        .flat_map(|component| &component.files)
+        .find(|file| file.media_type == "application/vnd.graphforge.runtime-generation+json")
+    else {
+        return Ok(());
+    };
+    if descriptor.path != RUNTIME_MAP_PATH || descriptor.length > limits.max_manifest_bytes {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            &descriptor.path,
+            "runtime map descriptor",
+        ));
+    }
+    let bytes = read_entry_bytes_from_map(map, RUNTIME_MAP_PATH)?;
+    let (value, runtime) = decode_runtime_map(&bytes)?;
+    if serde_json::to_vec(&value).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime map canonicalization",
+        )
+    })? != bytes
+        || runtime.contract != "graphforge-runtime-generation-map/1"
+        || runtime.participants.len() as u64 > limits.max_components
+        || runtime.capabilities.len() > 256
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime map contract",
+        ));
+    }
+    let component_ids: BTreeSet<_> = manifest
+        .components
+        .iter()
+        .map(|component| component.participant_id.as_str())
+        .collect();
+    let mut prior = None;
+    let mut runtime_ids = BTreeSet::new();
+    for participant in &runtime.participants {
+        if prior >= Some(participant.participant_id.as_str())
+            || !runtime_ids.insert(participant.participant_id.as_str())
+            || !component_ids.contains(participant.participant_id.as_str())
+            || participant.capability_version == 0
+            || participant.record_version == 0
+            || !matches!(participant.encoding.as_str(), "json" | "parquet" | "arrow")
+            || !valid_runtime_id(&participant.capability_id)
+            || !valid_runtime_id(&participant.record_family_id)
+            || participant.schema_fingerprint.len() != 64
+            || !participant
+                .schema_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::Incompatible,
+                RUNTIME_MAP_PATH,
+                "runtime participant mapping",
+            ));
+        }
+        let _ = participant.row_count;
+        prior = Some(participant.participant_id.as_str());
+    }
+    let mut prior_capability = None;
+    for capability in &runtime.capabilities {
+        if prior_capability >= Some(capability.capability_id.as_str())
+            || capability.capability_version == 0
+            || !valid_runtime_id(&capability.capability_id)
+        {
+            return Err(PortableV2Error::at(
+                PortableV2ErrorCode::Incompatible,
+                RUNTIME_MAP_PATH,
+                "runtime capability mapping",
+            ));
+        }
+        prior_capability = Some(capability.capability_id.as_str());
+    }
+    if let Some(graph) = runtime.graph_tree
+        && (graph.component_id != "graph-files"
+            || !component_ids.contains(graph.component_id.as_str())
+            || !runtime_ids.contains(graph.inventory_participant_id.as_str()))
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime graph placement",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_runtime_map(bytes: &[u8]) -> Result<(Value, RuntimeGenerationMap), PortableV2Error> {
+    let value = UniqueValue::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
+        .map_err(|_| {
+            PortableV2Error::at(
+                PortableV2ErrorCode::Incompatible,
+                RUNTIME_MAP_PATH,
+                "runtime map JSON",
+            )
+        })?
+        .0;
+    let runtime = serde_json::from_value(value.clone()).map_err(|_| {
+        PortableV2Error::at(
+            PortableV2ErrorCode::Incompatible,
+            RUNTIME_MAP_PATH,
+            "runtime map schema",
+        )
+    })?;
+    Ok((value, runtime))
+}
+fn valid_runtime_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if index == 0 {
+                byte.is_ascii_lowercase()
+            } else {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            }
+        })
+}
+
 fn read_entry_bytes_from_map(
     map: &BTreeMap<&str, &Entry>,
     path: &str,
@@ -1095,13 +1573,20 @@ fn hash_file(
     entry: &str,
     length: u64,
     buffer: usize,
-    retain: bool,
+    retain_limit: Option<u64>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableV2Error> {
     let mut f = File::open(path)
         .map_err(|_| PortableV2Error::at(PortableV2ErrorCode::Io, entry, "cannot open entry"))?;
     let mut h = Sha256::new();
-    let mut kept = if retain {
+    if retain_limit.is_some_and(|limit| length > limit) {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::LimitExceeded,
+            entry,
+            "retained control entry exceeds limit",
+        ));
+    }
+    let mut kept = if retain_limit.is_some() {
         Some(Vec::with_capacity(usize::try_from(length).map_err(
             |_| {
                 PortableV2Error::at(
@@ -1333,11 +1818,17 @@ fn hash_payload(
     size: u64,
     transport_hash: &mut Sha256,
     buffer: usize,
-    retain: bool,
+    retain_limit: Option<u64>,
     cancelled: Option<&AtomicBool>,
 ) -> Result<([u8; 32], Option<Vec<u8>>), PortableV2Error> {
     let mut payload_hash = Sha256::new();
-    let mut kept = if retain {
+    if retain_limit.is_some_and(|limit| size > limit) {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::LimitExceeded,
+            "retained control entry exceeds limit",
+        ));
+    }
+    let mut kept = if retain_limit.is_some() {
         Some(Vec::with_capacity(usize::try_from(size).map_err(|_| {
             PortableV2Error::new(
                 PortableV2ErrorCode::LimitExceeded,
@@ -1499,15 +1990,14 @@ fn hex(bytes: &[u8]) -> String {
     }
     s
 }
-fn retained(path: &str) -> bool {
-    matches!(
-        path,
-        "bagit.txt"
-            | "bag-info.txt"
-            | "manifest-sha256.txt"
-            | "tagmanifest-sha256.txt"
-            | MANIFEST_PATH
-    )
+fn retained_limit(path: &str, limits: PortableV2Limits) -> Option<u64> {
+    match path {
+        MANIFEST_PATH | RUNTIME_MAP_PATH => Some(limits.max_manifest_bytes),
+        "bagit.txt" | "bag-info.txt" | "manifest-sha256.txt" | "tagmanifest-sha256.txt" => {
+            Some(limits.max_tag_manifest_bytes)
+        }
+        _ => None,
+    }
 }
 
 struct UniqueValue(Value);
@@ -1614,6 +2104,17 @@ mod tests {
         );
         fs::write(root.path().join("tagmanifest-sha256.txt"), tag).unwrap();
         root
+    }
+
+    #[test]
+    fn runtime_map_rejects_duplicate_and_unknown_schema_members() {
+        let duplicate = br#"{"contract":"graphforge-runtime-generation-map/1","contract":"graphforge-runtime-generation-map/1","capabilities":[],"participants":[],"graph_tree":null}"#;
+        let error = decode_runtime_map(duplicate).err().unwrap();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+
+        let unknown = br#"{"contract":"graphforge-runtime-generation-map/1","capabilities":[],"participants":[],"graph_tree":null,"host_path":"/private/source"}"#;
+        let error = decode_runtime_map(unknown).err().unwrap();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
     }
 
     #[test]

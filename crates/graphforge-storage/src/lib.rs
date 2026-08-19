@@ -135,7 +135,8 @@ pub mod project_portable_v2;
 pub use project_portable_v2::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
     PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    PortableV2Report, PortableV2Representation, verify_portable_v2,
+    PortableV2Report, PortableV2Representation, materialize_verified_portable_v2,
+    verify_portable_v2,
 };
 
 pub mod workspace_participants;
