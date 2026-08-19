@@ -29,7 +29,10 @@ test("generation diff forwards exact Rust IPC, identities, limits, and cancellat
     "modifiedEdges",
   ]) {
     assert.deepEqual(result[name].ipc, retry[name].ipc);
-    assert.equal(tableFromIPC(result[name].ipc).numRows, Number(result[name].rowCount));
+    assert.equal(
+      tableFromIPC(result[name].ipc).numRows,
+      Number(result[name].rowCount),
+    );
   }
   assert.equal(result.addedNodes.rowCount, 1n);
   assert.equal(result.addedEdges.rowCount, 1n);
@@ -57,8 +60,5 @@ test("generation diff forwards exact Rust IPC, identities, limits, and cancellat
     signal: controller.signal,
   });
   controller.abort();
-  await assert.rejects(
-    pending,
-    (error) => error.code === "GF_CANCELLED",
-  );
+  await assert.rejects(pending, (error) => error.code === "GF_CANCELLED");
 });

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 
-import pyarrow.ipc as ipc
+from pyarrow import ipc
 
 
 def check_generation_diff() -> None:
@@ -49,9 +49,7 @@ def check_generation_diff() -> None:
         **{**request, "source_manifest_sha256": bytes(wrong_manifest)}
     )
     assert reload == {"kind": "reload_required", "reason": "identity_mismatch"}
-    bounded = forge.diff_committed_generations(
-        **request, max_records_per_generation=0
-    )
+    bounded = forge.diff_committed_generations(**request, max_records_per_generation=0)
     assert bounded == {"kind": "reload_required", "reason": "resource_limit"}
 
     cancellation = gf.CancellationToken()
