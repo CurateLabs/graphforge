@@ -7,7 +7,7 @@
       "coordinates": { "Point": [1.0, 2.0] }
     },
     "code": "GF_VALIDATION",
-    "message": "invalid canonical spatial property: unknown variant `EPSG:9999`, expected `EPSG:4326` or `EPSG:3857`"
+    "message": "invalid canonical spatial property: preserved-only spatial values require extension_name and extension_metadata"
   },
   "cases": [
     {
@@ -27,6 +27,16 @@
       "extensionMetadata": "{\"crs\":\"EPSG:3857\",\"crs_type\":\"authority_code\"}",
       "coordinates": { "Point": [-11687469.0, 4825942.0] },
       "flat": [-11687469.0, 4825942.0]
+    },
+    {
+      "name": "preserved_point",
+      "geometry": "point",
+      "crs": "OGC:CRS84",
+      "extensionName": "geoarrow.vendor_point",
+      "extensionMetadata": "{\"crs\":\"OGC:CRS84\",\"crs_type\":\"authority_code\",\"edges\":\"spherical\"}",
+      "coordinates": { "Point": [-104.9903, 39.7392] },
+      "flat": [-104.9903, 39.7392],
+      "preservedOnly": true
     },
     {
       "name": "linestring",

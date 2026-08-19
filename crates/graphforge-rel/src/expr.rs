@@ -2114,6 +2114,8 @@ impl<'a> ExprLowerer<'a> {
                 crs,
             },
             coordinates: SpatialCoordinates::Point([x, y]),
+            extension_name: None,
+            extension_metadata: None,
         })
     }
 
@@ -2149,7 +2151,7 @@ impl<'a> ExprLowerer<'a> {
                 "distance() accepts Point geometry only".into(),
             ));
         };
-        let distance = match a.spatial_type.crs {
+        let distance = match &a.spatial_type.crs {
             SpatialCrs::Epsg3857 => (bx - ax).hypot(by - ay),
             SpatialCrs::Epsg4326 => {
                 const EARTH_RADIUS_METRES: f64 = 6_371_008.8;
@@ -2159,6 +2161,11 @@ impl<'a> ExprLowerer<'a> {
                 let h = (dlat / 2.0).sin().powi(2)
                     + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
                 2.0 * EARTH_RADIUS_METRES * h.sqrt().asin()
+            }
+            SpatialCrs::Preserved(_) => {
+                return Err(LoweringError::InvalidType(
+                    "distance() does not compute preserved-only CRS values".into(),
+                ));
             }
         };
         Ok(lit(distance))
@@ -13623,6 +13630,34 @@ mod tests {
     /// Build a minimal lowerer with no ontology.
     fn make_lowerer<'a>(arena: &'a ExprArena, var_map: &'a VarMap) -> ExprLowerer<'a> {
         ExprLowerer::new(arena, None, var_map)
+    }
+
+    #[test]
+    fn distance_rejects_preserved_only_spatial_literals_explicitly() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+
+        let mut arena = ExprArena::new();
+        let preserved = arena.push(IrExpr::Literal(IrLiteral::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: Some("geoarrow.vendor_point".into()),
+            extension_metadata: Some("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}".into()),
+        })));
+        let distance = arena.push(IrExpr::FunctionCall {
+            name: "distance".into(),
+            args: vec![preserved, preserved],
+        });
+        let vars = VarMap::new();
+        let error = make_lowerer(&arena, &vars).lower(distance).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid argument type: distance() does not compute preserved-only CRS values"
+        );
     }
 
     // -----------------------------------------------------------------------
