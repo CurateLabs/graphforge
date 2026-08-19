@@ -68,7 +68,7 @@ fn replay_merge_fingerprint(bencher: Bencher, operations: usize) {
     let first = fixture(operations);
     let mut second = fixture(operations);
     for (index, operation) in second.iter_mut().enumerate() {
-        operation.operation_uuid = Uuid::from_u128(0x3000 + index as u128);
+        operation.operation_uuid = Uuid::from_u128(0x1_0000 + index as u128);
         if let GraphDeltaPayload::UpsertNodeV2 {
             updated_at_micros, ..
         } = &mut operation.payload
