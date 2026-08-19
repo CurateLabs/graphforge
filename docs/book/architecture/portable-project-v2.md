@@ -152,5 +152,20 @@ Portable v1 is recognized and delegated to the existing bounded v1 reader;
 v2 code MUST NOT reinterpret it, silently upgrade it, or emit v1. Importing v1
 and exporting v2 are two explicit operations with a new v2 package digest.
 
+## Verification API
+
+`graphforge_api::verify_portable_v2` is the shared Rust authority used by import,
+publication, CLI, and binding surfaces. It inspects either an expanded directory
+or a bundle by source type, not filename suffix, and never mutates a project.
+Callers supply finite limits and an optional cancellation flag.
+
+Full mode reads and hashes every regular entry before returning
+`integrity: verified`. Structure-only mode returns `integrity: not_checked` and
+is never import or publication evidence. Reports keep integrity, compatibility,
+and authenticity separate and identify failures only by a bounded
+portable-relative entry. The implementation retains the bounded semantic/tag
+records, entry index, and configured copy buffer; payloads stream incrementally
+even when the declared package exceeds 16 GiB.
+
 See the [fixture guide](../../../tests/fixtures/portable-v2/README.md) for the
 positive, negative, and structural conformance vectors.

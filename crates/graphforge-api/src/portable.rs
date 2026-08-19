@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use graphforge_core::GfError;
 use graphforge_storage::{PortableProjectLimits, ProjectCapability};
@@ -37,6 +38,20 @@ pub struct PortableImportRequest {
     pub operation_id: OperationId,
 }
 
+/// Read-only portable-v2 verification request.
+#[derive(Clone, Debug)]
+pub struct PortableVerifyRequest {
+    /// Expanded package directory or canonical `.gfpb` bundle.
+    pub input: PathBuf,
+    /// Full content verification or honest structure-only inspection.
+    pub mode: graphforge_storage::PortableV2Mode,
+    /// Caller-selected finite resource limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+}
+
+/// Stable Rust-owned portable-v2 verification report.
+pub type PortableVerifyResult = graphforge_storage::PortableV2Report;
+
 /// Stable export result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableExportResult {
@@ -71,6 +86,14 @@ pub struct PortableImportResult {
     pub envelope_sha256: String,
     /// Whether an identical operation was replayed.
     pub idempotent_replay: bool,
+}
+
+/// Verify portable-v2 content without opening or mutating a project.
+pub fn verify_portable_v2(
+    request: &PortableVerifyRequest,
+    cancelled: Option<&AtomicBool>,
+) -> Result<PortableVerifyResult, graphforge_storage::PortableV2Error> {
+    graphforge_storage::verify_portable_v2(&request.input, request.mode, request.limits, cancelled)
 }
 
 impl GraphForge {
@@ -181,6 +204,26 @@ mod tests {
     use graphforge_core::OntologyMode;
 
     const ONTOLOGY: &str = "ontology_id: portable-authority\nversion: \"1\"\nentity_types:\n  - name: Person\n    abstract: false\nrelation_types: []\n";
+
+    #[test]
+    fn portable_v2_verification_facade_preserves_typed_cancellation() {
+        let source = tempfile::tempdir().unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = verify_portable_v2(
+            &PortableVerifyRequest {
+                input: source.path().to_path_buf(),
+                mode: graphforge_storage::PortableV2Mode::Full,
+                limits: graphforge_storage::PortableV2Limits::default(),
+            },
+            Some(&cancelled),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            graphforge_storage::PortableV2ErrorCode::Cancelled
+        );
+        assert!(source.path().read_dir().unwrap().next().is_none());
+    }
 
     fn write_context(seed: u128) -> WriteContext {
         WriteContext {
