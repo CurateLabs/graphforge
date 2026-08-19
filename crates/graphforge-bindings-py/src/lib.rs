@@ -236,11 +236,13 @@ pub(crate) fn py_to_prop_value(value: &Bound<'_, PyAny>) -> PyResult<PropValue> 
             })?;
             Ok(PropValue::Spatial(spatial))
         } else {
-            serde_json::from_value::<TemporalValue>(json)
-                .map(PropValue::Temporal)
-                .map_err(|error| {
-                    PyTypeError::new_err(format!("invalid temporal property: {error}"))
-                })
+            let temporal = serde_json::from_value::<TemporalValue>(json).map_err(|error| {
+                PyTypeError::new_err(format!("invalid temporal property: {error}"))
+            })?;
+            temporal
+                .validate()
+                .map_err(|error| to_pyerr(value.py(), &error))?;
+            Ok(PropValue::Temporal(temporal))
         }
     } else {
         Err(PyTypeError::new_err(

@@ -610,11 +610,14 @@ fn json_to_prop_value(value: &serde_json::Value) -> Result<PropValue> {
                 })?;
                 PropValue::Spatial(spatial)
             } else if looks_like_temporal_json(value) {
-                PropValue::Temporal(serde_json::from_value(value.clone()).map_err(|error| {
-                    to_napi_err(&GfError::Validation(format!(
-                        "invalid temporal node property: {error}"
-                    )))
-                })?)
+                let temporal: graphforge_api::TemporalValue = serde_json::from_value(value.clone())
+                    .map_err(|error| {
+                        to_napi_err(&GfError::Validation(format!(
+                            "invalid temporal node property: {error}"
+                        )))
+                    })?;
+                temporal.validate().map_err(|error| to_napi_err(&error))?;
+                PropValue::Temporal(temporal)
             } else {
                 return Err(to_napi_err(&GfError::Validation(
                     UNSUPPORTED_PROP_TYPE_MSG.into(),
@@ -639,6 +642,7 @@ fn looks_like_temporal_json(value: &serde_json::Value) -> bool {
                 matches!(
                     kind,
                     "date"
+                        | "utc_date_time"
                         | "local_time"
                         | "offset_time"
                         | "local_date_time"

@@ -1499,6 +1499,7 @@ fn temporal_struct_value(
         }
         _ => return Err("unsupported temporal struct contract".to_owned()),
     };
+    temporal.validate().map_err(|error| error.to_string())?;
     Ok(PropValue::Temporal(temporal))
 }
 
@@ -1680,9 +1681,8 @@ fn validate_ontology_field(
                 DataType::List(_) | DataType::LargeList(_)
             )
         }
-        PropertyValueType::Duration | PropertyValueType::DateTime => {
-            field.data_type() == &expected_arrow
-        }
+        PropertyValueType::Duration => field.data_type() == &expected_arrow,
+        PropertyValueType::DateTime => temporal_datetime_data_type(field.data_type()),
         PropertyValueType::Spatial(spatial) => {
             field.data_type() == &spatial.data_type()
                 && field.metadata() == &spatial.field_metadata()
@@ -1711,6 +1711,21 @@ fn validate_ontology_field(
         ));
     }
     Ok(())
+}
+
+fn temporal_datetime_data_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone)
+            if zone.as_deref() == Some("UTC")
+    ) || matches!(
+        data_type,
+        DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
+    ) || matches!(data_type, DataType::Struct(fields)
+            if fields == &graphforge_storage::schemas::date_struct_fields()
+                || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
+                || fields == &graphforge_storage::schemas::time_struct_fields()
+                || fields == &graphforge_storage::schemas::datetime_struct_fields())
 }
 
 fn validate_property_name(kind: BulkInputKind, name: &str) -> Result<(), BulkValidationError> {
@@ -2505,6 +2520,100 @@ mod tests {
                 .unwrap()
                 .value(0),
             -104.9903
+        );
+    }
+
+    #[test]
+    fn temporal_bulk_publish_reopens_and_projects_calendar_and_zone_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let duration: ArrayRef = Arc::new(StructArray::new(
+            graphforge_storage::schemas::duration_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![-2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![-4])),
+                Arc::new(Int64Array::from(vec![500_000_001])),
+            ],
+            None,
+        ));
+        let zoned: ArrayRef = Arc::new(StructArray::new(
+            graphforge_storage::schemas::datetime_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![20_001])),
+                Arc::new(Time64NanosecondArray::from(vec![7_200_000_000_000])),
+                Arc::new(Int32Array::from(vec![-21_600])),
+                Arc::new(StringArray::from(vec![Some("America/Denver")])),
+            ],
+            None,
+        ));
+        let schema = bulk_node_input_schema(vec![
+            Field::new("duration", duration.data_type().clone(), true),
+            Field::new("zoned", zoned.data_type().clone(), true),
+        ])
+        .unwrap();
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(8_090).as_bytes()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Event"])),
+                duration,
+                zoned,
+            ],
+        )
+        .unwrap();
+
+        let graph = GraphForge::new(path.to_str()).unwrap();
+        graph
+            .publish_bulk_nodes(operation(8_091), &[input])
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Event) RETURN n.duration AS duration, n.zoned AS zoned")
+            .unwrap();
+        assert_eq!(
+            result
+                .schema
+                .field_with_name("duration")
+                .unwrap()
+                .data_type(),
+            &DataType::Struct(graphforge_storage::schemas::duration_struct_fields())
+        );
+        assert_eq!(
+            result.schema.field_with_name("zoned").unwrap().data_type(),
+            &DataType::Struct(graphforge_storage::schemas::datetime_struct_fields())
+        );
+        let zoned = result.batches[0]
+            .column_by_name("zoned")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            zoned
+                .column_by_name("offset")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(0),
+            -21_600
+        );
+        assert_eq!(
+            zoned
+                .column_by_name("zone")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "America/Denver"
         );
     }
 
