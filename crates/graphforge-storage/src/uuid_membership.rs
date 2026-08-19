@@ -146,6 +146,12 @@ impl UuidMembershipIndex {
         })
     }
 
+    /// Topology generation authenticated by this open handle.
+    #[must_use]
+    pub const fn topology_generation(&self) -> u64 {
+        self.manifest.topology_generation
+    }
+
     #[must_use]
     /// Return the authenticated unique-record count for one identity domain.
     pub fn count(&self, kind: UuidIndexKind) -> u64 {
@@ -179,6 +185,26 @@ impl UuidMembershipIndex {
         }
         Ok((requested.iter().map(|u| membership[u]).collect(), metrics))
     }
+}
+
+/// Whether a membership manifest exists, without duplicating its private layout.
+#[must_use]
+pub fn uuid_membership_index_present(project_dir: &Path) -> bool {
+    project_dir.join(INDEX_DIR).join(MANIFEST).is_file()
+}
+
+/// Whether the manifest version and topology generation match the workspace.
+/// This cheap publication-path check deliberately does not authenticate data;
+/// readers still use [`UuidMembershipIndex::open`] before trusting membership.
+pub fn uuid_membership_index_is_fresh(project_dir: &Path) -> Result<bool, GfError> {
+    let body = match fs::read(project_dir.join(INDEX_DIR).join(MANIFEST)) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(storage_err(error)),
+    };
+    let manifest: Manifest = serde_json::from_slice(&body).map_err(storage_err)?;
+    Ok(manifest.format_version == FORMAT_VERSION
+        && manifest.topology_generation == crate::read_topology_generation(project_dir)?)
 }
 
 fn open_verified(root: &Path, record: &FileRecord) -> Result<File, GfError> {
@@ -250,6 +276,7 @@ pub fn rebuild_uuid_membership_indexes(
         .tempdir_in(staging)
         .map_err(storage_err)?;
     let mut metrics = UuidIndexBuildMetrics::default();
+    let generation = crate::read_topology_generation(project_dir)?;
     let node_runs = scan_to_runs(
         &[project_dir.join("topology/nodes.parquet")],
         "node_uuid",
@@ -283,9 +310,18 @@ pub fn rebuild_uuid_membership_indexes(
         limits.merge_fan_in,
         &mut metrics,
     )?;
-    let generation = crate::read_topology_generation(project_dir)?;
+    if crate::read_topology_generation(project_dir)? != generation {
+        return Err(storage_err(
+            "topology generation changed during the index build",
+        ));
+    }
     let nodes = publish_data(&node_tmp, &root, staging, "nodes", generation)?;
     let edges = publish_data(&edge_tmp, &root, staging, "edges", generation)?;
+    if crate::read_topology_generation(project_dir)? != generation {
+        return Err(storage_err(
+            "topology generation changed before index manifest publication",
+        ));
+    }
     metrics.node_count = nodes.count;
     metrics.edge_count = edges.count;
     let manifest = Manifest {
@@ -495,6 +531,8 @@ fn sync_dir(path: &Path) -> Result<(), GfError> {
             .and_then(|f| f.sync_all())
             .map_err(storage_err)?;
     }
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -591,6 +629,29 @@ mod tests {
     }
 
     #[test]
+    fn probe_work_is_candidate_logarithmic_not_index_linear() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes = (1..=8_192).map(Uuid::from_u128).collect::<Vec<_>>();
+        write_uuid_parquet(
+            &dir.path().join("topology/nodes.parquet"),
+            "node_uuid",
+            &nodes,
+        );
+        rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+
+        let mut index = UuidMembershipIndex::open(dir.path()).unwrap();
+        let (found, metrics) = index
+            .probe(UuidIndexKind::Node, &[nodes[4_095], Uuid::from_u128(9_000)])
+            .unwrap();
+        assert_eq!(found, [true, false]);
+        assert_eq!(metrics.unique_requested, 2);
+        assert!(
+            metrics.file_seeks <= 28,
+            "two probes in 8192 records require at most 2 * (log2(8192) + 1) seeks"
+        );
+    }
+
+    #[test]
     fn corrupt_data_fails_closed_without_replacing_manifest() {
         let (dir, _, _) = fixture();
         rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
@@ -614,9 +675,12 @@ mod tests {
     #[test]
     fn missing_and_stale_manifests_fail_closed() {
         let (dir, _, _) = fixture();
+        assert!(!uuid_membership_index_is_fresh(dir.path()).unwrap());
         assert!(UuidMembershipIndex::open(dir.path()).is_err());
         rebuild_uuid_membership_indexes(dir.path(), UuidIndexBuildLimits::default()).unwrap();
+        assert!(uuid_membership_index_is_fresh(dir.path()).unwrap());
         crate::generation::bump_topology_generation(dir.path()).unwrap();
+        assert!(!uuid_membership_index_is_fresh(dir.path()).unwrap());
         assert!(
             UuidMembershipIndex::open(dir.path())
                 .unwrap_err()
@@ -638,14 +702,18 @@ mod tests {
             reader_barrier.wait();
             index.probe(UuidIndexKind::Node, &[expected]).unwrap().0
         });
-        let scratch = tempfile::Builder::new()
-            .prefix("build-crash-")
-            .tempdir_in(dir.path().parent().unwrap())
-            .unwrap();
-        fs::write(scratch.path().join("nodes-unpublished.uuidx"), [7_u8; 16]).unwrap();
+        fs::write(
+            dir.path().join(INDEX_DIR).join("nodes-unpublished.uuidx"),
+            [7_u8; 16],
+        )
+        .unwrap();
         barrier.wait();
         assert_eq!(reader.join().unwrap(), vec![true]);
-        assert!(UuidMembershipIndex::open(dir.path()).is_ok());
+        let mut reopened = UuidMembershipIndex::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.probe(UuidIndexKind::Node, &[expected]).unwrap().0,
+            vec![true]
+        );
     }
 
     #[test]

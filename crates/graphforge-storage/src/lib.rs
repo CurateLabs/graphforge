@@ -225,7 +225,8 @@ pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 pub mod uuid_membership;
 pub use uuid_membership::{
     UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexKind, UuidMembershipIndex,
-    UuidProbeMetrics, rebuild_uuid_membership_indexes,
+    UuidProbeMetrics, rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh,
+    uuid_membership_index_present,
 };
 
 pub mod catalog;

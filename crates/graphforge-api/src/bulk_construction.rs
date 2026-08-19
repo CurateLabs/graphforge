@@ -362,8 +362,19 @@ impl GraphForge {
         let mut existing = BTreeSet::new();
         if reject_existing {
             let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
-            existing = existing_node_uuids(self, &candidates)?;
-            existing.extend(existing_edge_uuids(self, &candidates)?);
+            let mut index = open_membership_index(self, BulkInputKind::Node)?;
+            existing = indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Node,
+                BulkInputKind::Node,
+            )?;
+            existing.extend(indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Edge,
+                BulkInputKind::Node,
+            )?);
         }
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
@@ -473,8 +484,19 @@ impl GraphForge {
         }
 
         let candidates = normalized.identities().collect::<BTreeSet<_>>();
-        let mut existing = existing_node_uuids(self, &candidates)?;
-        existing.extend(existing_edge_uuids(self, &candidates)?);
+        let mut index = open_membership_index(self, BulkInputKind::Node)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Node,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Node,
+        )?);
         if normalized
             .rows
             .iter()
@@ -624,14 +646,12 @@ impl GraphForge {
         }
         validate_partition_schemas(BulkInputKind::Edge, &EDGE_REQUIRED, batches)?;
         let endpoint_candidates = candidate_endpoint_uuids(batches)?;
-        let mut known_nodes = existing_node_uuids(self, &endpoint_candidates)?;
+        let edge_candidates = reject_existing
+            .then(|| candidate_uuids(batches, BulkInputKind::Edge, "edge_uuid"))
+            .transpose()?;
+        let (mut known_nodes, existing_edges) =
+            existing_edge_context(self, &endpoint_candidates, edge_candidates.as_ref())?;
         known_nodes.extend(same_request_nodes.identities());
-        let existing_edges = if reject_existing {
-            let edge_candidates = candidate_uuids(batches, BulkInputKind::Edge, "edge_uuid")?;
-            existing_edge_uuids(self, &edge_candidates)?
-        } else {
-            BTreeSet::new()
-        };
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
         let mut ordinal = 0_u64;
@@ -760,7 +780,19 @@ impl GraphForge {
             .iter()
             .map(|row| row.edge_uuid)
             .collect::<BTreeSet<_>>();
-        let existing = existing_edge_uuids(self, &candidates)?;
+        let mut index = open_membership_index(self, BulkInputKind::Edge)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Edge,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Edge,
+        )?);
         if let Some(row) = normalized
             .rows
             .iter()
@@ -1671,51 +1703,105 @@ fn generated_uuid(operation_uuid: OperationId, kind: BulkInputKind, ordinal: u64
     Uuid::from_bytes(bytes)
 }
 
-fn existing_node_uuids(
+fn open_membership_index(
     graph: &GraphForge,
-    candidates: &BTreeSet<Uuid>,
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    indexed_existing(graph, candidates, graphforge_storage::UuidIndexKind::Node)
-}
-
-fn existing_edge_uuids(
-    graph: &GraphForge,
-    candidates: &BTreeSet<Uuid>,
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    indexed_existing(graph, candidates, graphforge_storage::UuidIndexKind::Edge)
-}
-
-fn indexed_existing(
-    graph: &GraphForge,
-    candidates: &BTreeSet<Uuid>,
-    index_kind: graphforge_storage::UuidIndexKind,
-) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let manifest = graph.dir.join("indexes/uuid-membership/manifest.json");
-    if !manifest.exists() {
+    input_kind: BulkInputKind,
+) -> Result<
+    std::sync::MutexGuard<'_, Option<graphforge_storage::UuidMembershipIndex>>,
+    BulkValidationError,
+> {
+    let current_generation =
+        graphforge_storage::read_topology_generation(&graph.dir).map_err(|error| {
+            contract_error(
+                input_kind,
+                BulkValidationReason::ProjectState,
+                &error.to_string(),
+            )
+        })?;
+    let mut cached = graph.uuid_membership_index.lock().map_err(|error| {
+        contract_error(
+            input_kind,
+            BulkValidationReason::ProjectState,
+            &error.to_string(),
+        )
+    })?;
+    if cached
+        .as_ref()
+        .is_some_and(|index| index.topology_generation() != current_generation)
+    {
+        *cached = None;
+    }
+    if !graphforge_storage::uuid_membership_index_present(&graph.dir) {
         let has_nodes = graph.dir.join("topology/nodes.parquet").exists();
         let has_edges = std::fs::read_dir(graph.dir.join("topology/edges"))
             .ok()
             .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));
         if has_nodes || has_edges {
             return Err(contract_error(
-                BulkInputKind::Node,
+                input_kind,
                 BulkValidationReason::ProjectState,
                 "UUID membership index is missing; run the bounded storage rebuild before ingest",
             ));
         }
-        return Ok(BTreeSet::new());
+        return Ok(cached);
     }
-    let mut index = graphforge_storage::UuidMembershipIndex::open(&graph.dir).map_err(|error| {
-        contract_error(
-            BulkInputKind::Node,
-            BulkValidationReason::ProjectState,
-            &error.to_string(),
-        )
-    })?;
+    if cached.is_none() {
+        *cached = Some(
+            graphforge_storage::UuidMembershipIndex::open(&graph.dir).map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })?,
+        );
+    }
+    Ok(cached)
+}
+
+fn existing_edge_context(
+    graph: &GraphForge,
+    endpoint_candidates: &BTreeSet<Uuid>,
+    edge_candidates: Option<&BTreeSet<Uuid>>,
+) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), BulkValidationError> {
+    let mut index = open_membership_index(graph, BulkInputKind::Edge)?;
+    let known_nodes = indexed_existing(
+        index.as_mut(),
+        endpoint_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?;
+    let Some(edge_candidates) = edge_candidates else {
+        return Ok((known_nodes, BTreeSet::new()));
+    };
+    let mut existing = indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Edge,
+        BulkInputKind::Edge,
+    )?;
+    existing.extend(indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?);
+    Ok((known_nodes, existing))
+}
+
+fn indexed_existing(
+    index: Option<&mut graphforge_storage::UuidMembershipIndex>,
+    candidates: &BTreeSet<Uuid>,
+    index_kind: graphforge_storage::UuidIndexKind,
+    input_kind: BulkInputKind,
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let Some(index) = index else {
+        return Ok(BTreeSet::new());
+    };
     let requested = candidates.iter().copied().collect::<Vec<_>>();
     let (found, _) = index.probe(index_kind, &requested).map_err(|error| {
         contract_error(
-            BulkInputKind::Node,
+            input_kind,
             BulkValidationReason::ProjectState,
             &error.to_string(),
         )
@@ -3708,6 +3794,19 @@ mod tests {
                 .sum::<usize>(),
             256
         );
+        let node_collision =
+            edge_batch(&[node_ids[31]], &["KNOWS"], &[node_ids[0]], &[node_ids[1]]);
+        let collision = reopened
+            .publish_bulk_edges(operation(934), &[node_collision])
+            .unwrap_err();
+        assert!(matches!(
+            collision,
+            BulkEdgePublicationError::Validation(BulkValidationError {
+                kind: BulkInputKind::Edge,
+                reason: BulkValidationReason::IdentityConflict,
+                ..
+            })
+        ));
         let replay = reopened
             .publish_bulk_edges(operation(932), std::slice::from_ref(&batch))
             .unwrap();
