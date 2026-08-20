@@ -188,6 +188,35 @@ fn initialized_repository_can_import_into_its_pristine_state() {
 }
 
 #[test]
+fn portable_verify_skips_repository_discovery() {
+    let outside = TempDir::new().expect("outside repository");
+    let missing = outside.path().join("missing.gfpb");
+    let output = Command::new(env!("CARGO_BIN_EXE_gf"))
+        .current_dir(outside.path())
+        .args([
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            missing.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run verify outside repository");
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_ascii_lowercase().contains("repository"),
+        "verify must not require repository discovery: {stderr}"
+    );
+    assert!(
+        !stderr.contains("GF_REPOSITORY"),
+        "verify must not fail as repository lookup: {stderr}"
+    );
+}
+
+#[test]
 fn portable_v2_export_verify_and_import_round_trip() {
     let root = TempDir::new().expect("temp root");
     let source_project = root.path().join("source");
@@ -251,4 +280,22 @@ fn portable_v2_export_verify_and_import_round_trip() {
         "reopen failed: {}",
         String::from_utf8_lossy(&listed.stderr)
     );
+
+    // Verify is repository-independent: it must not require --project or a discovered repo.
+    let outside = TempDir::new().expect("outside repository");
+    let verified_outside = Command::new(env!("CARGO_BIN_EXE_gf"))
+        .current_dir(outside.path())
+        .args([
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run verify outside repository");
+    let verified_outside = json(&verified_outside);
+    assert_eq!(verified_outside["package_digest"], package_digest);
 }

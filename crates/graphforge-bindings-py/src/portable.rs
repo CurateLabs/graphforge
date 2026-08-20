@@ -464,14 +464,26 @@ pub(crate) fn export_portable_v2(
         limits: parse_limits(py, limits)?,
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
-    let progress_cb = progress.map(|cb| cb.clone().unbind());
+    let progress_cb = match progress {
+        Some(callback) => {
+            if !callback.is_callable() {
+                return Err(to_pyerr(
+                    py,
+                    &GfError::Validation("progress callback must be callable".into()),
+                ));
+            }
+            Some(callback.clone().unbind())
+        }
+        None => None,
+    };
+    let progress_error = std::sync::Mutex::new(None::<PyErr>);
     let result = py
         .detach(|| {
             forge
                 .inner
                 .export_portable_v2(&request, cancelled, |event| {
                     if let Some(callback) = progress_cb.as_ref() {
-                        let _ = Python::attach(|py| {
+                        let callback_result = Python::attach(|py| {
                             let payload = PyDict::new(py);
                             payload.set_item("entries_completed", event.entries_completed)?;
                             payload.set_item("bytes_completed", event.bytes_completed)?;
@@ -480,10 +492,24 @@ pub(crate) fn export_portable_v2(
                             callback.bind(py).call1((payload,))?;
                             Ok::<(), PyErr>(())
                         });
+                        if let Err(error) = callback_result {
+                            let mut slot = progress_error
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if slot.is_none() {
+                                *slot = Some(error);
+                            }
+                        }
                     }
                 })
         })
         .map_err(|error| to_portable_pyerr(py, &error))?;
+    if let Some(error) = progress_error
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return Err(error);
+    }
     json_value_to_python(py, &export_result_json(&result))
 }
 

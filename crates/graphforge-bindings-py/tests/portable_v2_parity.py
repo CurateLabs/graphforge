@@ -27,6 +27,36 @@ def check_portable_v2_parity() -> None:
         )
         assert expanded_export["package_digest"] == bundle_export["package_digest"]
         assert expanded_export["selection_fingerprint"] == preview["selection_fingerprint"]
+
+        events: list[dict[str, object]] = []
+
+        def progress(event: dict[str, object]) -> None:
+            events.append(event)
+            raise RuntimeError("progress callback failed")
+
+        try:
+            forge.export_portable_v2(
+                output_path=str(root / "callback-fail.gfpb"),
+                representation="bundle",
+                profile="complete",
+                progress=progress,
+            )
+            raise AssertionError("expected progress callback failure to propagate")
+        except RuntimeError as error:
+            assert "progress callback failed" in str(error)
+        assert events, "progress callback must run at least once"
+
+        try:
+            forge.export_portable_v2(
+                output_path=str(root / "not-callable.gfpb"),
+                representation="bundle",
+                profile="complete",
+                progress=object(),
+            )
+            raise AssertionError("expected non-callable progress to fail closed")
+        except Exception as error:  # noqa: BLE001 - binding surfaces ValidationError/TypeError
+            assert "callable" in str(error).lower()
+
         verified = gf.GraphForge.verify_portable_v2(str(bundle), mode="full")
         assert verified["package_digest"] == bundle_export["package_digest"]
         target = root / "target"

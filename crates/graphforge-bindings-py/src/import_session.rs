@@ -24,20 +24,18 @@ impl GraphForge {
         cancellation: Option<&graphforge_api::CancellationToken>,
     ) -> PyResult<ImportProgress> {
         self.ensure_open()?;
-        let mut guard = session.lock().map_err(|_| {
-            to_pyerr(
-                py,
-                &GfError::Execution("import session lock poisoned".into()),
-            )
-        })?;
-        let session = guard.as_mut().ok_or_else(|| {
-            to_pyerr(
-                py,
-                &GfError::Lifecycle("import session handle is closed".into()),
-            )
-        })?;
-        py.detach(|| session.validate_with_cancellation(&self.inner, cancellation))
-            .map_err(|error| to_pyerr(py, &error))
+        // Lock only inside `detach` so a concurrent GIL-holding caller cannot
+        // wait on this mutex while the detached worker needs the GIL to return.
+        py.detach(|| {
+            let mut guard = session
+                .lock()
+                .map_err(|_| GfError::Execution("import session lock poisoned".into()))?;
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| GfError::Lifecycle("import session handle is closed".into()))?;
+            session.validate_with_cancellation(&self.inner, cancellation)
+        })
+        .map_err(|error| to_pyerr(py, &error))
     }
 
     /// Publish a fully staged import while releasing the GIL on `&self`.
@@ -48,19 +46,13 @@ impl GraphForge {
         cancellation: Option<&graphforge_api::CancellationToken>,
     ) -> PyResult<String> {
         self.ensure_open()?;
-        let mut guard = session.lock().map_err(|_| {
-            to_pyerr(
-                py,
-                &GfError::Execution("import session lock poisoned".into()),
-            )
-        })?;
-        let session = guard.as_mut().ok_or_else(|| {
-            to_pyerr(
-                py,
-                &GfError::Lifecycle("import session handle is closed".into()),
-            )
-        })?;
         py.detach(|| {
+            let mut guard = session
+                .lock()
+                .map_err(|_| GfError::Execution("import session lock poisoned".into()))?;
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| GfError::Lifecycle("import session handle is closed".into()))?;
             session
                 .commit(&self.inner, cancellation)
                 .map(|uuid| uuid.to_string())
