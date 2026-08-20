@@ -20,6 +20,7 @@ use uuid::Uuid;
 include!(concat!(env!("OUT_DIR"), "/project_skills.rs"));
 
 mod maintenance_cli;
+mod portable_cli;
 
 const MAX_SKILL_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_SKILL_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -266,6 +267,18 @@ enum Command {
     Export(ExportArgs),
     /// Import a portable envelope into a new or empty project.
     Import(ImportArgs),
+    /// Portable-v2 preview, export, verify, import, and OCI promotion.
+    Portable {
+        #[command(subcommand)]
+        command: portable_cli::PortableCommand,
+    },
+    /// Stream a Cypher result to Parquet or Arrow IPC without full materialization.
+    Query(portable_cli::QueryArgs),
+    /// Staged Arrow/Parquet graph-import sessions.
+    ImportSession {
+        #[command(subcommand)]
+        command: portable_cli::ImportSessionCommand,
+    },
     /// Manage immutable named workspace checkpoints.
     Checkpoint {
         #[command(subcommand)]
@@ -1054,6 +1067,36 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
             output,
         );
     }
+    // Repository-independent portable commands must not call RepositoryContext::discover.
+    if let Command::Portable { command } = command {
+        match command {
+            portable_cli::PortableCommand::Verify(_)
+            | portable_cli::PortableCommand::PublishOci(_)
+            | portable_cli::PortableCommand::PullOci(_) => {
+                return portable_cli::run_portable_without_graph(
+                    Path::new(""),
+                    command,
+                    cli.json,
+                    output,
+                )
+                .map(|()| 0);
+            }
+            portable_cli::PortableCommand::Import(_) => {
+                let path = resolve_project_path(cli.project, cli.project_dir)?;
+                return portable_cli::run_portable_without_graph(&path, command, cli.json, output)
+                    .map(|()| 0);
+            }
+            command => {
+                let path = resolve_project_path(cli.project, cli.project_dir)?;
+                let path_text = path.to_str().ok_or_else(|| {
+                    graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
+                })?;
+                let graph = GraphForge::new(Some(path_text))?;
+                return portable_cli::run_portable(&graph, &path, command, cli.json, output)
+                    .map(|()| 0);
+            }
+        }
+    }
     let path = resolve_project_path(cli.project, cli.project_dir)?;
     let command = match command {
         Command::Import(args) => return run_import(args, &path, cli.json, output).map(|()| 0),
@@ -1068,6 +1111,12 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
     let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
         Command::Export(args) => return run_export(&graph, args, cli.json, output).map(|()| 0),
+        Command::Query(args) => {
+            return portable_cli::run_query(&graph, &args, cli.json, output).map(|()| 0);
+        }
+        Command::ImportSession { command } => {
+            return portable_cli::run_import_session(&graph, command, cli.json, output).map(|()| 0);
+        }
         Command::Recovery => {
             return maintenance_cli::run_recovery(&graph, cli.json, output).map(|()| 0);
         }

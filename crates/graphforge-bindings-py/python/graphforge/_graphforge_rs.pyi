@@ -6,6 +6,7 @@ Hand-written to match the PyO3 surface in `crates/graphforge-bindings-py/src/lib
 use `pyarrow` (a hard dependency).
 """
 
+from collections.abc import Callable
 from typing import Any, Literal, overload
 import uuid
 
@@ -43,6 +44,17 @@ class CancellationToken:
     def cancel(self) -> None: ...
     @property
     def is_cancelled(self) -> bool: ...
+
+class GraphImportSession:
+    @property
+    def session_uuid(self) -> str: ...
+    def status(self) -> dict[str, Any]: ...
+    def append_arrow(self, kind: str, data: Any) -> None: ...
+    def register_parquet(self, kind: str, path: str) -> None: ...
+    def checkpoint(self) -> dict[str, Any]: ...
+    def validate(self, *, cancellation: CancellationToken | None = None) -> dict[str, Any]: ...
+    def commit(self, *, cancellation: CancellationToken | None = None) -> str: ...
+    def abort(self) -> dict[str, Any]: ...
 
 class GraphTransaction:
     def status(self) -> dict[str, Any]: ...
@@ -241,6 +253,112 @@ class GraphForge:
         target_manifest_sha256: bytes,
         max_records_per_generation: int = 1_000_000,
         max_output_bytes: int = 268_435_456,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    def preview_portable_v2_selection(
+        self,
+        *,
+        checkpoint: str | None = None,
+        profile: str = "complete",
+        identities: list[dict[str, str]] | None = None,
+        strict: bool = False,
+        limits: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+    def preview_portable_v2_graph_subset(
+        self,
+        *,
+        subset: dict[str, Any],
+        checkpoint: str | None = None,
+        limits: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+    def export_portable_v2(
+        self,
+        *,
+        output_path: str,
+        representation: str = "bundle",
+        profile: str = "complete",
+        identities: list[dict[str, str]] | None = None,
+        checkpoint: str | None = None,
+        subset: dict[str, Any] | None = None,
+        limits: dict[str, Any] | None = None,
+        cancellation: CancellationToken | None = None,
+        progress: Callable[[dict[str, int]], object] | None = None,
+    ) -> dict[str, Any]: ...
+    @staticmethod
+    def verify_portable_v2(
+        input: str,
+        *,
+        mode: str = "full",
+        limits: dict[str, Any] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    @staticmethod
+    def import_portable_v2(
+        project_root: str,
+        *,
+        input: str,
+        operation_id: str,
+        limits: dict[str, Any] | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    @staticmethod
+    def publish_portable_v2_oci(
+        *,
+        package_path: str,
+        registry: str,
+        repository: str,
+        tag: str | None = None,
+        limits: dict[str, Any] | None = None,
+        authenticity: dict[str, Any] | None = None,
+        signature: dict[str, Any] | None = None,
+        insecure_http: bool = False,
+        credential: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    @staticmethod
+    def pull_portable_v2_oci(
+        *,
+        registry: str,
+        repository: str,
+        reference: str,
+        destination: str,
+        expected_oci_digest: str | None = None,
+        limits: dict[str, Any] | None = None,
+        authenticity: dict[str, Any] | None = None,
+        insecure_http: bool = False,
+        credential: str | None = None,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    def begin_import_session(
+        self,
+        *,
+        operation_uuid: str,
+        batch_rows: int | None = None,
+        max_source_bytes: int | None = None,
+        max_files: int | None = None,
+        max_rejected_rows: int | None = None,
+        io_concurrency: int | None = None,
+    ) -> GraphImportSession: ...
+    def resume_import_session(self, session_uuid: str) -> GraphImportSession: ...
+    def cleanup_stale_import_sessions(self, *, max_age_secs: int) -> int: ...
+    def execute_to_parquet_stream(
+        self,
+        query: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        max_row_group_rows: int = 65536,
+        max_batch_rows: int = 65536,
+        cancellation: CancellationToken | None = None,
+    ) -> dict[str, Any]: ...
+    def execute_to_arrow_ipc_stream(
+        self,
+        query: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        max_row_group_rows: int = 65536,
+        max_batch_rows: int = 65536,
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
     def diff_checkpoints(
