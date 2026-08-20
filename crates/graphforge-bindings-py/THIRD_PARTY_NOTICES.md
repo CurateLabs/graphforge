@@ -17,7 +17,7 @@ python3 scripts/generate_third_party_notices.py
 
 ## License overview
 
-- Apache License 2.0 (323)
+- Apache License 2.0 (319)
 - MIT License (73)
 - Unicode License v3 (19)
 - BSD 3-Clause "New" or "Revised" License (7)
@@ -1611,27 +1611,23 @@ Software.
 
 Used by:
 - windows 0.53.0
-- windows 0.61.3
-- windows-collections 0.2.0
+- windows 0.62.2
+- windows-collections 0.3.2
 - windows-core 0.53.0
-- windows-core 0.61.2
 - windows-core 0.62.2
-- windows-future 0.2.1
+- windows-future 0.3.2
 - windows-implement 0.60.2
 - windows-interface 0.59.3
-- windows-link 0.1.3
 - windows-link 0.2.1
-- windows-numerics 0.2.0
+- windows-numerics 0.3.1
 - windows-result 0.1.2
-- windows-result 0.3.4
 - windows-result 0.4.1
-- windows-strings 0.4.2
 - windows-strings 0.5.1
 - windows-sys 0.52.0
 - windows-sys 0.59.0
 - windows-sys 0.61.2
 - windows-targets 0.52.6
-- windows-threading 0.1.0
+- windows-threading 0.2.1
 - windows_aarch64_gnullvm 0.52.6
 - windows_aarch64_msvc 0.52.6
 - windows_i686_gnu 0.52.6
@@ -8784,7 +8780,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- sysinfo 0.37.2
+- sysinfo 0.39.6
 
 ```
 The MIT License (MIT)
