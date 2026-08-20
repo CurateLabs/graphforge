@@ -6,6 +6,7 @@ import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKFLOW = ROOT / ".github" / "workflows" / "codspeed.yml"
 EXPECTED = {
     "m6_storage.rs": {
         "gfdr_encode",
@@ -40,4 +41,24 @@ for filename, names in EXPECTED.items():
 if missing:
     print("missing M6 benchmarks: " + ", ".join(missing), file=sys.stderr)
     raise SystemExit(1)
+
+workflow = WORKFLOW.read_text(encoding="utf-8")
+walltime_job = workflow.split("  m6-walltime:\n", 1)
+if len(walltime_job) != 2:
+    raise SystemExit("CodSpeed workflow is missing the m6-walltime job")
+walltime_job = walltime_job[1].split("\n  m6-memory-fallback:", 1)[0]
+if "runs-on: codspeed-macro" not in walltime_job:
+    raise SystemExit("m6-walltime must run on the CodSpeed Macro Runner")
+if "mode: walltime" not in walltime_job:
+    raise SystemExit("m6-walltime must use the walltime instrument")
+
+simulation_job = workflow.split("  benchmarks:\n", 1)
+if len(simulation_job) != 2:
+    raise SystemExit("CodSpeed workflow is missing the simulation benchmark job")
+simulation_job = simulation_job[1].split("\n  m6-walltime:", 1)[0]
+if "runs-on: codspeed-macro" in simulation_job:
+    raise SystemExit("CPU simulation must remain separate from the Macro Runner")
+if "mode: simulation" not in simulation_job:
+    raise SystemExit("CPU benchmark job must use the simulation instrument")
+
 print(f"M6 benchmark inventory v1: {sum(map(len, EXPECTED.values()))} names verified")
