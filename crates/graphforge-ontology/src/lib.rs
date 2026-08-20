@@ -4,6 +4,7 @@
 //!
 //! - phase-10 ontology load/compile/persist/migrate ✓
 //! - M9 #836 — deterministic inventory composition (`composition` module) ✓
+//! - M9 #837 — ergonomic inventory CRUD / import-export (`inventory` module) ✓
 //! - M9 #838 — provenance-bearing bridge sets (`bridge` module) ✓
 #![forbid(unsafe_code)]
 
@@ -12,6 +13,7 @@ pub mod compiler;
 pub mod composition;
 pub mod error;
 pub mod handle;
+pub mod inventory;
 pub mod loader;
 pub mod migration;
 pub mod ontology;
@@ -39,6 +41,11 @@ pub use composition::{
 pub use error::{OntologyError, OntologyValidationError, ValidationErrorKind};
 pub use graphforge_core::{PropId, TypeId};
 pub use handle::{OntologyFormat, OntologyHandle};
+pub use inventory::{
+    DeletePreview, ExportFormat, ImportFormatHint, InventoryMetadata, InventoryMutationReceipt,
+    InventorySnapshot, ModuleInspect, ModuleLifecycleStatus, ModuleListEntry, ModuleSelector,
+    OntologyInventory, UpdatePreview,
+};
 pub use loader::OntologyLoader;
 pub use migration::{MigrationEngine, MigrationStep, TransformKind};
 pub use ontology::{

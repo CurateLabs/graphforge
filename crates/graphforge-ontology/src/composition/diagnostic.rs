@@ -74,11 +74,11 @@ pub enum DiagnosticCode {
     InterchangeIntegrity,
     /// Identifier is not NFC-normalized or digest is malformed.
     CollisionMetadata,
-    /// Preview/adopt/update/delete against a stale inventory generation.
+    /// Mutation preview/source generation does not match current authority.
     InventoryGenerationConflict,
-    /// Module or bridge still referenced by dependants / activation / bridges.
+    /// Module or bridge cannot be removed because dependants still reference it.
     DependencyInUse,
-    /// Lifecycle state machine rejects the requested transition.
+    /// Lifecycle transition is not allowed from the current status.
     LifecycleInvalidTransition,
     /// Bridge assertion endpoint is absent from the known module inventory.
     BridgeEndpointMissing,
