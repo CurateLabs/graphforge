@@ -384,9 +384,26 @@ fn deterministic_export_and_reopen() {
         .export_bridge(&BridgeSelector::Exact(id.clone()), BridgeExportFormat::Yaml)
         .unwrap();
     let round_json: BridgeDocument = serde_json::from_str(&json).unwrap();
-    let round_yaml: BridgeDocument = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(bridge_document_digest(&round_json).unwrap(), digest_a);
-    assert_eq!(bridge_document_digest(&round_yaml).unwrap(), digest_a);
+
+    // YAML round-trip via lifecycle import (avoid direct serde_yaml crate name;
+    // Bazel crate_universe exposes it as serde_yaml_ng).
+    let mut staging = BridgeInventory::new(ActivationMode::Exploratory, Default::default());
+    for table in [
+        table(research.clone(), &["Study", "Person"], &["FUNDED_BY"], &["title"]),
+        table(
+            genealogy.clone(),
+            &["Person", "Claim"],
+            &["PARENT_OF"],
+            &["name"],
+        ),
+    ] {
+        staging.register_module(table);
+    }
+    let yaml_id = staging
+        .import_text(&yaml, BridgeImportFormatHint::Yaml, "yaml-round")
+        .unwrap();
+    assert_eq!(yaml_id.canonical_digest, digest_a);
 
     let snap = inv.snapshot();
     let reopened = BridgeInventory::reopen(snap).unwrap();
