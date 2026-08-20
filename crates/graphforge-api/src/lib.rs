@@ -112,15 +112,24 @@ mod write_modes;
 
 pub use graphforge_storage::{
     PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
-    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    PortableV2Representation,
+    PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
+    PortableV2ExportReceipt, PortableV2GraphSelector, PortableV2GraphSubsetMeta,
+    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2OciAuthenticityPolicy,
+    PortableV2OciPhase, PortableV2OciProgress, PortableV2OciPullReceipt, PortableV2OciReference,
+    PortableV2OciSignatureMaterial, PortableV2OciSignatureState, PortableV2Output,
+    PortableV2PackageClass, PortableV2ParticipantId, PortableV2PropertyProjection,
+    PortableV2Representation, PortableV2SelectionEntry, PortableV2SelectionPlan,
+    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
+    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
 };
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
-    PortableSelection, PortableV2ImportRequest, PortableV2ImportResult,
-    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest, PortableVerifyRequest,
-    PortableVerifyResult, publish_portable_v2_oci, publish_portable_v2_oci_with_registry,
-    pull_portable_v2_oci, pull_portable_v2_oci_with_registry, verify_portable_v2,
+    PortableSelection, PortableV2ExportFacadeResult, PortableV2ExportRequest,
+    PortableV2ImportRequest, PortableV2ImportResult, PortableV2OciPublishFacadeRequest,
+    PortableV2OciPullFacadeRequest, PortableV2SelectionPreviewRequest,
+    PortableV2SubsetPreviewRequest, PortableVerifyRequest, PortableVerifyResult,
+    publish_portable_v2_oci, publish_portable_v2_oci_with_registry, pull_portable_v2_oci,
+    pull_portable_v2_oci_with_registry, verify_portable_v2,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,

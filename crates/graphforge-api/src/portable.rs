@@ -122,6 +122,72 @@ pub struct PortableVerifyRequest {
 /// Stable Rust-owned portable-v2 verification report.
 pub type PortableVerifyResult = graphforge_storage::PortableV2Report;
 
+/// Portable-v2 selection preview request against a pinned generation.
+#[derive(Clone, Debug)]
+pub struct PortableV2SelectionPreviewRequest {
+    /// Current or named-checkpoint selection.
+    pub selection: PortableSelection,
+    /// Selection profile / custom identities.
+    pub request: graphforge_storage::PortableV2SelectionRequest,
+    /// Caller-selected finite resource limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+}
+
+/// Portable-v2 graph-subset preview request against a pinned generation.
+#[derive(Clone, Debug)]
+pub struct PortableV2SubsetPreviewRequest {
+    /// Current or named-checkpoint selection.
+    pub selection: PortableSelection,
+    /// Graph-subset selector and closure.
+    pub request: graphforge_storage::PortableV2SubsetRequest,
+    /// Caller-selected finite resource limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+}
+
+/// Portable-v2 export request (expanded directory or canonical bundle).
+#[derive(Clone, Debug)]
+pub struct PortableV2ExportRequest {
+    /// Current or named-checkpoint selection.
+    pub selection: PortableSelection,
+    /// Destination path (new file or directory). Existing paths are rejected.
+    pub output_path: PathBuf,
+    /// Expanded directory or canonical `.gfpb` bundle.
+    pub representation: graphforge_storage::PortableV2Output,
+    /// Component selection profile. Ignored when `subset` is `Some`.
+    pub profile: graphforge_storage::PortableV2SelectionProfile,
+    /// Optional graph/data subset. When set, exports `graph-data-subset`.
+    pub subset: Option<graphforge_storage::PortableV2SubsetRequest>,
+    /// Caller-selected finite planner and streaming limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+}
+
+/// Stable portable-v2 export receipt for bindings and CLI JSON.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PortableV2ExportFacadeResult {
+    /// Contract name.
+    pub contract: &'static str,
+    /// Source selector kind.
+    pub source: &'static str,
+    /// Named checkpoint, when selected.
+    pub checkpoint: Option<String>,
+    /// Pinned source generation.
+    pub generation_uuid: Uuid,
+    /// Semantic package identity (`sha256:…`).
+    pub package_digest: String,
+    /// Representation-specific transport identity (`sha256:…`).
+    pub transport_digest: String,
+    /// Verified physical package entry count.
+    pub entry_count: usize,
+    /// Source payload bytes, excluding tags and manifest.
+    pub payload_bytes: u64,
+    /// Published representation token.
+    pub representation: &'static str,
+    /// Immutable content-free selection fingerprint.
+    pub selection_fingerprint: String,
+    /// Caller-selected output path.
+    pub output: PathBuf,
+}
+
 /// Stable export result.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PortableExportResult {
@@ -237,27 +303,133 @@ pub fn pull_portable_v2_oci_with_registry(
 }
 
 impl GraphForge {
+    /// Resolve a pinned generation for portable export/preview helpers.
+    fn resolve_portable_generation(
+        &self,
+        selection: &PortableSelection,
+    ) -> Result<
+        (
+            graphforge_storage::ResolvedProjectGeneration,
+            &'static str,
+            Option<String>,
+        ),
+        GfError,
+    > {
+        let root = self.resolved_generation.container_root();
+        match selection {
+            PortableSelection::Current => Ok((
+                graphforge_storage::resolve_project_generation(root)?,
+                "current",
+                None,
+            )),
+            PortableSelection::Checkpoint(name) => {
+                let (_, generation) = graphforge_storage::open_checkpoint_generation_with_mode(
+                    root,
+                    name,
+                    self.lifecycle_mode,
+                )?;
+                Ok((generation, "checkpoint", Some(name.clone())))
+            }
+        }
+    }
+
+    /// Preview one content-free portable-v2 component selection.
+    pub fn preview_portable_v2_selection(
+        &self,
+        request: &PortableV2SelectionPreviewRequest,
+    ) -> Result<graphforge_storage::PortableV2SelectionPlan, graphforge_storage::PortableV2Error>
+    {
+        let (generation, _, _) = self
+            .resolve_portable_generation(&request.selection)
+            .map_err(portable_resolve_err)?;
+        graphforge_storage::preview_portable_v2_selection(
+            &generation,
+            &request.request,
+            request.limits,
+        )
+    }
+
+    /// Preview one content-free portable-v2 graph-data subset.
+    pub fn preview_portable_v2_graph_subset(
+        &self,
+        request: &PortableV2SubsetPreviewRequest,
+    ) -> Result<graphforge_storage::PortableV2SubsetPlan, graphforge_storage::PortableV2Error> {
+        let (generation, _, _) = self
+            .resolve_portable_generation(&request.selection)
+            .map_err(portable_resolve_err)?;
+        graphforge_storage::preview_portable_v2_graph_subset(
+            &generation,
+            &request.request,
+            request.limits,
+        )
+    }
+
+    /// Export one pinned generation as an expanded or bundled portable-v2 package.
+    pub fn export_portable_v2(
+        &self,
+        request: &PortableV2ExportRequest,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<PortableV2ExportFacadeResult, graphforge_storage::PortableV2Error> {
+        let (generation, source, checkpoint) = self
+            .resolve_portable_generation(&request.selection)
+            .map_err(portable_resolve_err)?;
+        let plan = if let Some(subset) = &request.subset {
+            let preview = graphforge_storage::preview_portable_v2_graph_subset(
+                &generation,
+                subset,
+                request.limits,
+            )?;
+            graphforge_storage::plan_graph_subset_portable_v2(
+                &generation,
+                &preview,
+                request.limits,
+            )?
+        } else {
+            let selection = graphforge_storage::preview_portable_v2_selection(
+                &generation,
+                &graphforge_storage::PortableV2SelectionRequest {
+                    profile: request.profile.clone(),
+                    strict: false,
+                },
+                request.limits,
+            )?;
+            graphforge_storage::plan_selected_portable_v2(&generation, &selection, request.limits)?
+        };
+        let default_cancelled = AtomicBool::new(false);
+        let cancelled = cancelled.unwrap_or(&default_cancelled);
+        let receipt = graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &request.output_path,
+            request.representation,
+            request.limits,
+            cancelled,
+            |_| {},
+        )?;
+        Ok(PortableV2ExportFacadeResult {
+            contract: "graphforge-portable-export/2",
+            source,
+            checkpoint,
+            generation_uuid: receipt.generation_uuid,
+            package_digest: format!("sha256:{}", hex(receipt.package_digest)),
+            transport_digest: format!("sha256:{}", hex(receipt.transport_digest)),
+            entry_count: receipt.entry_count,
+            payload_bytes: receipt.payload_bytes,
+            representation: match receipt.output {
+                graphforge_storage::PortableV2Output::Expanded => "expanded",
+                graphforge_storage::PortableV2Output::Bundle => "bundle",
+            },
+            selection_fingerprint: receipt.selection_fingerprint,
+            output: request.output_path.clone(),
+        })
+    }
+
     /// Export one pinned current/checkpoint generation without copying live layout metadata.
     pub fn export_portable(
         &self,
         request: PortableExportRequest,
     ) -> Result<PortableExportResult, GfError> {
-        let root = self.resolved_generation.container_root();
-        let (generation, source, checkpoint) = match request.selection {
-            PortableSelection::Current => (
-                graphforge_storage::resolve_project_generation(root)?,
-                "current",
-                None,
-            ),
-            PortableSelection::Checkpoint(name) => {
-                let (_, generation) = graphforge_storage::open_checkpoint_generation_with_mode(
-                    root,
-                    &name,
-                    self.lifecycle_mode,
-                )?;
-                (generation, "checkpoint", Some(name))
-            }
-        };
+        let (generation, source, checkpoint) =
+            self.resolve_portable_generation(&request.selection)?;
         let receipt = graphforge_storage::export_portable_project(
             &generation,
             &request.output,
@@ -357,6 +529,13 @@ impl GraphForge {
     }
 }
 
+fn portable_resolve_err(_error: GfError) -> graphforge_storage::PortableV2Error {
+    graphforge_storage::PortableV2Error::new(
+        graphforge_storage::PortableV2ErrorCode::Io,
+        "pinned project generation is not exportable",
+    )
+}
+
 fn supported_capabilities() -> Vec<ProjectCapability> {
     [
         "epistemic",
@@ -450,6 +629,78 @@ mod tests {
         assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
 
         GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
+    }
+
+    #[test]
+    fn public_v2_export_preview_and_verify_agree_on_package_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let graph = GraphForge::new(source.to_str()).unwrap();
+        let limits = graphforge_storage::PortableV2Limits::default();
+        let preview = graph
+            .preview_portable_v2_selection(&PortableV2SelectionPreviewRequest {
+                selection: PortableSelection::Current,
+                request: graphforge_storage::PortableV2SelectionRequest {
+                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    strict: false,
+                },
+                limits,
+            })
+            .unwrap();
+        assert_eq!(preview.package_class, "complete");
+        let expanded = root.path().join("expanded");
+        let bundle = root.path().join("complete.gfpb");
+        let expanded_export = graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: expanded.clone(),
+                    representation: graphforge_storage::PortableV2Output::Expanded,
+                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits,
+                },
+                None,
+            )
+            .unwrap();
+        let bundle_export = graph
+            .export_portable_v2(
+                &PortableV2ExportRequest {
+                    selection: PortableSelection::Current,
+                    output_path: bundle.clone(),
+                    representation: graphforge_storage::PortableV2Output::Bundle,
+                    profile: graphforge_storage::PortableV2SelectionProfile::Complete,
+                    subset: None,
+                    limits,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(expanded_export.package_digest, bundle_export.package_digest);
+        assert_eq!(
+            expanded_export.selection_fingerprint,
+            preview.selection_fingerprint
+        );
+        let verified = verify_portable_v2(
+            &PortableVerifyRequest {
+                input: bundle,
+                mode: graphforge_storage::PortableV2Mode::Full,
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(verified.package_digest, bundle_export.package_digest);
+        let _ = graph.preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
+            selection: PortableSelection::Current,
+            request: graphforge_storage::PortableV2SubsetRequest {
+                selector: graphforge_storage::PortableV2GraphSelector::default(),
+                closure: graphforge_storage::PortableV2SubsetClosure::InducedEdges,
+                projection: graphforge_storage::PortableV2PropertyProjection::default(),
+            },
+            limits,
+        });
     }
 
     #[test]

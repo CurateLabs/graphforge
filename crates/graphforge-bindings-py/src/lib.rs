@@ -3,6 +3,8 @@
 #![warn(unsafe_code)]
 
 mod composite;
+mod import_session;
+mod portable;
 mod transaction;
 
 use std::collections::{BTreeMap, HashMap};
@@ -445,7 +447,10 @@ fn py_to_json_value(value: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     }
 }
 
-fn json_value_to_python(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
+pub(crate) fn json_value_to_python(
+    py: Python<'_>,
+    value: &serde_json::Value,
+) -> PyResult<Py<PyAny>> {
     Ok(match value {
         serde_json::Value::Null => py.None(),
         serde_json::Value::Bool(value) => value.into_pyobject(py)?.to_owned().unbind().into_any(),
@@ -530,7 +535,10 @@ fn pyarrow_table_to_batch(value: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
 /// Accepted forms: `pyarrow.Table`, Arrow-compatible DataFrame (`to_arrow` /
 /// pandas via `pyarrow.Table.from_pandas`), and `list[dict]` via
 /// `pyarrow.Table.from_pylist`. Ontology, identity, and publication stay in Rust.
-fn py_bulk_input_to_batch(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
+pub(crate) fn py_bulk_input_to_batch(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<RecordBatch> {
     if let Ok(batch) = pyarrow_table_to_batch(value) {
         return Ok(batch);
     }
@@ -1572,7 +1580,9 @@ fn embedding_options_from_kwargs(
 }
 
 /// Build the `$param` map from a Python `dict` (or empty when `None`).
-fn params_from_dict(params: Option<&Bound<'_, PyDict>>) -> PyResult<HashMap<String, IrLiteral>> {
+pub(crate) fn params_from_dict(
+    params: Option<&Bound<'_, PyDict>>,
+) -> PyResult<HashMap<String, IrLiteral>> {
     let mut out = HashMap::new();
     if let Some(dict) = params {
         for (k, v) in dict.iter() {
@@ -2548,7 +2558,7 @@ impl PyCancellationToken {
 impl GraphForge {
     /// Guard mirroring the v0.5 lifecycle contract: operations after `close()`
     /// raise `LifecycleError`.
-    fn ensure_open(&self) -> PyResult<()> {
+    pub(crate) fn ensure_open(&self) -> PyResult<()> {
         if self.closed {
             return Err(Python::attach(|py| {
                 to_pyerr(
@@ -2788,6 +2798,245 @@ impl GraphForge {
             }
         };
         Ok(out.into_any().unbind())
+    }
+
+    /// Preview one content-free portable-v2 component selection.
+    #[pyo3(signature = (*, checkpoint=None, profile="complete", identities=None, strict=false, limits=None))]
+    fn preview_portable_v2_selection(
+        &self,
+        py: Python<'_>,
+        checkpoint: Option<String>,
+        profile: &str,
+        identities: Option<&Bound<'_, PyList>>,
+        strict: bool,
+        limits: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::preview_portable_v2_selection(
+            self, py, checkpoint, profile, identities, strict, limits,
+        )
+    }
+
+    /// Preview one content-free portable-v2 graph-data subset.
+    #[pyo3(signature = (*, subset, checkpoint=None, limits=None))]
+    fn preview_portable_v2_graph_subset(
+        &self,
+        py: Python<'_>,
+        subset: &Bound<'_, PyDict>,
+        checkpoint: Option<String>,
+        limits: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::preview_portable_v2_graph_subset(self, py, checkpoint, subset, limits)
+    }
+
+    /// Export one pinned generation as an expanded or bundled portable-v2 package.
+    #[pyo3(signature = (*, output_path, representation="bundle", profile="complete", identities=None, checkpoint=None, subset=None, limits=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_portable_v2(
+        &self,
+        py: Python<'_>,
+        output_path: &str,
+        representation: &str,
+        profile: &str,
+        identities: Option<&Bound<'_, PyList>>,
+        checkpoint: Option<String>,
+        subset: Option<&Bound<'_, PyDict>>,
+        limits: Option<&Bound<'_, PyDict>>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::export_portable_v2(
+            self,
+            py,
+            output_path,
+            representation,
+            profile,
+            identities,
+            checkpoint,
+            subset,
+            limits,
+            cancellation,
+        )
+    }
+
+    /// Verify portable-v2 content without opening or mutating a project.
+    #[staticmethod]
+    #[pyo3(signature = (input, *, mode="full", limits=None, cancellation=None))]
+    fn verify_portable_v2(
+        py: Python<'_>,
+        input: &str,
+        mode: &str,
+        limits: Option<&Bound<'_, PyDict>>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::verify_portable_v2(py, input, mode, limits, cancellation)
+    }
+
+    /// Verify and atomically import a complete portable-v2 package.
+    #[staticmethod]
+    #[pyo3(signature = (project_root, *, input, operation_id, limits=None, cancellation=None))]
+    fn import_portable_v2(
+        py: Python<'_>,
+        project_root: &str,
+        input: &str,
+        operation_id: &str,
+        limits: Option<&Bound<'_, PyDict>>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::import_portable_v2(py, project_root, input, operation_id, limits, cancellation)
+    }
+
+    /// Publish a verified portable-v2 package to an OCI Distribution registry.
+    #[staticmethod]
+    #[pyo3(signature = (*, package_path, registry, repository, tag=None, limits=None, authenticity=None, signature=None, insecure_http=false, credential=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn publish_portable_v2_oci(
+        py: Python<'_>,
+        package_path: &str,
+        registry: &str,
+        repository: &str,
+        tag: Option<String>,
+        limits: Option<&Bound<'_, PyDict>>,
+        authenticity: Option<&Bound<'_, PyDict>>,
+        signature: Option<&Bound<'_, PyDict>>,
+        insecure_http: bool,
+        credential: Option<String>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::publish_portable_v2_oci(
+            py,
+            package_path,
+            registry,
+            repository,
+            tag,
+            limits,
+            authenticity,
+            signature,
+            insecure_http,
+            credential,
+            cancellation,
+        )
+    }
+
+    /// Pull and verify a portable-v2 package from an OCI Distribution registry.
+    #[staticmethod]
+    #[pyo3(signature = (*, registry, repository, reference, destination, expected_oci_digest=None, limits=None, authenticity=None, insecure_http=false, credential=None, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn pull_portable_v2_oci(
+        py: Python<'_>,
+        registry: &str,
+        repository: &str,
+        reference: &str,
+        destination: &str,
+        expected_oci_digest: Option<String>,
+        limits: Option<&Bound<'_, PyDict>>,
+        authenticity: Option<&Bound<'_, PyDict>>,
+        insecure_http: bool,
+        credential: Option<String>,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::pull_portable_v2_oci(
+            py,
+            registry,
+            repository,
+            reference,
+            destination,
+            expected_oci_digest,
+            limits,
+            authenticity,
+            insecure_http,
+            credential,
+            cancellation,
+        )
+    }
+
+    /// Begin a durable staged import session.
+    #[pyo3(signature = (*, operation_uuid, batch_rows=None, max_source_bytes=None, max_files=None, max_rejected_rows=None, io_concurrency=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn begin_import_session(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        operation_uuid: &str,
+        batch_rows: Option<usize>,
+        max_source_bytes: Option<u64>,
+        max_files: Option<u64>,
+        max_rejected_rows: Option<u64>,
+        io_concurrency: Option<usize>,
+    ) -> PyResult<Py<import_session::PyGraphImportSession>> {
+        import_session::begin_import_session(
+            slf,
+            py,
+            operation_uuid,
+            batch_rows,
+            max_source_bytes,
+            max_files,
+            max_rejected_rows,
+            io_concurrency,
+        )
+    }
+
+    /// Resume one durable, non-terminal import session.
+    #[pyo3(signature = (session_uuid,))]
+    fn resume_import_session(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        session_uuid: &str,
+    ) -> PyResult<Py<import_session::PyGraphImportSession>> {
+        import_session::resume_import_session(slf, py, session_uuid)
+    }
+
+    /// Abort and remove non-terminal sessions older than `max_age_secs`.
+    #[pyo3(signature = (*, max_age_secs))]
+    fn cleanup_stale_import_sessions(&self, py: Python<'_>, max_age_secs: u64) -> PyResult<u64> {
+        import_session::cleanup_stale_import_sessions(self, py, max_age_secs)
+    }
+
+    /// Stream a query into an atomic Parquet file with explicit limits.
+    #[pyo3(signature = (query, path, *, params=None, max_row_group_rows=65536, max_batch_rows=65536, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_to_parquet_stream(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        path: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        max_row_group_rows: usize,
+        max_batch_rows: usize,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::execute_to_parquet_stream(
+            self,
+            py,
+            query,
+            path,
+            params,
+            max_row_group_rows,
+            max_batch_rows,
+            cancellation,
+        )
+    }
+
+    /// Stream a query into an atomic Arrow IPC stream file with explicit limits.
+    #[pyo3(signature = (query, path, *, params=None, max_row_group_rows=65536, max_batch_rows=65536, cancellation=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_to_arrow_ipc_stream(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        path: &str,
+        params: Option<&Bound<'_, PyDict>>,
+        max_row_group_rows: usize,
+        max_batch_rows: usize,
+        cancellation: Option<&PyCancellationToken>,
+    ) -> PyResult<Py<PyAny>> {
+        portable::execute_to_arrow_ipc_stream(
+            self,
+            py,
+            query,
+            path,
+            params,
+            max_row_group_rows,
+            max_batch_rows,
+            cancellation,
+        )
     }
 
     /// Diff two checkpoint/current endpoints through the Rust-owned engine.
@@ -6180,6 +6429,7 @@ fn _graphforge_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_cli_execute, m)?)?;
     m.add_class::<GraphForge>()?;
     m.add_class::<transaction::PyGraphTransaction>()?;
+    m.add_class::<import_session::PyGraphImportSession>()?;
     m.add_class::<PyCheckpointView>()?;
     m.add_class::<PyCancellationToken>()?;
     m.add_class::<PyNodeHandle>()?;

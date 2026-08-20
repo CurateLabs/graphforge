@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { tableFromIPC } from "apache-arrow";
-import { CheckpointView, GraphForge, PlanHandle } from "../index.js";
+import { CheckpointView, GraphForge, GraphImportSession, PlanHandle } from "../index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const policy = JSON.parse(
@@ -56,7 +56,7 @@ test("the Node classification is total, frozen, and backed by non-skipped native
   const languageSpecific = new Set(
     Object.keys(policy.classification.languageSpecific),
   );
-  const receivers = { CheckpointView, GraphForge, PlanHandle };
+  const receivers = { CheckpointView, GraphForge, GraphImportSession, PlanHandle };
   for (const id of equivalent) {
     assert.ok(release.includes(id), `stale equivalent classification: ${id}`);
     assert.equal(
@@ -136,6 +136,7 @@ test("the Node classification is total, frozen, and backed by non-skipped native
   for (const [receiver, constructor] of Object.entries({
     CheckpointView,
     GraphForge,
+    GraphImportSession,
     PlanHandle,
   })) {
     const projected = new Set(
