@@ -243,12 +243,20 @@ pub fn preview_portable_v2_selection(
     }
     included.sort_by(|a, b| a.identity.cmp(&b.identity));
     excluded.sort_by(|a, b| a.identity.cmp(&b.identity));
-    let required_capabilities = included
-        .iter()
-        .map(|entry| entry.identity.capability_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let required_capabilities = if matches!(request.profile, PortableV2SelectionProfile::Complete) {
+        generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| capability.capability_id)
+            .collect()
+    } else {
+        included
+            .iter()
+            .map(|entry| entry.identity.capability_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
     let package_class = match request.profile {
         PortableV2SelectionProfile::Complete => "complete",
         PortableV2SelectionProfile::OntologyOnly => "ontology-only",
@@ -287,7 +295,7 @@ pub(crate) fn validate_selection_plan(
     Ok(())
 }
 
-fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, PortableV2Error> {
+pub(crate) fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, PortableV2Error> {
     let mut unsigned = plan.clone();
     unsigned.selection_fingerprint.clear();
     let bytes = crate::project_portable_v2::canonical_json(

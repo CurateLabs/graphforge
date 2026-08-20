@@ -24,7 +24,8 @@ pub use generation::{
 
 pub mod graph_projection;
 pub use graph_projection::{
-    GraphProjectionSelection, GraphProjectionSummary, materialize_graph_projection,
+    GraphProjectionClosure, GraphProjectionSelection, GraphProjectionSummary,
+    materialize_graph_projection, materialize_portable_graph_tree_projection,
 };
 
 pub mod graph_files;
@@ -122,6 +123,7 @@ pub use project_retention::{
 
 pub mod project_portable;
 pub mod project_portable_v2_export;
+pub mod project_portable_v2_import;
 pub use project_portable::{
     PortableExportReceipt, PortableImportReceipt, PortableProjectLimits, encode_portable_project,
     export_portable_project, import_portable_project, import_portable_project_file,
@@ -130,6 +132,10 @@ pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
     plan_complete_portable_v2, plan_selected_portable_v2,
+};
+pub use project_portable_v2_import::{
+    PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
+    import_complete_portable_v2, import_complete_portable_v2_with_progress,
 };
 
 pub mod project_portable_v2;
@@ -145,6 +151,13 @@ pub use project_portable_v2_selection::{
     PortableV2ParticipantId, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
     preview_portable_v2_selection,
+};
+
+pub mod project_portable_v2_subset;
+pub use project_portable_v2_subset::{
+    PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
+    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
+    plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
 };
 
 pub mod workspace_participants;

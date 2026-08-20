@@ -78,6 +78,8 @@ pub struct PortableV2ExportPlan {
     payload_bytes: u64,
     selection_fingerprint: String,
     package_class: PortableV2PackageClass,
+    /// Keeps subset materialization alive for the plan lifetime.
+    retained_subset: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 impl std::fmt::Debug for PortableV2ExportPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,6 +90,218 @@ impl std::fmt::Debug for PortableV2ExportPlan {
             .field("payload_bytes", &self.payload_bytes)
             .field("selection_fingerprint", &self.selection_fingerprint)
             .finish_non_exhaustive()
+    }
+}
+
+impl PortableV2ExportPlan {
+    /// Replace whole-graph tree payload with a projected subset staging tree.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "subset replacement keeps staging inventory selector and limits explicit"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "subset tree replacement must rebuild inventory components and semantic identity together"
+    )]
+    pub(crate) fn replace_graph_tree_with_subset(
+        &mut self,
+        staging: tempfile::TempDir,
+        inventory: &crate::GraphFilesInventory,
+        inventory_bytes: Vec<u8>,
+        selector: &str,
+        closure: &str,
+        selection_fingerprint: &str,
+        limits: PortableV2ExportLimits,
+    ) -> Result<(), ExportError> {
+        let inventory_id =
+            portable_participant_id(crate::GRAPH_CAPABILITY_ID, crate::GRAPH_FILES_FAMILY);
+        let inventory_path = format!("data/components/graph-data/{inventory_id}/participant.json");
+        self.files.retain(|file| {
+            !file
+                .path
+                .starts_with("data/components/graph-data/graph-tree/")
+                && file.path != inventory_path
+        });
+        let mut total = self
+            .files
+            .iter()
+            .map(|file| file.length)
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| limit("subset byte overflow"))?;
+        let inventory_file = inline_control(&inventory_path, inventory_bytes, limits, &mut total)?;
+        self.files.push(inventory_file);
+
+        let mut graph_files = Vec::new();
+        for entry in &inventory.files {
+            if matches!(
+                entry.role,
+                crate::GraphFileRole::Index | crate::GraphFileRole::Delta
+            ) {
+                continue;
+            }
+            let source = staging.path().join(&entry.relative_path);
+            let path = format!(
+                "data/components/graph-data/graph-tree/{}",
+                entry.relative_path
+            );
+            let planned = inspect(&source, &path, limits, &mut total)?;
+            if planned.length != entry.byte_length || hex(planned.digest) != entry.content_sha256 {
+                return Err(err(
+                    "GF_SOURCE_CHANGED",
+                    "subset graph file differs from captured inventory",
+                ));
+            }
+            graph_files.push(ComponentFile {
+                media_type: graph_media(&entry.relative_path).into(),
+                path: path.clone(),
+                length: planned.length,
+                sha256: hex(planned.digest),
+            });
+            self.files.push(planned);
+        }
+        graph_files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        self.files
+            .sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        collisions(&self.files)?;
+        if self.files.len() as u64 > limits.max_entries {
+            return Err(limit("entry count exceeds configured limit"));
+        }
+
+        let mut components = Vec::new();
+        let mut roots = Vec::new();
+        let mut by_component: std::collections::BTreeMap<(String, String), Vec<&PlannedFile>> =
+            std::collections::BTreeMap::new();
+        for file in &self.files {
+            let Some(rest) = file.path.strip_prefix("data/components/") else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, '/');
+            let kind = parts.next().unwrap_or_default().to_owned();
+            let participant = parts.next().unwrap_or_default().to_owned();
+            by_component
+                .entry((kind, participant))
+                .or_default()
+                .push(file);
+        }
+        for ((kind, participant_id), files) in by_component {
+            roots.push(participant_id.clone());
+            let component_files = if participant_id == "graph-tree" {
+                graph_files.clone()
+            } else {
+                files
+                    .iter()
+                    .map(|file| ComponentFile {
+                        media_type: media_type_for_path(&file.path).into(),
+                        path: file.path.clone(),
+                        length: file.length,
+                        sha256: hex(file.digest),
+                    })
+                    .collect()
+            };
+            components.push(Component {
+                kind,
+                participant_id,
+                required_dependencies: vec![],
+                files: component_files,
+            });
+        }
+        components.sort_by(|a, b| (&a.kind, &a.participant_id).cmp(&(&b.kind, &b.participant_id)));
+        roots.sort();
+        roots.dedup();
+
+        let capabilities = components
+            .iter()
+            .map(|component| format!("{}@1", component.kind))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let generation_uuid = self.generation_uuid.hyphenated().to_string();
+        let existing: serde_json::Value =
+            serde_json::from_slice(&self.manifest).map_err(storage)?;
+        let source_manifest = existing["source_generation"]["manifest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let omissions = existing["selection"]["omissions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let redactions = existing["selection"]["redactions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let draft = Manifest {
+            format: "graphforge-project/2",
+            package_digest: String::new(),
+            package_class: "graph-data-subset",
+            source_generation: Source {
+                generation_uuid: generation_uuid.clone(),
+                manifest_sha256: source_manifest.clone(),
+            },
+            selection: Selection {
+                roots: &roots,
+                omissions: omissions.clone(),
+                redactions: redactions.clone(),
+                graph_subset: Some(GraphSubsetRef { selector, closure }),
+            },
+            components: &components,
+            requirements: Requirements {
+                capabilities: capabilities.clone(),
+                dependency_rule: "required-transitive-closure/1",
+            },
+            states: States {
+                integrity: "verified",
+                compatibility: "supported",
+                authenticity: "unsigned",
+            },
+        };
+        let mut value = serde_json::to_value(&draft).map_err(storage)?;
+        value.as_object_mut().unwrap().remove("package_digest");
+        let semantic = canonical_json(&value)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"graphforge-project/2\0");
+        hasher.update(semantic);
+        self.package_digest = hasher.finalize().into();
+        let final_manifest = Manifest {
+            format: "graphforge-project/2",
+            package_digest: format!("sha256:{}", hex(self.package_digest)),
+            package_class: "graph-data-subset",
+            source_generation: Source {
+                generation_uuid,
+                manifest_sha256: source_manifest,
+            },
+            selection: Selection {
+                roots: &roots,
+                omissions,
+                redactions,
+                graph_subset: Some(GraphSubsetRef { selector, closure }),
+            },
+            components: &components,
+            requirements: Requirements {
+                capabilities,
+                dependency_rule: "required-transitive-closure/1",
+            },
+            states: States {
+                integrity: "verified",
+                compatibility: "supported",
+                authenticity: "unsigned",
+            },
+        };
+        self.manifest = canonical_json(&serde_json::to_value(final_manifest).map_err(storage)?)?;
+        if self.manifest.len() as u64 > limits.max_manifest_bytes {
+            return Err(limit("semantic manifest exceeds configured limit"));
+        }
+        self.payload_bytes = total;
+        selection_fingerprint.clone_into(&mut self.selection_fingerprint);
+        self.package_class = PortableV2PackageClass::GraphDataSubset;
+        self.retained_subset = Some(std::sync::Arc::new(staging));
+        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +344,13 @@ struct Selection<'a> {
     roots: &'a [String],
     omissions: Vec<String>,
     redactions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_subset: Option<GraphSubsetRef<'a>>,
+}
+#[derive(Serialize)]
+struct GraphSubsetRef<'a> {
+    selector: &'a str,
+    closure: &'a str,
 }
 #[derive(Serialize)]
 struct Component {
@@ -138,7 +359,7 @@ struct Component {
     required_dependencies: Vec<String>,
     files: Vec<ComponentFile>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ComponentFile {
     media_type: String,
     path: String,
@@ -387,6 +608,7 @@ pub fn plan_selected_portable_v2(
                 })
                 .collect(),
             redactions: selection.redactions.clone(),
+            graph_subset: None,
         },
         components: &components,
         requirements: Requirements {
@@ -424,6 +646,7 @@ pub fn plan_selected_portable_v2(
                 })
                 .collect(),
             redactions: selection.redactions.clone(),
+            graph_subset: None,
         },
         components: &components,
         requirements: Requirements {
@@ -448,6 +671,7 @@ pub fn plan_selected_portable_v2(
         payload_bytes: total,
         selection_fingerprint: selection.selection_fingerprint.clone(),
         package_class: package_class(&selection.package_class)?,
+        retained_subset: None,
     })
 }
 
@@ -538,6 +762,7 @@ fn package_class(value: &str) -> Result<PortableV2PackageClass, ExportError> {
         "complete" => Ok(PortableV2PackageClass::Complete),
         "ontology-only" => Ok(PortableV2PackageClass::OntologyOnly),
         "component-selective" => Ok(PortableV2PackageClass::ComponentSelective),
+        "graph-data-subset" => Ok(PortableV2PackageClass::GraphDataSubset),
         _ => Err(err(
             "GF_INCOMPATIBLE",
             "unsupported selection package class",
@@ -1188,6 +1413,22 @@ fn media_type(e: &str) -> &str {
         _ => "application/octet-stream",
     }
 }
+fn media_type_for_path(path: &str) -> &'static str {
+    if path.ends_with("runtime-generation.json") {
+        return "application/vnd.graphforge.runtime-generation+json";
+    }
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("json") => "application/json",
+        Some("parquet") => "application/vnd.apache.parquet",
+        Some("yaml" | "yml") => "application/yaml",
+        _ => "application/octet-stream",
+    }
+}
 fn graph_media(p: &str) -> &str {
     let extension = Path::new(p).extension().and_then(|value| value.to_str());
     if extension.is_some_and(|value| value.eq_ignore_ascii_case("parquet")) {
@@ -1344,6 +1585,112 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     use super::*;
     use crate::open_or_initialize_project;
+
+    fn graph_generation() -> (tempfile::TempDir, ResolvedProjectGeneration) {
+        let project = tempfile::tempdir().unwrap();
+        let parent = open_or_initialize_project(project.path()).unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        fs::write(tree.path().join("a.parquet"), b"graph-a").unwrap();
+        fs::create_dir(tree.path().join("properties")).unwrap();
+        fs::write(tree.path().join("properties/Person.parquet"), b"person").unwrap();
+        let (_, inventory) = crate::capture_graph_files(tree.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.insert(0, inventory);
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation_with_graph_tree(
+                project.path(),
+                &request,
+                Some(tree.path()),
+            )
+            .unwrap()
+        else {
+            panic!("fresh graph generation replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        drop(parent);
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation)
+    }
+
+    #[test]
+    fn graph_tree_round_trips_equivalently_from_both_representations() {
+        let (_project, generation) = graph_generation();
+        let limits = PortableV2ExportLimits::default();
+        let plan = plan_complete_portable_v2(&generation, limits).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let expanded = output.path().join("graph.gfproject");
+        let bundle = output.path().join("graph.gfpb");
+        let cancelled = AtomicBool::new(false);
+        export_complete_portable_v2(
+            &plan,
+            &expanded,
+            PortableV2Output::Expanded,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        export_complete_portable_v2(
+            &plan,
+            &bundle,
+            PortableV2Output::Bundle,
+            limits,
+            &cancelled,
+            |_| {},
+        )
+        .unwrap();
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let expanded_target = output.path().join("expanded");
+        let bundle_target = output.path().join("bundle");
+        for (source, target) in [(&expanded, &expanded_target), (&bundle, &bundle_target)] {
+            crate::import_complete_portable_v2(
+                source,
+                target,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &supported,
+                limits,
+                None,
+            )
+            .unwrap();
+        }
+        let expanded = crate::resolve_project_generation(&expanded_target).unwrap();
+        let bundle = crate::resolve_project_generation(&bundle_target).unwrap();
+        assert_eq!(
+            expanded.graph_files_inventory().unwrap(),
+            bundle.graph_files_inventory().unwrap()
+        );
+        assert_eq!(
+            tree_bytes(&expanded.graph_tree_root()),
+            tree_bytes(&bundle.graph_tree_root())
+        );
+    }
 
     #[test]
     fn selection_preview_is_stable_exact_and_consumed_by_export_plan() {
@@ -1597,6 +1944,130 @@ mod tests {
         assert_eq!(runtime["contract"], "graphforge-runtime-generation-map/1");
         assert!(runtime.get("host_path").is_none());
         assert!(runtime.get("secret").is_none());
+
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| crate::ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+        let expanded_target = out.path().join("expanded-project");
+        let bundle_target = out.path().join("bundle-project");
+        let mut progress = Vec::new();
+        let expanded_transaction = Uuid::new_v4();
+        let expanded_generation = Uuid::new_v4();
+        let expanded_import = crate::import_complete_portable_v2_with_progress(
+            &expanded,
+            &expanded_target,
+            expanded_transaction,
+            expanded_generation,
+            &supported,
+            limits,
+            Some(&cancelled),
+            |event| progress.push(event),
+        )
+        .unwrap();
+        assert_eq!(
+            progress.iter().map(|event| event.phase).collect::<Vec<_>>(),
+            vec![
+                crate::PortableV2ImportPhase::Verifying,
+                crate::PortableV2ImportPhase::Materialized,
+                crate::PortableV2ImportPhase::Published,
+            ]
+        );
+        let expected_package_digest = format!("sha256:{}", hex(a.package_digest));
+        assert!(progress.iter().skip(1).all(|event| {
+            event.entries > 0
+                && event.bytes > 0
+                && event.package_digest.as_deref() == Some(expected_package_digest.as_str())
+        }));
+        let bundle_import = crate::import_complete_portable_v2(
+            &first,
+            &bundle_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert_eq!(expanded_import.package_digest, bundle_import.package_digest);
+        let expanded_reopened = crate::resolve_project_generation(&expanded_target).unwrap();
+        let bundle_reopened = crate::resolve_project_generation(&bundle_target).unwrap();
+        assert_eq!(
+            expanded_reopened.capabilities(),
+            bundle_reopened.capabilities()
+        );
+        assert_eq!(
+            expanded_reopened.participant_snapshots().unwrap(),
+            bundle_reopened.participant_snapshots().unwrap()
+        );
+        let protected_generation = expanded_reopened.generation_uuid();
+        let replay = crate::import_complete_portable_v2(
+            &expanded,
+            &expanded_target,
+            expanded_transaction,
+            expanded_generation,
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap();
+        assert!(replay.publication.idempotent_replay);
+        assert_eq!(replay.publication.generation_uuid, protected_generation);
+        let overwrite = crate::import_complete_portable_v2(
+            &expanded,
+            &expanded_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap_err();
+        assert_eq!(overwrite.code, PortableV2ErrorCode::Io);
+        assert_eq!(
+            crate::resolve_project_generation(&expanded_target)
+                .unwrap()
+                .generation_uuid(),
+            protected_generation
+        );
+        let cancelled = AtomicBool::new(true);
+        let cancelled_target = out.path().join("cancelled-project");
+        let cancelled_error = crate::import_complete_portable_v2(
+            &expanded,
+            &cancelled_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            Some(&cancelled),
+        )
+        .unwrap_err();
+        assert_eq!(cancelled_error.code, PortableV2ErrorCode::Cancelled);
+        assert!(!cancelled_target.exists());
+        fs::write(
+            expanded.join(
+                "data/components/compatibility/graphforge-runtime-map/runtime-generation.json",
+            ),
+            b"{}",
+        )
+        .unwrap();
+        let corrupt_target = out.path().join("corrupt-project");
+        let corrupt = crate::import_complete_portable_v2(
+            &expanded,
+            &corrupt_target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &supported,
+            limits,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(corrupt.code, PortableV2ErrorCode::DigestMismatch);
+        assert!(!corrupt_target.exists());
     }
 
     #[test]

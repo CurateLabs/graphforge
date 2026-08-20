@@ -38,6 +38,30 @@ pub struct PortableImportRequest {
     pub operation_id: OperationId,
 }
 
+/// Verification-first portable-v2 complete-project import request.
+#[derive(Clone, Debug)]
+pub struct PortableV2ImportRequest {
+    /// Expanded package directory or canonical `.gfpb` bundle.
+    pub input: PathBuf,
+    /// Caller-owned idempotency identity.
+    pub operation_id: OperationId,
+    /// Caller-selected finite verifier and streaming limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+}
+
+/// Stable Rust-owned portable-v2 import result.
+#[derive(Clone, Debug)]
+pub struct PortableV2ImportResult {
+    /// Canonical semantic package identity.
+    pub package_digest: String,
+    /// Representation-specific transport identity.
+    pub transport_digest: Option<String>,
+    /// Newly published local generation UUID.
+    pub generation_uuid: Uuid,
+    /// Whether the operation replayed an identical publication.
+    pub idempotent_replay: bool,
+}
+
 /// Read-only portable-v2 verification request.
 #[derive(Clone, Debug)]
 pub struct PortableVerifyRequest {
@@ -170,6 +194,51 @@ impl GraphForge {
             idempotent_replay: receipt.publication.idempotent_replay,
         })
     }
+
+    /// Verify and atomically import a complete portable-v2 package.
+    pub fn import_portable_v2(
+        project_root: &Path,
+        request: &PortableV2ImportRequest,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<PortableV2ImportResult, graphforge_storage::PortableV2Error> {
+        let generation_uuid = Uuid::new_v5(
+            &request.operation_id.0,
+            b"graphforge-portable-v2-import-generation/1",
+        );
+        let receipt = graphforge_storage::import_complete_portable_v2(
+            &request.input,
+            project_root,
+            request.operation_id.0,
+            generation_uuid,
+            &supported_capabilities(),
+            request.limits,
+            cancelled,
+        )?;
+        let root = project_root.to_str().ok_or_else(|| {
+            graphforge_storage::PortableV2Error::new(
+                graphforge_storage::PortableV2ErrorCode::InvalidPath,
+                "invalid project path",
+            )
+        })?;
+        let reopened = Self::new(Some(root)).map_err(|_| {
+            graphforge_storage::PortableV2Error::new(
+                graphforge_storage::PortableV2ErrorCode::Io,
+                "imported project did not reopen",
+            )
+        })?;
+        if reopened.resolved_generation.generation_uuid() != receipt.publication.generation_uuid {
+            return Err(graphforge_storage::PortableV2Error::new(
+                graphforge_storage::PortableV2ErrorCode::Io,
+                "imported generation did not reopen",
+            ));
+        }
+        Ok(PortableV2ImportResult {
+            package_digest: receipt.package_digest,
+            transport_digest: receipt.transport_digest,
+            generation_uuid: receipt.publication.generation_uuid,
+            idempotent_replay: receipt.publication.idempotent_replay,
+        })
+    }
 }
 
 fn supported_capabilities() -> Vec<ProjectCapability> {
@@ -265,6 +334,48 @@ mod tests {
         assert_eq!(imported.envelope_sha256, exported.envelope_sha256);
 
         GraphForge::new(target.to_str()).expect("imported CURRENT must reopen");
+    }
+
+    #[test]
+    fn public_v2_import_facade_verifies_publishes_and_reopens() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        GraphForge::new(source.to_str()).unwrap();
+        let generation = graphforge_storage::resolve_project_generation(&source).unwrap();
+        let limits = graphforge_storage::PortableV2Limits::default();
+        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let package = root.path().join("complete.gfpb");
+        graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &package,
+            graphforge_storage::PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        let target = root.path().join("target");
+        let imported = GraphForge::import_portable_v2(
+            &target,
+            &PortableV2ImportRequest {
+                input: package,
+                operation_id: OperationId(Uuid::new_v4()),
+                limits,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!imported.idempotent_replay);
+        assert!(imported.package_digest.starts_with("sha256:"));
+        assert_eq!(
+            GraphForge::new(target.to_str())
+                .unwrap()
+                .resolved_generation
+                .generation_uuid(),
+            imported.generation_uuid
+        );
     }
 
     #[test]

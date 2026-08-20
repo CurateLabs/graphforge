@@ -180,7 +180,10 @@ any destination is created. Profiles are `Complete`, `OntologyOnly`,
 the pair `(capability_id, record_family_id)`; runtime catalog IDs, display names,
 and host paths are not accepted as identity. Graph data selection always means
 the whole committed graph component. Fine-grained row or subgraph selection is
-a separate contract.
+handled by `preview_portable_v2_graph_subset` / `plan_graph_subset_portable_v2`
+(#786): typed UUID selectors, `induced-edges` and `referential` closure, property
+redaction, and `package_class: graph-data-subset` with a content-free
+`selection.graph_subset` receipt.
 
 The preview lists included and excluded stable identities, inclusion reasons,
 row counts, exact committed participant byte estimates, required capabilities,
@@ -244,3 +247,24 @@ have distinct transport digests.
 
 Portable v1 remains available through `export_portable_project`. It is a
 separate explicit contract and is never emitted with v2 markers.
+
+## Complete-package importer
+
+`import_complete_portable_v2` accepts either local representation and invokes
+the shared full verifier before admitting the destination. Authenticated
+component entries are streamed into a transaction-owned materialization tree,
+then streamed again into one private generation with their declared lengths and
+digests rechecked. The configured copy buffer and bounded verifier indexes—not
+package payload size—bound memory. Publication uses the normal generation
+journal, fsync, validation, and atomic `CURRENT` transition, followed by a clean
+public reopen.
+
+The default operation accepts only the `complete` package class and only a new,
+empty, or pristine initialized destination. Existing project state is never
+overwritten or merged. Ontology-only, settings-only/component-selective, and
+graph-subset packages require explicit class-specific consumers; complete
+import returns a typed incompatibility without admitting the destination.
+Cancellation and corruption remove the private materialization, while a crash
+inside generation publication is handled by the normal project recovery and
+transaction-idempotency protocol. Portable v1 import remains a separate,
+explicit compatibility API.

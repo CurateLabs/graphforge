@@ -43,6 +43,30 @@ def check_generation_diff() -> None:
     assert result["added_nodes"]["row_count"] == 1
     assert result["added_edges"]["row_count"] == 1
 
+    forge.execute("MATCH (n) SET n.active = true")
+    final_target = forge.committed_generation_identity()
+    ladder = forge.diff_committed_generations(
+        source_generation_uuid=target["generation_uuid"],
+        source_manifest_sha256=target["manifest_sha256"],
+        target_generation_uuid=final_target["generation_uuid"],
+        target_manifest_sha256=final_target["manifest_sha256"],
+    )
+    direct = forge.diff_committed_generations(
+        source_generation_uuid=source["generation_uuid"],
+        source_manifest_sha256=source["manifest_sha256"],
+        target_generation_uuid=final_target["generation_uuid"],
+        target_manifest_sha256=final_target["manifest_sha256"],
+    )
+    assert ladder["kind"] == "ready"
+    assert direct["kind"] == "ready"
+    assert ladder["source"] == target
+    assert ladder["target"] == final_target
+    assert direct["source"] == source
+    assert direct["target"] == final_target
+    assert ladder["modified_nodes"]["row_count"] == 2
+    assert direct["added_nodes"]["row_count"] == 1
+    assert direct["modified_nodes"]["row_count"] == 1
+
     wrong_manifest = bytearray(source["manifest_sha256"])
     wrong_manifest[0] ^= 0xFF
     reload = forge.diff_committed_generations(
@@ -51,6 +75,8 @@ def check_generation_diff() -> None:
     assert reload == {"kind": "reload_required", "reason": "identity_mismatch"}
     bounded = forge.diff_committed_generations(**request, max_records_per_generation=0)
     assert bounded == {"kind": "reload_required", "reason": "resource_limit"}
+    byte_bounded = forge.diff_committed_generations(**request, max_output_bytes=1)
+    assert byte_bounded == {"kind": "reload_required", "reason": "resource_limit"}
 
     cancellation = gf.CancellationToken()
     cancellation.cancel()

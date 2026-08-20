@@ -534,7 +534,9 @@ fn validate_capabilities(
     Ok(())
 }
 
-fn prepare_import_target(target: &Path) -> Result<Option<ResolvedProjectGeneration>, GfError> {
+pub(crate) fn prepare_import_target(
+    target: &Path,
+) -> Result<Option<ResolvedProjectGeneration>, GfError> {
     reject_symlink_components(target, "portable import target")?;
     match std::fs::symlink_metadata(target) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -572,8 +574,15 @@ fn prepare_import_target(target: &Path) -> Result<Option<ResolvedProjectGenerati
 }
 
 fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
-    let Ok(resolved) = resolve_project_generation(target) else {
+    let Some(generation_uuid) = semantically_pristine_generation(target)? else {
         return Ok(false);
+    };
+    has_exact_pristine_layout(target, generation_uuid)
+}
+
+pub(crate) fn semantically_pristine_generation(target: &Path) -> Result<Option<Uuid>, GfError> {
+    let Ok(resolved) = resolve_project_generation(target) else {
+        return Ok(None);
     };
     let capabilities = resolved.capabilities();
     if capabilities.len() != 2
@@ -582,7 +591,7 @@ fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
         || capabilities[1].capability_id != "workspace"
         || capabilities[1].capability_version != 1
     {
-        return Ok(false);
+        return Ok(None);
     }
     let actual = resolved.participant_snapshots()?;
     let expected = crate::workspace_participants::empty_workspace_participants()?;
@@ -603,9 +612,9 @@ fn is_pristine_initialized_target(target: &Path) -> Result<bool, GfError> {
                 && actual.bytes == expected.bytes
         })
     {
-        return Ok(false);
+        return Ok(None);
     }
-    has_exact_pristine_layout(target, resolved.generation_uuid())
+    Ok(Some(resolved.generation_uuid()))
 }
 
 fn has_exact_pristine_layout(target: &Path, generation_uuid: Uuid) -> Result<bool, GfError> {
@@ -738,7 +747,7 @@ fn trusted_platform_symlink(_metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
 
     std::fs::OpenOptions::new()
@@ -748,7 +757,7 @@ fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_regular_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
 

@@ -37,6 +37,26 @@ test("generation diff forwards exact Rust IPC, identities, limits, and cancellat
   assert.equal(result.addedNodes.rowCount, 1n);
   assert.equal(result.addedEdges.rowCount, 1n);
 
+  forge.execute("MATCH (n) SET n.active = true");
+  const finalTarget = forge.committedGenerationIdentity();
+  const ladder = await forge.diffCommittedGenerations({
+    source: target,
+    target: finalTarget,
+  });
+  const direct = await forge.diffCommittedGenerations({
+    source,
+    target: finalTarget,
+  });
+  assert.equal(ladder.kind, "ready");
+  assert.equal(direct.kind, "ready");
+  assert.deepEqual(ladder.source, target);
+  assert.deepEqual(ladder.target, finalTarget);
+  assert.deepEqual(direct.source, source);
+  assert.deepEqual(direct.target, finalTarget);
+  assert.equal(ladder.modifiedNodes.rowCount, 2n);
+  assert.equal(direct.addedNodes.rowCount, 1n);
+  assert.equal(direct.modifiedNodes.rowCount, 1n);
+
   const wrongManifest = Buffer.from(source.manifestSha256);
   wrongManifest[0] ^= 0xff;
   assert.deepEqual(
@@ -50,6 +70,13 @@ test("generation diff forwards exact Rust IPC, identities, limits, and cancellat
     await forge.diffCommittedGenerations({
       ...request,
       maxRecordsPerGeneration: 0n,
+    }),
+    { kind: "reload_required", reason: "resource_limit" },
+  );
+  assert.deepEqual(
+    await forge.diffCommittedGenerations({
+      ...request,
+      maxOutputBytes: 1n,
     }),
     { kind: "reload_required", reason: "resource_limit" },
   );
