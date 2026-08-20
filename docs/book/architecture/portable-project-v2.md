@@ -180,7 +180,10 @@ any destination is created. Profiles are `Complete`, `OntologyOnly`,
 the pair `(capability_id, record_family_id)`; runtime catalog IDs, display names,
 and host paths are not accepted as identity. Graph data selection always means
 the whole committed graph component. Fine-grained row or subgraph selection is
-a separate contract.
+handled by `preview_portable_v2_graph_subset` / `plan_graph_subset_portable_v2`
+(#786): typed UUID selectors, `induced-edges` and `referential` closure, property
+redaction, and `package_class: graph-data-subset` with a content-free
+`selection.graph_subset` receipt.
 
 The preview lists included and excluded stable identities, inclusion reasons,
 row counts, exact committed participant byte estimates, required capabilities,

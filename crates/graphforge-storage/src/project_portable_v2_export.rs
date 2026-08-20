@@ -78,6 +78,8 @@ pub struct PortableV2ExportPlan {
     payload_bytes: u64,
     selection_fingerprint: String,
     package_class: PortableV2PackageClass,
+    /// Keeps subset materialization alive for the plan lifetime.
+    retained_subset: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 impl std::fmt::Debug for PortableV2ExportPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,6 +90,218 @@ impl std::fmt::Debug for PortableV2ExportPlan {
             .field("payload_bytes", &self.payload_bytes)
             .field("selection_fingerprint", &self.selection_fingerprint)
             .finish_non_exhaustive()
+    }
+}
+
+impl PortableV2ExportPlan {
+    /// Replace whole-graph tree payload with a projected subset staging tree.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "subset replacement keeps staging inventory selector and limits explicit"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "subset tree replacement must rebuild inventory components and semantic identity together"
+    )]
+    pub(crate) fn replace_graph_tree_with_subset(
+        &mut self,
+        staging: tempfile::TempDir,
+        inventory: &crate::GraphFilesInventory,
+        inventory_bytes: Vec<u8>,
+        selector: &str,
+        closure: &str,
+        selection_fingerprint: &str,
+        limits: PortableV2ExportLimits,
+    ) -> Result<(), ExportError> {
+        let inventory_id =
+            portable_participant_id(crate::GRAPH_CAPABILITY_ID, crate::GRAPH_FILES_FAMILY);
+        let inventory_path = format!("data/components/graph-data/{inventory_id}/participant.json");
+        self.files.retain(|file| {
+            !file
+                .path
+                .starts_with("data/components/graph-data/graph-tree/")
+                && file.path != inventory_path
+        });
+        let mut total = self
+            .files
+            .iter()
+            .map(|file| file.length)
+            .try_fold(0_u64, u64::checked_add)
+            .ok_or_else(|| limit("subset byte overflow"))?;
+        let inventory_file = inline_control(&inventory_path, inventory_bytes, limits, &mut total)?;
+        self.files.push(inventory_file);
+
+        let mut graph_files = Vec::new();
+        for entry in &inventory.files {
+            if matches!(
+                entry.role,
+                crate::GraphFileRole::Index | crate::GraphFileRole::Delta
+            ) {
+                continue;
+            }
+            let source = staging.path().join(&entry.relative_path);
+            let path = format!(
+                "data/components/graph-data/graph-tree/{}",
+                entry.relative_path
+            );
+            let planned = inspect(&source, &path, limits, &mut total)?;
+            if planned.length != entry.byte_length || hex(planned.digest) != entry.content_sha256 {
+                return Err(err(
+                    "GF_SOURCE_CHANGED",
+                    "subset graph file differs from captured inventory",
+                ));
+            }
+            graph_files.push(ComponentFile {
+                media_type: graph_media(&entry.relative_path).into(),
+                path: path.clone(),
+                length: planned.length,
+                sha256: hex(planned.digest),
+            });
+            self.files.push(planned);
+        }
+        graph_files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        self.files
+            .sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+        collisions(&self.files)?;
+        if self.files.len() as u64 > limits.max_entries {
+            return Err(limit("entry count exceeds configured limit"));
+        }
+
+        let mut components = Vec::new();
+        let mut roots = Vec::new();
+        let mut by_component: std::collections::BTreeMap<(String, String), Vec<&PlannedFile>> =
+            std::collections::BTreeMap::new();
+        for file in &self.files {
+            let Some(rest) = file.path.strip_prefix("data/components/") else {
+                continue;
+            };
+            let mut parts = rest.splitn(3, '/');
+            let kind = parts.next().unwrap_or_default().to_owned();
+            let participant = parts.next().unwrap_or_default().to_owned();
+            by_component
+                .entry((kind, participant))
+                .or_default()
+                .push(file);
+        }
+        for ((kind, participant_id), files) in by_component {
+            roots.push(participant_id.clone());
+            let component_files = if participant_id == "graph-tree" {
+                graph_files.clone()
+            } else {
+                files
+                    .iter()
+                    .map(|file| ComponentFile {
+                        media_type: media_type_for_path(&file.path).into(),
+                        path: file.path.clone(),
+                        length: file.length,
+                        sha256: hex(file.digest),
+                    })
+                    .collect()
+            };
+            components.push(Component {
+                kind,
+                participant_id,
+                required_dependencies: vec![],
+                files: component_files,
+            });
+        }
+        components.sort_by(|a, b| (&a.kind, &a.participant_id).cmp(&(&b.kind, &b.participant_id)));
+        roots.sort();
+        roots.dedup();
+
+        let capabilities = components
+            .iter()
+            .map(|component| format!("{}@1", component.kind))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let generation_uuid = self.generation_uuid.hyphenated().to_string();
+        let existing: serde_json::Value =
+            serde_json::from_slice(&self.manifest).map_err(storage)?;
+        let source_manifest = existing["source_generation"]["manifest_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let omissions = existing["selection"]["omissions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let redactions = existing["selection"]["redactions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let draft = Manifest {
+            format: "graphforge-project/2",
+            package_digest: String::new(),
+            package_class: "graph-data-subset",
+            source_generation: Source {
+                generation_uuid: generation_uuid.clone(),
+                manifest_sha256: source_manifest.clone(),
+            },
+            selection: Selection {
+                roots: &roots,
+                omissions: omissions.clone(),
+                redactions: redactions.clone(),
+                graph_subset: Some(GraphSubsetRef { selector, closure }),
+            },
+            components: &components,
+            requirements: Requirements {
+                capabilities: capabilities.clone(),
+                dependency_rule: "required-transitive-closure/1",
+            },
+            states: States {
+                integrity: "verified",
+                compatibility: "supported",
+                authenticity: "unsigned",
+            },
+        };
+        let mut value = serde_json::to_value(&draft).map_err(storage)?;
+        value.as_object_mut().unwrap().remove("package_digest");
+        let semantic = canonical_json(&value)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"graphforge-project/2\0");
+        hasher.update(semantic);
+        self.package_digest = hasher.finalize().into();
+        let final_manifest = Manifest {
+            format: "graphforge-project/2",
+            package_digest: format!("sha256:{}", hex(self.package_digest)),
+            package_class: "graph-data-subset",
+            source_generation: Source {
+                generation_uuid,
+                manifest_sha256: source_manifest,
+            },
+            selection: Selection {
+                roots: &roots,
+                omissions,
+                redactions,
+                graph_subset: Some(GraphSubsetRef { selector, closure }),
+            },
+            components: &components,
+            requirements: Requirements {
+                capabilities,
+                dependency_rule: "required-transitive-closure/1",
+            },
+            states: States {
+                integrity: "verified",
+                compatibility: "supported",
+                authenticity: "unsigned",
+            },
+        };
+        self.manifest = canonical_json(&serde_json::to_value(final_manifest).map_err(storage)?)?;
+        if self.manifest.len() as u64 > limits.max_manifest_bytes {
+            return Err(limit("semantic manifest exceeds configured limit"));
+        }
+        self.payload_bytes = total;
+        selection_fingerprint.clone_into(&mut self.selection_fingerprint);
+        self.package_class = PortableV2PackageClass::GraphDataSubset;
+        self.retained_subset = Some(std::sync::Arc::new(staging));
+        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +344,13 @@ struct Selection<'a> {
     roots: &'a [String],
     omissions: Vec<String>,
     redactions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    graph_subset: Option<GraphSubsetRef<'a>>,
+}
+#[derive(Serialize)]
+struct GraphSubsetRef<'a> {
+    selector: &'a str,
+    closure: &'a str,
 }
 #[derive(Serialize)]
 struct Component {
@@ -138,7 +359,7 @@ struct Component {
     required_dependencies: Vec<String>,
     files: Vec<ComponentFile>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ComponentFile {
     media_type: String,
     path: String,
@@ -387,6 +608,7 @@ pub fn plan_selected_portable_v2(
                 })
                 .collect(),
             redactions: selection.redactions.clone(),
+            graph_subset: None,
         },
         components: &components,
         requirements: Requirements {
@@ -424,6 +646,7 @@ pub fn plan_selected_portable_v2(
                 })
                 .collect(),
             redactions: selection.redactions.clone(),
+            graph_subset: None,
         },
         components: &components,
         requirements: Requirements {
@@ -448,6 +671,7 @@ pub fn plan_selected_portable_v2(
         payload_bytes: total,
         selection_fingerprint: selection.selection_fingerprint.clone(),
         package_class: package_class(&selection.package_class)?,
+        retained_subset: None,
     })
 }
 
@@ -538,6 +762,7 @@ fn package_class(value: &str) -> Result<PortableV2PackageClass, ExportError> {
         "complete" => Ok(PortableV2PackageClass::Complete),
         "ontology-only" => Ok(PortableV2PackageClass::OntologyOnly),
         "component-selective" => Ok(PortableV2PackageClass::ComponentSelective),
+        "graph-data-subset" => Ok(PortableV2PackageClass::GraphDataSubset),
         _ => Err(err(
             "GF_INCOMPATIBLE",
             "unsupported selection package class",
@@ -1185,6 +1410,22 @@ fn media_type(e: &str) -> &str {
         "json" => "application/json",
         "parquet" => "application/vnd.apache.parquet",
         "arrow" => "application/vnd.apache.arrow.file",
+        _ => "application/octet-stream",
+    }
+}
+fn media_type_for_path(path: &str) -> &'static str {
+    if path.ends_with("runtime-generation.json") {
+        return "application/vnd.graphforge.runtime-generation+json";
+    }
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("json") => "application/json",
+        Some("parquet") => "application/vnd.apache.parquet",
+        Some("yaml" | "yml") => "application/yaml",
         _ => "application/octet-stream",
     }
 }

@@ -24,7 +24,8 @@ pub use generation::{
 
 pub mod graph_projection;
 pub use graph_projection::{
-    GraphProjectionSelection, GraphProjectionSummary, materialize_graph_projection,
+    GraphProjectionClosure, GraphProjectionSelection, GraphProjectionSummary,
+    materialize_graph_projection, materialize_portable_graph_tree_projection,
 };
 
 pub mod graph_files;
@@ -145,6 +146,13 @@ pub use project_portable_v2_selection::{
     PortableV2ParticipantId, PortableV2SelectionEntry, PortableV2SelectionPlan,
     PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
     preview_portable_v2_selection,
+};
+
+pub mod project_portable_v2_subset;
+pub use project_portable_v2_subset::{
+    PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
+    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
+    plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
 };
 
 pub mod workspace_participants;
