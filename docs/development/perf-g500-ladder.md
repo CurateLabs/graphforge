@@ -63,11 +63,14 @@ hard-code rungs elsewhere.
 | Rungs | S10 (CI), S20, S22, S24, S25, S26 (provisioned) |
 | Seed / initiator | `1` / `A,B,C,D = 0.57, 0.19, 0.19, 0.05` |
 | Policy | undirected, drop self-loops, drop duplicates, canonical `(lo,hi)` |
-| Host envelope | **128 GiB** peak RSS, **1 TiB** local NVMe, **24 h** |
+| Host capacity | **128 GiB** peak RSS, **1 TiB** local NVMe (declared **Linux cloud** SKU) |
+| Wall-clock fail-safe | **4 h** (`timeout_s: 14400`) end-to-end on that SKU — provisional #745 budget, not a laptop or “overnight is fine” product claim |
 
 The **S10** rung runs in normal CI and deliberately sets `buffer_edges` below
 its own edge count, so the spill/merge path is exercised on every run. S20–S26
-are `#[ignore]` and opt-in.
+are `#[ignore]` and opt-in on **provisioned Linux cloud / evidence hosts**
+only. Developer laptops (including macOS Air-class machines) must not be used
+as #745 certification SUTs; local runs are dry-runs at best.
 
 ## First-fail ladder
 
@@ -100,7 +103,8 @@ first-fail unit tests):
 cargo test -p graphforge-api --test scale_g500_ladder
 ```
 
-Provisioned full ladder (long; isolate the target dir; Linux scale-host):
+Provisioned full ladder (long; isolate the target dir; **Linux cloud scale-host**
+matching the declared SKU — not a developer laptop for #745 evidence):
 
 ```bash
 CARGO_TARGET_DIR=/tmp/cargo-g500-ladder make bench-g500-ladder
@@ -122,15 +126,17 @@ One object per attempted rung (schema
 - `first_failing_phase`, `error_class`, `pass`, `reconciles`.
 - `input_fingerprint` (deterministic SHA-256 of the sorted live edge set),
   `rss_peak_bytes`, `disk_used_bytes`, `wall_time_s`, per-phase `steps`.
-- `machine_envelope` (128 GiB / 1 TiB / 24 h), `sut`, `generator`.
+- `machine_envelope` (128 GiB / 1 TiB / 4 h fail-safe), `sut`, `generator`.
 - `track` and `teps` are always `null`.
 
 Wall-clock and RSS numbers are hardware-specific observations, never CI
-millisecond gates.
+millisecond gates. For #745, `sut` must name the cloud SKU; laptop SUTs are
+rejected as certification evidence.
 
 ## CI placement
 
 Per the [Scale Evaluation](../reference/scale-evaluation.md) contract, large
 Graph500 runs **must not** be wired into normal GitHub Actions. Only the S10 CI
-rung runs in `test.yml`. The provisioned ladder is Make-only until an approved
-dedicated runner / evidence job exists (tracked with #745 certification).
+rung runs in `test.yml`. SCALE-20+ / #745 certification must run on an
+**approved dedicated Linux cloud evidence job** (or equivalent provisioned host)
+tracked with #745 — not on developer laptops.

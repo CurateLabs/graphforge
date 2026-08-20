@@ -359,7 +359,7 @@ struct RungOutcome {
 
 /// Check the envelope after a phase. Returns `Some(error_class)` on the first
 /// violation so the caller can stop the ladder. `ladder_started` is the
-/// ladder-level clock so the 24 h host envelope bounds the whole run, not each
+/// ladder-level clock so the 4 h wall-clock fail-safe bounds the whole run, not each
 /// rung independently.
 fn envelope_violation(
     env: &RunEnvelope,
@@ -921,10 +921,10 @@ fn ladder_profile_is_versioned_and_pinned() {
     assert_eq!(profile.schema, PROFILE_SCHEMA);
     assert_eq!(profile.schema_version, SCHEMA_VERSION);
     assert_eq!(profile.edgefactor, 16, "Official parameter ef must be 16");
-    // M5 #735 host envelope: 128 GiB RSS, 1 TiB disk, 24 h.
+    // Declared Linux cloud SKU (#745): 128 GiB RSS, 1 TiB disk, 4 h fail-safe.
     assert_eq!(profile.envelope.rss_bytes, 137_438_953_472);
     assert_eq!(profile.envelope.disk_bytes, 1_099_511_627_776);
-    assert_eq!(profile.envelope.timeout_s, 86_400);
+    assert_eq!(profile.envelope.timeout_s, 14_400);
     assert!(!profile.invocation.is_empty());
     for required in [
         "raw_attempts",
@@ -1082,7 +1082,7 @@ fn first_fail_stops_at_envelope_violation() {
     let tiny_env = RunEnvelope {
         rss_bytes: 1,
         disk_bytes: 1,
-        timeout_s: 86_400,
+        timeout_s: 14_400,
     };
     let ci_rung = profile
         .rungs
@@ -1147,8 +1147,9 @@ fn ci_rung_public_facade_engineering_green() {
 
 /// Provisioned full ladder (SCALE-20 → SCALE-26). Opt-in via
 /// `make bench-g500-ladder`. Writes one evidence object per attempted rung and
-/// stops at the first rung that exceeds the declared 128 GiB / 1 TiB / 24 h
-/// envelope. Never asserts a billion-edge product claim (that is #745).
+/// stops at the first rung that exceeds the declared 128 GiB / 1 TiB / 4 h
+/// cloud-SKU fail-safe. Never asserts a billion-edge product claim (that is #745).
+/// Certification evidence for #745 must come from a provisioned Linux cloud host.
 #[test]
 #[ignore = "Provisioned billion-edge scale ladder; make bench-g500-ladder"]
 fn ladder_public_facade_first_fail_evidence() {
