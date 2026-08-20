@@ -226,6 +226,8 @@ def validate(manifest_path: Path = MANIFEST) -> list[str]:
                     call = rf"\bview\s*\.\s*{re.escape(name)}\s*\("
                 elif receiver == "OpenRouterProviderSession":
                     call = rf"\bsession\s*\.\s*{re.escape(name)}\s*\("
+                elif receiver == "GraphForge":
+                    call = rf"(?:\bGraphForge\s*::|\.)\s*{re.escape(name)}\s*\("
                 else:
                     call = rf"\.\s*{re.escape(name)}\s*\("
                 if bodies and re.search(call, combined_body) is None:
