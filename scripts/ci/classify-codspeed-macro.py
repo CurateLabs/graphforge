@@ -31,7 +31,7 @@ KNOWN_IRRELEVANT_PREFIXES = (
 
 def requires_macro(path: str) -> bool:
     """Return true for relevant or unknown paths; unknowns fail closed."""
-    path = path.strip().removeprefix("./")
+    path = path.removeprefix("./")
     if not path:
         return False
     if path in RELEVANT_FILES or path.startswith(RELEVANT_PREFIXES):
@@ -46,7 +46,7 @@ def requires_macro(path: str) -> bool:
 
 
 def main() -> int:
-    paths = [line.strip() for line in sys.stdin if line.strip()]
+    paths = [line.removesuffix("\n").removesuffix("\r") for line in sys.stdin]
     print("true" if any(requires_macro(path) for path in paths) else "false")
     return 0
 
