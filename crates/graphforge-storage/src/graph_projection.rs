@@ -26,13 +26,27 @@ use parquet::arrow::ArrowWriter;
 type GraphUuid = [u8; 16];
 type EdgeEndpoints = BTreeMap<GraphUuid, (GraphUuid, GraphUuid)>;
 
+/// Referential-closure mode for one graph projection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GraphProjectionClosure {
+    /// Selected edges plus both endpoint nodes. Nodes never induce edges.
+    #[default]
+    Referential,
+    /// Selected nodes plus every edge whose endpoints are both selected.
+    InducedEdges,
+}
+
 /// Explicit graph identities requested for one projection.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphProjectionSelection {
-    /// Explicit node UUIDs. Selected edges add their endpoints automatically.
+    /// Explicit node UUIDs.
     pub node_uuids: BTreeSet<[u8; 16]>,
-    /// Explicit edge UUIDs. No other edge is induced from selected nodes.
+    /// Explicit edge UUIDs.
     pub edge_uuids: BTreeSet<[u8; 16]>,
+    /// Closure semantics applied before materialization.
+    pub closure: GraphProjectionClosure,
+    /// Property field names excluded from projected property tables.
+    pub exclude_properties: BTreeSet<String>,
 }
 
 /// Exact identities materialized into the graph-only target workspace.
@@ -51,10 +65,10 @@ pub struct GraphProjectionSummary {
 /// Materialize one deterministic graph-only workspace projection.
 ///
 /// The target must be absent or empty. Node/edge UUIDs and surrogate IDs are
-/// preserved. Every selected edge adds both endpoint nodes; node selection
-/// never induces an edge. Topology and property rows are rewritten in UUID
-/// order. Only core graph files and required ontology/runtime-catalog metadata
-/// are copied; derived indexes and every non-graph domain are excluded.
+/// preserved. Closure semantics follow [`GraphProjectionClosure`]. Topology and
+/// property rows are rewritten in UUID order. Only core graph files and
+/// required ontology/runtime-catalog metadata are copied; derived indexes and
+/// every non-graph domain are excluded.
 ///
 /// # Errors
 /// Returns validation for missing identities, unsafe/non-empty targets, or
@@ -63,6 +77,27 @@ pub fn materialize_graph_projection(
     source: &Path,
     target: &Path,
     selection: &GraphProjectionSelection,
+) -> Result<GraphProjectionSummary, GfError> {
+    materialize_graph_projection_with_options(source, target, selection, true)
+}
+
+/// Materialize a portable graph-tree projection without copying ontology files.
+///
+/// # Errors
+/// Same as [`materialize_graph_projection`].
+pub fn materialize_portable_graph_tree_projection(
+    source: &Path,
+    target: &Path,
+    selection: &GraphProjectionSelection,
+) -> Result<GraphProjectionSummary, GfError> {
+    materialize_graph_projection_with_options(source, target, selection, false)
+}
+
+fn materialize_graph_projection_with_options(
+    source: &Path,
+    target: &Path,
+    selection: &GraphProjectionSelection,
+    copy_ontology_files: bool,
 ) -> Result<GraphProjectionSummary, GfError> {
     validate_distinct_paths(source, target)?;
     validate_graph_empty_target(target)?;
@@ -76,19 +111,8 @@ pub fn materialize_graph_projection(
     let edge_ids = edges.keys().copied().collect::<BTreeSet<_>>();
     require_present(&selection.edge_uuids, &edge_ids, "edge")?;
 
-    let mut selected_nodes = selection.node_uuids.clone();
-    for edge_uuid in &selection.edge_uuids {
-        let (src, dst) = edges
-            .get(edge_uuid)
-            .expect("selected edge presence was validated");
-        if !node_ids.contains(src) || !node_ids.contains(dst) {
-            return Err(validation(
-                "selected edge references a missing endpoint node",
-            ));
-        }
-        selected_nodes.insert(*src);
-        selected_nodes.insert(*dst);
-    }
+    let (selected_nodes, selected_edges) =
+        resolve_projection_closure(selection, &node_ids, &edges)?;
     let endpoint_node_uuids = selected_nodes
         .difference(&selection.node_uuids)
         .copied()
@@ -101,40 +125,86 @@ pub fn materialize_graph_projection(
         &target.join("topology/nodes.parquet"),
         "node_uuid",
         &selected_nodes,
+        &selection.exclude_properties,
     )?;
     project_parquet_directory(
         &source.join("topology/edges"),
         &target.join("topology/edges"),
         "edge_uuid",
-        &selection.edge_uuids,
+        &selected_edges,
+        &BTreeSet::new(),
     )?;
     project_parquet_directory(
         &source.join("properties"),
         &target.join("properties"),
         "node_uuid",
         &selected_nodes,
+        &selection.exclude_properties,
     )?;
     project_parquet_directory(
         &source.join("edge_properties"),
         &target.join("edge_properties"),
         "edge_uuid",
-        &selection.edge_uuids,
+        &selected_edges,
+        &selection.exclude_properties,
     )?;
     copy_runtime_catalog(source, target)?;
-    for file in [
-        graphforge_core::manifest::MANIFEST_FILE,
-        graphforge_core::manifest::ONTOLOGY_FILE,
-    ] {
-        copy_regular_file_if_present(&source.join(file), &target.join(file))?;
+    if copy_ontology_files {
+        for file in [
+            graphforge_core::manifest::MANIFEST_FILE,
+            graphforge_core::manifest::ONTOLOGY_FILE,
+        ] {
+            copy_regular_file_if_present(&source.join(file), &target.join(file))?;
+        }
     }
     let graph_content_fingerprint = projected_graph_fingerprint(target)?;
 
     Ok(GraphProjectionSummary {
         node_uuids: selected_nodes.into_iter().collect(),
-        edge_uuids: selection.edge_uuids.iter().copied().collect(),
+        edge_uuids: selected_edges.into_iter().collect(),
         endpoint_node_uuids,
         graph_content_fingerprint,
     })
+}
+
+fn resolve_projection_closure(
+    selection: &GraphProjectionSelection,
+    node_ids: &BTreeSet<GraphUuid>,
+    edges: &EdgeEndpoints,
+) -> Result<(BTreeSet<GraphUuid>, BTreeSet<GraphUuid>), GfError> {
+    match selection.closure {
+        GraphProjectionClosure::Referential => {
+            let mut selected_nodes = selection.node_uuids.clone();
+            for edge_uuid in &selection.edge_uuids {
+                let (src, dst) = edges
+                    .get(edge_uuid)
+                    .expect("selected edge presence was validated");
+                if !node_ids.contains(src) || !node_ids.contains(dst) {
+                    return Err(validation(
+                        "selected edge references a missing endpoint node",
+                    ));
+                }
+                selected_nodes.insert(*src);
+                selected_nodes.insert(*dst);
+            }
+            Ok((selected_nodes, selection.edge_uuids.clone()))
+        }
+        GraphProjectionClosure::InducedEdges => {
+            if !selection.edge_uuids.is_empty() {
+                return Err(validation(
+                    "induced-edges closure rejects explicit edge selectors",
+                ));
+            }
+            let selected_nodes = selection.node_uuids.clone();
+            let mut selected_edges = BTreeSet::new();
+            for (edge_uuid, (src, dst)) in edges {
+                if selected_nodes.contains(src) && selected_nodes.contains(dst) {
+                    selected_edges.insert(*edge_uuid);
+                }
+            }
+            Ok((selected_nodes, selected_edges))
+        }
+    }
 }
 
 fn edge_endpoints(files: &[PathBuf]) -> Result<EdgeEndpoints, GfError> {
@@ -177,12 +247,13 @@ fn project_parquet_directory(
     target: &Path,
     key: &str,
     selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
     for path in sorted_parquet_files(source)? {
         let name = path
             .file_name()
             .ok_or_else(|| validation("graph parquet path has no file name"))?;
-        project_parquet_file(&path, &target.join(name), key, selected)?;
+        project_parquet_file(&path, &target.join(name), key, selected, exclude_properties)?;
     }
     Ok(())
 }
@@ -192,6 +263,7 @@ fn project_parquet_file(
     target: &Path,
     key: &str,
     selected: &BTreeSet<[u8; 16]>,
+    exclude_properties: &BTreeSet<String>,
 ) -> Result<(), GfError> {
     if !source.exists() {
         return Ok(());
@@ -223,12 +295,26 @@ fn project_parquet_file(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let indices = UInt32Array::from(indices);
-    let columns = combined
-        .columns()
+    let keep_columns = combined
+        .schema()
+        .fields()
         .iter()
-        .map(|column| take(column.as_ref(), &indices, None).map_err(storage))
+        .enumerate()
+        .filter(|(_, field)| {
+            field.name() == key || !exclude_properties.contains(field.name().as_str())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let fields = keep_columns
+        .iter()
+        .map(|index| combined.schema().field(*index).clone())
+        .collect::<Vec<_>>();
+    let projected_schema = Arc::new(Schema::new(fields));
+    let columns = keep_columns
+        .into_iter()
+        .map(|index| take(combined.column(index).as_ref(), &indices, None).map_err(storage))
         .collect::<Result<Vec<_>, _>>()?;
-    let projected = RecordBatch::try_new(Arc::clone(&schema), columns).map_err(storage)?;
+    let projected = RecordBatch::try_new(projected_schema, columns).map_err(storage)?;
     write_parquet(target, &projected)
 }
 
@@ -1151,6 +1237,7 @@ mod tests {
             &GraphProjectionSelection {
                 node_uuids: BTreeSet::from([*nodes[2].as_bytes()]),
                 edge_uuids: BTreeSet::from([*edges[0].as_bytes()]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1269,6 +1356,7 @@ mod tests {
         let selection = GraphProjectionSelection {
             node_uuids: BTreeSet::from([*nodes[2].as_bytes()]),
             edge_uuids: BTreeSet::from([*edges[0].as_bytes()]),
+            ..Default::default()
         };
         let left = materialize_graph_projection(source.path(), first.path(), &selection).unwrap();
         let right = materialize_graph_projection(source.path(), second.path(), &selection).unwrap();
@@ -1297,6 +1385,7 @@ mod tests {
         let selection = GraphProjectionSelection {
             node_uuids: BTreeSet::from([*nodes[2].as_bytes()]),
             edge_uuids: BTreeSet::from([*edges[0].as_bytes()]),
+            ..Default::default()
         };
         let baseline =
             materialize_graph_projection(source.path(), baseline_target.path(), &selection)
@@ -1345,6 +1434,7 @@ mod tests {
         let selection = GraphProjectionSelection {
             node_uuids: BTreeSet::from([*nodes[0].as_bytes()]),
             edge_uuids: BTreeSet::from([*edges[0].as_bytes()]),
+            ..Default::default()
         };
         let baseline =
             materialize_graph_projection(source.path(), first.path(), &selection).unwrap();
@@ -1437,6 +1527,7 @@ mod tests {
             &GraphProjectionSelection {
                 node_uuids: BTreeSet::from([*alice.as_bytes()]),
                 edge_uuids: BTreeSet::from([*knows.as_bytes()]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1516,6 +1607,7 @@ mod tests {
             &GraphProjectionSelection {
                 node_uuids: BTreeSet::from([*nodes[0].as_bytes()]),
                 edge_uuids: BTreeSet::new(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1573,6 +1665,7 @@ mod tests {
             &GraphProjectionSelection {
                 node_uuids: BTreeSet::from([*missing.as_bytes()]),
                 edge_uuids: BTreeSet::new(),
+                ..Default::default()
             },
         )
         .unwrap_err();
@@ -1708,6 +1801,7 @@ mod tests {
             &source_path,
             &target.path().join("properties/Person.parquet"),
             "node_uuid",
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )
         .unwrap_err();
@@ -2044,6 +2138,7 @@ mod tests {
                 &missing,
                 &root.path().join("unused.parquet"),
                 "node_uuid",
+                &BTreeSet::new(),
                 &BTreeSet::new(),
             )
             .is_ok()

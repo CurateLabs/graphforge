@@ -295,7 +295,7 @@ pub(crate) fn validate_selection_plan(
     Ok(())
 }
 
-fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, PortableV2Error> {
+pub(crate) fn fingerprint(plan: &PortableV2SelectionPlan) -> Result<String, PortableV2Error> {
     let mut unsigned = plan.clone();
     unsigned.selection_fingerprint.clear();
     let bytes = crate::project_portable_v2::canonical_json(
