@@ -6,7 +6,7 @@ Hand-written to match the PyO3 surface in `crates/graphforge-bindings-py/src/lib
 use `pyarrow` (a hard dependency).
 """
 
-from typing import Any, Literal, overload
+from typing import Any, Callable, Literal, overload
 import uuid
 
 import pyarrow
@@ -281,6 +281,7 @@ class GraphForge:
         subset: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
         cancellation: CancellationToken | None = None,
+        progress: Callable[[dict[str, int]], object] | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod
     def verify_portable_v2(

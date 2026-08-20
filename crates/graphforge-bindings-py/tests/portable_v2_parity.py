@@ -53,9 +53,10 @@ def check_portable_v2_parity() -> None:
                 profile="complete",
                 progress=object(),
             )
-            raise AssertionError("expected non-callable progress to fail closed")
-        except Exception as error:
+        except gf.ValidationError as error:
             assert "callable" in str(error).lower()
+        else:
+            raise AssertionError("expected non-callable progress to fail closed")
 
         verified = gf.GraphForge.verify_portable_v2(str(bundle), mode="full")
         assert verified["package_digest"] == bundle_export["package_digest"]
