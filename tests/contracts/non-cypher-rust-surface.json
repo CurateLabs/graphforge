@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "6d6b337134141d0c8e5034a8d174930106006df863a8c78197810b1c9f6670a5",
+  "public_method_digest": "b63fefd89490c3a262ec6e869af5d97dddf7db51039b53981e68eb3c3aa2d4a7",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -88,7 +88,11 @@
       "CheckpointView.remove_hypothesis_member": "designed-only",
       "CheckpointView.set_default_embedding_space": "designed-only",
       "CheckpointView.supersede_assertion": "designed-only",
-      "CancellationToken.flag": "introspection"
+      "CancellationToken.flag": "introspection",
+      "crate.publish_portable_v2_oci": "designed-only",
+      "crate.pull_portable_v2_oci": "designed-only",
+      "crate.publish_portable_v2_oci_with_registry": "designed-only",
+      "crate.pull_portable_v2_oci_with_registry": "designed-only"
     },
     "reasons": {
       "internal-helper": "exported execution plumbing, not a persisted product facade",

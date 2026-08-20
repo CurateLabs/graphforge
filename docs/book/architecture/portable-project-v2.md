@@ -268,3 +268,77 @@ Cancellation and corruption remove the private materialization, while a crash
 inside generation publication is handled by the normal project recovery and
 transaction-idempotency protocol. Portable v1 import remains a separate,
 explicit compatibility API.
+
+## Optional OCI Distribution transport
+
+Portable-v2 packages may be published and pulled through an OCI
+Distribution/ORAS-compatible registry without changing package identity.
+Local expanded/bundle export and air-gapped sharing remain fully functional
+without any registry.
+
+### Media types and digests
+
+| Role | Media type |
+| --- | --- |
+| Artifact type | `application/vnd.graphforge.project.v2` |
+| Config | `application/vnd.graphforge.project.v2.config+json` |
+| Bundle layer | `application/vnd.graphforge.project.v2+tar` |
+| Signature artifact | `application/vnd.graphforge.project.v2.signature` |
+| Signature payload | `application/vnd.graphforge.project.v2.signature+json` |
+
+The GraphForge `package_digest` remains authoritative for package equivalence.
+The OCI manifest digest is transport/distribution identity only. Human tags may
+be written and resolved, but they are mutable references and never substitute
+for a recorded digest. Pull-by-digest is stable even when a tag later moves;
+tag/digest disagreement fails closed.
+
+The same OCI mapping is used for every package class (`complete`,
+`ontology-only`, `component-selective`, `graph-data-subset`). Selective packages
+are not re-wrapped into a different transport semantics.
+
+### Publish / pull behavior
+
+`publish_portable_v2_oci` verifies the local package fully, uploads config and
+layer blobs (deduplicating by digest when the registry already has them),
+writes the digest-pinned manifest, optionally attaches a signature referrer,
+and only reports success after a fresh registry observation re-reads that
+manifest digest. `pull_portable_v2_oci` resolves the reference, downloads
+blobs, verifies the package with the shared verifier, evaluates authenticity
+separately from integrity, and only then publishes the destination. Cancellation,
+missing blobs, digest mismatch, incompatible media types, and auth/transport
+failures never leave a successful receipt or a claimed local package.
+
+Credentials stay caller-owned (secure providers/stdin). They are never
+persisted or emitted in receipts, errors, or progress events. HTTPS is the
+default; plain HTTP is an explicit `insecure_http` opt-in for disposable local
+registries only.
+
+### Signatures and authenticity
+
+Optional signature/provenance attachments use OCI subject/referrer semantics.
+Integrity and authenticity are distinct: unsigned content may verify as
+integrity-valid while authenticity is `absent`, and policy mismatches or
+invalid MACs fail authenticity without being reported as digest/integrity
+failures. Signature verification requires an explicit signer/key policy.
+
+### Local conformance and hosted registry path
+
+Required conformance uses an in-process disposable registry
+(`MemoryOciRegistry`) so ordinary core CI needs no network. Hosted registries
+that speak OCI Distribution (for example GHCR) are reached with the HTTP
+client:
+
+```text
+# Publish by digest (optional mutable tag)
+registry = ghcr.io
+repository = org/graphforge-packages
+reference = sha256:<oci-manifest-digest>
+
+# Pull only by the recorded OCI digest
+# Tags may be resolved for discovery, then re-pinned to the digest before trust.
+```
+
+Operators retain registry credentials, retention, immutability, and visibility
+policy. Offline/air-gapped users keep using `.gfpb` / `.gfproject/` copies.
+Binding parity for these Rust-owned verbs is owned by the portable promotion
+parity slice (#744).

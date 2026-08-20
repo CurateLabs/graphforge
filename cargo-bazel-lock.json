@@ -1,5 +1,5 @@
 {
-  "checksum": "e2a8b06a6d2ec90b3c7752d4f68cf0ac1d0df9be549b22ee81da847751192bf9",
+  "checksum": "d95c605f3013146097898d5e18d4997403c1bb75f3ac55ed55466bdd70067a8b",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12912,6 +12912,10 @@
         "deps_dev": {
           "common": [
             {
+              "id": "parquet 58.3.0",
+              "target": "parquet"
+            },
+            {
               "id": "tempfile 3.27.0",
               "target": "tempfile"
             }
@@ -13819,6 +13823,10 @@
             {
               "id": "unicode-normalization 0.1.25",
               "target": "unicode_normalization"
+            },
+            {
+              "id": "ureq 3.4.0",
+              "target": "ureq"
             },
             {
               "id": "uuid 1.24.0",

@@ -117,8 +117,10 @@ pub use graphforge_storage::{
 };
 pub use portable::{
     PortableExportRequest, PortableExportResult, PortableImportRequest, PortableImportResult,
-    PortableSelection, PortableV2ImportRequest, PortableV2ImportResult, PortableVerifyRequest,
-    PortableVerifyResult, verify_portable_v2,
+    PortableSelection, PortableV2ImportRequest, PortableV2ImportResult,
+    PortableV2OciPublishFacadeRequest, PortableV2OciPullFacadeRequest, PortableVerifyRequest,
+    PortableVerifyResult, publish_portable_v2_oci, publish_portable_v2_oci_with_registry,
+    pull_portable_v2_oci, pull_portable_v2_oci_with_registry, verify_portable_v2,
 };
 pub use repository::{
     GitProvenance, InfraCapabilityCompatibility, InfraNotChecked, InfraPlan, InfraStaticValidity,

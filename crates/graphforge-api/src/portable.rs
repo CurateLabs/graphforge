@@ -62,6 +62,52 @@ pub struct PortableV2ImportResult {
     pub idempotent_replay: bool,
 }
 
+/// Publish a verified local portable-v2 package to an OCI registry.
+#[derive(Clone, Debug)]
+pub struct PortableV2OciPublishFacadeRequest {
+    /// Verified local package path (bundle).
+    pub package_path: PathBuf,
+    /// Registry host without scheme or credentials.
+    pub registry: String,
+    /// Repository path.
+    pub repository: String,
+    /// Optional mutable tag.
+    pub tag: Option<String>,
+    /// Verifier limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+    /// Authenticity policy applied after transport.
+    pub authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy,
+    /// Optional signature material attached as an OCI referrer.
+    pub signature: Option<graphforge_storage::PortableV2OciSignatureMaterial>,
+    /// Use plain HTTP (local disposable registries only).
+    pub insecure_http: bool,
+    /// Caller-owned credential; never logged or persisted.
+    pub credential: Option<String>,
+}
+
+/// Pull a digest-pinned portable-v2 package from an OCI registry.
+#[derive(Clone, Debug)]
+pub struct PortableV2OciPullFacadeRequest {
+    /// Registry host without scheme or credentials.
+    pub registry: String,
+    /// Repository path.
+    pub repository: String,
+    /// Digest or mutable tag reference.
+    pub reference: String,
+    /// Optional expected digest when `reference` is a tag.
+    pub expected_oci_digest: Option<String>,
+    /// Destination path for the verified package.
+    pub destination: PathBuf,
+    /// Verifier limits.
+    pub limits: graphforge_storage::PortableV2Limits,
+    /// Authenticity policy.
+    pub authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy,
+    /// Use plain HTTP (local disposable registries only).
+    pub insecure_http: bool,
+    /// Caller-owned credential; never logged or persisted.
+    pub credential: Option<String>,
+}
+
 /// Read-only portable-v2 verification request.
 #[derive(Clone, Debug)]
 pub struct PortableVerifyRequest {
@@ -118,6 +164,76 @@ pub fn verify_portable_v2(
     cancelled: Option<&AtomicBool>,
 ) -> Result<PortableVerifyResult, graphforge_storage::PortableV2Error> {
     graphforge_storage::verify_portable_v2(&request.input, request.mode, request.limits, cancelled)
+}
+
+/// Publish a verified portable-v2 package through an OCI Distribution registry.
+pub fn publish_portable_v2_oci(
+    request: &PortableV2OciPublishFacadeRequest,
+    cancelled: Option<&AtomicBool>,
+) -> Result<graphforge_storage::PortableV2OciReference, graphforge_storage::PortableV2Error> {
+    let client = graphforge_storage::HttpOciRegistry::new(
+        &request.registry,
+        request.credential.as_deref(),
+        request.insecure_http,
+    )?;
+    graphforge_storage::publish_portable_v2_oci(
+        &client,
+        &graphforge_storage::PortableV2OciPublishRequest {
+            package_path: &request.package_path,
+            registry: &request.registry,
+            repository: &request.repository,
+            tag: request.tag.as_deref(),
+            limits: request.limits,
+            authenticity: request.authenticity.clone(),
+            signature: request.signature.clone(),
+            credential: request.credential.as_deref(),
+        },
+        cancelled,
+    )
+}
+
+/// Pull and verify a portable-v2 package from an OCI Distribution registry.
+pub fn pull_portable_v2_oci(
+    request: &PortableV2OciPullFacadeRequest,
+    cancelled: Option<&AtomicBool>,
+) -> Result<graphforge_storage::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error> {
+    let client = graphforge_storage::HttpOciRegistry::new(
+        &request.registry,
+        request.credential.as_deref(),
+        request.insecure_http,
+    )?;
+    graphforge_storage::pull_portable_v2_oci(
+        &client,
+        &graphforge_storage::PortableV2OciPullRequest {
+            registry: &request.registry,
+            repository: &request.repository,
+            reference: &request.reference,
+            expected_oci_digest: request.expected_oci_digest.as_deref(),
+            destination: &request.destination,
+            limits: request.limits,
+            authenticity: request.authenticity.clone(),
+            credential: request.credential.as_deref(),
+        },
+        cancelled,
+    )
+}
+
+/// Publish/pull against an injected registry backend (local conformance / tests).
+pub fn publish_portable_v2_oci_with_registry(
+    registry: &dyn graphforge_storage::PortableV2OciRegistry,
+    request: &graphforge_storage::PortableV2OciPublishRequest<'_>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<graphforge_storage::PortableV2OciReference, graphforge_storage::PortableV2Error> {
+    graphforge_storage::publish_portable_v2_oci(registry, request, cancelled)
+}
+
+/// Pull against an injected registry backend (local conformance / tests).
+pub fn pull_portable_v2_oci_with_registry(
+    registry: &dyn graphforge_storage::PortableV2OciRegistry,
+    request: &graphforge_storage::PortableV2OciPullRequest<'_>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<graphforge_storage::PortableV2OciPullReceipt, graphforge_storage::PortableV2Error> {
+    graphforge_storage::pull_portable_v2_oci(registry, request, cancelled)
 }
 
 impl GraphForge {
@@ -546,6 +662,65 @@ mod tests {
         assert_eq!(
             imported_clear.workspace_ontology().unwrap(),
             source.workspace_ontology().unwrap()
+        );
+    }
+
+    #[test]
+    fn oci_facade_round_trips_through_injected_memory_registry() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let _graph = GraphForge::new(project.to_str()).unwrap();
+        let generation = graphforge_storage::resolve_project_generation(&project).unwrap();
+        let limits = graphforge_storage::PortableV2Limits::default();
+        let plan = graphforge_storage::plan_complete_portable_v2(&generation, limits).unwrap();
+        let bundle = root.path().join("pkg.gfpb");
+        graphforge_storage::export_complete_portable_v2(
+            &plan,
+            &bundle,
+            graphforge_storage::PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        let registry = graphforge_storage::MemoryOciRegistry::default();
+        let published = publish_portable_v2_oci_with_registry(
+            &registry,
+            &graphforge_storage::PortableV2OciPublishRequest {
+                package_path: &bundle,
+                registry: "memory.local",
+                repository: "tests/facade",
+                tag: Some("latest"),
+                limits,
+                authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy::default(),
+                signature: None,
+                credential: None,
+            },
+            None,
+        )
+        .unwrap();
+        let destination = root.path().join("pulled.gfpb");
+        let pulled = pull_portable_v2_oci_with_registry(
+            &registry,
+            &graphforge_storage::PortableV2OciPullRequest {
+                registry: "memory.local",
+                repository: "tests/facade",
+                reference: &published.oci_manifest_digest,
+                expected_oci_digest: None,
+                destination: &destination,
+                limits,
+                authenticity: graphforge_storage::PortableV2OciAuthenticityPolicy::default(),
+                credential: None,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(pulled.report.package_digest, published.package_digest);
+        assert_eq!(
+            pulled.signature_state,
+            graphforge_storage::PortableV2OciSignatureState::Absent
         );
     }
 }
