@@ -390,7 +390,12 @@ fn deterministic_export_and_reopen() {
     // Bazel crate_universe exposes it as serde_yaml_ng).
     let mut staging = BridgeInventory::new(ActivationMode::Exploratory, Default::default());
     for table in [
-        table(research.clone(), &["Study", "Person"], &["FUNDED_BY"], &["title"]),
+        table(
+            research.clone(),
+            &["Study", "Person"],
+            &["FUNDED_BY"],
+            &["title"],
+        ),
         table(
             genealogy.clone(),
             &["Person", "Claim"],
