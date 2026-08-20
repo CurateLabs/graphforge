@@ -50,6 +50,8 @@ use napi_derive::napi;
 
 mod composite;
 mod error;
+mod import_session;
+mod portable;
 mod transaction;
 use composite::CompositeTransactionInput;
 use error::{NodeError, to_napi_err, type_error};
@@ -2260,7 +2262,22 @@ fn node_generation_identity(
     })
 }
 
-fn node_usize(value: Option<BigInt>, default: usize, name: &str) -> Result<usize> {
+pub(crate) fn node_u64(value: Option<BigInt>, name: &str) -> Result<u64> {
+    let Some(value) = value else {
+        return Err(to_napi_err(&GfError::Validation(format!(
+            "{name} is required"
+        ))));
+    };
+    let (negative, value, lossless) = value.get_u64();
+    if negative || !lossless {
+        return Err(to_napi_err(&GfError::Validation(format!(
+            "{name} must be a lossless unsigned 64-bit integer"
+        ))));
+    }
+    Ok(value)
+}
+
+pub(crate) fn node_usize(value: Option<BigInt>, default: usize, name: &str) -> Result<usize> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -3489,6 +3506,103 @@ impl GraphForge {
             engine: Arc::clone(&self.inner),
             request,
         }))
+    }
+
+    /// Preview one content-free portable-v2 component selection.
+    #[napi]
+    pub fn preview_portable_v2_selection(
+        &self,
+        request: portable::PortableSelectionPreviewInput,
+    ) -> Result<serde_json::Value> {
+        let graph = self.open_guard()?;
+        portable::preview_selection(&graph, request)
+    }
+
+    /// Preview one content-free portable-v2 graph-data subset.
+    #[napi]
+    pub fn preview_portable_v2_graph_subset(
+        &self,
+        request: portable::PortableSubsetPreviewInput,
+    ) -> Result<serde_json::Value> {
+        let graph = self.open_guard()?;
+        portable::preview_subset(&graph, request)
+    }
+
+    /// Export one pinned generation as an expanded or bundled portable-v2 package.
+    #[napi]
+    pub fn export_portable_v2(
+        &self,
+        request: portable::PortableExportInput,
+    ) -> Result<AsyncTask<portable::ExportPortableTask>> {
+        self.ensure_open()?;
+        portable::build_export_task(Arc::clone(&self.inner), request)
+    }
+
+    /// Verify portable-v2 content without opening or mutating a project.
+    #[napi]
+    pub fn verify_portable_v2(
+        request: portable::PortableVerifyInput,
+    ) -> Result<AsyncTask<portable::VerifyPortableTask>> {
+        portable::build_verify_task(request)
+    }
+
+    /// Verify and atomically import a complete portable-v2 package.
+    #[napi]
+    pub fn import_portable_v2(
+        request: portable::PortableImportInput,
+    ) -> Result<AsyncTask<portable::ImportPortableTask>> {
+        portable::build_import_task(request)
+    }
+
+    /// Publish a verified portable-v2 package to an OCI Distribution registry.
+    #[napi]
+    pub fn publish_portable_v2_oci(
+        request: portable::PortableOciPublishInput,
+    ) -> Result<AsyncTask<portable::PublishOciTask>> {
+        portable::build_publish_task(request)
+    }
+
+    /// Pull and verify a portable-v2 package from an OCI Distribution registry.
+    #[napi]
+    pub fn pull_portable_v2_oci(
+        request: portable::PortableOciPullInput,
+    ) -> Result<AsyncTask<portable::PullOciTask>> {
+        portable::build_pull_task(request)
+    }
+
+    /// Begin a durable staged import session.
+    #[napi]
+    pub fn begin_import_session(
+        &self,
+        operation_uuid: String,
+        limits: Option<import_session::ImportSessionLimitsInput>,
+    ) -> Result<import_session::GraphImportSession> {
+        import_session::begin_import_session(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.closed),
+            operation_uuid,
+            limits,
+        )
+    }
+
+    /// Resume one durable, non-terminal import session.
+    #[napi]
+    pub fn resume_import_session(
+        &self,
+        session_uuid: String,
+    ) -> Result<import_session::GraphImportSession> {
+        import_session::resume_import_session(
+            Arc::clone(&self.inner),
+            Arc::clone(&self.closed),
+            session_uuid,
+        )
+    }
+
+    /// Abort and remove non-terminal sessions older than `maxAgeSecs`.
+    #[napi]
+    pub fn cleanup_stale_import_sessions(&self, max_age_secs: BigInt) -> Result<BigInt> {
+        let graph = self.open_guard()?;
+        import_session::cleanup_stale_import_sessions(&graph, max_age_secs)
     }
 
     /// Compare two checkpoint/current endpoints through the Rust diff engine.
@@ -7631,7 +7745,7 @@ impl Task for AlgorithmRunEventsTask {
     }
 }
 
-fn to_napi_deferred_err(env: Env, error: &GfError) -> napi::Error {
+pub(crate) fn to_napi_deferred_err(env: Env, error: &GfError) -> napi::Error {
     let value = napi::JsError::from(to_napi_err(error)).into_unknown(env);
     napi::Error::from(value)
 }
@@ -7687,17 +7801,44 @@ impl PlanHandle {
         g.explain(&self.cypher).map_err(|e| to_napi_err(&e))
     }
 
-    /// Run the query and write the result to a Parquet file at `path`.
+    /// Run the query and write a streamed Parquet result with optional limits.
     #[napi]
-    #[must_use]
-    pub fn sink_parquet(&self, path: String) -> AsyncTask<SinkParquetTask> {
-        AsyncTask::new(SinkParquetTask {
+    pub fn sink_parquet(
+        &self,
+        path: String,
+        options: Option<portable::ResultSinkOptionsInput>,
+    ) -> Result<AsyncTask<portable::SinkStreamTask>> {
+        let (options, cancellation) = portable::parse_sink_options(options)?;
+        Ok(AsyncTask::new(portable::SinkStreamTask {
             engine: Arc::clone(&self.engine),
             closed: Arc::clone(&self.closed),
             cypher: self.cypher.clone(),
             params: self.params.clone(),
             path,
-        })
+            format: graphforge_api::ResultSinkFormat::Parquet,
+            options,
+            cancellation,
+        }))
+    }
+
+    /// Run the query and write a streamed Arrow IPC result with optional limits.
+    #[napi]
+    pub fn sink_arrow_ipc(
+        &self,
+        path: String,
+        options: Option<portable::ResultSinkOptionsInput>,
+    ) -> Result<AsyncTask<portable::SinkStreamTask>> {
+        let (options, cancellation) = portable::parse_sink_options(options)?;
+        Ok(AsyncTask::new(portable::SinkStreamTask {
+            engine: Arc::clone(&self.engine),
+            closed: Arc::clone(&self.closed),
+            cypher: self.cypher.clone(),
+            params: self.params.clone(),
+            path,
+            format: graphforge_api::ResultSinkFormat::ArrowIpc,
+            options,
+            cancellation,
+        }))
     }
 }
 
@@ -7733,39 +7874,6 @@ impl Task for CollectIpcTask {
         output
             .map(Buffer::from)
             .map_err(|error| to_napi_deferred_err(env, &error))
-    }
-}
-
-/// `AsyncTask` backing [`PlanHandle::sink_parquet`].
-pub struct SinkParquetTask {
-    engine: Arc<RwLock<graphforge_api::GraphForge>>,
-    closed: Arc<AtomicBool>,
-    cypher: String,
-    params: HashMap<String, IrLiteral>,
-    path: String,
-}
-
-impl Task for SinkParquetTask {
-    type Output = std::result::Result<(), GfError>;
-    type JsValue = ();
-
-    fn compute(&mut self) -> napi::Result<Self::Output> {
-        Ok((|| {
-            if self.closed.load(Ordering::Acquire) {
-                return Err(GfError::Lifecycle(
-                    "operation on a closed GraphForge instance".into(),
-                ));
-            }
-            let graph = self
-                .engine
-                .read()
-                .map_err(|_| GfError::Execution("GraphForge lock poisoned".into()))?;
-            graph.execute_to_parquet_with_params(&self.cypher, &self.params, &self.path)
-        })())
-    }
-
-    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<()> {
-        output.map_err(|error| to_napi_deferred_err(env, &error))
     }
 }
 
