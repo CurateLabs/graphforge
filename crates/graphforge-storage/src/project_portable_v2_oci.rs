@@ -465,17 +465,17 @@ impl HttpOciRegistry {
                 "registry must be a host[:port] without scheme or credentials",
             ));
         }
-        if let Some(cred) = credential {
-            if cred.contains('\n') || cred.contains('\r') {
-                return Err(PortableV2Error::new(
-                    PortableV2ErrorCode::InvalidPath,
-                    "credential contains control characters",
-                ));
-            }
+        if let Some(cred) = credential
+            && (cred.contains('\n') || cred.contains('\r'))
+        {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::InvalidPath,
+                "credential contains control characters",
+            ));
         }
         let scheme = if insecure_http { "http" } else { "https" };
         let config = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_global(Some(Duration::from_mins(1)))
             .http_status_as_error(false)
             .max_redirects(0)
             .build();
@@ -679,7 +679,7 @@ impl PortableV2OciRegistry for HttpOciRegistry {
 
 fn encode_base64(raw: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(((raw.len() + 2) / 3) * 4);
+    let mut out = String::with_capacity(raw.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < raw.len() {
         let b0 = raw[i];
@@ -713,6 +713,10 @@ pub fn publish_portable_v2_oci(
 }
 
 /// Publish with sanitized progress callbacks.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps verify/upload/observe and signature attach in one fail-closed publish path"
+)]
 pub fn publish_portable_v2_oci_with_progress(
     registry: &dyn PortableV2OciRegistry,
     request: &PortableV2OciPublishRequest<'_>,
@@ -885,6 +889,10 @@ pub fn pull_portable_v2_oci(
 }
 
 /// Pull with sanitized progress callbacks.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps download/verify/authenticity evaluation in one fail-closed pull path"
+)]
 pub fn pull_portable_v2_oci_with_progress(
     registry: &dyn PortableV2OciRegistry,
     request: &PortableV2OciPullRequest<'_>,
@@ -912,13 +920,13 @@ pub fn pull_portable_v2_oci_with_progress(
             "requested digest does not match downloaded manifest",
         ));
     }
-    if let Some(expected) = request.expected_oci_digest {
-        if expected != oci_manifest_digest {
-            return Err(PortableV2Error::new(
-                PortableV2ErrorCode::DigestMismatch,
-                "tag or reference disagrees with expected OCI digest",
-            ));
-        }
+    if let Some(expected) = request.expected_oci_digest
+        && expected != oci_manifest_digest
+    {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::DigestMismatch,
+            "tag or reference disagrees with expected OCI digest",
+        ));
     }
     let manifest: OciManifest = serde_json::from_slice(&manifest_bytes).map_err(|_| {
         PortableV2Error::new(
@@ -1236,11 +1244,11 @@ fn evaluate_signature_state(
             invalid = true;
             continue;
         }
-        if let Some(required) = &policy.require_named_signer {
-            if &payload.signer != required {
-                mismatched = true;
-                continue;
-            }
+        if let Some(required) = &policy.require_named_signer
+            && &payload.signer != required
+        {
+            mismatched = true;
+            continue;
         }
         let Some(key) = &policy.verification_key else {
             if policy.require_named_signer.is_some() {
