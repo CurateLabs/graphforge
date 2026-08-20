@@ -1086,7 +1086,7 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
                 .map(|()| 0);
         }
         Command::Query(args) => {
-            return portable_cli::run_query(&graph, args, cli.json, output).map(|()| 0);
+            return portable_cli::run_query(&graph, &args, cli.json, output).map(|()| 0);
         }
         Command::ImportSession { command } => {
             return portable_cli::run_import_session(&graph, command, cli.json, output).map(|()| 0);

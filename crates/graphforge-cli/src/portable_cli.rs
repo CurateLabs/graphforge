@@ -17,8 +17,10 @@ use uuid::Uuid;
 
 use crate::canonical_uuid;
 
-fn map_portable(error: PortableV2Error) -> graphforge_api::GfError {
-    graphforge_api::GfError::Validation(format!("{error}"))
+fn map_portable(error: &PortableV2Error) -> graphforge_api::GfError {
+    // Preserve the typed portable code in the message so CLI JSON/stderr keep
+    // a stable portable class without inventing a new GfError variant.
+    graphforge_api::GfError::Validation(format!("{:?}: {error}", error.code))
 }
 
 fn write_json(
@@ -172,9 +174,6 @@ pub(crate) struct PortablePublishOciArgs {
     tag: Option<String>,
     #[arg(long)]
     insecure_http: bool,
-    /// Optional credential; prefer GRAPHFORGE_OCI_CREDENTIAL in the environment.
-    #[arg(long)]
-    credential: Option<String>,
 }
 
 #[derive(Args)]
@@ -191,15 +190,16 @@ pub(crate) struct PortablePullOciArgs {
     destination: PathBuf,
     #[arg(long)]
     insecure_http: bool,
-    /// Optional credential; prefer GRAPHFORGE_OCI_CREDENTIAL in the environment.
-    #[arg(long)]
-    credential: Option<String>,
 }
 
-fn oci_credential(explicit: Option<String>) -> Option<String> {
-    explicit.or_else(|| std::env::var("GRAPHFORGE_OCI_CREDENTIAL").ok())
+fn oci_credential() -> Option<String> {
+    std::env::var("GRAPHFORGE_OCI_CREDENTIAL").ok()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "CLI dispatch keeps preview/export/verify/import/OCI in one portable command table"
+)]
 pub(crate) fn run_portable(
     graph: &GraphForge,
     project_root: &std::path::Path,
@@ -218,7 +218,7 @@ pub(crate) fn run_portable(
                     },
                     limits: PortableV2Limits::default(),
                 })
-                .map_err(map_portable)?;
+                .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(&plan, output)?;
             } else {
@@ -243,7 +243,7 @@ pub(crate) fn run_portable(
                     },
                     None,
                 )
-                .map_err(map_portable)?;
+                .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(&result, output)?;
             } else {
@@ -264,7 +264,7 @@ pub(crate) fn run_portable(
                 },
                 None,
             )
-            .map_err(map_portable)?;
+            .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(&report, output)?;
             } else {
@@ -286,7 +286,7 @@ pub(crate) fn run_portable(
                 },
                 None,
             )
-            .map_err(map_portable)?;
+            .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -318,11 +318,11 @@ pub(crate) fn run_portable(
                     authenticity: PortableV2OciAuthenticityPolicy::default(),
                     signature: None,
                     insecure_http: args.insecure_http,
-                    credential: oci_credential(args.credential),
+                    credential: oci_credential(),
                 },
                 None,
             )
-            .map_err(map_portable)?;
+            .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -355,11 +355,11 @@ pub(crate) fn run_portable(
                     limits: PortableV2Limits::default(),
                     authenticity: PortableV2OciAuthenticityPolicy::default(),
                     insecure_http: args.insecure_http,
-                    credential: oci_credential(args.credential),
+                    credential: oci_credential(),
                 },
                 None,
             )
-            .map_err(map_portable)?;
+            .map_err(|error| map_portable(&error))?;
             if json {
                 write_json(
                     &serde_json::json!({
@@ -407,12 +407,12 @@ pub(crate) struct QueryArgs {
 
 pub(crate) fn run_query(
     graph: &GraphForge,
-    args: QueryArgs,
+    args: &QueryArgs,
     json: bool,
     output: &mut dyn Write,
 ) -> Result<(), graphforge_api::GfError> {
     let options = ResultSinkOptions {
-        max_batch_rows: args.max_batch_rows.unwrap_or(1_024),
+        max_batch_rows: args.max_batch_rows.unwrap_or(65_536),
         max_row_group_rows: args.max_row_group_rows.unwrap_or(65_536),
     };
     let path = args.output.to_str().ok_or_else(|| {

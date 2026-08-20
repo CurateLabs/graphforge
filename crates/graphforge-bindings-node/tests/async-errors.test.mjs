@@ -1,7 +1,7 @@
 // Structured native-addon Promise rejection acceptance (#2499).
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
@@ -22,11 +22,22 @@ async function rejectsWithCode(promise, code) {
 }
 
 test("every native task uses structured cooperative error transport", () => {
-  const source = readFileSync(join(here, "../src/lib.rs"), "utf8");
-  const errors = readFileSync(join(here, "../src/error.rs"), "utf8");
-  assert.equal(source.match(/impl Task for /g)?.length, 42);
-  assert.equal(source.match(/type Output = std::result::Result</g)?.length, 42);
-  assert.equal(source.match(/to_napi_deferred_err\(env,/g)?.length, 42);
+  const srcDir = join(here, "../src");
+  const source = readdirSync(srcDir)
+    .filter((name) => name.endsWith(".rs"))
+    .map((name) => readFileSync(join(srcDir, name), "utf8"))
+    .join("\n");
+  const errors = readFileSync(join(srcDir, "error.rs"), "utf8");
+  const taskCount = source.match(/impl Task for /g)?.length ?? 0;
+  assert.equal(taskCount, 47);
+  assert.equal(
+    source.match(/type Output =\s*(?:\n\s*)?std::result::Result</g)?.length,
+    taskCount,
+  );
+  assert.equal(
+    source.match(/to_(?:napi|portable)_deferred_err\(env,/g)?.length,
+    taskCount,
+  );
   assert.match(
     source,
     /impl Task for ResolveBeliefSubjectTask \{[\s\S]*?type Output = std::result::Result<ResolvedBeliefSubject, GfError>;[\s\S]*?if self\.cancellation\.is_cancelled\(\)[\s\S]*?to_napi_deferred_err\(env,/,

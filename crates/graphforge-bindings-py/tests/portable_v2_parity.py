@@ -26,9 +26,7 @@ def check_portable_v2_parity() -> None:
             output_path=str(bundle), representation="bundle", profile="complete"
         )
         assert expanded_export["package_digest"] == bundle_export["package_digest"]
-        assert (
-            expanded_export["selection_fingerprint"] == preview["selection_fingerprint"]
-        )
+        assert expanded_export["selection_fingerprint"] == preview["selection_fingerprint"]
         verified = gf.GraphForge.verify_portable_v2(str(bundle), mode="full")
         assert verified["package_digest"] == bundle_export["package_digest"]
         target = root / "target"
