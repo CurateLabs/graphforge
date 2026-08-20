@@ -1,13 +1,14 @@
 # Benchmarking with CodSpeed
 
-**Status:** Continuous on every pull request to `main` (`CodSpeed` workflow) —
-**diagnostic only**, not a merge gate
+**Status:** Continuous on every pull request to `main` (`CodSpeed` workflow)
 
-GraphForge values correctness over performance, so benchmarks are evidence, not
-a merge gate. The `CodSpeed` workflow measures a fixed set of Rust benchmarks on
-every pull request and reports the delta against the base commit; it is not part
-of the required `CI Gate` aggregate. A red **CodSpeed Performance Analysis**
-check does not block merge when `CI Gate` is green.
+GraphForge values correctness over performance, but performance claims still
+require comparable evidence. The `CodSpeed` workflow measures a fixed set of
+Rust benchmarks on every pull request and reports the delta against the base
+commit. It is not part of the `CI Gate` aggregate, but the PR must still reach
+the repository's required `CLEAN` state: a red **CodSpeed Performance Analysis**
+check must be resolved or receive an explicit, evidence-backed maintainer
+disposition.
 
 ## What is measured
 
@@ -42,19 +43,17 @@ can fail independently of a green Actions job.
 
 Treat CodSpeed as a diagnostic signal, not a release or merge authority.
 
-**Known false-positive pattern:** sole regression on
-`graphforge-cypher::compile::lex[simple_match]` (often about −19% to −31%) while
-other benches are flat or improved, especially on PRs that do not change Cypher
-lexer/front-end sources. That shape is intentionally tiny; short samples are
-sensitive to measurement floor effects even under CPU simulation. Prefer raising
-SNR in the bench (batched iterations inside the measured closure) over treating
-the failure as an M4 or lexer regression.
+First verify that the report compares the intended base and head with the same
+instrument and environment. Walltime evidence is valid only when both sides
+come from `codspeed-macro`; an unknown/different hosted environment is an
+infrastructure or baseline defect, not a regression disposition. Seed a fresh
+`main` Macro Runner baseline, then run the changed PR head once against it.
 
-**Triage rule:** if the only failing bench is `lex[simple_match]` and the PR
-diff does not touch Cypher lexer/parse/bind sources (or their direct
-dependencies), treat the report as noise and proceed with `CI Gate`. Investigate
-further only when multiple cypher benches regress together or the PR changes the
-front end.
+For CPU simulation, tiny benchmarks can still be sensitive to the measurement
+floor. Raise their signal-to-noise ratio inside the benchmark rather than
+waiving a red check. When a comparable report remains red, investigate the
+changed dependency surface and either repair the regression or document the
+measured tradeoff through explicit maintainer disposition.
 
 ## Running them locally
 
@@ -82,9 +81,15 @@ reachability, and transaction classification belong to CPU simulation; fixture
 construction and correctness assertions stay outside timed closures.
 
 Durable open, recovery, commit, garbage collection, spill, and compaction are
-filesystem walltime measurements, not CPU-simulation claims. Scheduled/manual
-hardware evidence records the exact runner image, CPU allocation, head/base SHA,
-fixture version, and artifact URL. Until CodSpeed memory mode is available on
+filesystem walltime measurements, not CPU-simulation claims. They run on
+CodSpeed's dedicated `codspeed-macro` bare-metal ARM64 runner; shared hosted
+runners are not a valid fallback because their environment variance makes
+walltime comparisons incomparable. See CodSpeed's
+[Macro Runner guidance](https://codspeed.io/docs/features/macro-runners) and
+[walltime instrument contract](https://codspeed.io/docs/instruments/walltime).
+Scheduled/manual hardware evidence records
+the exact runner image, architecture, head/base SHA, fixture version, and
+artifact URL. Until CodSpeed memory mode is available on
 the project runner, replay and compaction peak-resident counters are emitted as
 an explicit scheduled hardware artifact. CodSpeed remains diagnostic only:
 Bazel tests, deterministic fault models, and native platform lanes are the
@@ -93,11 +98,12 @@ their measured tradeoff; samples and thresholds must not be weakened.
 
 The frozen pre-M6 comparison commit is
 `aeb46d1b012d40e8a0af7873af9152b3aab752c6`, the first parent immediately
-before the #777 replay merge. The walltime host contract is the pinned
-`blacksmith-4vcpu-ubuntu-2404` runner, Rust 1.96.0, `m6_storage_io` fixture v1,
-and CodSpeed walltime mode. The scheduled memory fallback uses that same host
-contract and uploads `/usr/bin/time -v` peak-resident output for replay and
-spill/compaction, named with the exact head SHA. Certification #756 records the
+before the #777 replay merge. The walltime host contract is CodSpeed's
+`codspeed-macro` ARM64 runner, Rust 1.96.0, `m6_storage_io` fixture v1, and
+CodSpeed walltime mode. The scheduled memory fallback remains a separately
+labelled Blacksmith diagnostic and uploads `/usr/bin/time -v` peak-resident
+output for replay and spill/compaction, named with the exact head SHA.
+Certification #756 records the
 base/head SHAs, result URLs or artifact IDs, benchmark mode and any accepted
 tradeoff. `scripts/ci/check-m6-benchmarks.py` freezes the v1 names and count.
 

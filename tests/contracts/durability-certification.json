@@ -68,7 +68,7 @@
   "native_oracle_aggregate": "native-durability-aggregate-${commit}.json",
   "benchmark_evidence": {
     "baseline_commit": "aeb46d1b012d40e8a0af7873af9152b3aab752c6",
-    "walltime_host": "blacksmith-4vcpu-ubuntu-2404",
+    "walltime_host": "codspeed-macro-arm64",
     "simulation_bench": "m6_storage",
     "walltime_bench": "m6_storage_io",
     "memory_fallback": "/usr/bin/time -v"

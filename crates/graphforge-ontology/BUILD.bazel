@@ -62,6 +62,15 @@ gf_rust_integration_test(
     ],
 )
 
+gf_rust_integration_test(
+    name = "inventory_crud",
+    srcs = ["tests/inventory_crud.rs"],
+    crate = ":graphforge_ontology",
+    deps = [
+        "//crates/graphforge-core:graphforge_core",
+    ],
+)
+
 test_suite(
     name = "ontology_tests",
     tests = [
@@ -69,5 +78,6 @@ test_suite(
         ":graphforge_ontology_test",
         ":integration",
         ":composition_inventory",
+        ":inventory_crud",
     ],
 )
