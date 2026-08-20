@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "fe37804afbbaa557546676cb2bf6394bfa1ba376c452603d83e63557e53ba2ec",
+  "sha256": "809ca800e55e7e7ccdc9a62d5739730fb1b4dad78feb4ba8354838e402023805",
   "entries": [
     {
       "name": "graphforge-api",
@@ -83,6 +83,15 @@
         },
         {
           "name": "graphforge-exec",
+          "req": "^0.5.2",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "graphforge-io",
           "req": "^0.5.2",
           "features": [],
           "optional": false,
@@ -517,6 +526,15 @@
           "target": null
         },
         {
+          "name": "parquet",
+          "req": "^58",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
+          "target": null
+        },
+        {
           "name": "serde",
           "req": "^1",
           "features": [
@@ -938,8 +956,19 @@
       "features": [],
       "dependencies": [
         {
-          "name": "graphforge-core",
-          "req": "^0.5.2",
+          "name": "arrow",
+          "req": "^58",
+          "features": [
+            "prettyprint"
+          ],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "futures",
+          "req": "^0.3",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -947,8 +976,17 @@
           "target": null
         },
         {
-          "name": "graphforge-storage",
-          "req": "^0.5.2",
+          "name": "parquet",
+          "req": "^58",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "tempfile",
+          "req": "^3",
           "features": [],
           "optional": false,
           "uses_default_features": true,
@@ -1465,6 +1503,15 @@
           "target": null
         },
         {
+          "name": "serde_json",
+          "req": "^1",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
           "name": "tempfile",
           "req": "^3",
           "features": [],
@@ -1616,6 +1663,15 @@
           "optional": false,
           "uses_default_features": true,
           "kind": null,
+          "target": null
+        },
+        {
+          "name": "codspeed-divan-compat",
+          "req": "^5",
+          "features": [],
+          "optional": false,
+          "uses_default_features": true,
+          "kind": "dev",
           "target": null
         },
         {
@@ -1803,6 +1859,17 @@
           "features": [],
           "optional": false,
           "uses_default_features": true,
+          "kind": null,
+          "target": null
+        },
+        {
+          "name": "ureq",
+          "req": "=3.4.0",
+          "features": [
+            "rustls"
+          ],
+          "optional": false,
+          "uses_default_features": false,
           "kind": null,
           "target": null
         },

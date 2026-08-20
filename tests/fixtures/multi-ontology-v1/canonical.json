@@ -1,0 +1,69 @@
+{
+  "activation": [
+    {
+      "mode": "advisory",
+      "scope": "module",
+      "subject": "https://graphforge.dev/ontology/document@1.0.0#37bf5df4b1162c6731a87fdbfa1ab7e5d399ce4cc07e5f622addfbff55cd0a15"
+    },
+    {
+      "mode": "strict",
+      "scope": "module",
+      "subject": "https://graphforge.dev/ontology/science@2.1.0#d326eb034d88a096ee4a63c92ac25650be4dddb6c5c9c97b7b3f56047449d99b"
+    }
+  ],
+  "bridges": [
+    {
+      "authored_version": "1.0.0",
+      "bridge_id": "https://graphforge.dev/bridge/research-document",
+      "canonical_digest": "1af03d417388faf01178eaadb579657ff78c7248e807d588c4f9239686f46079",
+      "provenance": "urn:graphforge:evidence:reviewed-2026-08-19"
+    },
+    {
+      "authored_version": "1.0.0",
+      "bridge_id": "https://graphforge.dev/bridge/science-provenance",
+      "canonical_digest": "a1d98b732a1df953aab26462f18585105384434f03fb0ac56c08669dcd0e4cef",
+      "provenance": "urn:graphforge:evidence:reviewed-2026-08-19"
+    }
+  ],
+  "expected": {
+    "ambiguous_unqualified": {
+      "candidates": ["genealogy:Person", "provenance:Person"],
+      "code": "resolution.ambiguous"
+    },
+    "qualified_success": "genealogy:entity:Person"
+  },
+  "modules": [
+    {
+      "authored_version": "1.0.0",
+      "canonical_digest": "37bf5df4b1162c6731a87fdbfa1ab7e5d399ce4cc07e5f622addfbff55cd0a15",
+      "ontology_id": "https://graphforge.dev/ontology/document"
+    },
+    {
+      "authored_version": "1.0.0",
+      "canonical_digest": "3cfd8b97c75af694936b656e7ad5d8d35c7b378646625e32ee7a28d3bfbfa7db",
+      "ontology_id": "https://graphforge.dev/ontology/evidence"
+    },
+    {
+      "authored_version": "3.0.0",
+      "canonical_digest": "4d97af4f4588a60f74df5f2a76f1bf8252a3dd675789758144432643bb6eb51b",
+      "ontology_id": "https://graphforge.dev/ontology/genealogy"
+    },
+    {
+      "authored_version": "1.2.0",
+      "canonical_digest": "8cf9db45f866c47c8e3a93fc2b45f4e3716a73f635397129afe7b5c5b9a569c4",
+      "ontology_id": "https://graphforge.dev/ontology/provenance"
+    },
+    {
+      "authored_version": "2.0.0",
+      "canonical_digest": "bd583906f3063869d948910601322c5f031962564063959b587177dd9f7534f7",
+      "ontology_id": "https://graphforge.dev/ontology/research"
+    },
+    {
+      "authored_version": "2.1.0",
+      "canonical_digest": "d326eb034d88a096ee4a63c92ac25650be4dddb6c5c9c97b7b3f56047449d99b",
+      "ontology_id": "https://graphforge.dev/ontology/science"
+    }
+  ],
+  "profile_default": "exploratory",
+  "version": 1
+}

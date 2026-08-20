@@ -22,6 +22,11 @@ class DurabilityCertificationGateTests(unittest.TestCase):
         contract = GATE.load_cert_contract()
         self.assertEqual(contract["contract"], GATE.CONTRACT)
         self.assertEqual(contract["seed"], GATE.CERT_SEED)
+        self.assertEqual(
+            contract["production_observation"]["driver"],
+            "graphforge_api::GraphForge",
+        )
+        self.assertEqual(contract["versions"]["m6_benchmark_inventory"], "m6-storage-v1")
 
     def test_seed_and_budget_mutations_fail_closed(self) -> None:
         with self.assertRaises(GATE.GateError):
@@ -49,6 +54,47 @@ class DurabilityCertificationGateTests(unittest.TestCase):
             self.assertEqual(report["contract"], GATE.CONTRACT)
             self.assertTrue((output / "durability-certification-report.sha256").is_file())
             self.assertTrue((output / "reproduction.txt").is_file())
+
+    def test_native_aggregate_is_exact_sha_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = {
+                "contract": "graphforge-native-durability-oracle/v1",
+                "filesystem_class": "native-test",
+                "profile": "ordered",
+                "seed": 7490,
+                "observations": [{"phase": "before_ack"}],
+                "modeled_faults": [{"safe": True}],
+                "minimized_failure": {"minimized_op_ids": [1]},
+            }
+            paths = {}
+            for platform in ("windows", "macos"):
+                path = root / f"native-oracle-{platform}.json"
+                path.write_text(json.dumps({**template, "platform": platform}))
+                paths[platform] = path
+            output = root / "aggregate.json"
+            args = type(
+                "Args",
+                (),
+                {
+                    "expected_sha": "a" * 40,
+                    "windows": str(paths["windows"]),
+                    "macos": str(paths["macos"]),
+                    "output": str(output),
+                },
+            )()
+            self.assertEqual(GATE.cmd_aggregate_native(args), 0)
+            aggregate = json.loads(output.read_text())
+            self.assertEqual(aggregate["commit"], "a" * 40)
+            self.assertEqual(
+                [row["platform"] for row in aggregate["platforms"]],
+                ["windows", "macos"],
+            )
+            bad = json.loads(paths["windows"].read_text())
+            bad["observations"] = []
+            paths["windows"].write_text(json.dumps(bad))
+            with self.assertRaises(GATE.GateError):
+                GATE.cmd_aggregate_native(args)
 
 
 if __name__ == "__main__":

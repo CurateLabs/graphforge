@@ -507,6 +507,14 @@ impl<'a> ExprLowerer<'a> {
 
             IrExpr::FunctionCall { name, args } if name == "labels" => self.lower_labels(args),
 
+            IrExpr::FunctionCall { name, args } if name.eq_ignore_ascii_case("point") => {
+                self.lower_spatial_point(args)
+            }
+
+            IrExpr::FunctionCall { name, args } if name.eq_ignore_ascii_case("distance") => {
+                self.lower_spatial_distance(args)
+            }
+
             IrExpr::FunctionCall { name, args }
                 if matches!(name.as_str(), "nodes" | "relationships") =>
             {
@@ -2017,6 +2025,150 @@ impl<'a> ExprLowerer<'a> {
         let a = self.lower(*a_id)?;
         let b = self.lower(*b_id)?;
         Ok(CYPHER_DURATION_BETWEEN.call(vec![a, b, lit(name)]))
+    }
+
+    fn lower_spatial_point(&self, args: &[ExprId]) -> Result<DfExpr, LoweringError> {
+        let [arg] = args else {
+            return Err(LoweringError::InvalidType(
+                "point() expects one map argument".into(),
+            ));
+        };
+        let value = self.const_spatial_point(*arg)?;
+        Ok(DfExpr::Literal(spatial_scalar(&value), None))
+    }
+
+    fn const_spatial_point(
+        &self,
+        id: ExprId,
+    ) -> Result<graphforge_core::SpatialValue, LoweringError> {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+        let IrExpr::MapLiteral(entries) = self.arena.get(id) else {
+            return Err(LoweringError::InvalidType(
+                "point() requires a literal coordinate map in the certified profile".into(),
+            ));
+        };
+        let number = |key: &str| -> Option<f64> {
+            let (_, id) = entries
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))?;
+            match self.arena.get(*id) {
+                IrExpr::Literal(IrLiteral::Int(value)) => {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "Cypher point coordinates are represented as f64"
+                    )]
+                    let value = *value as f64;
+                    Some(value)
+                }
+                IrExpr::Literal(IrLiteral::Float(value)) => Some(*value),
+                _ => None,
+            }
+        };
+        let string = |key: &str| -> Option<&str> {
+            let (_, id) = entries
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))?;
+            match self.arena.get(*id) {
+                IrExpr::Literal(IrLiteral::Str(value)) => Some(value.as_str()),
+                _ => None,
+            }
+        };
+        let geographic = number("longitude").zip(number("latitude"));
+        let cartesian = number("x").zip(number("y"));
+        let ((x, y), default_crs) = match (cartesian, geographic) {
+            (Some(value), None) => (value, SpatialCrs::Epsg3857),
+            (None, Some(value)) => (value, SpatialCrs::Epsg4326),
+            _ => {
+                return Err(LoweringError::InvalidType(
+                    "point() requires exactly x/y or longitude/latitude numeric coordinates".into(),
+                ));
+            }
+        };
+        if !x.is_finite() || !y.is_finite() {
+            return Err(LoweringError::InvalidType(
+                "point() coordinates must be finite".into(),
+            ));
+        }
+        let crs = match string("crs") {
+            None => default_crs,
+            Some(value) if value.eq_ignore_ascii_case("EPSG:4326") => SpatialCrs::Epsg4326,
+            Some(value) if value.eq_ignore_ascii_case("EPSG:3857") => SpatialCrs::Epsg3857,
+            Some(value) => {
+                return Err(LoweringError::InvalidType(format!(
+                    "unsupported spatial CRS `{value}` for point() computation"
+                )));
+            }
+        };
+        if (geographic.is_some() && crs != SpatialCrs::Epsg4326)
+            || (cartesian.is_some() && crs != SpatialCrs::Epsg3857)
+        {
+            return Err(LoweringError::InvalidType(
+                "point() coordinate keys do not match the declared CRS".into(),
+            ));
+        }
+        Ok(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs,
+            },
+            coordinates: SpatialCoordinates::Point([x, y]),
+            extension_name: None,
+            extension_metadata: None,
+        })
+    }
+
+    fn lower_spatial_distance(&self, args: &[ExprId]) -> Result<DfExpr, LoweringError> {
+        use graphforge_core::{SpatialCoordinates, SpatialCrs};
+        let [left, right] = args else {
+            return Err(LoweringError::InvalidType(
+                "distance() expects two Point values".into(),
+            ));
+        };
+        let point = |id| match self.arena.get(id) {
+            IrExpr::FunctionCall { name, args }
+                if name.eq_ignore_ascii_case("point") && args.len() == 1 =>
+            {
+                self.const_spatial_point(args[0])
+            }
+            IrExpr::Literal(IrLiteral::Spatial(value)) => Ok(value.clone()),
+            _ => Err(LoweringError::InvalidType(
+                "distance() certified profile requires Point values".into(),
+            )),
+        };
+        let a = point(*left)?;
+        let b = point(*right)?;
+        if a.spatial_type.crs != b.spatial_type.crs {
+            return Err(LoweringError::InvalidType(
+                "distance() does not implicitly reproject mixed CRS values".into(),
+            ));
+        }
+        let (SpatialCoordinates::Point([ax, ay]), SpatialCoordinates::Point([bx, by])) =
+            (&a.coordinates, &b.coordinates)
+        else {
+            return Err(LoweringError::InvalidType(
+                "distance() accepts Point geometry only".into(),
+            ));
+        };
+        let distance = match &a.spatial_type.crs {
+            SpatialCrs::Epsg3857 => (bx - ax).hypot(by - ay),
+            SpatialCrs::Epsg4326 => {
+                const EARTH_RADIUS_METRES: f64 = 6_371_008.8;
+                let (lat1, lat2) = (ay.to_radians(), by.to_radians());
+                let dlat = lat2 - lat1;
+                let dlon = (bx - ax).to_radians();
+                let h = (dlat / 2.0).sin().powi(2)
+                    + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
+                2.0 * EARTH_RADIUS_METRES * h.sqrt().asin()
+            }
+            SpatialCrs::Preserved(_) => {
+                return Err(LoweringError::InvalidType(
+                    "distance() does not compute preserved-only CRS values".into(),
+                ));
+            }
+        };
+        Ok(lit(distance))
     }
 
     fn extract_temporal_fields(
@@ -4689,6 +4841,7 @@ pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
             offset,
             zone,
         } => datetime_scalar(Some((*days, *nanos, *offset, zone.clone()))),
+        IrLiteral::Spatial(value) => spatial_property_scalar(value),
         // A homogeneous list → a `ScalarValue::List` of the element scalars; the
         // inner type is the first element's (re-typing untyped nulls to it so the
         // array stays homogeneous, as the list-literal lowering does). (#1006)
@@ -4720,6 +4873,83 @@ pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
     }
 }
 
+fn spatial_scalar(value: &graphforge_core::SpatialValue) -> ScalarValue {
+    use datafusion::arrow::array::{Float64Array, StructArray};
+    use datafusion::arrow::buffer::NullBuffer;
+    use datafusion::arrow::datatypes::{Field, Fields};
+    use graphforge_core::SpatialCoordinates;
+
+    fn coordinate(value: [f64; 2]) -> ScalarValue {
+        let fields = Fields::from(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]);
+        ScalarValue::Struct(Arc::new(StructArray::new(
+            fields,
+            vec![
+                Arc::new(Float64Array::from(vec![value[0]])),
+                Arc::new(Float64Array::from(vec![value[1]])),
+            ],
+            Some(NullBuffer::from(vec![true])),
+        )))
+    }
+
+    fn list(values: &[ScalarValue]) -> ScalarValue {
+        let data_type = values
+            .first()
+            .map_or(DataType::Null, ScalarValue::data_type);
+        ScalarValue::List(ScalarValue::new_list(values, &data_type, false))
+    }
+
+    fn coordinates(values: &[[f64; 2]]) -> ScalarValue {
+        list(&values.iter().copied().map(coordinate).collect::<Vec<_>>())
+    }
+
+    match &value.coordinates {
+        SpatialCoordinates::Point(value) => coordinate(*value),
+        SpatialCoordinates::LineString(values) | SpatialCoordinates::MultiPoint(values) => {
+            coordinates(values)
+        }
+        SpatialCoordinates::Polygon(parts) | SpatialCoordinates::MultiLineString(parts) => list(
+            &parts
+                .iter()
+                .map(|part| coordinates(part))
+                .collect::<Vec<_>>(),
+        ),
+        SpatialCoordinates::MultiPolygon(polygons) => list(
+            &polygons
+                .iter()
+                .map(|polygon| {
+                    list(
+                        &polygon
+                            .iter()
+                            .map(|ring| coordinates(ring))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+fn spatial_property_scalar(value: &graphforge_core::SpatialValue) -> ScalarValue {
+    use datafusion::arrow::array::{StringArray, StructArray};
+    use datafusion::arrow::buffer::NullBuffer;
+    use datafusion::arrow::datatypes::{Field, Fields};
+    let fields = Fields::from(vec![Field::new(
+        "__graphforge_spatial_v1",
+        DataType::Utf8,
+        false,
+    )]);
+    ScalarValue::Struct(Arc::new(StructArray::new(
+        fields,
+        vec![Arc::new(StringArray::from(vec![
+            serde_json::to_string(value).expect("spatial value serialization is infallible"),
+        ]))],
+        Some(NullBuffer::from(vec![true])),
+    )))
+}
+
 /// Convert a DataFusion [`ScalarValue`] back to an [`IrLiteral`] for storage as
 /// a property value (#791 SET).
 ///
@@ -4736,6 +4966,10 @@ pub fn ir_literal_to_scalar(lit_val: &IrLiteral) -> ScalarValue {
 /// # Errors
 /// Returns [`LoweringError::InvalidType`] for a value that openCypher does not
 /// permit as a stored property.
+#[allow(
+    clippy::too_many_lines,
+    reason = "closed exhaustive property scalar conversion table"
+)]
 pub fn scalar_to_ir_literal(value: &ScalarValue) -> Result<IrLiteral, LoweringError> {
     // Any null (typed `Int64(None)` or untyped `Null`) stores as Cypher null.
     if value.is_null() {
@@ -4786,6 +5020,21 @@ pub fn scalar_to_ir_literal(value: &ScalarValue) -> Result<IrLiteral, LoweringEr
         // A date keeps its date identity (ADR 0009/0012): a `Struct{epoch_day}` of
         // i64 days, not coerced to a `DateTime` — so it reads back and renders as a
         // date.
+        ScalarValue::Struct(arr)
+            if arr.fields().len() == 1 && arr.fields()[0].name() == "__graphforge_spatial_v1" =>
+        {
+            let json = arr
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                .ok_or_else(|| {
+                    LoweringError::InvalidType("malformed internal spatial value".into())
+                })?
+                .value(0);
+            IrLiteral::Spatial(serde_json::from_str(json).map_err(|_| {
+                LoweringError::InvalidType("malformed internal spatial value".into())
+            })?)
+        }
         ScalarValue::Struct(arr) if is_date_struct(&DataType::Struct(arr.fields().clone())) => {
             match date_struct_value(arr, 0) {
                 Some(days) => IrLiteral::Date(days),
@@ -13381,6 +13630,34 @@ mod tests {
     /// Build a minimal lowerer with no ontology.
     fn make_lowerer<'a>(arena: &'a ExprArena, var_map: &'a VarMap) -> ExprLowerer<'a> {
         ExprLowerer::new(arena, None, var_map)
+    }
+
+    #[test]
+    fn distance_rejects_preserved_only_spatial_literals_explicitly() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+
+        let mut arena = ExprArena::new();
+        let preserved = arena.push(IrExpr::Literal(IrLiteral::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: Some("geoarrow.vendor_point".into()),
+            extension_metadata: Some("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}".into()),
+        })));
+        let distance = arena.push(IrExpr::FunctionCall {
+            name: "distance".into(),
+            args: vec![preserved, preserved],
+        });
+        let vars = VarMap::new();
+        let error = make_lowerer(&arena, &vars).lower(distance).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid argument type: distance() does not compute preserved-only CRS values"
+        );
     }
 
     // -----------------------------------------------------------------------

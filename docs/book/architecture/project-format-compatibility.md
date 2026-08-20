@@ -23,6 +23,13 @@ v1.0 format freeze.
 - Data that is not already in a valid v0.5 project must be re-created through
   the v0.5 public construction or ingest surface.
 
+Within a supported v0.5 generation, base-only canonical Parquet remains
+readable. Typed GFDR records use the current versioned framing and typed value
+encoding. The superseded prototype's routing-free topology/property payloads
+and plain-string property representation are not losslessly migratable and are
+rejected with `GF_UNSUPPORTED_PROJECT_FORMAT`; GraphForge never silently
+reinterprets them.
+
 ## Knowledge-layer implementation boundary
 
 The knowledge layer starts from the v0.5 graph and project contracts on `main`.

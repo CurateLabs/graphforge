@@ -204,12 +204,59 @@ pub(crate) fn prop_literal(value: &PropValue) -> Result<IrLiteral, GfError> {
         PropValue::Int(value) => Ok(IrLiteral::Int(*value)),
         PropValue::Float(value) => Ok(IrLiteral::Float(*value)),
         PropValue::Str(value) => Ok(IrLiteral::Str(value.clone())),
+        PropValue::Temporal(value) => {
+            value.validate()?;
+            Ok(temporal_literal(value))
+        }
+        PropValue::Spatial(value) => Ok(IrLiteral::Spatial(value.clone())),
         PropValue::List(values) => values
             .iter()
             .map(prop_literal)
             .collect::<Result<Vec<_>, _>>()
             .map(IrLiteral::List),
         _ => Err(validation("unsupported node property value")),
+    }
+}
+
+pub(crate) fn temporal_literal(value: &graphforge_core::TemporalValue) -> IrLiteral {
+    use graphforge_core::TemporalValue;
+    match value {
+        TemporalValue::Duration {
+            months,
+            days,
+            seconds,
+            nanos,
+        } => IrLiteral::Duration {
+            months: *months,
+            days: *days,
+            seconds: *seconds,
+            nanos: *nanos,
+        },
+        TemporalValue::UtcDateTime { epoch_micros } => IrLiteral::DateTime(*epoch_micros),
+        TemporalValue::Date { epoch_days } => IrLiteral::Date(*epoch_days),
+        TemporalValue::LocalDateTime { epoch_days, nanos } => IrLiteral::LocalDateTime {
+            days: *epoch_days,
+            nanos: *nanos,
+        },
+        TemporalValue::LocalTime { nanos } => IrLiteral::Time(*nanos),
+        TemporalValue::OffsetTime {
+            nanos,
+            offset_seconds,
+        } => IrLiteral::ZonedTime {
+            nanos: *nanos,
+            offset: *offset_seconds,
+        },
+        TemporalValue::ZonedDateTime {
+            epoch_days,
+            nanos,
+            offset_seconds,
+            zone,
+        } => IrLiteral::ZonedDateTime {
+            days: *epoch_days,
+            nanos: *nanos,
+            offset: *offset_seconds,
+            zone: zone.clone(),
+        },
     }
 }
 
@@ -253,12 +300,65 @@ fn validation(message: impl Into<String>) -> GfError {
 mod tests {
     use super::*;
     use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use graphforge_core::{
+        SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+    };
 
     fn properties() -> HashMap<String, PropValue> {
         HashMap::from([
             ("name".into(), PropValue::Str("Alice".into())),
             ("score".into(), PropValue::Int(7)),
         ])
+    }
+
+    #[test]
+    fn scalar_spatial_node_and_edge_project_after_reopen_with_geoarrow_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_str().unwrap();
+        let graph = GraphForge::new(Some(path)).unwrap();
+        let location = PropValue::Spatial(SpatialValue {
+            spatial_type: SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: SpatialCrs::Epsg4326,
+            },
+            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+            extension_name: None,
+            extension_metadata: None,
+        });
+        let source = graph
+            .add_node(
+                "Place",
+                &HashMap::from([("location".into(), location.clone())]),
+            )
+            .unwrap();
+        let target = graph.add_node("Place", &HashMap::new()).unwrap();
+        graph
+            .add_edge(
+                &source,
+                "ROUTE",
+                &target,
+                &HashMap::from([("location".into(), location)]),
+            )
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(Some(path)).unwrap();
+        for query in [
+            "MATCH (n:Place) WHERE n.location IS NOT NULL RETURN n.location AS location",
+            "MATCH ()-[r:ROUTE]->() RETURN r.location AS location",
+        ] {
+            let result = reopened.execute(query).unwrap();
+            let field = result.schema.field_with_name("location").unwrap();
+            assert_eq!(field.metadata()["ARROW:extension:name"], "geoarrow.point");
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
+            );
+            assert_eq!(
+                result.batches[0].column_by_name("location").unwrap().len(),
+                1
+            );
+        }
     }
 
     #[test]
@@ -330,6 +430,118 @@ mod tests {
                 .unwrap(),
             uuid
         );
+    }
+
+    #[test]
+    fn temporal_scalar_properties_survive_reopen_with_exact_components() {
+        use graphforge_core::TemporalValue;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let temporal = [
+            (
+                "duration",
+                TemporalValue::Duration {
+                    months: -2,
+                    days: 3,
+                    seconds: -4,
+                    nanos: 500_000_001,
+                },
+            ),
+            (
+                "utc",
+                TemporalValue::UtcDateTime {
+                    epoch_micros: -1_234_567,
+                },
+            ),
+            (
+                "date",
+                TemporalValue::Date {
+                    epoch_days: -10_000,
+                },
+            ),
+            (
+                "local_datetime",
+                TemporalValue::LocalDateTime {
+                    epoch_days: 20_000,
+                    nanos: 1_234_567_890,
+                },
+            ),
+            ("local_time", TemporalValue::LocalTime { nanos: 42 }),
+            (
+                "offset_time",
+                TemporalValue::OffsetTime {
+                    nanos: 43,
+                    offset_seconds: 19_800,
+                },
+            ),
+            (
+                "zoned_datetime",
+                TemporalValue::ZonedDateTime {
+                    epoch_days: 20_001,
+                    nanos: 7_200_000_000_000,
+                    offset_seconds: -21_600,
+                    zone: Some("America/Denver".into()),
+                },
+            ),
+        ];
+        let properties = temporal
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), PropValue::Temporal(value.clone())))
+            .collect::<HashMap<_, _>>();
+        {
+            let graph = GraphForge::new(dir.path().to_str()).unwrap();
+            graph.add_node("Event", &properties).unwrap();
+        }
+
+        let reopened = GraphForge::new(dir.path().to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Event) RETURN n.duration, n.utc, n.date, n.local_datetime, n.local_time, n.offset_time, n.zoned_datetime")
+            .unwrap();
+        assert_eq!(
+            result
+                .batches
+                .iter()
+                .map(arrow::array::RecordBatch::num_rows)
+                .sum::<usize>(),
+            1
+        );
+
+        let rows = graphforge_storage::read_node_property_rows(&reopened.dir, "_untyped").unwrap();
+        assert_eq!(rows.len(), 1);
+        let stored = rows.values().next().unwrap();
+        for (name, value) in temporal {
+            assert_eq!(stored.get(name), Some(&temporal_literal(&value)), "{name}");
+        }
+    }
+
+    #[test]
+    fn temporal_scalar_validation_rejects_invalid_wall_time_offset_and_zone() {
+        use graphforge_core::TemporalValue;
+
+        let graph = GraphForge::new(None).unwrap();
+        for value in [
+            TemporalValue::LocalTime {
+                nanos: 86_400_000_000_000,
+            },
+            TemporalValue::OffsetTime {
+                nanos: 0,
+                offset_seconds: 64_801,
+            },
+            TemporalValue::ZonedDateTime {
+                epoch_days: 0,
+                nanos: 0,
+                offset_seconds: 0,
+                zone: Some("bad\nzone".into()),
+            },
+        ] {
+            let error = graph
+                .add_node(
+                    "Event",
+                    &HashMap::from([("when".into(), PropValue::Temporal(value))]),
+                )
+                .unwrap_err();
+            assert_eq!(error.code(), "GF_VALIDATION");
+        }
     }
 
     #[test]

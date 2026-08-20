@@ -31,7 +31,7 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 - Writing: CREATE, SET, REMOVE, DELETE, DETACH DELETE
 - Advanced: OPTIONAL MATCH, UNION, UNWIND, variable-length paths
 - Temporal: All date/time types and functions (100% complete)
-- Spatial: Point and distance functions (100% complete)
+- Spatial: canonical GeoArrow properties plus the bounded `point()`/`distance()` profile below
 - Pattern matching: All node/relationship pattern variations, pattern predicates
 - Predicate functions: all(), any(), none(), single(), exists(), isEmpty()
 - List operations: extract(), filter(), reduce(), slicing, negative indexing
@@ -182,12 +182,12 @@ Comprehensive status matrix for GraphForge's OpenCypher implementation, showing 
 | hour(), minute(), second() | ✅ Complete | 8 | evaluator.py | Time accessors |
 | truncate() | ✅ Complete | 4 | evaluator.py | Temporal truncation; compact parsing and truncate variants (v0.3.8) |
 
-#### Spatial Functions (2 total: 2 complete) ✅ COMPLETE CATEGORY
+#### Spatial Functions (2 documented, 0 currently certified)
 
 | Function | Status | TCK Scenarios | File | Notes |
 |----------|--------|---------------|------|-------|
-| point() | ✅ Complete | 6 | evaluator.py | Point creation (2D/3D) |
-| distance() | ✅ Complete | 4 | evaluator.py | Distance calculation |
+| point() | ✅ Bounded profile | Rust E2E | #800 | Literal 2D `x`/`y` EPSG:3857 or `longitude`/`latitude` EPSG:4326 maps; no implicit axis swap or reprojection |
+| distance() | ✅ Bounded profile | Rust E2E | #800 | Euclidean metres for EPSG:3857 and deterministic haversine metres for EPSG:4326 Point values; mixed CRS and non-Point values are typed errors |
 
 #### Path Functions (3 total: 3 complete) ✅ COMPLETE CATEGORY
 

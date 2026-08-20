@@ -168,6 +168,102 @@ mod tests {
     }
 
     #[test]
+    fn facade_reopen_queries_typed_delta_materialized_from_canonical_parquet() {
+        use arrow::array::Int64Array;
+        use graphforge_ir::IrLiteral;
+        use graphforge_storage::{
+            GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest,
+            encode_graph_delta_value,
+        };
+
+        let directory = TempDir::new().unwrap();
+        let graph = GraphForge::new(directory.path().to_str()).unwrap();
+        graph.execute("CREATE (:Base)").unwrap();
+        drop(graph);
+
+        let replayed_node = Uuid::now_v7().hyphenated().to_string();
+        graphforge_storage::publish_graph_delta(
+            directory.path(),
+            &GraphDeltaPublishRequest {
+                transaction_uuid: Uuid::now_v7(),
+                generation_uuid: Uuid::now_v7(),
+                run_uuid: Uuid::now_v7(),
+                operations: vec![
+                    GraphDeltaOp {
+                        operation_uuid: Uuid::now_v7(),
+                        kind: GraphDeltaOpKind::UpsertNode,
+                        payload: GraphDeltaPayload::UpsertNodeV2 {
+                            node_uuid: replayed_node.clone(),
+                            node_id: 2,
+                            type_ids: Vec::new(),
+                            created_at_micros: 1_700_000_000_000_001,
+                            updated_at_micros: 1_700_000_000_000_001,
+                        },
+                    },
+                    GraphDeltaOp {
+                        operation_uuid: Uuid::now_v7(),
+                        kind: GraphDeltaOpKind::SetNodeProperty,
+                        payload: GraphDeltaPayload::SetNodeProperty {
+                            node_uuid: replayed_node,
+                            property_stem: "_untyped".into(),
+                            key: "rank".into(),
+                            value: encode_graph_delta_value(&IrLiteral::Int(7)).unwrap(),
+                        },
+                    },
+                ],
+                limits: GraphDeltaJournalLimits::default(),
+            },
+        )
+        .unwrap();
+
+        let reopened = GraphForge::new(directory.path().to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n) RETURN count(n) AS total")
+            .unwrap();
+        let count = result.batches[0]
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 2);
+        let result = reopened
+            .execute("MATCH (n) WHERE n.rank = 7 RETURN n.rank AS rank")
+            .unwrap();
+        let rank = result.batches[0]
+            .column_by_name("rank")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(rank, 7);
+        reopened
+            .checkpoint(crate::CheckpointRequest {
+                name: "Delta replay".into(),
+                description: Some("typed GFDR checkpoint parity".into()),
+                idempotency_key: crate::OperationId(Uuid::now_v7()),
+                actor_uuid: None,
+            })
+            .unwrap();
+        let checkpoint = reopened.open_checkpoint("Delta replay").unwrap();
+        let result = checkpoint
+            .execute("MATCH (n) WHERE n.rank = 7 RETURN n.rank AS rank")
+            .unwrap();
+        assert_eq!(
+            result.batches[0]
+                .column_by_name("rank")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            7
+        );
+    }
+
+    #[test]
     fn in_memory_retention_uses_ephemeral_lifecycle_mode() {
         let graph = GraphForge::new(None).unwrap();
         graph
@@ -195,21 +291,18 @@ mod tests {
         use graphforge_storage::{
             GraphDeltaOp, GraphDeltaOpKind, GraphDeltaPayload, GraphDeltaPublishRequest,
             ProjectCapability, ProjectGenerationRequest, ProjectStageOutcome,
-            ReconstructedGraphState,
         };
 
         let graph = GraphForge::new(None).unwrap();
         let root = graph.resolved_generation.container_root();
         let workspace = tempfile::tempdir().unwrap();
-        graphforge_storage::stage_base_graph_workspace(
+        let mut writer = graphforge_storage::GraphWriter::open_at(
             workspace.path(),
-            &[
-                ("topology/nodes.parquet", b"nodes"),
-                ("topology/edges.parquet", b"edges"),
-            ],
-            Some(&ReconstructedGraphState::default()),
+            graphforge_core::OntologyMode::Strict,
+            1_700_000_000_000_000,
         )
         .unwrap();
+        writer.flush().unwrap();
         let (_, files) = graphforge_storage::capture_graph_files(workspace.path()).unwrap();
         let mut participants = graphforge_storage::empty_workspace_participants().unwrap();
         participants.insert(0, files);
@@ -253,9 +346,12 @@ mod tests {
                 operations: vec![GraphDeltaOp {
                     operation_uuid: Uuid::now_v7(),
                     kind: GraphDeltaOpKind::UpsertNode,
-                    payload: GraphDeltaPayload::UpsertNode {
+                    payload: GraphDeltaPayload::UpsertNodeV2 {
                         node_uuid: Uuid::now_v7().hyphenated().to_string(),
+                        node_id: 1,
                         type_ids: vec![1],
+                        created_at_micros: 1,
+                        updated_at_micros: 1,
                     },
                 }],
                 limits: GraphDeltaJournalLimits::default(),

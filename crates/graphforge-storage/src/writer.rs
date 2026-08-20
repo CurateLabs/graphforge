@@ -63,7 +63,10 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use graphforge_core::uuid::{Uuid, to_bytes};
-use graphforge_core::{GfError, OntologyMode, TypeId};
+use graphforge_core::{
+    GfError, OntologyMode, SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType,
+    SpatialValue, TypeId,
+};
 use graphforge_ir::IrLiteral;
 
 /// Identity, labels, and properties of a buffered node matched by MERGE.
@@ -146,6 +149,991 @@ struct PropRow {
 struct EdgePropRow {
     edge_uuid: [u8; 16],
     props: HashMap<String, IrLiteral>,
+}
+
+type TypedPropertyRow = (String, [u8; 16], HashMap<String, IrLiteral>);
+#[cfg(test)]
+type ReconstructedEdge<'a> = (&'a String, &'a (String, String, String));
+
+/// Apply a bounded GFDR overlay while scanning the canonical base in bounded
+/// Arrow batches. Only overlay identities are retained across batches.
+pub(crate) fn write_replay_overlay_streaming(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let node_path = source.join("topology/nodes.parquet");
+    let output_node_path = target.join("topology/nodes.parquet");
+    let node_scan = scan_replay_node_authority(&node_path, overlay, limits)?;
+    let reader = if node_path.exists() {
+        let node_file = fs::File::open(&node_path).map_err(|error| {
+            GfError::Storage(format!(
+                "open canonical replay nodes at {}: {error}",
+                node_path.display()
+            ))
+        })?;
+        Some(
+            ParquetRecordBatchReaderBuilder::try_new(node_file)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?,
+        )
+    } else {
+        None
+    };
+    fs::create_dir_all(output_node_path.parent().expect("node output has parent"))
+        .map_err(|error| io_err(&error))?;
+    let output = fs::File::create(&output_node_path).map_err(|error| io_err(&error))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(output, TOPOLOGY_NODES_SCHEMA.clone(), None)
+            .map_err(pq_err)?;
+    for batch in reader.into_iter().flatten() {
+        let batch = batch.map_err(pq_err)?;
+        if batch.num_rows() > limits.max_batch_rows {
+            return Err(GfError::Storage(
+                "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+            ));
+        }
+        let uuids = batch
+            .column_by_name("node_uuid")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .ok_or_else(|| pq_err("canonical node_uuid column is incompatible"))?;
+        for row in 0..batch.num_rows() {
+            let uuid = uuid::Uuid::from_slice(uuids.value(row))
+                .map_err(|error| pq_err(format!("canonical node_uuid is invalid: {error}")))?
+                .hyphenated()
+                .to_string();
+            match overlay.nodes.get(&uuid) {
+                Some(Some(replacement)) => writer
+                    .write(&replay_node_batch(&[replacement])?)
+                    .map_err(pq_err)?,
+                Some(None) => {}
+                None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
+            }
+        }
+    }
+    let mut appended: Vec<_> = overlay
+        .nodes
+        .iter()
+        .filter(|(uuid, row)| row.is_some() && !node_scan.existing_overlay.contains(*uuid))
+        .filter_map(|(_, row)| row.as_ref())
+        .collect();
+    appended.sort_by_key(|row| row.node_id);
+    if !appended.is_empty() {
+        writer
+            .write(&replay_node_batch(&appended)?)
+            .map_err(pq_err)?;
+    }
+    writer.close().map_err(pq_err)?;
+
+    validate_replay_edge_endpoints(overlay, &node_scan)?;
+    stream_replay_edges(source, target, overlay, limits, &node_scan)?;
+    stream_replay_properties(
+        source,
+        target,
+        overlay,
+        limits,
+        false,
+        &node_scan.existing_overlay,
+    )?;
+    stream_replay_properties(source, target, overlay, limits, true, &HashSet::new())?;
+    Ok(())
+}
+
+struct ReplayNodeAuthority {
+    existing_overlay: HashSet<String>,
+    endpoint_ids: HashMap<String, u64>,
+    deleted_nodes: HashSet<String>,
+}
+
+#[allow(clippy::too_many_lines)] // One bounded authority scan validates all node invariants.
+fn scan_replay_node_authority(
+    node_path: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+) -> Result<ReplayNodeAuthority, GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let endpoint_uuids: HashSet<_> = overlay
+        .edges
+        .values()
+        .filter_map(Option::as_ref)
+        .flat_map(|edge| [edge.src_uuid.clone(), edge.dst_uuid.clone()])
+        .collect();
+    if !node_path.exists() {
+        let mut endpoint_ids = HashMap::new();
+        for (uuid, row) in &overlay.nodes {
+            if let Some(row) = row
+                && endpoint_uuids.contains(uuid)
+            {
+                endpoint_ids.insert(uuid.clone(), row.node_id);
+            }
+        }
+        return Ok(ReplayNodeAuthority {
+            existing_overlay: HashSet::new(),
+            endpoint_ids,
+            deleted_nodes: overlay
+                .nodes
+                .iter()
+                .filter(|(_, row)| row.is_none())
+                .map(|(uuid, _)| uuid.clone())
+                .collect(),
+        });
+    }
+    let input = fs::File::open(node_path).map_err(|error| {
+        GfError::Storage(format!(
+            "scan canonical replay nodes at {}: {error}",
+            node_path.display()
+        ))
+    })?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+        .map_err(pq_err)?
+        .with_batch_size(limits.max_batch_rows)
+        .build()
+        .map_err(pq_err)?;
+    let mut existing_overlay = HashSet::new();
+    let mut endpoint_ids = HashMap::new();
+    let mut prior_id = 0_u64;
+    let mut base_max = 0_u64;
+    for batch in reader {
+        let batch = batch.map_err(pq_err)?;
+        let uuids = batch
+            .column_by_name("node_uuid")
+            .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+            .ok_or_else(|| pq_err("canonical node_uuid column is incompatible"))?;
+        let ids = batch
+            .column_by_name("node_id")
+            .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| pq_err("canonical node_id column is incompatible"))?;
+        for row in 0..batch.num_rows() {
+            let uuid = uuid::Uuid::from_slice(uuids.value(row))
+                .map_err(|error| pq_err(format!("canonical node_uuid is invalid: {error}")))?
+                .hyphenated()
+                .to_string();
+            let id = ids.value(row);
+            if id <= prior_id {
+                return Err(pq_err("canonical node_id order is not strictly increasing"));
+            }
+            prior_id = id;
+            base_max = id;
+            if overlay.nodes.contains_key(&uuid) {
+                existing_overlay.insert(uuid.clone());
+                if let Some(Some(replacement)) = overlay.nodes.get(&uuid)
+                    && replacement.node_id != id
+                {
+                    return Err(pq_err(
+                        "GF_UNSUPPORTED_PROJECT_FORMAT: node surrogate changed",
+                    ));
+                }
+            }
+            if endpoint_uuids.contains(&uuid) {
+                endpoint_ids.insert(uuid, id);
+            }
+        }
+    }
+    let mut new_ids = HashSet::new();
+    for (uuid, row) in &overlay.nodes {
+        if let Some(row) = row
+            && !existing_overlay.contains(uuid)
+        {
+            if row.node_id <= base_max || !new_ids.insert(row.node_id) {
+                return Err(pq_err(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: new node surrogate is not monotonic",
+                ));
+            }
+            if endpoint_uuids.contains(uuid) {
+                endpoint_ids.insert(uuid.clone(), row.node_id);
+            }
+        }
+    }
+    Ok(ReplayNodeAuthority {
+        existing_overlay,
+        endpoint_ids,
+        deleted_nodes: overlay
+            .nodes
+            .iter()
+            .filter(|(_, row)| row.is_none())
+            .map(|(uuid, _)| uuid.clone())
+            .collect(),
+    })
+}
+
+fn validate_replay_edge_endpoints(
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    nodes: &ReplayNodeAuthority,
+) -> Result<(), GfError> {
+    for edge in overlay.edges.values().filter_map(Option::as_ref) {
+        let src_id = nodes.endpoint_ids.get(&edge.src_uuid).copied();
+        let dst_id = nodes.endpoint_ids.get(&edge.dst_uuid).copied();
+        if src_id != Some(edge.src_id) || dst_id != Some(edge.dst_id) {
+            return Err(pq_err(
+                "GF_UNSUPPORTED_PROJECT_FORMAT: edge endpoint identity is missing or inconsistent",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn replay_node_batch(
+    rows: &[&crate::graph_delta_journal::ReplayNodeRow],
+) -> Result<RecordBatch, GfError> {
+    let uuids = fixed_uuid_array(rows.iter().map(|row| row.node_uuid.as_str()))?;
+    let nullable_label_sets =
+        arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
+            rows.iter()
+                .map(|row| Some(row.type_ids.iter().copied().map(Some))),
+        );
+    let label_sets = arrow::array::ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt32, false)),
+        nullable_label_sets.offsets().clone(),
+        nullable_label_sets.values().clone(),
+        None,
+    );
+    RecordBatch::try_new(
+        TOPOLOGY_NODES_SCHEMA.clone(),
+        vec![
+            Arc::new(uuids),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.node_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt32Array::from(
+                rows.iter()
+                    .map(|row| row.type_ids.first().copied().unwrap_or(u32::MAX))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(label_sets),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.created_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.updated_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+        ],
+    )
+    .map_err(pq_err)
+}
+
+#[allow(clippy::too_many_lines)] // Two bounded passes keep validation and emission consistent.
+fn stream_replay_edges(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    nodes: &ReplayNodeAuthority,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let source_dir = source.join("topology/edges");
+    let target_dir = target.join("topology/edges");
+    fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
+    let mut relations = std::collections::BTreeSet::new();
+    if source_dir.exists() {
+        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
+            let entry = entry.map_err(|error| io_err(&error))?;
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+            {
+                let stem = path
+                    .file_stem()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .ok_or_else(|| pq_err("edge Parquet stem is not UTF-8"))?;
+                relations.insert(stem.to_owned());
+            }
+        }
+    }
+    relations.extend(
+        overlay
+            .edges
+            .values()
+            .filter_map(Option::as_ref)
+            .map(|edge| edge.rel_type.clone()),
+    );
+    for relation in relations {
+        let source_path = source_dir.join(format!("{relation}.parquet"));
+        let target_path = target_dir.join(format!("{relation}.parquet"));
+        let mut existing_overlay = HashSet::new();
+        let mut base_max = 0_u64;
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                let uuids = required_uuid_column(&batch, "edge_uuid")?;
+                let srcs = required_uuid_column(&batch, "src_uuid")?;
+                let dsts = required_uuid_column(&batch, "dst_uuid")?;
+                let ids = batch
+                    .column_by_name("edge_id")
+                    .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| pq_err("canonical edge_id column is incompatible"))?;
+                for row in 0..batch.num_rows() {
+                    let edge_uuid = canonical_uuid(uuids.value(row), "edge_uuid")?;
+                    let src_uuid = canonical_uuid(srcs.value(row), "src_uuid")?;
+                    let dst_uuid = canonical_uuid(dsts.value(row), "dst_uuid")?;
+                    if !overlay.edges.contains_key(&edge_uuid)
+                        && (nodes.deleted_nodes.contains(&src_uuid)
+                            || nodes.deleted_nodes.contains(&dst_uuid))
+                    {
+                        return Err(pq_err(
+                            "GF_UNSUPPORTED_PROJECT_FORMAT: retained edge references deleted node",
+                        ));
+                    }
+                    let id = ids.value(row);
+                    if id <= base_max {
+                        return Err(pq_err("canonical edge_id order is not strictly increasing"));
+                    }
+                    base_max = id;
+                    if overlay.edges.contains_key(&edge_uuid) {
+                        existing_overlay.insert(edge_uuid.clone());
+                        if let Some(Some(replacement)) = overlay.edges.get(&edge_uuid)
+                            && replacement.edge_id != id
+                        {
+                            return Err(pq_err(
+                                "GF_UNSUPPORTED_PROJECT_FORMAT: edge surrogate changed",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut new_ids = HashSet::new();
+        for (uuid, row) in &overlay.edges {
+            if let Some(row) = row
+                && row.rel_type == relation
+                && !existing_overlay.contains(uuid)
+                && (row.edge_id <= base_max || !new_ids.insert(row.edge_id))
+            {
+                return Err(pq_err(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: new edge surrogate is not monotonic",
+                ));
+            }
+        }
+        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(output, TYPED_EDGE_SCHEMA.clone(), None)
+                .map_err(pq_err)?;
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                if batch.num_rows() > limits.max_batch_rows {
+                    return Err(GfError::Storage(
+                        "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+                    ));
+                }
+                let uuids = batch
+                    .column_by_name("edge_uuid")
+                    .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+                    .ok_or_else(|| pq_err("canonical edge_uuid column is incompatible"))?;
+                for row in 0..batch.num_rows() {
+                    let uuid = canonical_uuid(uuids.value(row), "edge_uuid")?;
+                    match overlay.edges.get(&uuid) {
+                        Some(Some(replacement)) if replacement.rel_type == relation => writer
+                            .write(&replay_edge_batch(&[replacement])?)
+                            .map_err(pq_err)?,
+                        Some(_) => {}
+                        None => writer.write(&batch.slice(row, 1)).map_err(pq_err)?,
+                    }
+                }
+            }
+        }
+        let mut appended: Vec<_> = overlay
+            .edges
+            .iter()
+            .filter(|(uuid, row)| {
+                row.as_ref().is_some_and(|edge| edge.rel_type == relation)
+                    && !existing_overlay.contains(*uuid)
+            })
+            .filter_map(|(_, row)| row.as_ref())
+            .collect();
+        appended.sort_by_key(|edge| edge.edge_id);
+        if !appended.is_empty() {
+            writer
+                .write(&replay_edge_batch(&appended)?)
+                .map_err(pq_err)?;
+        }
+        writer.close().map_err(pq_err)?;
+    }
+    Ok(())
+}
+
+fn required_uuid_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<&'a FixedSizeBinaryArray, GfError> {
+    batch
+        .column_by_name(name)
+        .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
+        .ok_or_else(|| pq_err(format!("canonical {name} column is incompatible")))
+}
+
+fn canonical_uuid(bytes: &[u8], field: &str) -> Result<String, GfError> {
+    uuid::Uuid::from_slice(bytes)
+        .map(|value| value.hyphenated().to_string())
+        .map_err(|error| pq_err(format!("canonical {field} is invalid: {error}")))
+}
+
+fn replay_edge_batch(
+    rows: &[&crate::graph_delta_journal::ReplayEdgeRow],
+) -> Result<RecordBatch, GfError> {
+    RecordBatch::try_new(
+        TYPED_EDGE_SCHEMA.clone(),
+        vec![
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.edge_uuid.as_str()),
+            )?),
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.src_uuid.as_str()),
+            )?),
+            Arc::new(fixed_uuid_array(
+                rows.iter().map(|row| row.dst_uuid.as_str()),
+            )?),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.edge_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.src_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|row| row.dst_id).collect::<Vec<_>>(),
+            )),
+            Arc::new(
+                TimestampMicrosecondArray::from(
+                    rows.iter()
+                        .map(|row| row.created_at_micros)
+                        .collect::<Vec<_>>(),
+                )
+                .with_timezone_opt(Some(Arc::from("UTC"))),
+            ),
+        ],
+    )
+    .map_err(pq_err)
+}
+
+#[allow(clippy::too_many_lines)] // Node and edge property paths deliberately share one writer.
+fn stream_replay_properties(
+    source: &Path,
+    target: &Path,
+    overlay: &crate::graph_delta_journal::ReplayOverlay,
+    limits: crate::graph_delta_journal::GraphDeltaJournalLimits,
+    edge: bool,
+    base_overlay_entities: &HashSet<String>,
+) -> Result<(), GfError> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let (directory, join_field, metadata_key) = if edge {
+        (
+            "edge_properties",
+            EDGE_PROPERTY_UUID_FIELD,
+            "graphforge.rel_type",
+        )
+    } else {
+        (
+            "properties",
+            NODE_PROPERTY_UUID_FIELD,
+            "graphforge.entity_type",
+        )
+    };
+    let operations = if edge {
+        &overlay.edge_properties
+    } else {
+        &overlay.node_properties
+    };
+    let mut stems = std::collections::BTreeSet::new();
+    stems.extend(operations.keys().map(|(_, stem, _)| stem.clone()));
+    let source_dir = source.join(directory);
+    let target_dir = target.join(directory);
+    if !operations.is_empty() && source_dir.exists() {
+        for entry in fs::read_dir(&source_dir).map_err(|error| io_err(&error))? {
+            let path = entry.map_err(|error| io_err(&error))?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "parquet")
+                && let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str)
+            {
+                stems.insert(stem.to_owned());
+            }
+        }
+    }
+    fs::create_dir_all(&target_dir).map_err(|error| io_err(&error))?;
+    for stem in stems {
+        let source_path = source_dir.join(format!("{stem}.parquet"));
+        let target_path = target_dir.join(format!("{stem}.parquet"));
+        let base_schema = if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .schema()
+                .clone()
+        } else {
+            Arc::new(
+                Schema::new(vec![uuid_field(join_field)]).with_metadata(
+                    [(metadata_key.to_owned(), stem.clone())]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+        };
+        let schema = replay_property_schema(
+            base_schema.as_ref(),
+            operations
+                .iter()
+                .filter(|((_, operation_stem, _), _)| operation_stem == &stem),
+        )?;
+        let output = fs::File::create(&target_path).map_err(|error| io_err(&error))?;
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(output, Arc::new(schema.clone()), None)
+                .map_err(pq_err)?;
+        let mut seen = HashSet::<String>::new();
+        if source_path.exists() {
+            let input = fs::File::open(&source_path).map_err(|error| io_err(&error))?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+                .map_err(pq_err)?
+                .with_batch_size(limits.max_batch_rows)
+                .build()
+                .map_err(pq_err)?;
+            for batch in reader {
+                let batch = batch.map_err(pq_err)?;
+                if batch.num_rows() > limits.max_batch_rows {
+                    return Err(GfError::Storage(
+                        "GF_RESOURCE_LIMIT: graph delta replay batch rows".into(),
+                    ));
+                }
+                if edge {
+                    let mut rows = Vec::new();
+                    decode_property_batch(&batch, join_field, |uuid, mut props| {
+                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
+                        if overlay.edges.get(&key).is_some_and(Option::is_none) {
+                            return;
+                        }
+                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
+                        seen.insert(key);
+                        rows.push(EdgePropRow {
+                            edge_uuid: uuid,
+                            props,
+                        });
+                    })?;
+                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
+                } else {
+                    let mut rows = Vec::new();
+                    decode_property_batch(&batch, join_field, |uuid, mut props| {
+                        let key = uuid::Uuid::from_bytes(uuid).hyphenated().to_string();
+                        if overlay.nodes.get(&key).is_some_and(Option::is_none) {
+                            return;
+                        }
+                        apply_streamed_property_ops(&key, &stem, operations, &mut props);
+                        seen.insert(key);
+                        rows.push(PropRow {
+                            node_uuid: uuid,
+                            props,
+                        });
+                    })?;
+                    write_property_rows_with_schema(&mut writer, &schema, join_field, &rows)?;
+                }
+            }
+        }
+        for (entity_uuid, operation_stem, _) in operations.keys() {
+            if operation_stem != &stem || seen.contains(entity_uuid) {
+                continue;
+            }
+            let mut props = HashMap::new();
+            apply_streamed_property_ops(entity_uuid, &stem, operations, &mut props);
+            if props.is_empty() {
+                continue;
+            }
+            let uuid = uuid::Uuid::parse_str(entity_uuid)
+                .map_err(pq_err)?
+                .into_bytes();
+            if edge {
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[EdgePropRow {
+                        edge_uuid: uuid,
+                        props,
+                    }],
+                )?;
+            } else {
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[PropRow {
+                        node_uuid: uuid,
+                        props,
+                    }],
+                )?;
+            }
+            seen.insert(entity_uuid.clone());
+        }
+        if !edge && stem == "_untyped" {
+            for (entity_uuid, row) in &overlay.nodes {
+                if row.is_none()
+                    || base_overlay_entities.contains(entity_uuid)
+                    || seen.contains(entity_uuid)
+                {
+                    continue;
+                }
+                let uuid = uuid::Uuid::parse_str(entity_uuid)
+                    .map_err(pq_err)?
+                    .into_bytes();
+                write_property_rows_with_schema(
+                    &mut writer,
+                    &schema,
+                    join_field,
+                    &[PropRow {
+                        node_uuid: uuid,
+                        props: HashMap::new(),
+                    }],
+                )?;
+                seen.insert(entity_uuid.clone());
+            }
+        }
+        writer.close().map_err(pq_err)?;
+    }
+    Ok(())
+}
+
+fn apply_streamed_property_ops(
+    entity_uuid: &str,
+    stem: &str,
+    operations: &std::collections::BTreeMap<(String, String, String), Option<IrLiteral>>,
+    props: &mut HashMap<String, IrLiteral>,
+) {
+    for ((uuid, operation_stem, key), value) in operations {
+        if uuid != entity_uuid {
+            continue;
+        }
+        if operation_stem == stem
+            && let Some(value) = value
+        {
+            props.insert(key.clone(), value.clone());
+        } else {
+            props.remove(key);
+        }
+    }
+}
+
+fn replay_property_schema<'a>(
+    base: &Schema,
+    operations: impl Iterator<Item = (&'a (String, String, String), &'a Option<IrLiteral>)>,
+) -> Result<Schema, GfError> {
+    let mut fields: Vec<Field> = base
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect();
+    for ((_, _, key), value) in operations {
+        let Some(value) = value else { continue };
+        reject_map_property_value(key, value)?;
+        let Some(value_type) = ColType::of(value) else {
+            continue;
+        };
+        if let Some(existing) = fields.iter().find(|field| field.name() == key) {
+            let existing_type = col_type_from_data_type(existing.data_type())
+                .ok_or_else(|| pq_err(format!("unsupported canonical property type for {key}")))?;
+            if existing_type != value_type
+                && !(existing_type == ColType::HetScalar && value_type.is_scalar())
+            {
+                return Err(pq_err(format!(
+                    "GF_UNSUPPORTED_PROJECT_FORMAT: property {key} changes canonical type"
+                )));
+            }
+        } else {
+            fields.push(Field::new(key, value_type.data_type(), true));
+        }
+    }
+    Ok(Schema::new(fields).with_metadata(base.metadata().clone()))
+}
+
+fn col_type_from_data_type(data_type: &DataType) -> Option<ColType> {
+    match data_type {
+        DataType::Int64 => Some(ColType::Int),
+        DataType::Float64 => Some(ColType::Float),
+        DataType::Boolean => Some(ColType::Bool),
+        DataType::Utf8 => Some(ColType::Str),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Some(ColType::DateTime),
+        DataType::Time64(TimeUnit::Nanosecond) => Some(ColType::Time),
+        DataType::List(field) => {
+            col_type_from_data_type(field.data_type()).map(|inner| ColType::List(Box::new(inner)))
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "__het_int") => {
+            Some(ColType::HetScalar)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "months") => {
+            Some(ColType::Duration)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "epoch_day") => {
+            Some(ColType::Date)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "offset_seconds") => {
+            Some(ColType::ZonedTime)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "timezone") => {
+            Some(ColType::ZonedDateTime)
+        }
+        DataType::Struct(fields) if fields.iter().any(|field| field.name() == "date") => {
+            Some(ColType::LocalDateTime)
+        }
+        _ => None,
+    }
+}
+
+fn write_property_rows_with_schema<R: PropRowLike>(
+    writer: &mut parquet::arrow::ArrowWriter<fs::File>,
+    schema: &Schema,
+    uuid_field_name: &str,
+    rows: &[R],
+) -> Result<(), GfError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    columns.push(Arc::new(
+        FixedSizeBinaryArray::try_from_iter(rows.iter().map(|row| row.uuid_bytes().to_vec()))
+            .map_err(pq_err)?,
+    ));
+    for field in schema.fields().iter().skip(1) {
+        let column_type = col_type_from_data_type(field.data_type()).ok_or_else(|| {
+            pq_err(format!(
+                "unsupported canonical property type for {}",
+                field.name()
+            ))
+        })?;
+        columns.push(build_property_array(field.name(), column_type, rows));
+    }
+    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns).map_err(pq_err)?;
+    if batch.schema().field(0).name() != uuid_field_name {
+        return Err(pq_err("canonical property UUID field mismatch"));
+    }
+    writer.write(&batch).map_err(pq_err)
+}
+
+/// Materialize a verified base-plus-GFDR logical state as canonical Parquet in
+/// a private read workspace. The committed generation remains unchanged.
+#[allow(clippy::too_many_lines)] // One canonical writer keeps topology and properties atomic.
+#[cfg(test)]
+pub(crate) fn write_reconstructed_graph(
+    dir: &Path,
+    state: &crate::graph_delta_journal::ReconstructedGraphState,
+) -> Result<(), GfError> {
+    let topology = dir.join("topology");
+    let edges_dir = topology.join("edges");
+    for path in [
+        topology.join("nodes.parquet"),
+        edges_dir.clone(),
+        dir.join("properties"),
+        dir.join("edge_properties"),
+    ] {
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|error| io_err(&error))?;
+        } else if path.exists() {
+            fs::remove_file(&path).map_err(|error| io_err(&error))?;
+        }
+    }
+    fs::create_dir_all(&edges_dir).map_err(|error| io_err(&error))?;
+
+    let mut nodes: Vec<_> = state.nodes.iter().collect();
+    nodes.sort_by_key(|(uuid, _)| state.node_ids.get(*uuid).copied().unwrap_or(u64::MAX));
+    let uuids = fixed_uuid_array(nodes.iter().map(|(uuid, _)| uuid.as_str()))?;
+    let node_ids = UInt64Array::from(
+        nodes
+            .iter()
+            .map(|(uuid, _)| {
+                state.node_ids.get(*uuid).copied().ok_or_else(|| {
+                    pq_err(format!(
+                        "reconstructed node {uuid} is missing its surrogate id"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let primary_types = UInt32Array::from(
+        nodes
+            .iter()
+            .map(|(_, labels)| labels.first().copied().unwrap_or(u32::MAX))
+            .collect::<Vec<_>>(),
+    );
+    let nullable_label_sets =
+        arrow::array::ListArray::from_iter_primitive::<arrow::datatypes::UInt32Type, _, _>(
+            nodes
+                .iter()
+                .map(|(_, labels)| Some(labels.iter().copied().map(Some))),
+        );
+    let label_sets = arrow::array::ListArray::new(
+        Arc::new(Field::new("item", DataType::UInt32, false)),
+        nullable_label_sets.offsets().clone(),
+        nullable_label_sets.values().clone(),
+        None,
+    );
+    let node_timestamps = nodes
+        .iter()
+        .map(|(uuid, _)| {
+            state.node_timestamps.get(*uuid).copied().ok_or_else(|| {
+                pq_err(format!(
+                    "reconstructed node {uuid} is missing its timestamps"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let created = TimestampMicrosecondArray::from(
+        node_timestamps
+            .iter()
+            .map(|timestamps| timestamps.0)
+            .collect::<Vec<_>>(),
+    )
+    .with_timezone_opt(Some(Arc::from("UTC")));
+    let updated = TimestampMicrosecondArray::from(
+        node_timestamps
+            .iter()
+            .map(|timestamps| timestamps.1)
+            .collect::<Vec<_>>(),
+    )
+    .with_timezone_opt(Some(Arc::from("UTC")));
+    let node_batch = RecordBatch::try_new(
+        TOPOLOGY_NODES_SCHEMA.clone(),
+        vec![
+            Arc::new(uuids),
+            Arc::new(node_ids),
+            Arc::new(primary_types),
+            Arc::new(label_sets),
+            Arc::new(created),
+            Arc::new(updated),
+        ],
+    )
+    .map_err(pq_err)?;
+    write_parquet_batch(&topology.join("nodes.parquet"), &node_batch)?;
+
+    let mut by_relation: std::collections::BTreeMap<&str, Vec<ReconstructedEdge<'_>>> =
+        std::collections::BTreeMap::new();
+    for (edge_uuid, edge) in &state.edges {
+        by_relation
+            .entry(&edge.2)
+            .or_default()
+            .push((edge_uuid, edge));
+    }
+    for (relation, mut edges) in by_relation {
+        edges.sort_by_key(|(uuid, _)| state.edge_ids.get(*uuid).map_or(u64::MAX, |ids| ids.0));
+        let edge_uuids = fixed_uuid_array(edges.iter().map(|(uuid, _)| uuid.as_str()))?;
+        let src_uuids = fixed_uuid_array(edges.iter().map(|(_, edge)| edge.0.as_str()))?;
+        let dst_uuids = fixed_uuid_array(edges.iter().map(|(_, edge)| edge.1.as_str()))?;
+        let ids: Vec<_> = edges
+            .iter()
+            .map(|(uuid, _)| {
+                state.edge_ids.get(*uuid).copied().ok_or_else(|| {
+                    pq_err(format!(
+                        "reconstructed edge {uuid} is missing its surrogate ids"
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let created = TimestampMicrosecondArray::from(
+            edges
+                .iter()
+                .map(|(uuid, _)| {
+                    state.edge_created_at.get(*uuid).copied().ok_or_else(|| {
+                        pq_err(format!(
+                            "reconstructed edge {uuid} is missing its timestamp"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .with_timezone_opt(Some(Arc::from("UTC")));
+        let batch = RecordBatch::try_new(
+            TYPED_EDGE_SCHEMA.clone(),
+            vec![
+                Arc::new(edge_uuids),
+                Arc::new(src_uuids),
+                Arc::new(dst_uuids),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt64Array::from(
+                    ids.iter().map(|ids| ids.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(created),
+            ],
+        )
+        .map_err(pq_err)?;
+        write_parquet_batch(&edges_dir.join(format!("{relation}.parquet")), &batch)?;
+    }
+
+    let mut property_writer = GraphWriter::open_at(dir, OntologyMode::Strict, 0)?;
+    for ((uuid, key), encoded) in &state.node_properties {
+        let uuid = uuid::Uuid::parse_str(uuid).map_err(pq_err)?;
+        let value: IrLiteral = serde_json::from_str(encoded).map_err(pq_err)?;
+        let stem = state
+            .node_property_stems
+            .get(&(uuid.hyphenated().to_string(), key.clone()))
+            .ok_or_else(|| pq_err("reconstructed node property is missing its routing stem"))?;
+        property_writer.set_properties(&uuid, Some(stem), HashMap::from([(key.clone(), value)]))?;
+    }
+    for ((uuid, key), encoded) in &state.edge_properties {
+        let uuid = uuid::Uuid::parse_str(uuid).map_err(pq_err)?;
+        let value: IrLiteral = serde_json::from_str(encoded).map_err(pq_err)?;
+        let relation = state
+            .edge_property_stems
+            .get(&(uuid.hyphenated().to_string(), key.clone()))
+            .ok_or_else(|| pq_err("reconstructed edge property is missing its routing stem"))?;
+        property_writer.set_edge_properties(
+            &uuid,
+            Some(relation),
+            HashMap::from([(key.clone(), value)]),
+        )?;
+    }
+    property_writer.flush()
+}
+
+fn fixed_uuid_array<'a>(
+    values: impl Iterator<Item = &'a str>,
+) -> Result<FixedSizeBinaryArray, GfError> {
+    let values = values
+        .map(|value| {
+            uuid::Uuid::parse_str(value)
+                .map(|uuid| uuid.into_bytes().to_vec())
+                .map_err(pq_err)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    FixedSizeBinaryArray::try_from_iter(values.into_iter()).map_err(pq_err)
+}
+
+#[cfg(test)]
+fn write_parquet_batch(path: &Path, batch: &RecordBatch) -> Result<(), GfError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| io_err(&error))?;
+    }
+    let file = fs::File::create(path).map_err(|error| io_err(&error))?;
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, batch.schema(), None).map_err(pq_err)?;
+    writer.write(batch).map_err(pq_err)?;
+    writer.close().map_err(pq_err)?;
+    Ok(())
 }
 
 /// Shared accessor over a buffered property row so the dynamic-schema inference
@@ -1020,6 +2008,7 @@ enum ColType {
     Time,
     ZonedTime,
     ZonedDateTime,
+    Spatial(SpatialType, Option<String>, Option<String>),
     /// A homogeneous `List<inner>` column (#1006).
     List(Box<ColType>),
 }
@@ -1043,6 +2032,11 @@ impl ColType {
             IrLiteral::Time(_) => Some(Self::Time),
             IrLiteral::ZonedTime { .. } => Some(Self::ZonedTime),
             IrLiteral::ZonedDateTime { .. } => Some(Self::ZonedDateTime),
+            IrLiteral::Spatial(value) => Some(Self::Spatial(
+                value.spatial_type.clone(),
+                value.extension_name.clone(),
+                value.extension_metadata.clone(),
+            )),
             // A homogeneous list: infer the inner type from the first non-null
             // element. A list whose elements are all null (or an empty list)
             // yields no type and the column falls back to `Str`. (#1006)
@@ -1068,6 +2062,7 @@ impl ColType {
             Self::Time => DataType::Time64(TimeUnit::Nanosecond),
             Self::ZonedTime => DataType::Struct(crate::schemas::time_struct_fields()),
             Self::ZonedDateTime => DataType::Struct(crate::schemas::datetime_struct_fields()),
+            Self::Spatial(spatial_type, _, _) => spatial_data_type(spatial_type),
             Self::List(inner) => {
                 DataType::List(Arc::new(Field::new("item", inner.data_type(), true)))
             }
@@ -1080,6 +2075,55 @@ impl ColType {
             Self::Int | Self::Float | Self::Bool | Self::Str | Self::HetScalar
         )
     }
+}
+
+fn spatial_data_type(spatial_type: &SpatialType) -> DataType {
+    let coordinate = DataType::Struct(arrow::datatypes::Fields::from(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+    ]));
+    let list = |name: &str, child| DataType::List(Arc::new(Field::new(name, child, false)));
+    match spatial_type.geometry {
+        SpatialGeometryType::Point => coordinate,
+        SpatialGeometryType::LineString => list("vertices", coordinate),
+        SpatialGeometryType::Polygon => list("rings", list("vertices", coordinate)),
+        SpatialGeometryType::MultiPoint => list("points", coordinate),
+        SpatialGeometryType::MultiLineString => list("linestrings", list("vertices", coordinate)),
+        SpatialGeometryType::MultiPolygon => {
+            list("polygons", list("rings", list("vertices", coordinate)))
+        }
+    }
+}
+
+fn spatial_field(
+    name: &str,
+    spatial_type: &SpatialType,
+    preserved_name: Option<&str>,
+    preserved_metadata: Option<&str>,
+    nullable: bool,
+) -> Field {
+    let canonical_name = match spatial_type.geometry {
+        SpatialGeometryType::Point => "geoarrow.point",
+        SpatialGeometryType::LineString => "geoarrow.linestring",
+        SpatialGeometryType::Polygon => "geoarrow.polygon",
+        SpatialGeometryType::MultiPoint => "geoarrow.multipoint",
+        SpatialGeometryType::MultiLineString => "geoarrow.multilinestring",
+        SpatialGeometryType::MultiPolygon => "geoarrow.multipolygon",
+    };
+    let crs = match &spatial_type.crs {
+        SpatialCrs::Epsg4326 => "EPSG:4326",
+        SpatialCrs::Epsg3857 => "EPSG:3857",
+        SpatialCrs::Preserved(value) => value,
+    };
+    let extension_name = preserved_name.unwrap_or(canonical_name);
+    let extension_metadata = preserved_metadata.map_or_else(
+        || format!("{{\"crs\":\"{crs}\",\"crs_type\":\"authority_code\"}}"),
+        ToOwned::to_owned,
+    );
+    Field::new(name, spatial_data_type(spatial_type), nullable).with_metadata(HashMap::from([
+        ("ARROW:extension:name".to_owned(), extension_name.to_owned()),
+        ("ARROW:extension:metadata".to_owned(), extension_metadata),
+    ]))
 }
 
 fn heterogeneous_scalar_fields() -> arrow::datatypes::Fields {
@@ -1159,7 +2203,16 @@ fn build_property_columns_keyed<R: PropRowLike>(
     let mut fields: Vec<Field> = vec![uuid_field(uuid_field_name)];
     for name in &order {
         let ct = col_types.get(name).cloned().unwrap_or(ColType::Str);
-        fields.push(Field::new(name, ct.data_type(), true));
+        fields.push(match ct {
+            ColType::Spatial(spatial_type, extension_name, extension_metadata) => spatial_field(
+                name,
+                &spatial_type,
+                extension_name.as_deref(),
+                extension_metadata.as_deref(),
+                true,
+            ),
+            _ => Field::new(name, ct.data_type(), true),
+        });
     }
     let meta: HashMap<String, String> = [(meta_key.to_owned(), meta_value.to_owned())]
         .into_iter()
@@ -1432,6 +2485,7 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
                 Some(NullBuffer::from(valid)),
             ))
         }
+        ColType::Spatial(spatial_type, _, _) => build_spatial_array(name, &spatial_type, rows),
         ColType::Str => {
             let mut b = StringBuilder::new();
             for row in rows {
@@ -1477,6 +2531,203 @@ fn build_property_array<R: PropRowLike>(name: &str, ct: ColType, rows: &[R]) -> 
                 child,
                 Some(NullBuffer::from(valid)),
             ))
+        }
+    }
+}
+
+fn coordinate_builder(capacity: usize) -> arrow::array::StructBuilder {
+    use arrow::array::{ArrayBuilder, Float64Builder, StructBuilder};
+    let DataType::Struct(fields) = spatial_data_type(&SpatialType {
+        geometry: SpatialGeometryType::Point,
+        crs: SpatialCrs::Epsg4326,
+    }) else {
+        unreachable!()
+    };
+    StructBuilder::new(
+        fields,
+        vec![
+            Box::new(Float64Builder::with_capacity(capacity)) as Box<dyn ArrayBuilder>,
+            Box::new(Float64Builder::with_capacity(capacity)),
+        ],
+    )
+}
+
+fn append_coordinate(builder: &mut arrow::array::StructBuilder, coordinate: [f64; 2]) {
+    builder
+        .field_builder::<Float64Builder>(0)
+        .expect("canonical x builder")
+        .append_value(coordinate[0]);
+    builder
+        .field_builder::<Float64Builder>(1)
+        .expect("canonical y builder")
+        .append_value(coordinate[1]);
+    builder.append(true);
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "six canonical GeoArrow nesting shapes share one exhaustive writer"
+)]
+fn build_spatial_array<R: PropRowLike>(
+    name: &str,
+    spatial_type: &SpatialType,
+    rows: &[R],
+) -> ArrayRef {
+    use arrow::array::ListBuilder;
+
+    match spatial_type.geometry {
+        SpatialGeometryType::Point => {
+            let mut builder = coordinate_builder(rows.len());
+            for row in rows {
+                match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::Point(coordinate),
+                        ..
+                    })) if observed == spatial_type => {
+                        append_coordinate(&mut builder, *coordinate);
+                    }
+                    _ => builder.append(false),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::LineString | SpatialGeometryType::MultiPoint => {
+            let child_name = if spatial_type.geometry == SpatialGeometryType::LineString {
+                "vertices"
+            } else {
+                "points"
+            };
+            let mut builder =
+                ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(Field::new(
+                    child_name,
+                    spatial_data_type(&SpatialType {
+                        geometry: SpatialGeometryType::Point,
+                        crs: spatial_type.crs.clone(),
+                    }),
+                    false,
+                )));
+            for row in rows {
+                let coordinates = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::LineString(values),
+                        ..
+                    })) if observed == spatial_type => Some(values.as_slice()),
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiPoint(values),
+                        ..
+                    })) if observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(coordinates) = coordinates {
+                    for coordinate in coordinates {
+                        append_coordinate(builder.values(), *coordinate);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::Polygon | SpatialGeometryType::MultiLineString => {
+            let coordinate_type = spatial_data_type(&SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: spatial_type.crs.clone(),
+            });
+            let inner = ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(Field::new(
+                "vertices",
+                coordinate_type.clone(),
+                false,
+            )));
+            let outer_name = if spatial_type.geometry == SpatialGeometryType::Polygon {
+                "rings"
+            } else {
+                "linestrings"
+            };
+            let mut builder = ListBuilder::new(inner).with_field(Arc::new(Field::new(
+                outer_name,
+                DataType::List(Arc::new(Field::new("vertices", coordinate_type, false))),
+                false,
+            )));
+            for row in rows {
+                let parts = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::Polygon(values),
+                        ..
+                    })) if observed == spatial_type => Some(values.as_slice()),
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiLineString(values),
+                        ..
+                    })) if observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(parts) = parts {
+                    for coordinates in parts {
+                        for coordinate in coordinates {
+                            append_coordinate(builder.values().values(), *coordinate);
+                        }
+                        builder.values().append(true);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        SpatialGeometryType::MultiPolygon => {
+            let coordinate_type = spatial_data_type(&SpatialType {
+                geometry: SpatialGeometryType::Point,
+                crs: spatial_type.crs.clone(),
+            });
+            let vertices = ListBuilder::new(coordinate_builder(0)).with_field(Arc::new(
+                Field::new("vertices", coordinate_type.clone(), false),
+            ));
+            let rings_type = DataType::List(Arc::new(Field::new(
+                "vertices",
+                coordinate_type.clone(),
+                false,
+            )));
+            let rings = ListBuilder::new(vertices).with_field(Arc::new(Field::new(
+                "rings",
+                rings_type.clone(),
+                false,
+            )));
+            let mut builder = ListBuilder::new(rings).with_field(Arc::new(Field::new(
+                "polygons",
+                DataType::List(Arc::new(Field::new("rings", rings_type, false))),
+                false,
+            )));
+            for row in rows {
+                let polygons = match row.props().get(name) {
+                    Some(IrLiteral::Spatial(SpatialValue {
+                        spatial_type: observed,
+                        coordinates: SpatialCoordinates::MultiPolygon(values),
+                        ..
+                    })) if observed == spatial_type => Some(values.as_slice()),
+                    _ => None,
+                };
+                if let Some(polygons) = polygons {
+                    for rings in polygons {
+                        for coordinates in rings {
+                            for coordinate in coordinates {
+                                append_coordinate(builder.values().values().values(), *coordinate);
+                            }
+                            builder.values().values().append(true);
+                        }
+                        builder.values().append(true);
+                    }
+                    builder.append(true);
+                } else {
+                    builder.append(false);
+                }
+            }
+            Arc::new(builder.finish())
         }
     }
 }
@@ -1586,6 +2837,9 @@ fn literal_to_string(lit: &IrLiteral) -> String {
             "{days}d{nanos}ns{offset:+}s{}",
             zone.as_deref().unwrap_or("")
         ),
+        IrLiteral::Spatial(value) => {
+            serde_json::to_string(value).expect("canonical spatial values are serializable")
+        }
         // A list in a mixed (stringified) column: a deterministic bracketed form.
         IrLiteral::List(items) => {
             let parts: Vec<String> = items.iter().map(literal_to_string).collect();
@@ -1633,6 +2887,36 @@ fn decode_edge_property_rows(batches: &[RecordBatch]) -> Result<Vec<EdgePropRow>
         })?;
     }
     Ok(out)
+}
+
+/// Decode every persisted node-property row while retaining its canonical
+/// [`IrLiteral`] type. This is the bounded base decoder used by authoritative
+/// graph-delta replay; callers must apply their own aggregate replay budget.
+pub(crate) fn read_all_node_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+    let mut rows = Vec::new();
+    for stem in crate::catalog::list_property_stems(dir) {
+        let batches = crate::catalog::read_properties(dir, &stem).map_err(pq_err)?;
+        rows.extend(
+            decode_property_rows(&batches)?
+                .into_iter()
+                .map(|row| (stem.clone(), row.node_uuid, row.props)),
+        );
+    }
+    Ok(rows)
+}
+
+/// Edge-property analogue of [`read_all_node_properties`].
+pub(crate) fn read_all_edge_properties(dir: &Path) -> Result<Vec<TypedPropertyRow>, GfError> {
+    let mut rows = Vec::new();
+    for stem in crate::catalog::list_edge_property_stems(dir) {
+        let batches = crate::catalog::read_edge_properties(dir, &stem).map_err(pq_err)?;
+        rows.extend(
+            decode_edge_property_rows(&batches)?
+                .into_iter()
+                .map(|row| (stem.clone(), row.edge_uuid, row.props)),
+        );
+    }
+    Ok(rows)
 }
 
 /// Read the non-null property keys currently stored for one entity.
@@ -1837,6 +3121,9 @@ fn decode_value(
     use arrow::array::{
         Array, BooleanArray, Int32Array, Int64Array, ListArray, StructArray, Time64NanosecondArray,
     };
+    if field.metadata().contains_key("ARROW:extension:name") {
+        return decode_spatial_value(col, field, r);
+    }
     Ok(match field.data_type() {
         DataType::Int64 => IrLiteral::Int(downcast::<Int64Array>(col, field)?.value(r)),
         DataType::Float64 => IrLiteral::Float(downcast::<Float64Array>(col, field)?.value(r)),
@@ -2034,6 +3321,185 @@ fn decode_value(
             )));
         }
     })
+}
+
+fn decode_spatial_value(col: &ArrayRef, field: &Field, row: usize) -> Result<IrLiteral, GfError> {
+    decode_spatial_property_value(col.as_ref(), field, row).map(IrLiteral::Spatial)
+}
+
+/// Decode one canonical GeoArrow property row without reconstructing geometry
+/// in a language binding.
+#[allow(
+    clippy::too_many_lines,
+    reason = "six canonical GeoArrow nesting shapes share one exhaustive decoder"
+)]
+pub fn decode_spatial_property_value(
+    col: &dyn arrow::array::Array,
+    field: &Field,
+    row: usize,
+) -> Result<SpatialValue, GfError> {
+    use arrow::array::{Array, ListArray, StructArray};
+    let extension_name = field
+        .metadata()
+        .get("ARROW:extension:name")
+        .ok_or_else(|| GfError::Storage("spatial field missing extension name".into()))?;
+    let geometry = match extension_name.as_str() {
+        "geoarrow.point" => SpatialGeometryType::Point,
+        "geoarrow.linestring" => SpatialGeometryType::LineString,
+        "geoarrow.polygon" => SpatialGeometryType::Polygon,
+        "geoarrow.multipoint" => SpatialGeometryType::MultiPoint,
+        "geoarrow.multilinestring" => SpatialGeometryType::MultiLineString,
+        "geoarrow.multipolygon" => SpatialGeometryType::MultiPolygon,
+        _ => [
+            SpatialGeometryType::Point,
+            SpatialGeometryType::LineString,
+            SpatialGeometryType::Polygon,
+            SpatialGeometryType::MultiPoint,
+            SpatialGeometryType::MultiLineString,
+            SpatialGeometryType::MultiPolygon,
+        ]
+        .into_iter()
+        .find(|geometry| {
+            spatial_data_type(&SpatialType {
+                geometry: *geometry,
+                crs: SpatialCrs::Epsg4326,
+            }) == *field.data_type()
+        })
+        .ok_or_else(|| GfError::Storage("unsupported spatial extension storage type".into()))?,
+    };
+    let metadata = field
+        .metadata()
+        .get("ARROW:extension:metadata")
+        .ok_or_else(|| GfError::Storage("spatial field missing extension metadata".into()))?;
+    let crs_name = serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| value.get("crs")?.as_str().map(ToOwned::to_owned))
+        .ok_or_else(|| GfError::Storage("spatial CRS metadata is malformed".into()))?;
+    let crs = match crs_name.as_str() {
+        "EPSG:4326" => SpatialCrs::Epsg4326,
+        "EPSG:3857" => SpatialCrs::Epsg3857,
+        _ => SpatialCrs::Preserved(crs_name),
+    };
+    let coordinates = match geometry {
+        SpatialGeometryType::Point => SpatialCoordinates::Point(read_coordinate(
+            col.as_any()
+                .downcast_ref::<StructArray>()
+                .ok_or_else(|| GfError::Storage("spatial point is not a struct".into()))?,
+            row,
+        )?),
+        SpatialGeometryType::LineString | SpatialGeometryType::MultiPoint => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial geometry is not a list".into()))?
+                .value(row);
+            let values =
+                read_coordinates(value.as_any().downcast_ref::<StructArray>().ok_or_else(
+                    || GfError::Storage("spatial coordinate payload is not a struct".into()),
+                )?)?;
+            if geometry == SpatialGeometryType::LineString {
+                SpatialCoordinates::LineString(values)
+            } else {
+                SpatialCoordinates::MultiPoint(values)
+            }
+        }
+        SpatialGeometryType::Polygon | SpatialGeometryType::MultiLineString => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial geometry is not a nested list".into()))?
+                .value(row);
+            let lists = value
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("spatial parts are not lists".into()))?;
+            let mut parts = Vec::with_capacity(lists.len());
+            for index in 0..lists.len() {
+                let coordinates = lists.value(index);
+                parts.push(read_coordinates(
+                    coordinates
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .ok_or_else(|| {
+                            GfError::Storage("spatial coordinates are not structs".into())
+                        })?,
+                )?);
+            }
+            if geometry == SpatialGeometryType::Polygon {
+                SpatialCoordinates::Polygon(parts)
+            } else {
+                SpatialCoordinates::MultiLineString(parts)
+            }
+        }
+        SpatialGeometryType::MultiPolygon => {
+            let value = col
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("multipolygon is not a nested list".into()))?
+                .value(row);
+            let polygons = value
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| GfError::Storage("multipolygon polygons are not lists".into()))?;
+            let mut decoded = Vec::with_capacity(polygons.len());
+            for polygon_index in 0..polygons.len() {
+                let polygon = polygons.value(polygon_index);
+                let rings = polygon
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or_else(|| GfError::Storage("multipolygon rings are not lists".into()))?;
+                let mut decoded_rings = Vec::with_capacity(rings.len());
+                for ring_index in 0..rings.len() {
+                    let coordinates = rings.value(ring_index);
+                    decoded_rings.push(read_coordinates(
+                        coordinates
+                            .as_any()
+                            .downcast_ref::<StructArray>()
+                            .ok_or_else(|| {
+                                GfError::Storage("multipolygon coordinates are not structs".into())
+                            })?,
+                    )?);
+                }
+                decoded.push(decoded_rings);
+            }
+            SpatialCoordinates::MultiPolygon(decoded)
+        }
+    };
+    let preserved_crs = matches!(crs, SpatialCrs::Preserved(_));
+    Ok(SpatialValue {
+        spatial_type: SpatialType { geometry, crs },
+        coordinates,
+        extension_name: (!matches!(
+            extension_name.as_str(),
+            "geoarrow.point"
+                | "geoarrow.linestring"
+                | "geoarrow.polygon"
+                | "geoarrow.multipoint"
+                | "geoarrow.multilinestring"
+                | "geoarrow.multipolygon"
+        ))
+        .then(|| extension_name.clone()),
+        extension_metadata: preserved_crs.then(|| metadata.clone()),
+    })
+}
+
+fn read_coordinates(array: &arrow::array::StructArray) -> Result<Vec<[f64; 2]>, GfError> {
+    use arrow::array::Array;
+    (0..array.len())
+        .map(|index| read_coordinate(array, index))
+        .collect()
+}
+
+fn read_coordinate(array: &arrow::array::StructArray, row: usize) -> Result<[f64; 2], GfError> {
+    let x = array
+        .column_by_name("x")
+        .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| GfError::Storage("spatial x coordinate is not Float64".into()))?;
+    let y = array
+        .column_by_name("y")
+        .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| GfError::Storage("spatial y coordinate is not Float64".into()))?;
+    Ok([x.value(row), y.value(row)])
 }
 
 /// Downcast a column to a concrete Arrow array type, erroring with the column
@@ -3343,6 +4809,147 @@ mod tests {
             reopened
                 .get(&to_bytes(&propertyless))
                 .is_none_or(HashMap::is_empty)
+        );
+    }
+
+    #[test]
+    fn canonical_spatial_properties_round_trip_with_exact_geoarrow_metadata() {
+        let dir = TempDir::new().unwrap();
+        let node = new_v7();
+        let other = new_v7();
+        let edge = new_v7();
+        let spatial = |geometry, coordinates| {
+            IrLiteral::Spatial(SpatialValue {
+                spatial_type: SpatialType {
+                    geometry,
+                    crs: SpatialCrs::Epsg4326,
+                },
+                coordinates,
+                extension_name: None,
+                extension_metadata: None,
+            })
+        };
+        let values = HashMap::from([
+            (
+                "point".into(),
+                spatial(
+                    SpatialGeometryType::Point,
+                    SpatialCoordinates::Point([-104.9903, 39.7392]),
+                ),
+            ),
+            (
+                "line".into(),
+                spatial(
+                    SpatialGeometryType::LineString,
+                    SpatialCoordinates::LineString(vec![[0.0, 1.0], [2.0, 3.0]]),
+                ),
+            ),
+            (
+                "polygon".into(),
+                spatial(
+                    SpatialGeometryType::Polygon,
+                    SpatialCoordinates::Polygon(vec![vec![[0.0, 0.0], [1.0, 0.0], [0.0, 0.0]]]),
+                ),
+            ),
+            (
+                "multipoint".into(),
+                spatial(
+                    SpatialGeometryType::MultiPoint,
+                    SpatialCoordinates::MultiPoint(vec![[4.0, 5.0], [6.0, 7.0]]),
+                ),
+            ),
+            (
+                "multiline".into(),
+                spatial(
+                    SpatialGeometryType::MultiLineString,
+                    SpatialCoordinates::MultiLineString(vec![vec![[8.0, 9.0], [10.0, 11.0]]]),
+                ),
+            ),
+            (
+                "multipolygon".into(),
+                spatial(
+                    SpatialGeometryType::MultiPolygon,
+                    SpatialCoordinates::MultiPolygon(vec![vec![vec![
+                        [0.0, 0.0],
+                        [2.0, 0.0],
+                        [0.0, 0.0],
+                    ]]]),
+                ),
+            ),
+            (
+                "preserved".into(),
+                IrLiteral::Spatial(SpatialValue {
+                    spatial_type: SpatialType {
+                        geometry: SpatialGeometryType::Point,
+                        crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+                    },
+                    coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+                    extension_name: Some("geoarrow.vendor_point".into()),
+                    extension_metadata: Some(
+                        "{\"crs\":\"OGC:CRS84\",\"crs_type\":\"authority_code\",\"edges\":\"spherical\"}"
+                            .into(),
+                    ),
+                }),
+            ),
+        ]);
+
+        let mut writer = GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS).unwrap();
+        writer.create_node(node, TypeId(0)).unwrap();
+        writer.create_node(other, TypeId(0)).unwrap();
+        writer.create_edge(edge, "ROUTE", &node, &other).unwrap();
+        writer.set_properties(&node, None, values.clone()).unwrap();
+        writer
+            .set_edge_properties(
+                &edge,
+                Some("ROUTE"),
+                HashMap::from([("location".into(), values["point"].clone())]),
+            )
+            .unwrap();
+        writer.flush().unwrap();
+
+        let node_schema =
+            crate::catalog::discover_parquet_schema(&node_props_path(dir.path(), "_untyped"))
+                .unwrap();
+        for (name, extension_name) in [
+            ("point", "geoarrow.point"),
+            ("line", "geoarrow.linestring"),
+            ("polygon", "geoarrow.polygon"),
+            ("multipoint", "geoarrow.multipoint"),
+            ("multiline", "geoarrow.multilinestring"),
+            ("multipolygon", "geoarrow.multipolygon"),
+        ] {
+            let field = node_schema.field_with_name(name).unwrap();
+            assert_eq!(field.metadata()["ARROW:extension:name"], extension_name);
+            assert_eq!(
+                field.metadata()["ARROW:extension:metadata"],
+                "{\"crs\":\"EPSG:4326\",\"crs_type\":\"authority_code\"}"
+            );
+        }
+        let preserved = node_schema.field_with_name("preserved").unwrap();
+        assert_eq!(
+            preserved.metadata()["ARROW:extension:name"],
+            "geoarrow.vendor_point"
+        );
+        assert_eq!(
+            preserved.metadata()["ARROW:extension:metadata"],
+            "{\"crs\":\"OGC:CRS84\",\"crs_type\":\"authority_code\",\"edges\":\"spherical\"}"
+        );
+        assert_eq!(
+            read_node_props(dir.path(), "_untyped")[&to_bytes(&node)],
+            values
+        );
+        assert_eq!(
+            read_edge_props(dir.path(), "ROUTE")[&to_bytes(&edge)]["location"],
+            values["point"]
+        );
+
+        // Opening and flushing again exercises the persisted decode/re-encode path.
+        let mut reopened =
+            GraphWriter::open_at(dir.path(), OntologyMode::Exploratory, TS + 1).unwrap();
+        reopened.flush().unwrap();
+        assert_eq!(
+            read_node_props(dir.path(), "_untyped")[&to_bytes(&node)],
+            values
         );
     }
 

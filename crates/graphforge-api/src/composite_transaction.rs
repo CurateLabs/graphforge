@@ -383,6 +383,12 @@ fn encode_prop_value(writer: &mut CanonicalWriter, value: &PropValue) -> Result<
             }
             Ok(())
         }
+        PropValue::Temporal(value) => {
+            writer.u8(6).map_err(canonical_error)?;
+            let encoded = serde_json::to_string(value)
+                .map_err(|error| GfError::Validation(error.to_string()))?;
+            writer.text(&encoded).map_err(canonical_error)
+        }
         _ => Err(GfError::Validation(
             "unsupported property value variant in canonical graph mutation content".into(),
         )),

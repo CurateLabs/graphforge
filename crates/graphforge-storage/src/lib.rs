@@ -24,7 +24,8 @@ pub use generation::{
 
 pub mod graph_projection;
 pub use graph_projection::{
-    GraphProjectionSelection, GraphProjectionSummary, materialize_graph_projection,
+    GraphProjectionClosure, GraphProjectionSelection, GraphProjectionSummary,
+    materialize_graph_projection, materialize_portable_graph_tree_projection,
 };
 
 pub mod graph_files;
@@ -43,19 +44,24 @@ pub use graph_delta_journal::{
     GraphDeltaPayload, GraphDeltaPublicationReceipt, GraphDeltaPublishRequest,
     GraphDeltaReplayEvidence, GraphDeltaRun, MAX_GRAPH_DELTA_PAYLOAD_BYTES,
     MAX_GRAPH_DELTA_RECORDS_PER_RUN, MAX_GRAPH_DELTA_REPLAY_MEMORY_BYTES,
-    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, ReconstructedGraphState, apply_delta_runs,
-    decode_delta_run, delta_run_relative_path, encode_delta_run, list_delta_runs,
-    load_verified_delta_runs, publish_graph_delta, publish_graph_delta_with_mode,
-    reconstruct_graph_state, stage_base_graph_workspace,
+    MAX_GRAPH_DELTA_RUN_BYTES, MAX_GRAPH_DELTA_RUNS, PreparedGraphDelta, ReconstructedGraphState,
+    apply_delta_runs, decode_delta_run, decode_graph_delta_value, delta_run_relative_path,
+    encode_delta_run, encode_graph_delta_value, list_delta_runs, load_verified_delta_runs,
+    materialize_replayed_graph_tree, prepare_graph_delta, publish_graph_delta,
+    publish_graph_delta_with_mode, reconstruct_graph_state, stage_base_graph_workspace,
 };
 
 pub mod graph_delta_compaction;
 pub use graph_delta_compaction::{
-    DEFAULT_COMPACTION_MAX_DISK_BYTES, DEFAULT_COMPACTION_MAX_MEMORY_BYTES,
+    DEFAULT_COMPACTION_CANCELLATION_CHECK_ROWS, DEFAULT_COMPACTION_MAX_DISK_BYTES,
+    DEFAULT_COMPACTION_MAX_INPUT_BYTES, DEFAULT_COMPACTION_MAX_INPUT_RUNS,
+    DEFAULT_COMPACTION_MAX_MEMORY_BYTES, DEFAULT_COMPACTION_MAX_OUTPUT_ROWS,
     DEFAULT_COMPACTION_MAX_SPILL_BYTES, GRAPH_DELTA_COMPACTION_SPILL_DIR,
     GraphDeltaCompactionLimits, GraphDeltaCompactionPolicy, GraphDeltaCompactionReport,
-    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus, compact_graph_delta,
-    compact_graph_delta_with_mode, graph_delta_compaction_status,
+    GraphDeltaCompactionRequest, GraphDeltaCompactionStatus,
+    MAX_COMPACTION_CANCELLATION_CHECK_ROWS, MAX_COMPACTION_DISK_BYTES, MAX_COMPACTION_INPUT_BYTES,
+    MAX_COMPACTION_MEMORY_BYTES, MAX_COMPACTION_OUTPUT_ROWS, MAX_COMPACTION_SPILL_BYTES,
+    compact_graph_delta, compact_graph_delta_with_mode, graph_delta_compaction_status,
     graph_delta_compaction_status_with_mode, preview_graph_delta_compaction,
     preview_graph_delta_compaction_with_mode,
 };
@@ -65,6 +71,7 @@ pub use project_generation::{
     CURRENT_FILE, FORMAT_FILE, PROJECT_FORMAT_BYTES, ProjectCapabilityDescriptor,
     ProjectParticipantDescriptor, ProjectParticipantSnapshot, ResolvedProjectGeneration,
     open_or_initialize_ephemeral_project, open_or_initialize_project, resolve_project_generation,
+    resolve_verified_generation,
 };
 
 mod project_failpoint;
@@ -115,9 +122,55 @@ pub use project_retention::{
 };
 
 pub mod project_portable;
+pub mod project_portable_v2_export;
+pub mod project_portable_v2_import;
 pub use project_portable::{
     PortableExportReceipt, PortableImportReceipt, PortableProjectLimits, encode_portable_project,
     export_portable_project, import_portable_project, import_portable_project_file,
+};
+pub use project_portable_v2_export::{
+    PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
+    PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
+    plan_complete_portable_v2, plan_selected_portable_v2,
+};
+pub use project_portable_v2_import::{
+    PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
+    import_complete_portable_v2, import_complete_portable_v2_with_progress,
+};
+
+pub mod project_portable_v2;
+pub use project_portable_v2::{
+    PortableV2Authenticity, PortableV2Compatibility, PortableV2Error, PortableV2ErrorCode,
+    PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
+    PortableV2Report, PortableV2Representation, materialize_verified_portable_v2,
+    verify_portable_v2,
+};
+
+mod project_portable_v2_selection;
+pub use project_portable_v2_selection::{
+    PortableV2ParticipantId, PortableV2SelectionEntry, PortableV2SelectionPlan,
+    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
+    preview_portable_v2_selection,
+};
+
+pub mod project_portable_v2_subset;
+pub use project_portable_v2_subset::{
+    PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
+    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
+    plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
+};
+
+pub mod project_portable_v2_oci;
+pub use project_portable_v2_oci::{
+    HttpOciRegistry, MemoryOciRegistry, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE,
+    OCI_LAYER_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, OCI_SIGNATURE_ARTIFACT_TYPE,
+    OCI_SIGNATURE_CONFIG_MEDIA_TYPE, PortableV2OciAuthenticityPolicy, PortableV2OciPhase,
+    PortableV2OciProgress, PortableV2OciPublishRequest, PortableV2OciPullReceipt,
+    PortableV2OciPullRequest, PortableV2OciReference, PortableV2OciRegistry,
+    PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
+    evaluate_portable_v2_oci_signature_state, publish_portable_v2_oci,
+    publish_portable_v2_oci_with_progress, pull_portable_v2_oci,
+    pull_portable_v2_oci_with_progress,
 };
 
 pub mod workspace_participants;
@@ -222,6 +275,13 @@ pub use vector_store::{
 pub mod io_stats;
 pub use io_stats::{IoSnapshot, snapshot as io_snapshot};
 
+pub mod uuid_membership;
+pub use uuid_membership::{
+    UuidIndexBuildLimits, UuidIndexBuildMetrics, UuidIndexKind, UuidMembershipIndex,
+    UuidProbeMetrics, rebuild_uuid_membership_indexes, uuid_membership_index_is_fresh,
+    uuid_membership_index_present,
+};
+
 pub mod catalog;
 pub use catalog::{
     EdgePropertyTable, GraphCatalog, PropertyTable, TopologyNodeTable, TypedEdgeTable,
@@ -252,10 +312,11 @@ pub use schemas::{
 
 pub mod writer;
 pub use writer::{
-    GraphWriter, count_entity_properties, read_entity_properties, read_entity_property_keys,
-    read_node_property_rows, remove_edge_properties, remove_node_properties,
-    set_edge_properties_rewrite, set_node_properties, stage_remove_edge_properties,
-    stage_remove_node_properties, stage_set_edge_properties, stage_set_node_properties,
+    GraphWriter, count_entity_properties, decode_spatial_property_value, read_entity_properties,
+    read_entity_property_keys, read_node_property_rows, remove_edge_properties,
+    remove_node_properties, set_edge_properties_rewrite, set_node_properties,
+    stage_remove_edge_properties, stage_remove_node_properties, stage_set_edge_properties,
+    stage_set_node_properties,
 };
 
 pub mod mutator;

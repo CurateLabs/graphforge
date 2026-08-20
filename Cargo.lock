@@ -2164,6 +2164,7 @@ dependencies = [
  "graphforge-core",
  "graphforge-cypher",
  "graphforge-exec",
+ "graphforge-io",
  "graphforge-ir",
  "graphforge-knowledge",
  "graphforge-ontology",
@@ -2226,6 +2227,7 @@ dependencies = [
  "arrow",
  "clap",
  "graphforge-api",
+ "parquet",
  "serde",
  "serde_json",
  "tempfile",
@@ -2296,8 +2298,10 @@ dependencies = [
 name = "graphforge-io"
 version = "0.5.2"
 dependencies = [
- "graphforge-core",
- "graphforge-storage",
+ "arrow",
+ "futures",
+ "parquet",
+ "tempfile",
  "thiserror 2.0.20",
 ]
 
@@ -2381,6 +2385,7 @@ dependencies = [
  "graphforge-plan",
  "graphforge-storage",
  "insta",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.20",
 ]
@@ -2407,6 +2412,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "atomicwrites",
+ "codspeed-divan-compat",
  "datafusion",
  "datafusion-catalog",
  "fs4 1.1.0",
@@ -2427,6 +2433,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "unicode-normalization",
+ "ureq",
  "uuid",
  "wait-timeout",
 ]

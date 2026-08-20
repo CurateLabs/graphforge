@@ -329,6 +329,257 @@ impl fmt::Display for ProjectErrorCode {
 // PropValue — minimal property value type
 // ---------------------------------------------------------------------------
 
+/// Consumer-neutral temporal values accepted at GraphForge data boundaries.
+///
+/// Calendar and wall-clock components remain separate: durations are never
+/// collapsed into elapsed nanoseconds, and zone-bearing datetimes retain both
+/// the observed UTC offset and optional IANA zone identifier.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TemporalValue {
+    /// Calendar duration with independent months, days, seconds, and nanoseconds.
+    Duration {
+        /// Calendar months.
+        months: i64,
+        /// Calendar days.
+        days: i64,
+        /// Whole elapsed seconds below the calendar components.
+        seconds: i64,
+        /// Sub-second nanoseconds.
+        nanos: i64,
+    },
+    /// UTC instant as microseconds from the Unix epoch.
+    UtcDateTime {
+        /// Signed microseconds from the Unix epoch.
+        epoch_micros: i64,
+    },
+    /// Calendar date as days from the Unix epoch.
+    Date {
+        /// Signed days from the Unix epoch.
+        epoch_days: i64,
+    },
+    /// Local date and time without an offset or zone.
+    LocalDateTime {
+        /// Signed days from the Unix epoch.
+        epoch_days: i64,
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+    },
+    /// Local wall-clock time without an offset.
+    LocalTime {
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+    },
+    /// Wall-clock time with its explicit UTC offset in seconds.
+    OffsetTime {
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+        /// Signed UTC offset in seconds.
+        offset_seconds: i32,
+    },
+    /// Date and time with an explicit offset and optional IANA zone identity.
+    ZonedDateTime {
+        /// Signed days from the Unix epoch in the represented local date.
+        epoch_days: i64,
+        /// Nanoseconds since local midnight.
+        nanos: i64,
+        /// Signed observed UTC offset in seconds.
+        offset_seconds: i32,
+        /// Optional IANA zone identity; `None` means offset-only.
+        zone: Option<String>,
+    },
+}
+
+impl TemporalValue {
+    /// Validate the canonical ranges shared by scalar and bulk ingestion.
+    pub fn validate(&self) -> Result<(), GfError> {
+        const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+        const MAX_OFFSET_SECONDS: i32 = 18 * 60 * 60;
+        let validate_time = |nanos: i64| {
+            if (0..NANOS_PER_DAY).contains(&nanos) {
+                Ok(())
+            } else {
+                Err(GfError::Validation(
+                    "temporal nanoseconds must be within one day".into(),
+                ))
+            }
+        };
+        let validate_offset = |offset: i32| {
+            if (-MAX_OFFSET_SECONDS..=MAX_OFFSET_SECONDS).contains(&offset) {
+                Ok(())
+            } else {
+                Err(GfError::Validation(
+                    "temporal UTC offset must be within plus or minus 18 hours".into(),
+                ))
+            }
+        };
+        match self {
+            Self::Duration { nanos, .. } if !(-999_999_999..=999_999_999).contains(nanos) => {
+                Err(GfError::Validation(
+                    "duration nanoseconds must be between -999999999 and 999999999".into(),
+                ))
+            }
+            Self::LocalDateTime { nanos, .. } | Self::LocalTime { nanos } => validate_time(*nanos),
+            Self::OffsetTime {
+                nanos,
+                offset_seconds,
+            } => {
+                validate_time(*nanos)?;
+                validate_offset(*offset_seconds)
+            }
+            Self::ZonedDateTime {
+                nanos,
+                offset_seconds,
+                zone,
+                ..
+            } => {
+                validate_time(*nanos)?;
+                validate_offset(*offset_seconds)?;
+                if let Some(zone) = zone
+                    && (zone.is_empty() || zone.len() > 255 || zone.chars().any(char::is_control))
+                {
+                    return Err(GfError::Validation(
+                        "temporal zone must be nonempty, control-free UTF-8 up to 255 bytes".into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Coordinate reference systems certified by GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpatialCrs {
+    /// WGS 84 longitude/latitude in canonical x/y order.
+    Epsg4326,
+    /// Web Mercator easting/northing in canonical x/y order.
+    Epsg3857,
+    /// Standards-valid CRS identifier preserved for interchange only.
+    Preserved(String),
+}
+
+impl serde::Serialize for SpatialCrs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Epsg4326 => "EPSG:4326",
+            Self::Epsg3857 => "EPSG:3857",
+            Self::Preserved(value) => value,
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SpatialCrs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "EPSG:4326" => Self::Epsg4326,
+            "EPSG:3857" => Self::Epsg3857,
+            _ => Self::Preserved(value),
+        })
+    }
+}
+
+/// Homogeneous geometry kinds in GraphForge's spatial v1 profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialGeometryType {
+    /// One x/y coordinate.
+    Point,
+    /// One ordered sequence of vertices.
+    LineString,
+    /// One polygon represented as ordered rings.
+    Polygon,
+    /// A collection of points.
+    MultiPoint,
+    /// A collection of line strings.
+    MultiLineString,
+    /// A collection of polygons.
+    MultiPolygon,
+}
+
+/// Complete homogeneous spatial property type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SpatialType {
+    /// Homogeneous geometry kind.
+    pub geometry: SpatialGeometryType,
+    /// Coordinate reference system for every coordinate.
+    pub crs: SpatialCrs,
+}
+
+/// Canonical f64 coordinate payload for one spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SpatialCoordinates {
+    /// Point coordinate.
+    Point([f64; 2]),
+    /// Line-string vertices.
+    LineString(Vec<[f64; 2]>),
+    /// Polygon rings and their vertices.
+    Polygon(Vec<Vec<[f64; 2]>>),
+    /// Multi-point coordinates.
+    MultiPoint(Vec<[f64; 2]>),
+    /// Multi-line-string vertices.
+    MultiLineString(Vec<Vec<[f64; 2]>>),
+    /// Multi-polygon rings and vertices.
+    MultiPolygon(Vec<Vec<Vec<[f64; 2]>>>),
+}
+
+/// One canonical typed spatial property value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpatialValue {
+    /// Geometry kind and CRS.
+    pub spatial_type: SpatialType,
+    /// Coordinates matching `spatial_type.geometry`.
+    pub coordinates: SpatialCoordinates,
+    /// Original extension name when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_name: Option<String>,
+    /// Original extension metadata JSON when the value is preserved-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_metadata: Option<String>,
+}
+
+impl SpatialValue {
+    /// Whether this value is preserved for interchange but not certified for computation.
+    #[must_use]
+    pub fn is_preserved_only(&self) -> bool {
+        matches!(self.spatial_type.crs, SpatialCrs::Preserved(_))
+            || self.extension_name.is_some()
+            || self.extension_metadata.is_some()
+    }
+
+    /// Validate the explicit envelope required for preserved-only values.
+    pub fn validate_interchange_profile(&self) -> Result<(), &'static str> {
+        if !self.is_preserved_only() {
+            return Ok(());
+        }
+        let (Some(name), Some(metadata)) = (&self.extension_name, &self.extension_metadata) else {
+            return Err(
+                "preserved-only spatial values require extension_name and extension_metadata",
+            );
+        };
+        if name.is_empty() {
+            return Err("preserved-only spatial extension_name must not be empty");
+        }
+        let trimmed = metadata.trim();
+        let valid_metadata = trimmed.starts_with('{')
+            && trimmed.ends_with('}')
+            && trimmed.contains("\"crs\"")
+            && trimmed.contains(':');
+        if !valid_metadata {
+            return Err("preserved-only spatial extension_metadata must contain a CRS");
+        }
+        Ok(())
+    }
+}
+
 /// A graph property value.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
@@ -345,6 +596,10 @@ pub enum PropValue {
     Str(String),
     /// Ordered list.
     List(Vec<PropValue>),
+    /// Typed temporal value with consumer-neutral Arrow semantics.
+    Temporal(TemporalValue),
+    /// Canonical typed spatial value.
+    Spatial(SpatialValue),
 }
 
 impl fmt::Display for PropValue {
@@ -365,6 +620,12 @@ impl fmt::Display for PropValue {
                 }
                 write!(f, "]")
             }
+            Self::Temporal(value) => write!(f, "temporal({value:?})"),
+            Self::Spatial(value) => write!(
+                f,
+                "spatial({:?}, {:?})",
+                value.spatial_type, value.coordinates
+            ),
         }
     }
 }

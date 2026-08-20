@@ -80,6 +80,9 @@ jobs:
       - name: Test text checkout byte policy
         run: python3 scripts/ci/test-text-checkout-policy.py
 
+      - name: Validate multi-ontology contract fixtures
+        run: python3 scripts/ci/multi-ontology-contract-check.py
+
       - name: Test aggregate merge gate
         run: scripts/ci/test-require-gates.sh
 
@@ -262,7 +265,7 @@ jobs:
 
       - name: Install cargo-deny and cargo-about
         if: steps.cargo-licenses.outputs.run == 'true'
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2.86.1
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.1
 
@@ -288,7 +291,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
@@ -404,7 +407,7 @@ jobs:
           npm run format:check
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
@@ -508,7 +511,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
@@ -784,7 +787,7 @@ jobs:
           toolchain: "1.96.0"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
 
@@ -892,7 +895,7 @@ jobs:
           name: native-oracle-windows-${{ github.sha }}
           path: ${{ runner.temp }}/durability-certification-evidence
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
       - name: Run Windows injected publication error recovery test
         shell: bash
@@ -977,7 +980,7 @@ jobs:
           name: native-oracle-macos-${{ github.sha }}
           path: ${{ runner.temp }}/durability-certification-evidence
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
       - name: Run macOS injected publication error recovery test
         run: >-
@@ -996,6 +999,43 @@ jobs:
           cargo test -p graphforge-storage --lib
           project_checkpoints::tests::checkpoint_read_guard_unlocks_before_a_cloned_descriptor_closes
           --no-fail-fast -- --exact --nocapture
+
+  native-durability-aggregate:
+    name: Native Durability Aggregate
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - changes
+      - windows-graphforge-storage-locks
+      - macos-graphforge-storage-durability
+    if: always() && needs.changes.outputs.rust == 'true'
+    timeout-minutes: 10
+    steps:
+      - name: Checkout aggregate implementation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download exact-SHA Windows oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-oracle-windows-${{ github.sha }}
+          path: native/windows
+      - name: Download exact-SHA macOS oracle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-oracle-macos-${{ github.sha }}
+          path: native/macos
+      - name: Validate and aggregate native durability evidence
+        run: >-
+          python3 scripts/ci/durability-certification-gate.py aggregate-native
+          --expected-sha "${{ github.sha }}"
+          --windows native/windows/native-oracle-windows.json
+          --macos native/macos/native-oracle-macos.json
+          --output native/native-durability-aggregate.json
+      - name: Upload exact-SHA native durability aggregate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-durability-aggregate-${{ github.sha }}
+          path: native/native-durability-aggregate.json
+          if-no-files-found: error
+          retention-days: 14
 
   bazel-bootstrap:
     # Job display name kept for continuity; this is the authoritative Rust
@@ -1280,6 +1320,7 @@ jobs:
       - concurrency-matrix
       - windows-graphforge-storage-locks
       - macos-graphforge-storage-durability
+      - native-durability-aggregate
       - bazel-bootstrap
     steps:
       - name: Checkout gate implementation
@@ -1300,4 +1341,5 @@ jobs:
           "${{ needs.concurrency-matrix.result }}"
           "${{ needs.windows-graphforge-storage-locks.result }}"
           "${{ needs.macos-graphforge-storage-durability.result }}"
+          "${{ needs.native-durability-aggregate.result }}"
           "${{ needs.bazel-bootstrap.result }}"

@@ -1125,6 +1125,13 @@ fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
             offset.hash(state);
             zone.hash(state);
         }
+        IrLiteral::Spatial(value) => {
+            15u8.hash(state);
+            value.spatial_type.hash(state);
+            value.extension_name.hash(state);
+            value.extension_metadata.hash(state);
+            hash_spatial_coordinates(&value.coordinates, state);
+        }
         IrLiteral::List(items) => {
             12u8.hash(state);
             items.len().hash(state);
@@ -1138,6 +1145,70 @@ fn hash_literal<H: Hasher>(lit: &IrLiteral, state: &mut H) {
             for (key, value) in entries {
                 key.hash(state);
                 hash_literal(value, state);
+            }
+        }
+    }
+}
+
+fn hash_spatial_coordinates<H: Hasher>(
+    coordinates: &graphforge_core::SpatialCoordinates,
+    state: &mut H,
+) {
+    use graphforge_core::SpatialCoordinates;
+    fn point<H: Hasher>(value: &[f64; 2], state: &mut H) {
+        value[0].to_bits().hash(state);
+        value[1].to_bits().hash(state);
+    }
+    match coordinates {
+        SpatialCoordinates::Point(value) => {
+            0u8.hash(state);
+            point(value, state);
+        }
+        SpatialCoordinates::LineString(values) => {
+            1u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                point(value, state);
+            }
+        }
+        SpatialCoordinates::Polygon(rings) => {
+            2u8.hash(state);
+            rings.len().hash(state);
+            for ring in rings {
+                ring.len().hash(state);
+                for value in ring {
+                    point(value, state);
+                }
+            }
+        }
+        SpatialCoordinates::MultiPoint(values) => {
+            3u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                point(value, state);
+            }
+        }
+        SpatialCoordinates::MultiLineString(lines) => {
+            4u8.hash(state);
+            lines.len().hash(state);
+            for line in lines {
+                line.len().hash(state);
+                for value in line {
+                    point(value, state);
+                }
+            }
+        }
+        SpatialCoordinates::MultiPolygon(polygons) => {
+            5u8.hash(state);
+            polygons.len().hash(state);
+            for polygon in polygons {
+                polygon.len().hash(state);
+                for ring in polygon {
+                    ring.len().hash(state);
+                    for value in ring {
+                        point(value, state);
+                    }
+                }
             }
         }
     }
@@ -2141,6 +2212,50 @@ mod tests {
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn graph_create_hash_includes_exact_preserved_spatial_profile() {
+        use graphforge_core::{
+            SpatialCoordinates, SpatialCrs, SpatialGeometryType, SpatialType, SpatialValue,
+        };
+        use std::collections::hash_map::DefaultHasher;
+
+        let hash = |metadata: &str| {
+            let node = GraphCreateNode::new(
+                empty_plan(),
+                vec![ResolvedNodeSpec {
+                    var: 0,
+                    label_ids: vec![],
+                    label_names: vec!["Place".into()],
+                    properties: vec![(
+                        "location".into(),
+                        IrLiteral::Spatial(SpatialValue {
+                            spatial_type: SpatialType {
+                                geometry: SpatialGeometryType::Point,
+                                crs: SpatialCrs::Preserved("OGC:CRS84".into()),
+                            },
+                            coordinates: SpatialCoordinates::Point([-104.9903, 39.7392]),
+                            extension_name: Some("geoarrow.vendor_point".into()),
+                            extension_metadata: Some(metadata.into()),
+                        }),
+                    )],
+                    computed_properties: vec![],
+                    is_reference: false,
+                }],
+                vec![],
+                PathBuf::from("/tmp/gf"),
+                OntologyMode::Exploratory,
+            );
+            let mut hasher = DefaultHasher::new();
+            node.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_ne!(
+            hash("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}"),
+            hash("{\"crs\":\"OGC:CRS84\",\"edges\":\"planar\"}")
+        );
     }
 
     #[test]

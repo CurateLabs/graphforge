@@ -311,6 +311,18 @@ Arrow is used as the internal execution currency:
 - **C Stream Interface** — batch readers for streaming results
 - **Arrow IPC** — serialized stream for cross-process use (Node today; future UniFFI consumers)
 
+Query-result files use the same demand-driven `RecordBatch` stream. Parquet and
+Arrow IPC sinks request one batch only after the preceding batch has been
+accepted, enforce configured batch and Parquet row-group limits, and publish a
+sibling temporary file atomically only after writer finalization and sync.
+Receipts report rows, batches, bytes, elapsed time, and completion phase;
+cancellation or execution/writer failure reports bounded progress and never
+publishes a partial destination.
+
+File order is the query's result order. An explicit Cypher `ORDER BY` therefore
+produces deterministic row order; without an ordering clause, neither the sink
+nor the file format adds an ordering guarantee.
+
 Swift and Kotlin bindings are deferred to v0.5.1; when they ship, they will consume Arrow IPC
 bytes over UniFFI without becoming semantic owners.
 

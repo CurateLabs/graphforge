@@ -35,6 +35,8 @@ jobs:
       GF_CERT_SEED: "7560"
       GF_CERT_HISTORIES: ${{ github.event.inputs.histories || '64' }}
       GF_CERT_OPS: ${{ github.event.inputs.ops || '32' }}
+      GRAPHFORGE_CERT_RUNNER: blacksmith-4vcpu-ubuntu-2404
+      GRAPHFORGE_CERT_FILESYSTEM_CLASS: hosted-linux-filesystem
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
@@ -61,4 +63,4 @@ jobs:
           name: durability-certification-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/durability-certification-evidence
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14

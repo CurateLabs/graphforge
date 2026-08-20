@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 192,
-  "releaseSurfaceDigest": "7b10db80d4bd05e21a94c57a7c4218e54f0d464a27dab127bdec59903afc66a0",
+  "releaseSurfaceCount": 207,
+  "releaseSurfaceDigest": "01f642d893eeb78b9493363d6c4ac5eea6744e0a970b60a9e6a456fe9892a886",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -25,7 +25,9 @@
     "epistemic": "epistemic",
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
     "compatibility": "arrowIpc",
-    "transaction-maintenance": "transactionMaintenance"
+    "transaction-maintenance": "transactionMaintenance",
+    "resumable-import": "lifecycleConstruction",
+    "semantic-generation-diff": "semanticGenerationDiff"
   },
   "classification": {
     "equivalent": [
@@ -60,7 +62,9 @@
       "GraphForge.create_hypothesis_group",
       "GraphForge.delete_checkpoint",
       "GraphForge.delete_embedding_space",
+      "GraphForge.committed_generation_identity",
       "GraphForge.diff_checkpoints",
+      "GraphForge.diff_committed_generations",
       "GraphForge.embedding_refresh_project_policy",
       "GraphForge.embedding_space",
       "GraphForge.embedding_spaces",
@@ -172,6 +176,13 @@
         ],
         "reason": "Node binds parameters on PlanHandle before Promise-delivered IPC."
       },
+      "GraphForge.execute_to_arrow_ipc_stream_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.collectIpc"
+        ],
+        "reason": "Node binds parameters on PlanHandle before Promise-delivered Arrow IPC."
+      },
       "GraphForge.execute_to_parquet": {
         "nodeMembers": [
           "GraphForge.plan",
@@ -185,6 +196,13 @@
           "PlanHandle.sinkParquet"
         ],
         "reason": "Node binds parameters on PlanHandle before the asynchronous Parquet sink."
+      },
+      "GraphForge.execute_to_parquet_stream_with_params": {
+        "nodeMembers": [
+          "GraphForge.plan",
+          "PlanHandle.sinkParquet"
+        ],
+        "reason": "Node binds parameters on PlanHandle before the asynchronous bounded Parquet sink."
       },
       "GraphForge.configure_provider_find_runtime": {
         "nodeMembers": [
@@ -214,6 +232,7 @@
     "notExposedDefaults": {
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
+      "GraphImportSession": "Rust owns durable staged import sessions; binding projection is tracked separately.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
     }
@@ -320,6 +339,11 @@
       "arrow_roundtrip.test.mjs": [
         "multi-column results keep column order",
         "zero-row result keeps a valid schema"
+      ]
+    },
+    "semanticGenerationDiff": {
+      "generation-diff.test.mjs": [
+        "generation diff forwards exact Rust IPC, identities, limits, and cancellation"
       ]
     },
     "persistenceErrorsCancellation": {

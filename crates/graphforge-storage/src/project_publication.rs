@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use graphforge_core::{GfError, ProjectErrorCode};
@@ -98,6 +99,20 @@ pub struct ProjectGenerationRequest {
     pub capabilities: Vec<ProjectCapability>,
     /// Complete participant set.
     pub participants: Vec<ProjectParticipant>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectFileParticipant {
+    pub participant: ProjectParticipant,
+    pub source: PathBuf,
+    pub byte_length: u64,
+    pub content_sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+enum ParticipantPayloads<'a> {
+    Memory,
+    Files(&'a [ProjectFileParticipant], Option<&'a AtomicBool>, usize),
 }
 
 /// Safe participant metadata available to domain validators.
@@ -426,6 +441,53 @@ pub(crate) fn stage_project_generation_from_admitted_parent(
             None,
             None,
             graph_tree,
+            ParticipantPayloads::Memory,
+        )
+    })();
+    result.map_err(|error| map_stage_error(request, error))
+}
+
+pub(crate) fn stage_project_generation_from_files_admitted(
+    admission: crate::filesystem_admission::ProjectLifecycleAdmission,
+    parent: ResolvedProjectGeneration,
+    request: &ProjectGenerationRequest,
+    files: &[ProjectFileParticipant],
+    graph_tree: Option<&Path>,
+    cancelled: Option<&AtomicBool>,
+    copy_buffer_bytes: usize,
+) -> Result<ProjectStageOutcome, GfError> {
+    let result = (|| {
+        validate_request(request)?;
+        admission.revalidate_identity()?;
+        let root = canonical_supported_root(admission.root())?;
+        let writer_lock = acquire_writer_lock(&root, request)?;
+        project_failpoint::hit(
+            "project.after_writer_lock",
+            Some(request.transaction_uuid),
+            Some(request.generation_uuid),
+            "WRITER_LOCK",
+            false,
+        )?;
+        let current = resolve_project_generation(&root)?;
+        if current.generation_uuid() != parent.generation_uuid()
+            || current.manifest_sha256() != parent.manifest_sha256()
+        {
+            return Err(project_error(
+                ProjectErrorCode::WriteConflict,
+                "prepared CURRENT changed before portable import publication",
+            ));
+        }
+        let identity = admission.into_identity()?;
+        stage_project_generation_inner_with_locks(
+            StagedAdmission::Exclusive(identity),
+            root,
+            PublicationLock::Exclusive(writer_lock),
+            parent,
+            request,
+            None,
+            None,
+            graph_tree,
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes),
         )
     })();
     result.map_err(|error| map_stage_error(request, error))
@@ -473,6 +535,7 @@ fn stage_project_generation_inner(
         None,
         None,
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -503,6 +566,7 @@ fn stage_project_generation_optimistic_inner(
         None,
         Some(operation_fingerprint),
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -530,6 +594,7 @@ pub(crate) fn stage_project_generation_with_lock(
         revert,
         None,
         graph_tree,
+        ParticipantPayloads::Memory,
     )
 }
 
@@ -546,9 +611,11 @@ fn stage_project_generation_inner_with_locks(
     revert: Option<RevertJournalExtension>,
     operation_fingerprint: Option<[u8; 32]>,
     graph_tree: Option<&Path>,
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<ProjectStageOutcome, GfError> {
     validate_request(request)?;
-    let (capabilities, participants, request_fingerprint) = request_metadata(request)?;
+    let (capabilities, participants, request_fingerprint) =
+        request_metadata_with_payloads(request, payloads)?;
     let operation_fingerprint =
         operation_fingerprint.map_or_else(|| request_fingerprint.clone(), hex_digest);
     let transactions_dir = ensure_machine_directory(&root, Path::new(TRANSACTIONS_DIR))?;
@@ -591,9 +658,9 @@ fn stage_project_generation_inner_with_locks(
         false,
     )?;
 
-    stage_participant_files(request, &generation_root, &participants)?;
+    stage_participant_files(request, &generation_root, &participants, payloads)?;
     sync_participant_directories(&generation_root.join(PARTICIPANTS_DIR), &participants)?;
-    stage_optional_graph_tree(request, &parent, &generation_root, graph_tree)?;
+    stage_optional_graph_tree(&participants, &parent, &generation_root, graph_tree)?;
     project_failpoint::hit(
         "project.after_participant_dir_fsync",
         Some(request.transaction_uuid),
@@ -925,16 +992,16 @@ fn prepare_generation_directory(
 }
 
 fn stage_optional_graph_tree(
-    request: &ProjectGenerationRequest,
+    participants: &[StagedParticipant],
     parent: &ResolvedProjectGeneration,
     generation_root: &Path,
     graph_tree: Option<&Path>,
 ) -> Result<(), GfError> {
-    let files_participant = request.participants.iter().find(|participant| {
+    let files_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == crate::GRAPH_FILES_FAMILY
     });
-    let snapshot_participant = request.participants.iter().find(|participant| {
+    let snapshot_participant = participants.iter().find(|participant| {
         participant.capability_id == crate::GRAPH_CAPABILITY_ID
             && participant.record_family_id == "snapshot"
     });
@@ -955,14 +1022,18 @@ fn stage_optional_graph_tree(
     };
     if files_participant.capability_version != crate::GRAPH_CAPABILITY_VERSION
         || files_participant.record_version != crate::GRAPH_FILES_RECORD_VERSION
-        || files_participant.encoding != ProjectParticipantEncoding::Json
+        || files_participant.encoding != ProjectParticipantEncoding::Json.extension()
     {
         return Err(project_error(
             ProjectErrorCode::PublicationFailed,
             "unsupported graph files participant contract",
         ));
     }
-    let inventory = crate::decode_inventory(&files_participant.bytes)?;
+    let inventory_path = generation_root
+        .join(PARTICIPANTS_DIR)
+        .join(&files_participant.relative_path);
+    let inventory =
+        crate::decode_inventory(&std::fs::read(inventory_path).map_err(publication_io)?)?;
     let parent_tree = parent.graph_tree_root();
     let source = match graph_tree {
         Some(path) => path,
@@ -1004,14 +1075,16 @@ fn stage_participant_files(
     request: &ProjectGenerationRequest,
     generation_root: &Path,
     participants: &[StagedParticipant],
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<(), GfError> {
     for metadata in participants {
-        let input = request
+        let (index, input) = request
             .participants
             .iter()
+            .enumerate()
             .find(|candidate| {
-                candidate.capability_id == metadata.capability_id
-                    && candidate.record_family_id == metadata.record_family_id
+                candidate.1.capability_id == metadata.capability_id
+                    && candidate.1.record_family_id == metadata.record_family_id
             })
             .expect("validated canonical metadata has one source participant");
         let destination = generation_root
@@ -1029,7 +1102,39 @@ fn stage_participant_files(
             .create_new(true)
             .open(&destination)
             .map_err(publication_io)?;
-        file.write_all(&input.bytes).map_err(publication_io)?;
+        match payloads {
+            ParticipantPayloads::Memory => file.write_all(&input.bytes).map_err(publication_io)?,
+            ParticipantPayloads::Files(files, cancelled, copy_buffer_bytes) => {
+                let source = &files[index];
+                let mut input = crate::project_portable::open_regular_nofollow(&source.source)
+                    .map_err(publication_io)?;
+                let mut hash = Sha256::new();
+                let mut copied = 0;
+                let mut buffer = vec![0; copy_buffer_bytes];
+                loop {
+                    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                        return Err(project_error(
+                            ProjectErrorCode::PublicationFailed,
+                            "portable import cancelled during staging",
+                        ));
+                    }
+                    let count = input.read(&mut buffer).map_err(publication_io)?;
+                    if count == 0 {
+                        break;
+                    }
+                    file.write_all(&buffer[..count]).map_err(publication_io)?;
+                    hash.update(&buffer[..count]);
+                    copied += count as u64;
+                }
+                let digest: [u8; 32] = hash.finalize().into();
+                if copied != source.byte_length || digest != source.content_sha256 {
+                    return Err(project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "portable participant changed during staging",
+                    ));
+                }
+            }
+        }
         project_failpoint::hit(
             "project.after_participant_write",
             Some(request.transaction_uuid),
@@ -1696,8 +1801,20 @@ fn validate_request(request: &ProjectGenerationRequest) -> Result<(), GfError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn request_metadata(
     request: &ProjectGenerationRequest,
+) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
+    request_metadata_with_payloads(request, ParticipantPayloads::Memory)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "canonical metadata validation keeps memory and streamed sources identical"
+)]
+fn request_metadata_with_payloads(
+    request: &ProjectGenerationRequest,
+    payloads: ParticipantPayloads<'_>,
 ) -> Result<(Vec<ProjectCapability>, Vec<StagedParticipant>, String), GfError> {
     let mut capabilities = request.capabilities.clone();
     capabilities.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
@@ -1722,8 +1839,35 @@ fn request_metadata(
         ));
     }
     let mut participants = Vec::with_capacity(request.participants.len());
-    for participant in &request.participants {
-        let content_sha256: [u8; 32] = Sha256::digest(&participant.bytes).into();
+    for (index, participant) in request.participants.iter().enumerate() {
+        let (byte_length, content_sha256) = match payloads {
+            ParticipantPayloads::Memory => (
+                u64::try_from(participant.bytes.len()).map_err(|_| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "participant byte length exceeds u64",
+                    )
+                })?,
+                Sha256::digest(&participant.bytes).into(),
+            ),
+            ParticipantPayloads::Files(files, _, _) => {
+                let file = files.get(index).ok_or_else(|| {
+                    project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "missing participant file",
+                    )
+                })?;
+                if file.participant.capability_id != participant.capability_id
+                    || file.participant.record_family_id != participant.record_family_id
+                {
+                    return Err(project_error(
+                        ProjectErrorCode::PublicationFailed,
+                        "participant file identity mismatch",
+                    ));
+                }
+                (file.byte_length, file.content_sha256)
+            }
+        };
         participants.push(StagedParticipant {
             capability_id: participant.capability_id.clone(),
             capability_version: participant.capability_version,
@@ -1736,12 +1880,7 @@ fn request_metadata(
                 participant.encoding.extension()
             ),
             encoding: participant.encoding.extension().into(),
-            byte_length: u64::try_from(participant.bytes.len()).map_err(|_| {
-                project_error(
-                    ProjectErrorCode::PublicationFailed,
-                    "participant byte length exceeds u64",
-                )
-            })?,
+            byte_length,
             row_count: participant.row_count,
             schema_fingerprint: hex_digest(participant.schema_fingerprint),
             content_sha256: hex_digest(content_sha256),
@@ -2060,14 +2199,19 @@ pub(crate) fn publish_atomic_bytes(
 
     let publish = || -> Result<(), AtomicPublishError> {
         let mut temp = OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&temp_path)?;
+        // Recovery may run in a separately loaded native addon while an
+        // optimistic writer is still staging its journal.  A Rust static is
+        // not an authority across those environments, so the temporary file
+        // itself carries a kernel-visible lease until replacement completes.
+        crate::file_lock::lock_exclusive(&temp)?;
         temp.write_all(bytes)?;
         after_write()?;
         temp.sync_all()?;
         after_sync()?;
-        drop(temp);
         before_replace()?;
 
         // Concurrent same-process replace of one target must not overlap
@@ -2082,7 +2226,7 @@ pub(crate) fn publish_atomic_bytes(
         let directory = crate::filesystem_admission::open_directory_handle(parent)?;
         // Existence is one snapshot; `replace_file` / `install_new_file` verify
         // regular single-link identity on the open handles.
-        match std::fs::symlink_metadata(path) {
+        let result = match std::fs::symlink_metadata(path) {
             Ok(_) => graphforge_filesystem::replace_file(
                 &directory,
                 std::ffi::OsStr::new(&temp_name),
@@ -2098,7 +2242,10 @@ pub(crate) fn publish_atomic_bytes(
                 .map_err(AtomicPublishError::Io)
             }
             Err(error) => Err(AtomicPublishError::Io(error)),
-        }
+        };
+        let unlock = crate::file_lock::unlock(&temp);
+        drop(temp);
+        result.and_then(|()| unlock.map_err(AtomicPublishError::Io))
     };
     let result = publish();
     if result.is_err() {
@@ -2175,14 +2322,32 @@ pub(crate) fn cleanup_atomicwrite_temp(path: &Path) -> Result<bool, GfError> {
         && digest.len() == 64
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
-        let metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        let path_metadata = std::fs::symlink_metadata(path).map_err(publication_io)?;
+        if !path_metadata.is_file() || path_metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(publication_io)?;
+        if !crate::file_lock::try_lock_exclusive(&file).map_err(publication_io)? {
+            // A live publisher owns this exact temporary inode.  Recognize it
+            // as protocol state, but never delete another environment's work.
+            return Ok(true);
+        }
+        let metadata = file.metadata().map_err(publication_io)?;
         if !metadata.is_file()
-            || metadata.file_type().is_symlink()
-            || graphforge_filesystem::path_link_count(path).map_err(publication_io)? != 1
+            || graphforge_filesystem::file_link_count(&file).map_err(publication_io)? != 1
+            || graphforge_filesystem::path_identity(path).map_err(publication_io)?
+                != graphforge_filesystem::file_identity(&file).map_err(publication_io)?
         {
+            let _ = crate::file_lock::unlock(&file);
             return Ok(false);
         }
         std::fs::remove_file(path).map_err(publication_io)?;
+        crate::file_lock::unlock(&file).map_err(publication_io)?;
+        drop(file);
         sync_directory(
             path.parent()
                 .expect("atomic-write temporary directory always has a parent"),
@@ -3379,6 +3544,68 @@ mod tests {
             );
         }
         assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn cleanup_preserves_a_kernel_leased_atomic_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+        publish_atomic_bytes(
+            &target,
+            b"published\n",
+            || {
+                let temps = atomic_temp_names(root.path());
+                assert_eq!(temps.len(), 1);
+                let temp = root.path().join(&temps[0]);
+                assert!(cleanup_atomicwrite_temp(&temp).unwrap());
+                assert!(temp.exists(), "live publisher temp must not be removed");
+                Ok(())
+            },
+            || Ok(()),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published\n");
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn cross_process_cleanup_preserves_a_kernel_leased_atomic_temp() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("CURRENT");
+        publish_atomic_bytes(
+            &target,
+            b"published\n",
+            || {
+                let temps = atomic_temp_names(root.path());
+                assert_eq!(temps.len(), 1);
+                let temp = root.path().join(&temps[0]);
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("project_publication::tests::atomic_temp_cleanup_child")
+                    .arg("--exact")
+                    .env("GRAPHFORGE_ATOMIC_TEMP_CLEANUP_CHILD", &temp)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+                assert!(temp.exists(), "child process must preserve live temp");
+                Ok(())
+            },
+            || Ok(()),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"published\n");
+        assert!(atomic_temp_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn atomic_temp_cleanup_child() {
+        let Ok(path) = std::env::var("GRAPHFORGE_ATOMIC_TEMP_CLEANUP_CHILD") else {
+            return;
+        };
+        let path = Path::new(&path);
+        assert!(cleanup_atomicwrite_temp(path).unwrap());
+        assert!(path.exists(), "leased temp was removed by child process");
     }
 
     fn atomic_temp_names(root: &Path) -> Vec<String> {

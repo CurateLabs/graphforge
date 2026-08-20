@@ -1,5 +1,5 @@
 {
-  "checksum": "eb825bb532c27d7ca9b1742de33af130925482788ca47c526d094c8f6982f8d0",
+  "checksum": "d95c605f3013146097898d5e18d4997403c1bb75f3ac55ed55466bdd70067a8b",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12912,6 +12912,10 @@
         "deps_dev": {
           "common": [
             {
+              "id": "parquet 58.3.0",
+              "target": "parquet"
+            },
+            {
               "id": "tempfile 3.27.0",
               "target": "tempfile"
             }
@@ -13248,6 +13252,22 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "arrow 58.3.0",
+              "target": "arrow"
+            },
+            {
+              "id": "futures 0.3.32",
+              "target": "futures"
+            },
+            {
+              "id": "parquet 58.3.0",
+              "target": "parquet"
+            },
+            {
+              "id": "tempfile 3.27.0",
+              "target": "tempfile"
+            },
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
@@ -13612,6 +13632,10 @@
               "target": "datafusion_functions_aggregate"
             },
             {
+              "id": "serde_json 1.0.151",
+              "target": "serde_json"
+            },
+            {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
             }
@@ -13801,6 +13825,10 @@
               "target": "unicode_normalization"
             },
             {
+              "id": "ureq 3.4.0",
+              "target": "ureq"
+            },
+            {
               "id": "uuid 1.24.0",
               "target": "uuid"
             }
@@ -13826,6 +13854,11 @@
         },
         "deps_dev": {
           "common": [
+            {
+              "id": "codspeed-divan-compat 5.0.1",
+              "target": "codspeed_divan_compat",
+              "alias": "divan"
+            },
             {
               "id": "wait-timeout 0.2.1",
               "target": "wait_timeout"

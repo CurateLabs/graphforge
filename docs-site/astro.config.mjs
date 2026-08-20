@@ -87,6 +87,14 @@ export default defineConfig({
                   slug: 'book/architecture/project-format-compatibility',
                 },
                 {
+                  label: 'Portable Project v2',
+                  slug: 'book/architecture/portable-project-v2',
+                },
+                {
+                  label: 'Composable Multi-Ontology',
+                  slug: 'book/architecture/composable-multi-ontology',
+                },
+                {
                   label: 'Canonical Fingerprints v1',
                   slug: 'book/architecture/canonical-fingerprints-v1',
                 },
@@ -268,6 +276,18 @@ export default defineConfig({
                 {
                   label: '0019 Authoritative graph delta journal',
                   slug: 'adr/0019-authoritative-graph-delta-journal',
+                },
+                {
+                  label: '0020 NTFS namespace durability',
+                  slug: 'adr/0020-ntfs-write-through-namespace-durability',
+                },
+                {
+                  label: '0021 Portable project v2',
+                  slug: 'adr/0021-portable-project-v2',
+                },
+                {
+                  label: '0023 Composable multi-ontology',
+                  slug: 'adr/0023-composable-multi-ontology',
                 },
               ],
             },

@@ -20,6 +20,7 @@ pub mod ontology;
 pub mod persistence;
 pub mod registry;
 pub mod schemas;
+pub mod spatial;
 pub mod validator;
 
 pub use compiler::{OntologyCompiler, OntologyRuntime, PropertyOwnerKind};
@@ -34,4 +35,7 @@ pub use ontology::{
 };
 pub use persistence::{load_parquet, save_parquet};
 pub use registry::OntologyRegistry;
+pub use spatial::{
+    SpatialCrs, SpatialGeometryType, SpatialType, SpatialValidationError, SpatialValidationLimits,
+};
 pub use validator::OntologyValidator;

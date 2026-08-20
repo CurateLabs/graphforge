@@ -1,10 +1,11 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "51fd33865c0866530edac0f1c3e735ba72354774de93966883b5020e1a1655fb",
+  "public_method_digest": "b63fefd89490c3a262ec6e869af5d97dddf7db51039b53981e68eb3c3aa2d4a7",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
+      "GraphImportSession": "release-tested",
       "GraphTransaction": "introspection",
       "RepositoryContext": "designed-only",
       "crate": "release-tested",
@@ -41,6 +42,7 @@
       "crate.composite_receipt_schema": "introspection",
       "crate.grade_gsi": "introspection",
       "crate.hold_writer": "internal-helper",
+      "crate.verify_portable_v2": "designed-only",
       "GraphForge.new": "introspection",
       "GraphForge.new_with_options": "introspection",
       "GraphForge.path": "introspection",
@@ -49,6 +51,7 @@
       "GraphForge.resource_policy": "introspection",
       "GraphForge.export_portable": "designed-only",
       "GraphForge.import_portable": "designed-only",
+      "GraphForge.import_portable_v2": "designed-only",
       "GraphForge.preview_revert_to_checkpoint": "designed-only",
       "GraphForge.show_checkpoint": "designed-only",
       "RepositoryContext.discover": "introspection",
@@ -85,7 +88,11 @@
       "CheckpointView.remove_hypothesis_member": "designed-only",
       "CheckpointView.set_default_embedding_space": "designed-only",
       "CheckpointView.supersede_assertion": "designed-only",
-      "CancellationToken.flag": "introspection"
+      "CancellationToken.flag": "introspection",
+      "crate.publish_portable_v2_oci": "designed-only",
+      "crate.pull_portable_v2_oci": "designed-only",
+      "crate.publish_portable_v2_oci_with_registry": "designed-only",
+      "crate.pull_portable_v2_oci_with_registry": "designed-only"
     },
     "reasons": {
       "internal-helper": "exported execution plumbing, not a persisted product facade",
@@ -700,7 +707,9 @@
         "GraphForge.execute_stream",
         "GraphForge.execute_stream_owned",
         "GraphForge.execute_stream_with_params",
+        "GraphForge.execute_to_arrow_ipc_stream_with_params",
         "GraphForge.execute_to_parquet",
+        "GraphForge.execute_to_parquet_stream_with_params",
         "GraphForge.execute_to_parquet_with_params",
         "GraphForge.execute_with_params",
         "GraphForge.explain",
@@ -742,8 +751,49 @@
           "symbol": "execute_to_parquet_roundtrips"
         },
         {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "streaming_parquet_and_ipc_report_progress_and_roundtrip"
+        },
+        {
+          "path": "crates/graphforge-api/tests/facade_methods.rs",
+          "symbol": "cancelled_stream_does_not_publish_destination"
+        },
+        {
           "path": "crates/graphforge-api/tests/public_facade_remaining_conformance.rs",
           "symbol": "public_lifecycle_inventory_covers_remaining_facade_methods"
+        }
+      ]
+    },
+    "resumable-import": {
+      "ids": [
+        "GraphForge.begin_import_session",
+        "GraphForge.cleanup_stale_import_sessions",
+        "GraphForge.resume_import_session",
+        "GraphImportSession.abort",
+        "GraphImportSession.append_arrow",
+        "GraphImportSession.checkpoint",
+        "GraphImportSession.commit",
+        "GraphImportSession.register_parquet",
+        "GraphImportSession.status",
+        "GraphImportSession.validate",
+        "GraphImportSession.validate_with_cancellation"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "arrow_session_resumes_stages_and_publishes_one_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "parquet_abort_and_missing_endpoint_preserve_prior_generation"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "cancellation_and_missing_endpoint_are_durable_fail_closed"
+        },
+        {
+          "path": "crates/graphforge-api/src/import_session.rs",
+          "symbol": "interrupted_batch_replays_and_stale_cleanup_removes_private_artifacts"
         }
       ]
     },
@@ -782,6 +832,26 @@
         {
           "path": "crates/graphforge-api/src/transaction.rs",
           "symbol": "drop_rolls_back_without_publication"
+        }
+      ]
+    },
+    "semantic-generation-diff": {
+      "ids": [
+        "GraphForge.committed_generation_identity",
+        "GraphForge.diff_committed_generations"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "generation_bound_add_is_retry_deterministic_and_every_stream_is_valid_ipc"
+        },
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "cancellation_and_resource_limit_fail_before_partial_output"
+        },
+        {
+          "path": "crates/graphforge-api/src/generation_diff.rs",
+          "symbol": "corrupt_and_incompatible_generations_are_typed_reload_required"
         }
       ]
     }

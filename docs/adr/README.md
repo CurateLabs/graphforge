@@ -26,6 +26,9 @@ are not retained in this tree.
 | 0018 | [Acknowledged durability and isolation contract](0018-acknowledged-durability-isolation.md) | `0018-acknowledged-durability-isolation.md` |
 | 0019 | [Authoritative durable graph delta journal](0019-authoritative-graph-delta-journal.md) | `0019-authoritative-graph-delta-journal.md` |
 | 0020 | [NTFS write-through namespace durability](0020-ntfs-write-through-namespace-durability.md) | `0020-ntfs-write-through-namespace-durability.md` |
+| 0021 | [Portable project v2 package layout and identity](0021-portable-project-v2.md) | `0021-portable-project-v2.md` |
+| 0022 | [Multi-ontology semantics in portable project v2](0022-portable-v2-multi-ontology-compatibility.md) | `0022-portable-v2-multi-ontology-compatibility.md` |
+| 0023 | [Composable ontology modules and semantic bridges](0023-composable-multi-ontology.md) | `0023-composable-multi-ontology.md` |
 
 ## Numbering
 

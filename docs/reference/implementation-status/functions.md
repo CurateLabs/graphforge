@@ -294,11 +294,15 @@ All temporal functions are ✅ COMPLETE with comprehensive support.
 
 ### point() ✅
 **Signature:** `point({x, y [, crs]})` or `point({latitude, longitude [, crs]})`
-**Notes:** Supports 2D/3D, Cartesian and Geographic coordinate systems.
+**Notes:** The certified profile is 2D only: `x`/`y` uses EPSG:3857 and
+`longitude`/`latitude` uses EPSG:4326. The optional CRS must agree with those
+keys. Unsupported CRS values fail explicitly; GraphForge never swaps axes or
+implicitly reprojects.
 
 ### distance() ✅
 **Signature:** `distance(point1, point2)`
-**Notes:** Haversine for geographic coordinates; Euclidean for Cartesian.
+**Notes:** Deterministic haversine metres for EPSG:4326 and Euclidean metres for
+EPSG:3857. Both arguments must be Points in the same CRS.
 
 ---
 

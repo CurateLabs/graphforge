@@ -129,6 +129,10 @@ its Cargo build stays a diagnostic path next to authoritative Bazel
 compilation. A sole `lex[simple_match]` Performance Analysis failure on a
 non-cypher PR is a known short-bench noise pattern — see triage in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
+M6 pure kernels use simulation; durable open/recovery/commit/GC/compaction use
+the declared Blacksmith 4-vCPU Ubuntu 24.04 walltime runner. Weekly/manual runs
+also retain exact-SHA replay and compaction peak-RSS artifacts while CodSpeed
+memory mode is unavailable for this project.
 
 ### `binding-release-candidate.yml`
 

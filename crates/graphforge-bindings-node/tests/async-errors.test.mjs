@@ -24,9 +24,9 @@ async function rejectsWithCode(promise, code) {
 test("every native task uses structured cooperative error transport", () => {
   const source = readFileSync(join(here, "../src/lib.rs"), "utf8");
   const errors = readFileSync(join(here, "../src/error.rs"), "utf8");
-  assert.equal(source.match(/impl Task for /g)?.length, 41);
-  assert.equal(source.match(/type Output = std::result::Result</g)?.length, 41);
-  assert.equal(source.match(/to_napi_deferred_err\(env,/g)?.length, 41);
+  assert.equal(source.match(/impl Task for /g)?.length, 42);
+  assert.equal(source.match(/type Output = std::result::Result</g)?.length, 42);
+  assert.equal(source.match(/to_napi_deferred_err\(env,/g)?.length, 42);
   assert.match(
     source,
     /impl Task for ResolveBeliefSubjectTask \{[\s\S]*?type Output = std::result::Result<ResolvedBeliefSubject, GfError>;[\s\S]*?if self\.cancellation\.is_cancelled\(\)[\s\S]*?to_napi_deferred_err\(env,/,

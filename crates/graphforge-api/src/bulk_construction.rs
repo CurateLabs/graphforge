@@ -20,7 +20,8 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, LargeListArray, LargeStringArray, ListArray, StringArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    StructArray, Time64NanosecondArray, TimestampMicrosecondArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -330,6 +331,59 @@ pub fn bulk_receipt_schema() -> SchemaRef {
 }
 
 impl GraphForge {
+    pub(crate) fn import_base_membership(
+        &self,
+        candidates: &[Uuid],
+        kind: graphforge_storage::UuidIndexKind,
+        input_kind: BulkInputKind,
+    ) -> Result<Vec<bool>, BulkValidationError> {
+        let mut index = open_membership_index(self, input_kind)?;
+        let Some(index) = index.as_mut() else {
+            return Ok(vec![false; candidates.len()]);
+        };
+        index
+            .probe(kind, candidates)
+            .map(|(found, _)| found)
+            .map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })
+    }
+
+    pub(crate) fn normalize_import_nodes(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+    ) -> Result<ValidatedBulkNodes, BulkValidationError> {
+        self.normalize_bulk_nodes(operation_uuid, batches, false)
+    }
+
+    pub(crate) fn normalize_import_edges(
+        &self,
+        operation_uuid: OperationId,
+        batches: &[RecordBatch],
+        imported_endpoints: &BTreeSet<Uuid>,
+    ) -> Result<ValidatedBulkEdges, BulkValidationError> {
+        let empty_nodes = ValidatedBulkNodes {
+            rows: Vec::new(),
+            operation_uuid,
+            source_generation_uuid: *self
+                .current_generation_uuid
+                .lock()
+                .expect("generation UUID lock poisoned"),
+        };
+        self.normalize_bulk_edges(
+            operation_uuid,
+            batches,
+            &empty_nodes,
+            false,
+            Some(imported_endpoints),
+        )
+    }
+
     /// Normalize and validate every Arrow node row without writing storage,
     /// the runtime catalog, ontology state, or project generations.
     pub fn validate_bulk_nodes(
@@ -361,8 +415,20 @@ impl GraphForge {
         validate_partition_schemas(BulkInputKind::Node, &NODE_REQUIRED, batches)?;
         let mut existing = BTreeSet::new();
         if reject_existing {
-            existing = existing_node_uuids(self)?;
-            existing.extend(existing_edge_uuids(self)?);
+            let candidates = candidate_uuids(batches, BulkInputKind::Node, "node_uuid")?;
+            let mut index = open_membership_index(self, BulkInputKind::Node)?;
+            existing = indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Node,
+                BulkInputKind::Node,
+            )?;
+            existing.extend(indexed_existing(
+                index.as_mut(),
+                &candidates,
+                graphforge_storage::UuidIndexKind::Edge,
+                BulkInputKind::Node,
+            )?);
         }
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
@@ -372,6 +438,7 @@ impl GraphForge {
             let uuids = uuid_column(batch, BulkInputKind::Node, "node_uuid")?;
             let labels = string_column(batch, BulkInputKind::Node, "label")?;
             let properties = property_columns(batch, &NODE_REQUIRED);
+            preflight_spatial_columns(BulkInputKind::Node, ordinal, &properties)?;
             for row in 0..batch.num_rows() {
                 let node_uuid = uuid_at(
                     uuids,
@@ -470,8 +537,20 @@ impl GraphForge {
             )?);
         }
 
-        let mut existing = existing_node_uuids(self)?;
-        existing.extend(existing_edge_uuids(self)?);
+        let candidates = normalized.identities().collect::<BTreeSet<_>>();
+        let mut index = open_membership_index(self, BulkInputKind::Node)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Node,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Node,
+        )?);
         if normalized
             .rows
             .iter()
@@ -597,7 +676,7 @@ impl GraphForge {
                 &error.to_string(),
             )
         })?;
-        self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true)
+        self.normalize_bulk_edges(operation_uuid, batches, same_request_nodes, true, None)
     }
 
     fn normalize_bulk_edges(
@@ -606,6 +685,7 @@ impl GraphForge {
         batches: &[RecordBatch],
         same_request_nodes: &ValidatedBulkNodes,
         reject_existing: bool,
+        additional_known_nodes: Option<&BTreeSet<Uuid>>,
     ) -> Result<ValidatedBulkEdges, BulkValidationError> {
         let source_generation_uuid = *self
             .current_generation_uuid
@@ -620,13 +700,16 @@ impl GraphForge {
             ));
         }
         validate_partition_schemas(BulkInputKind::Edge, &EDGE_REQUIRED, batches)?;
-        let mut known_nodes = existing_node_uuids(self)?;
+        let endpoint_candidates = candidate_endpoint_uuids(batches)?;
+        let edge_candidates = reject_existing
+            .then(|| candidate_uuids(batches, BulkInputKind::Edge, "edge_uuid"))
+            .transpose()?;
+        let (mut known_nodes, existing_edges) =
+            existing_edge_context(self, &endpoint_candidates, edge_candidates.as_ref())?;
+        if let Some(additional) = additional_known_nodes {
+            known_nodes.extend(additional.iter().copied());
+        }
         known_nodes.extend(same_request_nodes.identities());
-        let existing_edges = if reject_existing {
-            existing_edge_uuids(self)?
-        } else {
-            BTreeSet::new()
-        };
         let mut observed = BTreeSet::new();
         let mut rows = Vec::new();
         let mut ordinal = 0_u64;
@@ -637,6 +720,7 @@ impl GraphForge {
             let sources = uuid_column(batch, BulkInputKind::Edge, "source_uuid")?;
             let targets = uuid_column(batch, BulkInputKind::Edge, "target_uuid")?;
             let properties = property_columns(batch, &EDGE_REQUIRED);
+            preflight_spatial_columns(BulkInputKind::Edge, ordinal, &properties)?;
             for row in 0..batch.num_rows() {
                 let edge_uuid = uuid_at(
                     uuids,
@@ -725,7 +809,8 @@ impl GraphForge {
                 .lock()
                 .expect("generation UUID lock poisoned"),
         };
-        let normalized = self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false)?;
+        let normalized =
+            self.normalize_bulk_edges(operation_uuid, batches, &empty_nodes, false, None)?;
         if normalized.rows.is_empty() {
             return Ok(edge_receipt(&normalized.rows, operation_uuid, Uuid::nil())?);
         }
@@ -749,7 +834,24 @@ impl GraphForge {
             )?);
         }
 
-        let existing = existing_edge_uuids(self)?;
+        let candidates = normalized
+            .rows
+            .iter()
+            .map(|row| row.edge_uuid)
+            .collect::<BTreeSet<_>>();
+        let mut index = open_membership_index(self, BulkInputKind::Edge)?;
+        let mut existing = indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Edge,
+            BulkInputKind::Edge,
+        )?;
+        existing.extend(indexed_existing(
+            index.as_mut(),
+            &candidates,
+            graphforge_storage::UuidIndexKind::Node,
+            BulkInputKind::Edge,
+        )?);
         if let Some(row) = normalized
             .rows
             .iter()
@@ -886,7 +988,20 @@ fn input_schema(
             ));
         }
         validate_property_name(kind, field.name())?;
-        validate_property_type(kind, field.name(), field.data_type())?;
+        if field.metadata().contains_key("ARROW:extension:name") {
+            (spatial_type_from_field(field).is_some() || is_preserved_spatial_field(field))
+                .then_some(())
+                .ok_or_else(|| {
+                    field_error(
+                        kind,
+                        BulkValidationReason::UnsupportedPropertyType,
+                        field.name(),
+                        "unsupported Arrow extension property",
+                    )
+                })?;
+        } else {
+            validate_property_type(kind, field.name(), field.data_type())?;
+        }
         if prior == Some(field.name()) {
             return Err(field_error(
                 kind,
@@ -1002,7 +1117,20 @@ fn validate_batch_schema(
     }
     for field in properties {
         validate_property_name(kind, field.name())?;
-        validate_property_type(kind, field.name(), field.data_type())?;
+        if field.metadata().contains_key("ARROW:extension:name") {
+            (spatial_type_from_field(field).is_some() || is_preserved_spatial_field(field))
+                .then_some(())
+                .ok_or_else(|| {
+                    field_error(
+                        kind,
+                        BulkValidationReason::UnsupportedPropertyType,
+                        field.name(),
+                        "unsupported Arrow extension property",
+                    )
+                })?;
+        } else {
+            validate_property_type(kind, field.name(), field.data_type())?;
+        }
     }
     Ok(())
 }
@@ -1074,18 +1202,141 @@ where
     let mut values = BTreeMap::new();
     for (field, array) in columns {
         owner_validation(field.name(), field)?;
-        let value = property_value_at(array.as_ref(), row).map_err(|message| {
-            row_error(
-                kind,
-                BulkValidationReason::UnsupportedPropertyType,
-                ordinal,
-                field.name(),
-                &message,
-            )
-        })?;
+        let value = if field.metadata().contains_key("ARROW:extension:name") {
+            if array.is_null(row) {
+                PropValue::Null
+            } else {
+                PropValue::Spatial(
+                    graphforge_storage::decode_spatial_property_value(array.as_ref(), field, row)
+                        .map_err(|error| {
+                        row_error(
+                            kind,
+                            BulkValidationReason::UnsupportedPropertyType,
+                            ordinal,
+                            field.name(),
+                            &error.to_string(),
+                        )
+                    })?,
+                )
+            }
+        } else {
+            property_value_at(array.as_ref(), row).map_err(|message| {
+                row_error(
+                    kind,
+                    BulkValidationReason::UnsupportedPropertyType,
+                    ordinal,
+                    field.name(),
+                    &message,
+                )
+            })?
+        };
         values.insert(field.name().to_owned(), value);
     }
     Ok(values)
+}
+
+fn preflight_spatial_columns(
+    kind: BulkInputKind,
+    first_ordinal: u64,
+    columns: &[(&Field, &ArrayRef)],
+) -> Result<(), BulkValidationError> {
+    for (field, array) in columns {
+        let Some(_) = field.metadata().get("ARROW:extension:name") else {
+            continue;
+        };
+        if let Some(spatial) = spatial_type_from_field(field) {
+            spatial
+                .validate_array(
+                    field,
+                    array.as_ref(),
+                    graphforge_ontology::SpatialValidationLimits::default(),
+                )
+                .map_err(|error| {
+                    row_error(
+                        kind,
+                        BulkValidationReason::PropertyTypeMismatch,
+                        first_ordinal,
+                        field.name(),
+                        error.code(),
+                    )
+                })?;
+        } else {
+            let limits = graphforge_ontology::SpatialValidationLimits::default();
+            let metadata = field
+                .metadata()
+                .get("ARROW:extension:metadata")
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .filter(|value| value.get("crs").is_some());
+            if metadata.is_none()
+                || array.len() > limits.max_geometries
+                || array.get_array_memory_size() > limits.max_bytes
+            {
+                return Err(row_error(
+                    kind,
+                    BulkValidationReason::PropertyTypeMismatch,
+                    first_ordinal,
+                    field.name(),
+                    "preserved spatial field has malformed metadata or exceeds its resource limit",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn spatial_type_from_field(field: &Field) -> Option<graphforge_ontology::SpatialType> {
+    use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+    let geometry = match field.metadata().get("ARROW:extension:name")?.as_str() {
+        "geoarrow.point" => SpatialGeometryType::Point,
+        "geoarrow.linestring" => SpatialGeometryType::LineString,
+        "geoarrow.polygon" => SpatialGeometryType::Polygon,
+        "geoarrow.multipoint" => SpatialGeometryType::MultiPoint,
+        "geoarrow.multilinestring" => SpatialGeometryType::MultiLineString,
+        "geoarrow.multipolygon" => SpatialGeometryType::MultiPolygon,
+        _ => return None,
+    };
+    let metadata = field.metadata().get("ARROW:extension:metadata")?;
+    let crs = if metadata == &SpatialCrs::Epsg4326.extension_metadata() {
+        SpatialCrs::Epsg4326
+    } else if metadata == &SpatialCrs::Epsg3857.extension_metadata() {
+        SpatialCrs::Epsg3857
+    } else {
+        return None;
+    };
+    Some(SpatialType { geometry, crs })
+}
+
+fn is_preserved_spatial_field(field: &Field) -> bool {
+    use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+
+    let Some(metadata) = field.metadata().get("ARROW:extension:metadata") else {
+        return false;
+    };
+    if serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()
+        .and_then(|value| value.get("crs").cloned())
+        .is_none()
+    {
+        return false;
+    }
+    [
+        SpatialGeometryType::Point,
+        SpatialGeometryType::LineString,
+        SpatialGeometryType::Polygon,
+        SpatialGeometryType::MultiPoint,
+        SpatialGeometryType::MultiLineString,
+        SpatialGeometryType::MultiPolygon,
+    ]
+    .into_iter()
+    .any(|geometry| {
+        SpatialType {
+            geometry,
+            crs: SpatialCrs::Epsg4326,
+        }
+        .field("spatial", field.is_nullable())
+        .data_type()
+            == field.data_type()
+    })
 }
 
 fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String> {
@@ -1118,6 +1369,25 @@ fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String>
                 value.to_owned()
             ))
         }
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, timezone)
+            if timezone.as_deref() == Some("UTC") =>
+        {
+            scalar!(TimestampMicrosecondArray, |epoch_micros| {
+                PropValue::Temporal(graphforge_core::TemporalValue::UtcDateTime { epoch_micros })
+            })
+        }
+        DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond) => {
+            let nanos = array
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .ok_or_else(|| "Arrow array does not match its schema".to_owned())?
+                .value(row);
+            validate_wall_clock_nanos(nanos)?;
+            Ok(PropValue::Temporal(
+                graphforge_core::TemporalValue::LocalTime { nanos },
+            ))
+        }
+        DataType::Struct(fields) => temporal_struct_value(array, row, fields),
         DataType::List(_) => {
             let values = array
                 .as_any()
@@ -1141,6 +1411,104 @@ fn property_value_at(array: &dyn Array, row: usize) -> Result<PropValue, String>
                 .map(PropValue::List)
         }
         other => Err(format!("unsupported property type {other}")),
+    }
+}
+
+fn temporal_struct_value(
+    array: &dyn Array,
+    row: usize,
+    fields: &arrow::datatypes::Fields,
+) -> Result<PropValue, String> {
+    use graphforge_core::TemporalValue;
+    let values = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| "Arrow array does not match its schema".to_owned())?;
+    let names = fields
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    let i64_at = |name: &str| -> Result<i64, String> {
+        let column = values
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+            .ok_or_else(|| format!("temporal field {name} is not Int64"))?;
+        (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| format!("temporal field {name} is null for a present value"))
+    };
+    let nanos_at = |name: &str| -> Result<i64, String> {
+        let column = values
+            .column_by_name(name)
+            .and_then(|column| column.as_any().downcast_ref::<Time64NanosecondArray>())
+            .ok_or_else(|| format!("temporal field {name} is not Time64(Nanosecond)"))?;
+        let nanos = (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| format!("temporal field {name} is null for a present value"))?;
+        validate_wall_clock_nanos(nanos)?;
+        Ok(nanos)
+    };
+    let offset = || -> Result<i32, String> {
+        let column = values
+            .column_by_name("offset")
+            .and_then(|column| column.as_any().downcast_ref::<Int32Array>())
+            .ok_or_else(|| "temporal field offset is not Int32".to_owned())?;
+        let value = (!column.is_null(row))
+            .then(|| column.value(row))
+            .ok_or_else(|| "temporal field offset is null for a present value".to_owned())?;
+        if !(-64_800..=64_800).contains(&value) {
+            return Err("temporal offset exceeds the certified +/-18 hour range".to_owned());
+        }
+        Ok(value)
+    };
+    let temporal = match names.as_slice() {
+        ["months", "days", "seconds", "nanos"] => TemporalValue::Duration {
+            months: i64_at("months")?,
+            days: i64_at("days")?,
+            seconds: i64_at("seconds")?,
+            nanos: i64_at("nanos")?,
+        },
+        ["epoch_day"] => TemporalValue::Date {
+            epoch_days: i64_at("epoch_day")?,
+        },
+        ["date", "time"] => TemporalValue::LocalDateTime {
+            epoch_days: i64_at("date")?,
+            nanos: nanos_at("time")?,
+        },
+        ["time", "offset"] => TemporalValue::OffsetTime {
+            nanos: nanos_at("time")?,
+            offset_seconds: offset()?,
+        },
+        ["date", "time", "offset", "zone"] => {
+            let zones = values
+                .column_by_name("zone")
+                .and_then(|column| column.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| "temporal field zone is not Utf8".to_owned())?;
+            let zone = (!zones.is_null(row)).then(|| zones.value(row).to_owned());
+            if zone.as_ref().is_some_and(|zone| {
+                zone.is_empty() || zone.len() > 255 || zone.chars().any(char::is_control)
+            }) {
+                return Err("temporal zone identity is malformed".to_owned());
+            }
+            TemporalValue::ZonedDateTime {
+                epoch_days: i64_at("date")?,
+                nanos: nanos_at("time")?,
+                offset_seconds: offset()?,
+                zone,
+            }
+        }
+        _ => return Err("unsupported temporal struct contract".to_owned()),
+    };
+    temporal.validate().map_err(|error| error.to_string())?;
+    Ok(PropValue::Temporal(temporal))
+}
+
+fn validate_wall_clock_nanos(nanos: i64) -> Result<(), String> {
+    const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+    if (0..NANOS_PER_DAY).contains(&nanos) {
+        Ok(())
+    } else {
+        Err("temporal wall-clock nanoseconds are outside one day".to_owned())
     }
 }
 
@@ -1313,7 +1681,13 @@ fn validate_ontology_field(
                 DataType::List(_) | DataType::LargeList(_)
             )
         }
-        PropertyValueType::Duration | PropertyValueType::DateTime | PropertyValueType::Map => false,
+        PropertyValueType::Duration => field.data_type() == &expected_arrow,
+        PropertyValueType::DateTime => temporal_datetime_data_type(field.data_type()),
+        PropertyValueType::Spatial(spatial) => {
+            field.data_type() == &spatial.data_type()
+                && field.metadata() == &spatial.field_metadata()
+        }
+        PropertyValueType::Map => false,
     };
     if !compatible {
         return Err(row_error(
@@ -1337,6 +1711,21 @@ fn validate_ontology_field(
         ));
     }
     Ok(())
+}
+
+fn temporal_datetime_data_type(data_type: &DataType) -> bool {
+    matches!(
+        data_type,
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone)
+            if zone.as_deref() == Some("UTC")
+    ) || matches!(
+        data_type,
+        DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
+    ) || matches!(data_type, DataType::Struct(fields)
+            if fields == &graphforge_storage::schemas::date_struct_fields()
+                || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
+                || fields == &graphforge_storage::schemas::time_struct_fields()
+                || fields == &graphforge_storage::schemas::datetime_struct_fields())
 }
 
 fn validate_property_name(kind: BulkInputKind, name: &str) -> Result<(), BulkValidationError> {
@@ -1376,7 +1765,7 @@ fn validate_property_type(
 }
 
 fn property_data_type_supported(data_type: &DataType) -> bool {
-    match data_type {
+    (match data_type {
         DataType::List(field) | DataType::LargeList(field) => {
             property_data_type_supported(field.data_type())
         }
@@ -1394,7 +1783,16 @@ fn property_data_type_supported(data_type: &DataType) -> bool {
                 | DataType::Float64
                 | DataType::Utf8
                 | DataType::LargeUtf8
+                | DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond)
         ),
+    }) || {
+        matches!(data_type, DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, zone) if zone.as_deref() == Some("UTC"))
+            || matches!(data_type, DataType::Struct(fields)
+        if fields == &graphforge_storage::schemas::duration_struct_fields()
+            || fields == &graphforge_storage::schemas::date_struct_fields()
+            || fields == &graphforge_storage::schemas::localdatetime_struct_fields()
+            || fields == &graphforge_storage::schemas::time_struct_fields()
+            || fields == &graphforge_storage::schemas::datetime_struct_fields())
     }
 }
 
@@ -1556,52 +1954,132 @@ fn generated_uuid(operation_uuid: OperationId, kind: BulkInputKind, ordinal: u64
     Uuid::from_bytes(bytes)
 }
 
-fn existing_node_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let batches = graphforge_storage::read_nodes(&graph.dir).map_err(|error| {
-        contract_error(
-            BulkInputKind::Node,
-            BulkValidationReason::ProjectState,
-            &error.to_string(),
-        )
-    })?;
-    collect_existing_uuids(
-        batches,
-        BulkInputKind::Node,
-        "node_uuid",
-        "persisted node UUID is malformed",
-    )
-}
-
-fn existing_edge_uuids(graph: &GraphForge) -> Result<BTreeSet<Uuid>, BulkValidationError> {
-    let batches =
-        graphforge_storage::read_edges(&graph.dir, "*", graph.ontology_mode).map_err(|error| {
+fn open_membership_index(
+    graph: &GraphForge,
+    input_kind: BulkInputKind,
+) -> Result<
+    std::sync::MutexGuard<'_, Option<graphforge_storage::UuidMembershipIndex>>,
+    BulkValidationError,
+> {
+    let current_generation =
+        graphforge_storage::read_topology_generation(&graph.dir).map_err(|error| {
             contract_error(
-                BulkInputKind::Edge,
+                input_kind,
                 BulkValidationReason::ProjectState,
                 &error.to_string(),
             )
         })?;
-    collect_existing_uuids(
-        batches,
-        BulkInputKind::Edge,
-        "edge_uuid",
-        "persisted edge UUID is malformed",
-    )
+    let mut cached = graph.uuid_membership_index.lock().map_err(|error| {
+        contract_error(
+            input_kind,
+            BulkValidationReason::ProjectState,
+            &error.to_string(),
+        )
+    })?;
+    if cached
+        .as_ref()
+        .is_some_and(|index| index.topology_generation() != current_generation)
+    {
+        *cached = None;
+    }
+    if !graphforge_storage::uuid_membership_index_present(&graph.dir) {
+        let has_nodes = graph.dir.join("topology/nodes.parquet").exists();
+        let has_edges = std::fs::read_dir(graph.dir.join("topology/edges"))
+            .ok()
+            .is_some_and(|mut entries| entries.any(|entry| entry.is_ok()));
+        if has_nodes || has_edges {
+            return Err(contract_error(
+                input_kind,
+                BulkValidationReason::ProjectState,
+                "UUID membership index is missing; run the bounded storage rebuild before ingest",
+            ));
+        }
+        return Ok(cached);
+    }
+    if cached.is_none() {
+        *cached = Some(
+            graphforge_storage::UuidMembershipIndex::open(&graph.dir).map_err(|error| {
+                contract_error(
+                    input_kind,
+                    BulkValidationReason::ProjectState,
+                    &error.to_string(),
+                )
+            })?,
+        );
+    }
+    Ok(cached)
 }
 
-fn collect_existing_uuids(
-    batches: Vec<RecordBatch>,
+fn existing_edge_context(
+    graph: &GraphForge,
+    endpoint_candidates: &BTreeSet<Uuid>,
+    edge_candidates: Option<&BTreeSet<Uuid>>,
+) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), BulkValidationError> {
+    let mut index = open_membership_index(graph, BulkInputKind::Edge)?;
+    let known_nodes = indexed_existing(
+        index.as_mut(),
+        endpoint_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?;
+    let Some(edge_candidates) = edge_candidates else {
+        return Ok((known_nodes, BTreeSet::new()));
+    };
+    let mut existing = indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Edge,
+        BulkInputKind::Edge,
+    )?;
+    existing.extend(indexed_existing(
+        index.as_mut(),
+        edge_candidates,
+        graphforge_storage::UuidIndexKind::Node,
+        BulkInputKind::Edge,
+    )?);
+    Ok((known_nodes, existing))
+}
+
+fn indexed_existing(
+    index: Option<&mut graphforge_storage::UuidMembershipIndex>,
+    candidates: &BTreeSet<Uuid>,
+    index_kind: graphforge_storage::UuidIndexKind,
+    input_kind: BulkInputKind,
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let Some(index) = index else {
+        return Ok(BTreeSet::new());
+    };
+    let requested = candidates.iter().copied().collect::<Vec<_>>();
+    let (found, _) = index.probe(index_kind, &requested).map_err(|error| {
+        contract_error(
+            input_kind,
+            BulkValidationReason::ProjectState,
+            &error.to_string(),
+        )
+    })?;
+    Ok(requested
+        .into_iter()
+        .zip(found)
+        .filter_map(|(uuid, present)| present.then_some(uuid))
+        .collect())
+}
+
+fn candidate_uuids(
+    batches: &[RecordBatch],
     kind: BulkInputKind,
     field: &str,
-    malformed_message: &str,
 ) -> Result<BTreeSet<Uuid>, BulkValidationError> {
     let mut values = BTreeSet::new();
     for batch in batches {
-        let uuids = uuid_column(&batch, kind, field)?;
+        let uuids = uuid_column(batch, kind, field)?;
         for row in 0..uuids.len() {
             if !uuids.is_null(row) {
-                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|_| {
-                    contract_error(kind, BulkValidationReason::ProjectState, malformed_message)
+                values.insert(Uuid::from_slice(uuids.value(row)).map_err(|error| {
+                    contract_error(
+                        kind,
+                        BulkValidationReason::SchemaMismatch,
+                        &error.to_string(),
+                    )
                 })?);
             }
         }
@@ -1609,35 +2087,59 @@ fn collect_existing_uuids(
     Ok(values)
 }
 
-fn register_existing_endpoints(
+fn candidate_endpoint_uuids(
+    batches: &[RecordBatch],
+) -> Result<BTreeSet<Uuid>, BulkValidationError> {
+    let mut values = candidate_uuids(batches, BulkInputKind::Edge, "source_uuid")?;
+    values.extend(candidate_uuids(
+        batches,
+        BulkInputKind::Edge,
+        "target_uuid",
+    )?);
+    Ok(values)
+}
+
+#[cfg(test)]
+fn indexed_uuid_count(graph: &GraphForge, kind: graphforge_storage::UuidIndexKind) -> u64 {
+    graphforge_storage::UuidMembershipIndex::open(&graph.dir)
+        .expect("published graph has an authenticated UUID membership index")
+        .count(kind)
+}
+
+pub(crate) fn register_existing_endpoints(
     writer: &mut graphforge_storage::GraphWriter,
     dir: &std::path::Path,
     endpoints: &BTreeSet<Uuid>,
 ) -> Result<(), super::GfError> {
     let mut unresolved = endpoints.clone();
-    for batch in graphforge_storage::read_nodes(dir).map_err(|error| {
-        super::GfError::Storage(format!("failed to read node topology: {error}"))
-    })? {
+    graphforge_storage::visit_nodes_batched(dir, 8_192, |batch| {
         let uuids = batch
             .column_by_name("node_uuid")
             .and_then(|column| column.as_any().downcast_ref::<FixedSizeBinaryArray>())
             .ok_or_else(|| {
-                super::GfError::Storage("node topology has malformed UUID column".into())
+                datafusion::error::DataFusionError::Execution(
+                    "node topology has malformed UUID column".into(),
+                )
             })?;
         let ids = batch
             .column_by_name("node_id")
             .and_then(|column| column.as_any().downcast_ref::<UInt64Array>())
             .ok_or_else(|| {
-                super::GfError::Storage("node topology has malformed ID column".into())
+                datafusion::error::DataFusionError::Execution(
+                    "node topology has malformed ID column".into(),
+                )
             })?;
         for row in 0..batch.num_rows() {
-            let uuid = Uuid::from_slice(uuids.value(row))
-                .map_err(|error| super::GfError::Storage(error.to_string()))?;
+            let uuid = Uuid::from_slice(uuids.value(row)).map_err(|error| {
+                datafusion::error::DataFusionError::Execution(error.to_string())
+            })?;
             if unresolved.remove(&uuid) {
                 writer.register_existing_node(uuid, ids.value(row));
             }
         }
-    }
+        Ok(!unresolved.is_empty())
+    })
+    .map_err(|error| super::GfError::Storage(format!("failed to read node topology: {error}")))?;
     if unresolved.is_empty() {
         Ok(())
     } else {
@@ -1847,7 +2349,7 @@ fn row_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{FixedSizeBinaryArray, Int64Array, StringArray};
+    use arrow::array::{FixedSizeBinaryArray, Float64Array, Int64Array, StringArray, StructArray};
     use std::process::Command;
 
     const FAILPOINT_COOKIE: &str = "graphforge-internal-subprocess-v1";
@@ -1861,6 +2363,258 @@ mod tests {
 
     fn operation(seed: u128) -> OperationId {
         OperationId(uuid(seed))
+    }
+
+    #[test]
+    fn spatial_bulk_preflight_validates_the_complete_array_before_row_normalization() {
+        use graphforge_ontology::{SpatialCrs, SpatialGeometryType, SpatialType};
+        let spatial = SpatialType {
+            geometry: SpatialGeometryType::Point,
+            crs: SpatialCrs::Epsg4326,
+        };
+        let field = spatial.field("location", false);
+        let array: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-105.0, 181.0])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7, 0.0])) as ArrayRef,
+            ),
+        ]));
+        let error =
+            preflight_spatial_columns(BulkInputKind::Node, 40, &[(&field, &array)]).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+        assert_eq!(error.row_ordinal, Some(40));
+        assert_eq!(error.field.as_deref(), Some("location"));
+        assert_eq!(error.message, "GF_SPATIAL_COORDINATE_OUT_OF_RANGE");
+    }
+
+    #[test]
+    fn preserved_spatial_bulk_preflight_accepts_explicit_metadata_and_rejects_malformed() {
+        use std::collections::HashMap;
+
+        let array: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-104.9903])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7392])) as ArrayRef,
+            ),
+        ]));
+        let field =
+            Field::new("location", array.data_type().clone(), true).with_metadata(HashMap::from([
+                (
+                    "ARROW:extension:name".into(),
+                    "geoarrow.vendor_point".into(),
+                ),
+                (
+                    "ARROW:extension:metadata".into(),
+                    "{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}".into(),
+                ),
+            ]));
+        preflight_spatial_columns(BulkInputKind::Node, 0, &[(&field, &array)]).unwrap();
+        let value =
+            normalize_properties(
+                BulkInputKind::Node,
+                0,
+                0,
+                &[(&field, &array)],
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        let PropValue::Spatial(value) = &value["location"] else {
+            panic!("preserved field must remain spatial");
+        };
+        assert_eq!(
+            value.extension_name.as_deref(),
+            Some("geoarrow.vendor_point")
+        );
+        assert_eq!(
+            value.extension_metadata.as_deref(),
+            Some("{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}")
+        );
+
+        let malformed =
+            Field::new("location", array.data_type().clone(), true).with_metadata(HashMap::from([
+                (
+                    "ARROW:extension:name".into(),
+                    "geoarrow.vendor_point".into(),
+                ),
+                ("ARROW:extension:metadata".into(), "{}".into()),
+            ]));
+        let error =
+            preflight_spatial_columns(BulkInputKind::Node, 0, &[(&malformed, &array)]).unwrap_err();
+        assert_eq!(error.reason, BulkValidationReason::PropertyTypeMismatch);
+    }
+
+    #[test]
+    fn preserved_spatial_bulk_publish_reopens_and_projects_exact_metadata() {
+        use std::collections::HashMap;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let extension_name = "geoarrow.vendor_point";
+        let extension_metadata = "{\"crs\":\"OGC:CRS84\",\"edges\":\"spherical\"}";
+        let location: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("x", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![-104.9903])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("y", DataType::Float64, false)),
+                Arc::new(Float64Array::from(vec![39.7392])) as ArrayRef,
+            ),
+        ]));
+        let location_field = Field::new("location", location.data_type().clone(), true)
+            .with_metadata(HashMap::from([
+                ("ARROW:extension:name".into(), extension_name.into()),
+                ("ARROW:extension:metadata".into(), extension_metadata.into()),
+            ]));
+        let schema = bulk_node_input_schema(vec![location_field]).unwrap();
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(8_020).as_bytes()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Place"])),
+                location,
+            ],
+        )
+        .unwrap();
+
+        let graph = GraphForge::new(path.to_str()).unwrap();
+        graph
+            .publish_bulk_nodes(operation(8_021), &[input])
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Place) RETURN n.location AS location")
+            .unwrap();
+        let field = result.schema.field_with_name("location").unwrap();
+        assert_eq!(field.metadata()["ARROW:extension:name"], extension_name);
+        assert_eq!(
+            field.metadata()["ARROW:extension:metadata"],
+            extension_metadata
+        );
+        let values = result.batches[0]
+            .column_by_name("location")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            values
+                .column_by_name("x")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            -104.9903
+        );
+    }
+
+    #[test]
+    fn temporal_bulk_publish_reopens_and_projects_calendar_and_zone_components() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("project");
+        std::fs::create_dir(&path).unwrap();
+        let duration: ArrayRef = Arc::new(StructArray::new(
+            graphforge_storage::schemas::duration_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![-2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![-4])),
+                Arc::new(Int64Array::from(vec![500_000_001])),
+            ],
+            None,
+        ));
+        let zoned: ArrayRef = Arc::new(StructArray::new(
+            graphforge_storage::schemas::datetime_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![20_001])),
+                Arc::new(Time64NanosecondArray::from(vec![7_200_000_000_000])),
+                Arc::new(Int32Array::from(vec![-21_600])),
+                Arc::new(StringArray::from(vec![Some("America/Denver")])),
+            ],
+            None,
+        ));
+        let schema = bulk_node_input_schema(vec![
+            Field::new("duration", duration.data_type().clone(), true),
+            Field::new("zoned", zoned.data_type().clone(), true),
+        ])
+        .unwrap();
+        let input = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([uuid(8_090).as_bytes()].into_iter())
+                        .unwrap(),
+                ),
+                Arc::new(StringArray::from(vec!["Event"])),
+                duration,
+                zoned,
+            ],
+        )
+        .unwrap();
+
+        let graph = GraphForge::new(path.to_str()).unwrap();
+        graph
+            .publish_bulk_nodes(operation(8_091), &[input])
+            .unwrap();
+        drop(graph);
+
+        let reopened = GraphForge::new(path.to_str()).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Event) RETURN n.duration AS duration, n.zoned AS zoned")
+            .unwrap();
+        assert_eq!(
+            result
+                .schema
+                .field_with_name("duration")
+                .unwrap()
+                .data_type(),
+            &DataType::Struct(graphforge_storage::schemas::duration_struct_fields())
+        );
+        assert_eq!(
+            result.schema.field_with_name("zoned").unwrap().data_type(),
+            &DataType::Struct(graphforge_storage::schemas::datetime_struct_fields())
+        );
+        let zoned = result.batches[0]
+            .column_by_name("zoned")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            zoned
+                .column_by_name("offset")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(0),
+            -21_600
+        );
+        assert_eq!(
+            zoned
+                .column_by_name("zone")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "America/Denver"
+        );
     }
 
     #[test]
@@ -2194,6 +2948,39 @@ mod tests {
         for (array, expected) in cases {
             assert_eq!(property_value_at(array.as_ref(), 0).unwrap(), expected);
         }
+
+        let utc =
+            TimestampMicrosecondArray::from(vec![1_700_000_000_123_456_i64]).with_timezone("UTC");
+        assert_eq!(
+            property_value_at(&utc, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::UtcDateTime {
+                epoch_micros: 1_700_000_000_123_456,
+            })
+        );
+        let local_time = Time64NanosecondArray::from(vec![12_345_i64]);
+        assert_eq!(
+            property_value_at(&local_time, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::LocalTime { nanos: 12_345 })
+        );
+        let duration = StructArray::new(
+            graphforge_storage::schemas::duration_struct_fields(),
+            vec![
+                Arc::new(Int64Array::from(vec![-2])),
+                Arc::new(Int64Array::from(vec![3])),
+                Arc::new(Int64Array::from(vec![-4])),
+                Arc::new(Int64Array::from(vec![5])),
+            ],
+            None,
+        );
+        assert_eq!(
+            property_value_at(&duration, 0).unwrap(),
+            PropValue::Temporal(graphforge_core::TemporalValue::Duration {
+                months: -2,
+                days: 3,
+                seconds: -4,
+                nanos: 5,
+            })
+        );
 
         let nullable = StringArray::from(vec![None::<&str>]);
         assert_eq!(property_value_at(&nullable, 0).unwrap(), PropValue::Null);
@@ -3369,7 +4156,10 @@ mod tests {
             })
         ));
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
     }
 
     #[test]
@@ -3408,7 +4198,10 @@ mod tests {
             *reopened.current_generation_uuid.lock().unwrap(),
             generation
         );
-        assert_eq!(existing_node_uuids(&reopened).unwrap().len(), 2);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Node),
+            2
+        );
 
         let changed = node_batch(&[uuid(924)], &["Person"], &[Some("Changed")]);
         let error = reopened
@@ -3421,7 +4214,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_node_uuids(&reopened).unwrap().len(), 2);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Node),
+            2
+        );
     }
 
     #[test]
@@ -3494,7 +4290,10 @@ mod tests {
         drop(graph);
 
         let reopened = GraphForge::new(path.to_str()).unwrap();
-        assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 256);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+            256
+        );
         assert_eq!(
             reopened
                 .execute("MATCH ()-[r:KNOWS]->() RETURN r.weight")
@@ -3505,6 +4304,19 @@ mod tests {
                 .sum::<usize>(),
             256
         );
+        let node_collision =
+            edge_batch(&[node_ids[31]], &["KNOWS"], &[node_ids[0]], &[node_ids[1]]);
+        let collision = reopened
+            .publish_bulk_edges(operation(934), &[node_collision])
+            .unwrap_err();
+        assert!(matches!(
+            collision,
+            BulkEdgePublicationError::Validation(BulkValidationError {
+                kind: BulkInputKind::Edge,
+                reason: BulkValidationReason::IdentityConflict,
+                ..
+            })
+        ));
         let replay = reopened
             .publish_bulk_edges(operation(932), std::slice::from_ref(&batch))
             .unwrap();
@@ -3529,7 +4341,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 256);
+        assert_eq!(
+            indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+            256
+        );
     }
 
     #[test]
@@ -3565,7 +4380,10 @@ mod tests {
             })
         ));
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), generation);
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
         assert_eq!(
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
@@ -3588,7 +4406,10 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+        assert_eq!(
+            indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+            0
+        );
         assert_eq!(
             std::fs::read_dir(path.join("generations")).unwrap().count(),
             generation_count
@@ -3697,9 +4518,15 @@ mod tests {
         if expect_committed {
             assert_ne!(durable, parent);
             assert_eq!(visible, durable);
-            assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 1);
+            assert_eq!(
+                indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+                1
+            );
             let reopened = GraphForge::new(Some(&root)).unwrap();
-            assert_eq!(existing_edge_uuids(&reopened).unwrap().len(), 1);
+            assert_eq!(
+                indexed_uuid_count(&reopened, graphforge_storage::UuidIndexKind::Edge),
+                1
+            );
             assert_eq!(
                 graph.runtime_catalog.lock().unwrap().to_record_batch(),
                 reopened.runtime_catalog.lock().unwrap().to_record_batch()
@@ -3707,7 +4534,10 @@ mod tests {
         } else {
             assert_eq!(durable, parent);
             assert_eq!(visible, parent);
-            assert_eq!(existing_edge_uuids(&graph).unwrap().len(), 0);
+            assert_eq!(
+                indexed_uuid_count(&graph, graphforge_storage::UuidIndexKind::Edge),
+                0
+            );
             assert_eq!(
                 graph.runtime_catalog.lock().unwrap().to_record_batch(),
                 prior_catalog
