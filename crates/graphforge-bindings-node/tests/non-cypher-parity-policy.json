@@ -1,8 +1,8 @@
 {
   "contractVersion": 1,
   "rustManifest": "../../../tests/contracts/non-cypher-rust-surface.json",
-  "releaseSurfaceCount": 207,
-  "releaseSurfaceDigest": "01f642d893eeb78b9493363d6c4ac5eea6744e0a970b60a9e6a456fe9892a886",
+  "releaseSurfaceCount": 210,
+  "releaseSurfaceDigest": "9ca796af78a3ea51e4c0d404e9f74e3eb1cdd49a0b862dc15838cd9ada037877",
   "requiredEquivalent": [
     "GraphForge.adopt_ontology",
     "GraphForge.clear_ontology",
@@ -26,8 +26,9 @@
     "streaming-errors-maintenance": "persistenceErrorsCancellation",
     "compatibility": "arrowIpc",
     "transaction-maintenance": "transactionMaintenance",
-    "resumable-import": "lifecycleConstruction",
-    "semantic-generation-diff": "semanticGenerationDiff"
+    "resumable-import": "importSession",
+    "semantic-generation-diff": "semanticGenerationDiff",
+    "portable-v2-facade": "portableV2"
   },
   "classification": {
     "equivalent": [
@@ -47,12 +48,15 @@
       "GraphForge.assess_confidence",
       "GraphForge.attach_evidence",
       "GraphForge.attach_resolved_run",
+      "GraphForge.begin_import_session",
       "GraphForge.begin_transaction",
       "GraphForge.bind_embedding_space_alias",
       "GraphForge.checkpoint",
+      "GraphForge.cleanup_stale_import_sessions",
       "GraphForge.clear",
       "GraphForge.clear_ontology",
       "GraphForge.cluster",
+      "GraphForge.committed_generation_identity",
       "GraphForge.compact_graph_delta",
       "GraphForge.confidence_assessment",
       "GraphForge.confidence_inputs",
@@ -62,7 +66,6 @@
       "GraphForge.create_hypothesis_group",
       "GraphForge.delete_checkpoint",
       "GraphForge.delete_embedding_space",
-      "GraphForge.committed_generation_identity",
       "GraphForge.diff_checkpoints",
       "GraphForge.diff_committed_generations",
       "GraphForge.embedding_refresh_project_policy",
@@ -75,6 +78,7 @@
       "GraphForge.execute_project_cleanup",
       "GraphForge.explain",
       "GraphForge.export_ontology",
+      "GraphForge.export_portable_v2",
       "GraphForge.find",
       "GraphForge.graph_delta_compaction_status",
       "GraphForge.graph_directedness",
@@ -118,6 +122,8 @@
       "GraphForge.prepare_rank_invocation",
       "GraphForge.prepare_similar_invocation",
       "GraphForge.preview_graph_delta_compaction",
+      "GraphForge.preview_portable_v2_graph_subset",
+      "GraphForge.preview_portable_v2_selection",
       "GraphForge.preview_project_cleanup",
       "GraphForge.profile_gsi",
       "GraphForge.project_capabilities",
@@ -142,6 +148,7 @@
       "GraphForge.remove_hypothesis_member",
       "GraphForge.resolve_belief_projection",
       "GraphForge.resolve_belief_subject",
+      "GraphForge.resume_import_session",
       "GraphForge.revert_to_checkpoint",
       "GraphForge.schema",
       "GraphForge.set_default_embedding_space",
@@ -152,7 +159,14 @@
       "GraphForge.suggest_ontology",
       "GraphForge.supersede_assertion",
       "GraphForge.validate_ontology",
-      "GraphForge.workspace_ontology"
+      "GraphForge.workspace_ontology",
+      "GraphImportSession.abort",
+      "GraphImportSession.append_arrow",
+      "GraphImportSession.checkpoint",
+      "GraphImportSession.commit",
+      "GraphImportSession.register_parquet",
+      "GraphImportSession.status",
+      "GraphImportSession.validate"
     ],
     "languageSpecific": {
       "GraphForge.execute_stream": {
@@ -179,9 +193,9 @@
       "GraphForge.execute_to_arrow_ipc_stream_with_params": {
         "nodeMembers": [
           "GraphForge.plan",
-          "PlanHandle.collectIpc"
+          "PlanHandle.sinkArrowIpc"
         ],
-        "reason": "Node binds parameters on PlanHandle before Promise-delivered Arrow IPC."
+        "reason": "Node binds parameters on PlanHandle before the asynchronous Arrow IPC sink."
       },
       "GraphForge.execute_to_parquet": {
         "nodeMembers": [
@@ -215,6 +229,12 @@
           "GraphForge.algorithmDescriptorContracts"
         ],
         "reason": "Node projects the live Rust registry as a thin GraphForge method without opening knowledge or epistemic storage."
+      },
+      "GraphImportSession.validate_with_cancellation": {
+        "nodeMembers": [
+          "GraphImportSession.validate"
+        ],
+        "reason": "Node validate accepts an optional AbortSignal instead of a second method."
       }
     },
     "nodeOnly": {
@@ -225,14 +245,19 @@
       "GraphForge.algorithmDescriptorContracts": "Thin projection of crate.algorithm_descriptor_contracts.",
       "GraphForge.path": "Node project-path getter corresponding to Rust introspection.",
       "GraphForge.plan": "Node asynchronous execution adapter classified above.",
+      "GraphForge.verifyPortableV2": "Static Node adapter for crate.verify_portable_v2.",
+      "GraphForge.importPortableV2": "Static Node adapter for GraphForge.import_portable_v2.",
+      "GraphForge.publishPortableV2Oci": "Static Node adapter for crate.publish_portable_v2_oci.",
+      "GraphForge.pullPortableV2Oci": "Static Node adapter for crate.pull_portable_v2_oci.",
       "PlanHandle.collectIpc": "Promise-delivered Arrow IPC adapter classified above.",
       "PlanHandle.explain": "Node-only plan introspection for the asynchronous execution adapter.",
-      "PlanHandle.sinkParquet": "Asynchronous Parquet sink adapter classified above."
+      "PlanHandle.sinkParquet": "Asynchronous Parquet sink adapter classified above.",
+      "PlanHandle.sinkArrowIpc": "Asynchronous Arrow IPC sink adapter classified above.",
+      "GraphImportSession.sessionUuid": "Node getter for the Rust session_uuid value object accessor."
     },
     "notExposedDefaults": {
       "CheckpointView": "Node checkpoint views expose the bounded pinned read surface; unsupported Rust checkpoint operations require an explicit parity decision.",
       "GraphForge": "No shipped Node member exists for this Rust facade entry; adding one requires an explicit parity decision.",
-      "GraphImportSession": "Rust owns durable staged import sessions; binding projection is tracked separately.",
       "OpenRouterProviderSession": "Rust provider sessions are not exported; Node owns a configured native provider adapter instead.",
       "RepositoryContext": "Rust owns repository lifecycle behavior; the Node command wrapper parity is delivered by issue #226."
     }
@@ -357,6 +382,9 @@
       ],
       "cluster-vector.test.mjs": [
         "k means cluster"
+      ],
+      "result_sink.test.mjs": [
+        "result sinks stream parquet and arrow ipc with BigInt receipts"
       ]
     },
     "transactionMaintenance": {
@@ -364,6 +392,16 @@
         "mixed transaction commit and explicit rollback have parity",
         "dropped wrapper handles roll back and never commit",
         "maintenance preview and execution reconcile candidate identities"
+      ]
+    },
+    "portableV2": {
+      "portable_v2.test.mjs": [
+        "portable-v2 export verify and import preserve package digest"
+      ]
+    },
+    "importSession": {
+      "import_session.test.mjs": [
+        "import session begin checkpoint resume abort lifecycle"
       ]
     }
   }
