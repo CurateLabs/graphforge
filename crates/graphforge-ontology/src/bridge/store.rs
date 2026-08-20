@@ -9,7 +9,7 @@ use crate::composition::{
     DiagnosticLimit, OntologyModuleId, SymbolKind, bridge_document_digest,
 };
 
-use super::types::{BridgeDocument, BridgeLifecycleStatus, MappingMethod};
+use super::types::{BridgeDocument, BridgeLifecycleStatus};
 use super::validate::validate_bridge_document;
 
 /// Known module symbols used to validate bridge endpoints.
@@ -252,6 +252,22 @@ impl BridgeInventory {
         validate_bridge_document(doc, &modules, self.diag_limit)
     }
 
+    fn require_authoritative(&self, doc: &BridgeDocument) -> Result<(), CompositionError> {
+        if doc
+            .assertions
+            .iter()
+            .any(|assertion| !assertion.provenance.method.is_authoritative())
+        {
+            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::LifecycleInvalidTransition,
+                "suggested/inferred mappings remain non-authoritative until rewritten as authored",
+                vec![doc.bridge_id.clone()],
+                self.diag_limit,
+            )));
+        }
+        Ok(())
+    }
+
     /// Create/register a validated authored bridge into session staging.
     pub fn create_register(
         &mut self,
@@ -262,18 +278,7 @@ impl BridgeInventory {
         self.validate_document(&doc)?;
         // Suggested/inferred-only documents may stage as candidates but create_register
         // requires authored assertions for the validated path.
-        if doc
-            .assertions
-            .iter()
-            .any(|a| !a.provenance.method.is_authoritative())
-        {
-            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                DiagnosticCode::LifecycleInvalidTransition,
-                "create_register requires authored mappings; import suggested/inferred as candidates",
-                vec![doc.bridge_id.clone()],
-                self.diag_limit,
-            )));
-        }
+        self.require_authoritative(&doc)?;
         let id = self.identity_for(&doc)?;
         let key = id.display_ref();
         if self.adopted.contains_key(&key) {
@@ -346,19 +351,7 @@ impl BridgeInventory {
         }
         self.validate_document(&staged.doc)?;
         // Adoption requires authored mappings (suggested stay non-authoritative).
-        if staged
-            .doc
-            .assertions
-            .iter()
-            .any(|a| a.provenance.method != MappingMethod::Authored)
-        {
-            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                DiagnosticCode::LifecycleInvalidTransition,
-                "suggested/inferred mappings remain non-authoritative until rewritten as authored",
-                vec![staged.id.display_ref()],
-                self.diag_limit,
-            )));
-        }
+        self.require_authoritative(&staged.doc)?;
         let key = staged.id.display_ref();
         if self.adopted.contains_key(&key) {
             return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
@@ -441,6 +434,7 @@ impl BridgeInventory {
         if !preview.document_valid {
             self.validate_document(&next_doc)?;
         }
+        self.require_authoritative(&next_doc)?;
         if preview.next.bridge_id != preview.prior.bridge_id {
             return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
                 DiagnosticCode::CollisionMetadata,
@@ -685,6 +679,17 @@ impl BridgeInventory {
             });
         }
         for bridge in snapshot.adopted {
+            inv.validate_document(&bridge.doc)?;
+            inv.require_authoritative(&bridge.doc)?;
+            let computed_id = inv.identity_for(&bridge.doc)?;
+            if bridge.id != computed_id || bridge.dependencies != bridge.doc.dependencies {
+                return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                    DiagnosticCode::InterchangeIntegrity,
+                    "snapshot bridge identity or dependency projection does not match its document",
+                    vec![bridge.id.display_ref(), computed_id.display_ref()],
+                    inv.diag_limit,
+                )));
+            }
             inv.adopted.insert(
                 bridge.id.display_ref(),
                 BridgeRecord {
@@ -698,9 +703,9 @@ impl BridgeInventory {
         for receipt in snapshot.receipts {
             inv.receipts.insert(receipt.operation_id.clone(), receipt);
         }
-        // Re-validate adopted documents against reopened modules.
+        // Re-validate the adopted dependency closure after every identity is loaded.
         for record in inv.adopted.values() {
-            inv.validate_document(&record.doc)?;
+            inv.require_bridge_dependencies(&record.dependencies)?;
         }
         Ok(inv)
     }

@@ -448,6 +448,66 @@ fn suggested_mappings_remain_non_authoritative() {
 }
 
 #[test]
+fn suggested_mapping_cannot_enter_authority_via_update_or_reopen() {
+    let (mut inv, research, genealogy) = base_inventory();
+    let authored = doc(
+        "https://graphforge.dev/bridge/authority-boundary",
+        "1.0.0",
+        &research,
+        &genealogy,
+        vec![assertion(
+            q(&research, SymbolKind::Entity, "Person"),
+            q(&genealogy, SymbolKind::Entity, "Person"),
+            BridgePredicate::Equivalent,
+        )],
+    );
+    let id = inv.create_register(authored, "create").unwrap();
+    inv.adopt(&BridgeSelector::Exact(id.clone()), 0, "adopt")
+        .unwrap();
+
+    let mut suggested = inv.inspect(&BridgeSelector::Exact(id.clone())).unwrap().doc;
+    suggested.authored_version = "2.0.0".into();
+    suggested.assertions[0].provenance.method = MappingMethod::Suggested;
+    let err = inv
+        .update(
+            &BridgeSelector::Exact(id),
+            suggested,
+            inv.generation(),
+            "update",
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), Some(DiagnosticCode::LifecycleInvalidTransition));
+
+    let mut snapshot = inv.snapshot();
+    snapshot.adopted[0].doc.assertions[0].provenance.method = MappingMethod::Inferred;
+    let err = BridgeInventory::reopen(snapshot).unwrap_err();
+    assert_eq!(err.code(), Some(DiagnosticCode::LifecycleInvalidTransition));
+}
+
+#[test]
+fn reopen_rejects_tampered_identity_projection() {
+    let (mut inv, research, genealogy) = base_inventory();
+    let document = doc(
+        "https://graphforge.dev/bridge/reopen-integrity",
+        "1.0.0",
+        &research,
+        &genealogy,
+        vec![assertion(
+            q(&research, SymbolKind::Entity, "Person"),
+            q(&genealogy, SymbolKind::Entity, "Person"),
+            BridgePredicate::Equivalent,
+        )],
+    );
+    let id = inv.create_register(document, "create").unwrap();
+    inv.adopt(&BridgeSelector::Exact(id), 0, "adopt").unwrap();
+
+    let mut snapshot = inv.snapshot();
+    snapshot.adopted[0].id.canonical_digest = "0".repeat(64);
+    let err = BridgeInventory::reopen(snapshot).unwrap_err();
+    assert_eq!(err.code(), Some(DiagnosticCode::InterchangeIntegrity));
+}
+
+#[test]
 fn equal_human_names_never_create_a_bridge() {
     let (inv, research, genealogy) = base_inventory();
     // Both modules declare Person; inventory of bridges stays empty.
