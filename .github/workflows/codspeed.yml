@@ -1,37 +1,80 @@
 name: CodSpeed
 
-# Continuous performance measurement for the Rust surface. Benchmarks are
+# Nightly performance measurement for the Rust surface. Benchmarks are
 # divan targets built through `cargo codspeed` and measured with CodSpeed's
 # CPU simulation instrument for pure kernels and CodSpeed Macro Runners for
 # durable I/O walltime. Cargo builds here are diagnostics-only: Bazel remains
 # the authoritative compile/test surface (see .github/workflows/README.md).
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
-  # Lets CodSpeed trigger a backtest run to seed the baseline.
   workflow_dispatch:
   schedule:
-    - cron: "17 7 * * 1"
+    - cron: "17 7 * * *"
 
 permissions:
+  actions: read
   contents: read
   # OpenID Connect authentication with CodSpeed (no long-lived token).
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-main
+  cancel-in-progress: false
 
 jobs:
+  nightly:
+    name: Check Latest Main
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.main.outputs.sha }}
+      should-run: ${{ steps.decision.outputs.should-run }}
+    steps:
+      - name: Checkout latest main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Resolve latest main SHA
+        id: main
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Find latest successful nightly SHA
+        id: previous
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous=""
+          if curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/codspeed.yml/runs?branch=main&event=schedule&status=success&per_page=1" \
+            --output nightly-runs.json; then
+            previous="$(python3 -c 'import json; data=json.load(open("nightly-runs.json", encoding="utf-8")); runs=data.get("workflow_runs", []); print(runs[0]["head_sha"] if runs else "")')"
+          fi
+          echo "sha=$previous" >> "$GITHUB_OUTPUT"
+      - name: Decide whether benchmarks are needed
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          should_run=true
+          if [[ "${{ github.event_name }}" == "schedule" && "${{ steps.previous.outputs.sha }}" == "${{ steps.main.outputs.sha }}" ]]; then
+            should_run=false
+          fi
+          echo "should-run=$should_run" >> "$GITHUB_OUTPUT"
+
   benchmarks:
     name: Rust Benchmarks
+    needs: nightly
+    if: needs.nightly.outputs.should-run == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.nightly.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
@@ -59,12 +102,16 @@ jobs:
 
   m6-walltime:
     name: M6 Durable Walltime (CodSpeed Macro ARM64)
+    needs: nightly
+    if: needs.nightly.outputs.should-run == 'true'
     # Walltime comparisons require CodSpeed's isolated bare-metal runner.
     # Shared hosted runners are intentionally not a fallback.
     runs-on: codspeed-macro
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.nightly.outputs.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
@@ -80,11 +127,14 @@ jobs:
 
   m6-memory-fallback:
     name: M6 Scheduled Peak Memory Artifact
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: nightly
+    if: github.event_name == 'workflow_dispatch' && needs.nightly.outputs.should-run == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.nightly.outputs.sha }}
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master as of 2026-08-05
         with:
           toolchain: "1.96.0"
