@@ -2829,7 +2829,7 @@ impl GraphForge {
     }
 
     /// Export one pinned generation as an expanded or bundled portable-v2 package.
-    #[pyo3(signature = (*, output_path, representation="bundle", profile="complete", identities=None, checkpoint=None, subset=None, limits=None, cancellation=None))]
+    #[pyo3(signature = (*, output_path, representation="bundle", profile="complete", identities=None, checkpoint=None, subset=None, limits=None, cancellation=None, progress=None))]
     #[allow(clippy::too_many_arguments)]
     fn export_portable_v2(
         &self,
@@ -2842,6 +2842,7 @@ impl GraphForge {
         subset: Option<&Bound<'_, PyDict>>,
         limits: Option<&Bound<'_, PyDict>>,
         cancellation: Option<&PyCancellationToken>,
+        progress: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         portable::export_portable_v2(
             self,
@@ -2854,6 +2855,7 @@ impl GraphForge {
             subset,
             limits,
             cancellation,
+            progress,
         )
     }
 

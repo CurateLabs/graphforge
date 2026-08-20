@@ -37,7 +37,7 @@ def check_import_session_lifecycle() -> None:
         aborted = resumed.abort()
         assert aborted["files_accepted"] >= 1
         cleaned = forge.cleanup_stale_import_sessions(max_age_secs=0)
-        assert cleaned >= 0
+        assert cleaned == 0
 
 
 def main() -> None:

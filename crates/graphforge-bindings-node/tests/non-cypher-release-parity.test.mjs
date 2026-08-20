@@ -166,6 +166,22 @@ test("the Node classification is total, frozen, and backed by non-skipped native
         `unclassified shipped Node member: ${receiver}.${method}`,
       );
     }
+    for (const method of Object.getOwnPropertyNames(constructor)) {
+      if (
+        method === "length" ||
+        method === "name" ||
+        method === "prototype" ||
+        projected.has(method)
+      ) {
+        continue;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(constructor, method);
+      if (!descriptor || typeof descriptor.value !== "function") continue;
+      assert.ok(
+        nodeOnly.has(`${receiver}.${method}`),
+        `unclassified shipped Node static member: ${receiver}.${method}`,
+      );
+    }
   }
 
   for (const [group, files] of Object.entries(policy.evidence)) {

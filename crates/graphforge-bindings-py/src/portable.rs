@@ -276,8 +276,12 @@ fn export_result_json(result: &graphforge_api::PortableV2ExportFacadeResult) -> 
     })
 }
 
-fn verify_result_json(report: &graphforge_api::PortableVerifyResult) -> serde_json::Value {
-    serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}))
+fn verify_result_json(
+    py: Python<'_>,
+    report: &graphforge_api::PortableVerifyResult,
+) -> PyResult<serde_json::Value> {
+    serde_json::to_value(report)
+        .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))
 }
 
 fn import_result_json(result: &graphforge_api::PortableV2ImportResult) -> serde_json::Value {
@@ -289,17 +293,26 @@ fn import_result_json(result: &graphforge_api::PortableV2ImportResult) -> serde_
     })
 }
 
-fn oci_reference_json(reference: &graphforge_api::PortableV2OciReference) -> serde_json::Value {
-    serde_json::to_value(reference).unwrap_or_else(|_| serde_json::json!({}))
+fn oci_reference_json(
+    py: Python<'_>,
+    reference: &graphforge_api::PortableV2OciReference,
+) -> PyResult<serde_json::Value> {
+    serde_json::to_value(reference)
+        .map_err(|error| to_pyerr(py, &GfError::Execution(error.to_string())))
 }
 
-fn oci_pull_json(receipt: &graphforge_api::PortableV2OciPullReceipt) -> serde_json::Value {
-    serde_json::json!({
-        "reference": oci_reference_json(&receipt.reference),
+fn oci_pull_json(
+    py: Python<'_>,
+    receipt: &graphforge_api::PortableV2OciPullReceipt,
+) -> PyResult<serde_json::Value> {
+    let reference = oci_reference_json(py, &receipt.reference)?;
+    let report = verify_result_json(py, &receipt.report)?;
+    Ok(serde_json::json!({
+        "reference": reference,
         "destination": receipt.destination.display().to_string(),
-        "report": verify_result_json(&receipt.report),
+        "report": report,
         "signature_state": receipt.signature_state,
-    })
+    }))
 }
 
 fn sink_receipt_dict(py: Python<'_>, receipt: &ResultSinkReceipt) -> PyResult<Py<PyAny>> {
@@ -439,6 +452,7 @@ pub(crate) fn export_portable_v2(
     subset: Option<&Bound<'_, PyDict>>,
     limits: Option<&Bound<'_, PyDict>>,
     cancellation: Option<&PyCancellationToken>,
+    progress: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     forge.ensure_open()?;
     let request = PortableV2ExportRequest {
@@ -450,8 +464,25 @@ pub(crate) fn export_portable_v2(
         limits: parse_limits(py, limits)?,
     };
     let cancelled = cancellation.map(|token| token.inner.flag());
+    let progress_cb = progress.map(|cb| cb.clone().unbind());
     let result = py
-        .detach(|| forge.inner.export_portable_v2(&request, cancelled))
+        .detach(|| {
+            forge
+                .inner
+                .export_portable_v2(&request, cancelled, |event| {
+                    if let Some(callback) = progress_cb.as_ref() {
+                        let _ = Python::attach(|py| {
+                            let payload = PyDict::new(py);
+                            payload.set_item("entries_completed", event.entries_completed)?;
+                            payload.set_item("bytes_completed", event.bytes_completed)?;
+                            payload.set_item("entries_total", event.entries_total)?;
+                            payload.set_item("bytes_total", event.bytes_total)?;
+                            callback.bind(py).call1((payload,))?;
+                            Ok::<(), PyErr>(())
+                        });
+                    }
+                })
+        })
         .map_err(|error| to_portable_pyerr(py, &error))?;
     json_value_to_python(py, &export_result_json(&result))
 }
@@ -473,7 +504,7 @@ pub(crate) fn verify_portable_v2(
     let report = py
         .detach(|| graphforge_api::verify_portable_v2(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, &error))?;
-    json_value_to_python(py, &verify_result_json(&report))
+    json_value_to_python(py, &verify_result_json(py, &report)?)
 }
 
 /// Verify and atomically import a complete portable-v2 package.
@@ -528,7 +559,7 @@ pub(crate) fn publish_portable_v2_oci(
     let reference = py
         .detach(|| graphforge_api::publish_portable_v2_oci(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, &error))?;
-    json_value_to_python(py, &oci_reference_json(&reference))
+    json_value_to_python(py, &oci_reference_json(py, &reference)?)
 }
 
 /// Pull and verify a portable-v2 package from an OCI registry.
@@ -561,7 +592,7 @@ pub(crate) fn pull_portable_v2_oci(
     let receipt = py
         .detach(|| graphforge_api::pull_portable_v2_oci(&request, cancelled))
         .map_err(|error| to_portable_pyerr(py, &error))?;
-    json_value_to_python(py, &oci_pull_json(&receipt))
+    json_value_to_python(py, &oci_pull_json(py, &receipt)?)
 }
 
 /// Stream a query into an atomic Parquet result with explicit limits.

@@ -15,6 +15,60 @@ use crate::{
     GraphForge, PyCancellationToken, canonical_operation_id, py_bulk_input_to_batch, to_pyerr,
 };
 
+impl GraphForge {
+    /// Run durable import validation while releasing the GIL on `&self`.
+    pub(crate) fn run_import_validate(
+        &self,
+        py: Python<'_>,
+        session: &Mutex<Option<GraphImportSession>>,
+        cancellation: Option<&graphforge_api::CancellationToken>,
+    ) -> PyResult<ImportProgress> {
+        self.ensure_open()?;
+        let mut guard = session.lock().map_err(|_| {
+            to_pyerr(
+                py,
+                &GfError::Execution("import session lock poisoned".into()),
+            )
+        })?;
+        let session = guard.as_mut().ok_or_else(|| {
+            to_pyerr(
+                py,
+                &GfError::Lifecycle("import session handle is closed".into()),
+            )
+        })?;
+        py.detach(|| session.validate_with_cancellation(&self.inner, cancellation))
+            .map_err(|error| to_pyerr(py, &error))
+    }
+
+    /// Publish a fully staged import while releasing the GIL on `&self`.
+    pub(crate) fn run_import_commit(
+        &self,
+        py: Python<'_>,
+        session: &Mutex<Option<GraphImportSession>>,
+        cancellation: Option<&graphforge_api::CancellationToken>,
+    ) -> PyResult<String> {
+        self.ensure_open()?;
+        let mut guard = session.lock().map_err(|_| {
+            to_pyerr(
+                py,
+                &GfError::Execution("import session lock poisoned".into()),
+            )
+        })?;
+        let session = guard.as_mut().ok_or_else(|| {
+            to_pyerr(
+                py,
+                &GfError::Lifecycle("import session handle is closed".into()),
+            )
+        })?;
+        py.detach(|| {
+            session
+                .commit(&self.inner, cancellation)
+                .map(|uuid| uuid.to_string())
+        })
+        .map_err(|error| to_pyerr(py, &error))
+    }
+}
+
 fn phase_name(phase: ImportPhase) -> &'static str {
     match phase {
         ImportPhase::Open => "open",
@@ -165,17 +219,12 @@ impl PyGraphImportSession {
         py: Python<'_>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<Py<PyAny>> {
-        let parent = self.parent.clone_ref(py);
         let cancellation = cancellation.map(|token| token.inner.clone());
-        let progress = self.with_mut(py, |session| {
-            let graph = parent.bind(py).borrow();
-            if graph.closed {
-                return Err(GfError::Lifecycle(
-                    "operation on a closed GraphForge instance".into(),
-                ));
-            }
-            session.validate_with_cancellation(&graph.inner, cancellation.as_ref())
-        })?;
+        let progress = self.parent.bind(py).borrow().run_import_validate(
+            py,
+            &self.inner,
+            cancellation.as_ref(),
+        )?;
         progress_dict(py, &progress)
     }
 
@@ -186,19 +235,11 @@ impl PyGraphImportSession {
         py: Python<'_>,
         cancellation: Option<&PyCancellationToken>,
     ) -> PyResult<String> {
-        let parent = self.parent.clone_ref(py);
         let cancellation = cancellation.map(|token| token.inner.clone());
-        self.with_mut(py, |session| {
-            let graph = parent.bind(py).borrow();
-            if graph.closed {
-                return Err(GfError::Lifecycle(
-                    "operation on a closed GraphForge instance".into(),
-                ));
-            }
-            session
-                .commit(&graph.inner, cancellation.as_ref())
-                .map(|uuid| uuid.to_string())
-        })
+        self.parent
+            .bind(py)
+            .borrow()
+            .run_import_commit(py, &self.inner, cancellation.as_ref())
     }
 
     /// Abort without changing CURRENT.

@@ -9,9 +9,9 @@ use graphforge_api::{
     BulkInputKind, CancellationToken, GfError, GraphImportSession as ApiSession, ImportPhase,
     ImportProgress, ImportSessionLimits, OperationId,
 };
-use napi::bindgen_prelude::{AbortSignal, BigInt, Buffer};
+use napi::bindgen_prelude::{AbortSignal, AsyncTask, BigInt, Buffer};
+use napi::{Env, Task};
 use napi_derive::napi;
-use uuid::Uuid;
 
 use crate::error::to_napi_err;
 use crate::{Result, napi_validation};
@@ -106,7 +106,7 @@ fn parse_limits(input: Option<ImportSessionLimitsInput>) -> Result<ImportSession
 pub struct GraphImportSession {
     engine: Arc<RwLock<graphforge_api::GraphForge>>,
     closed: Arc<std::sync::atomic::AtomicBool>,
-    inner: Mutex<Option<ApiSession>>,
+    inner: Arc<Mutex<Option<ApiSession>>>,
 }
 
 impl GraphImportSession {
@@ -124,6 +124,82 @@ impl GraphImportSession {
             ))
         })?;
         f(session).map_err(|error| to_napi_err(&error))
+    }
+}
+
+pub struct ValidateImportSessionTask {
+    engine: Arc<RwLock<graphforge_api::GraphForge>>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    inner: Arc<Mutex<Option<ApiSession>>>,
+    cancellation: CancellationToken,
+}
+
+impl Task for ValidateImportSessionTask {
+    type Output = std::result::Result<ImportProgress, GfError>;
+    type JsValue = ImportProgressOutput;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(Err(GfError::Lifecycle(
+                "operation on a closed GraphForge instance".into(),
+            )));
+        }
+        let graph = self
+            .engine
+            .read()
+            .map_err(|_| napi::Error::from_reason("GraphForge lock poisoned"))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("import session lock poisoned"))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("import session handle is closed"))?;
+        Ok(session.validate_with_cancellation(&graph, Some(&self.cancellation)))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output
+            .map(progress_output)
+            .map_err(|error| crate::to_napi_deferred_err(env, &error))
+    }
+}
+
+pub struct CommitImportSessionTask {
+    engine: Arc<RwLock<graphforge_api::GraphForge>>,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    inner: Arc<Mutex<Option<ApiSession>>>,
+    cancellation: CancellationToken,
+}
+
+impl Task for CommitImportSessionTask {
+    type Output = std::result::Result<String, GfError>;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(Err(GfError::Lifecycle(
+                "operation on a closed GraphForge instance".into(),
+            )));
+        }
+        let graph = self
+            .engine
+            .read()
+            .map_err(|_| napi::Error::from_reason("GraphForge lock poisoned"))?;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("import session lock poisoned"))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("import session handle is closed"))?;
+        Ok(session
+            .commit(&graph, Some(&self.cancellation))
+            .map(|uuid| uuid.to_string()))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        output.map_err(|error| crate::to_napi_deferred_err(env, &error))
     }
 }
 
@@ -178,47 +254,33 @@ impl GraphImportSession {
 
     /// Validate and durably stage every source with optional cancellation.
     #[napi]
-    pub fn validate(&self, signal: Option<AbortSignal>) -> Result<ImportProgressOutput> {
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(to_napi_err(&GfError::Lifecycle(
-                "operation on a closed GraphForge instance".into(),
-            )));
-        }
+    pub fn validate(&self, signal: Option<AbortSignal>) -> AsyncTask<ValidateImportSessionTask> {
         let cancellation = CancellationToken::new();
         if let Some(signal) = signal {
             let cancellation = cancellation.clone();
             signal.on_abort(move || cancellation.cancel());
         }
-        let graph = self
-            .engine
-            .read()
-            .map_err(|_| to_napi_err(&GfError::Execution("GraphForge lock poisoned".into())))?;
-        let progress = self
-            .with_mut(|session| session.validate_with_cancellation(&graph, Some(&cancellation)))?;
-        Ok(progress_output(progress))
+        AsyncTask::new(ValidateImportSessionTask {
+            engine: Arc::clone(&self.engine),
+            closed: Arc::clone(&self.closed),
+            inner: Arc::clone(&self.inner),
+            cancellation,
+        })
     }
 
     /// Publish the fully staged graph as one generation.
     #[napi]
-    pub fn commit(&self, signal: Option<AbortSignal>) -> Result<String> {
-        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(to_napi_err(&GfError::Lifecycle(
-                "operation on a closed GraphForge instance".into(),
-            )));
-        }
+    pub fn commit(&self, signal: Option<AbortSignal>) -> AsyncTask<CommitImportSessionTask> {
         let cancellation = CancellationToken::new();
         if let Some(signal) = signal {
             let cancellation = cancellation.clone();
             signal.on_abort(move || cancellation.cancel());
         }
-        let graph = self
-            .engine
-            .read()
-            .map_err(|_| to_napi_err(&GfError::Execution("GraphForge lock poisoned".into())))?;
-        self.with_mut(|session| {
-            session
-                .commit(&graph, Some(&cancellation))
-                .map(|uuid| uuid.to_string())
+        AsyncTask::new(CommitImportSessionTask {
+            engine: Arc::clone(&self.engine),
+            closed: Arc::clone(&self.closed),
+            inner: Arc::clone(&self.inner),
+            cancellation,
         })
     }
 
@@ -261,7 +323,7 @@ pub(crate) fn begin_import_session(
     Ok(GraphImportSession {
         engine: Arc::clone(&engine),
         closed,
-        inner: Mutex::new(Some(session)),
+        inner: Arc::new(Mutex::new(Some(session))),
     })
 }
 
@@ -275,11 +337,7 @@ pub(crate) fn resume_import_session(
             "operation on a closed GraphForge instance".into(),
         )));
     }
-    let uuid = Uuid::parse_str(&session_uuid).map_err(|_| {
-        to_napi_err(&GfError::Validation(
-            "sessionUuid must be a canonical UUID string".into(),
-        ))
-    })?;
+    let uuid = crate::canonical_operation_id(&session_uuid)?.0;
     let graph = engine
         .read()
         .map_err(|_| to_napi_err(&GfError::Execution("GraphForge lock poisoned".into())))?;
@@ -289,7 +347,7 @@ pub(crate) fn resume_import_session(
     Ok(GraphImportSession {
         engine: Arc::clone(&engine),
         closed,
-        inner: Mutex::new(Some(session)),
+        inner: Arc::new(Mutex::new(Some(session))),
     })
 }
 

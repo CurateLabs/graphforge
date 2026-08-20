@@ -1075,16 +1075,32 @@ fn run(cli: Cli, output: &mut dyn Write) -> Result<i32, graphforge_api::GfError>
     if handle_revert_before_open(&command, &path, cli.json, output)? {
         return Ok(0);
     }
+    // Project-free portable ops must run before GraphForge::new so import/OCI
+    // do not contend with the live project-root writer lock.
+    if let Command::Portable { command } = command {
+        return match command {
+            portable_cli::PortableCommand::Verify(_)
+            | portable_cli::PortableCommand::Import(_)
+            | portable_cli::PortableCommand::PublishOci(_)
+            | portable_cli::PortableCommand::PullOci(_) => {
+                portable_cli::run_portable_without_graph(&path, command, cli.json, output)
+                    .map(|()| 0)
+            }
+            command => {
+                let path_text = path.to_str().ok_or_else(|| {
+                    graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
+                })?;
+                let graph = GraphForge::new(Some(path_text))?;
+                portable_cli::run_portable(&graph, &path, command, cli.json, output).map(|()| 0)
+            }
+        };
+    }
     let path_text = path.to_str().ok_or_else(|| {
         graphforge_api::GfError::Validation("--project must be valid UTF-8".into())
     })?;
     let mut graph = GraphForge::new(Some(path_text))?;
     let command = match command {
         Command::Export(args) => return run_export(&graph, args, cli.json, output).map(|()| 0),
-        Command::Portable { command } => {
-            return portable_cli::run_portable(&graph, &path, command, cli.json, output)
-                .map(|()| 0);
-        }
         Command::Query(args) => {
             return portable_cli::run_query(&graph, &args, cli.json, output).map(|()| 0);
         }

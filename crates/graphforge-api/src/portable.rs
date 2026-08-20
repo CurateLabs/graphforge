@@ -369,6 +369,7 @@ impl GraphForge {
         &self,
         request: &PortableV2ExportRequest,
         cancelled: Option<&AtomicBool>,
+        progress: impl FnMut(graphforge_storage::PortableV2ExportProgress),
     ) -> Result<PortableV2ExportFacadeResult, graphforge_storage::PortableV2Error> {
         let (generation, source, checkpoint) = self
             .resolve_portable_generation(&request.selection)
@@ -403,7 +404,7 @@ impl GraphForge {
             request.representation,
             request.limits,
             cancelled,
-            |_| {},
+            progress,
         )?;
         Ok(PortableV2ExportFacadeResult {
             contract: "graphforge-portable-export/2",
@@ -662,6 +663,7 @@ mod tests {
                     limits,
                 },
                 None,
+                |_| {},
             )
             .unwrap();
         let bundle_export = graph
@@ -675,6 +677,7 @@ mod tests {
                     limits,
                 },
                 None,
+                |_| {},
             )
             .unwrap();
         assert_eq!(expanded_export.package_digest, bundle_export.package_digest);
@@ -692,15 +695,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.package_digest, bundle_export.package_digest);
-        let _ = graph.preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
-            selection: PortableSelection::Current,
-            request: graphforge_storage::PortableV2SubsetRequest {
-                selector: graphforge_storage::PortableV2GraphSelector::default(),
-                closure: graphforge_storage::PortableV2SubsetClosure::InducedEdges,
-                projection: graphforge_storage::PortableV2PropertyProjection::default(),
-            },
-            limits,
-        });
+        graph
+            .preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
+                selection: PortableSelection::Current,
+                request: graphforge_storage::PortableV2SubsetRequest {
+                    selector: graphforge_storage::PortableV2GraphSelector::default(),
+                    closure: graphforge_storage::PortableV2SubsetClosure::InducedEdges,
+                    projection: graphforge_storage::PortableV2PropertyProjection::default(),
+                },
+                limits,
+            })
+            .unwrap();
     }
 
     #[test]

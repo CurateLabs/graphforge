@@ -18,9 +18,19 @@ use uuid::Uuid;
 use crate::canonical_uuid;
 
 fn map_portable(error: &PortableV2Error) -> graphforge_api::GfError {
-    // Preserve the typed portable code in the message so CLI JSON/stderr keep
-    // a stable portable class without inventing a new GfError variant.
-    graphforge_api::GfError::Validation(format!("{:?}: {error}", error.code))
+    // Preserve the typed portable code in the message and map to the matching
+    // GfError fault domain so CLI exit codes distinguish IO/execution/validation.
+    let message = format!("{:?}: {error}", error.code);
+    match error.code {
+        graphforge_api::PortableV2ErrorCode::Io => graphforge_api::GfError::Storage(message),
+        graphforge_api::PortableV2ErrorCode::Cancelled
+        | graphforge_api::PortableV2ErrorCode::LimitExceeded
+        | graphforge_api::PortableV2ErrorCode::DigestMismatch
+        | graphforge_api::PortableV2ErrorCode::ConcurrentMutation => {
+            graphforge_api::GfError::Execution(message)
+        }
+        _ => graphforge_api::GfError::Validation(message),
+    }
 }
 
 fn write_json(
@@ -196,9 +206,9 @@ fn oci_credential() -> Option<String> {
     std::env::var("GRAPHFORGE_OCI_CREDENTIAL").ok()
 }
 
-#[expect(
+#[allow(
     clippy::too_many_lines,
-    reason = "CLI dispatch keeps preview/export/verify/import/OCI in one portable command table"
+    reason = "CLI dispatch keeps preview/export in one portable command table"
 )]
 pub(crate) fn run_portable(
     graph: &GraphForge,
@@ -242,6 +252,18 @@ pub(crate) fn run_portable(
                         limits: PortableV2Limits::default(),
                     },
                     None,
+                    |progress| {
+                        if !json {
+                            let _ = writeln!(
+                                output,
+                                "export progress entries={}/{} bytes={}/{}",
+                                progress.entries_completed,
+                                progress.entries_total,
+                                progress.bytes_completed,
+                                progress.bytes_total
+                            );
+                        }
+                    },
                 )
                 .map_err(|error| map_portable(&error))?;
             if json {
@@ -254,6 +276,30 @@ pub(crate) fn run_portable(
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
+        }
+        command => {
+            return run_portable_without_graph(project_root, command, json, output);
+        }
+    }
+    Ok(())
+}
+
+/// Project-free portable operations that must not hold a live `GraphForge` lock.
+#[allow(
+    clippy::too_many_lines,
+    reason = "CLI dispatch keeps verify/import/OCI in one project-free portable table"
+)]
+pub(crate) fn run_portable_without_graph(
+    project_root: &std::path::Path,
+    command: PortableCommand,
+    json: bool,
+    output: &mut dyn Write,
+) -> Result<(), graphforge_api::GfError> {
+    match command {
+        PortableCommand::Preview(_) | PortableCommand::Export(_) => {
+            Err(graphforge_api::GfError::Validation(
+                "preview/export require an open project handle".into(),
+            ))
         }
         PortableCommand::Verify(args) => {
             let report = verify_portable_v2(
@@ -275,6 +321,7 @@ pub(crate) fn run_portable(
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
+            Ok(())
         }
         PortableCommand::Import(args) => {
             let result = GraphForge::import_portable_v2(
@@ -306,6 +353,7 @@ pub(crate) fn run_portable(
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
+            Ok(())
         }
         PortableCommand::PublishOci(args) => {
             let reference = publish_portable_v2_oci(
@@ -343,6 +391,7 @@ pub(crate) fn run_portable(
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
+            Ok(())
         }
         PortableCommand::PullOci(args) => {
             let receipt = pull_portable_v2_oci(
@@ -378,9 +427,9 @@ pub(crate) fn run_portable(
                 )
                 .map_err(|error| graphforge_api::GfError::Execution(error.to_string()))?;
             }
+            Ok(())
         }
     }
-    Ok(())
 }
 
 #[derive(Clone, Copy, ValueEnum)]

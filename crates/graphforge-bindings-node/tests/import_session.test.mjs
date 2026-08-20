@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
-import { tableToIPC, tableFromArrays } from "apache-arrow";
+import {
+  FixedSizeBinary,
+  Table,
+  Utf8,
+  tableToIPC,
+  vectorFromArray,
+} from "apache-arrow";
 import { GraphForge } from "../index.js";
 
 test("import session begin checkpoint resume abort lifecycle", () => {
@@ -15,9 +21,9 @@ test("import session begin checkpoint resume abort lifecycle", () => {
     const session = forge.beginImportSession(operation);
     assert.equal(session.status().phase, "open");
     const nodeUuid = Buffer.from(randomUUID().replace(/-/g, ""), "hex");
-    const table = tableFromArrays({
-      node_uuid: [nodeUuid],
-      label: ["Person"],
+    const table = new Table({
+      node_uuid: vectorFromArray([nodeUuid], new FixedSizeBinary(16)),
+      label: vectorFromArray(["Person"], new Utf8()),
     });
     session.appendArrow("node", Buffer.from(tableToIPC(table)));
     const progress = session.checkpoint();

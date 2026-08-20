@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use graphforge_api::{
-    CancellationToken, GfError, PortableSelection, PortableV2Error, PortableV2ErrorCode,
-    PortableV2ExportRequest, PortableV2GraphSelector, PortableV2ImportRequest, PortableV2Limits,
-    PortableV2Mode, PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
-    PortableV2OciPullFacadeRequest, PortableV2OciSignatureMaterial, PortableV2Output,
-    PortableV2ParticipantId, PortableV2PropertyProjection, PortableV2SelectionPreviewRequest,
-    PortableV2SelectionProfile, PortableV2SelectionRequest, PortableV2SubsetClosure,
-    PortableV2SubsetPlan, PortableV2SubsetPreviewRequest, PortableV2SubsetRequest,
-    PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions, ResultSinkReceipt,
+    CancellationToken, GfError, PortableSelection, PortableV2Authenticity, PortableV2Compatibility,
+    PortableV2Error, PortableV2ErrorCode, PortableV2ExportRequest, PortableV2GraphSelector,
+    PortableV2ImportRequest, PortableV2Integrity, PortableV2Limits, PortableV2Mode,
+    PortableV2OciAuthenticityPolicy, PortableV2OciPublishFacadeRequest,
+    PortableV2OciPullFacadeRequest, PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
+    PortableV2Output, PortableV2ParticipantId, PortableV2PropertyProjection,
+    PortableV2SelectionPreviewRequest, PortableV2SelectionProfile, PortableV2SelectionRequest,
+    PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetPreviewRequest,
+    PortableV2SubsetRequest, PortableVerifyRequest, ResultSinkFormat, ResultSinkOptions,
+    ResultSinkReceipt,
 };
 use napi::bindgen_prelude::{AbortSignal, AsyncTask, BigInt, Buffer};
 use napi::{Env, Task};
@@ -213,11 +215,45 @@ fn export_result_output(
         generation_uuid: result.generation_uuid.to_string(),
         package_digest: result.package_digest,
         transport_digest: result.transport_digest,
-        entry_count: BigInt::from(result.entry_count as u64),
+        entry_count: BigInt::from(u64::try_from(result.entry_count).unwrap_or(u64::MAX)),
         payload_bytes: BigInt::from(result.payload_bytes),
         representation: result.representation.to_owned(),
         selection_fingerprint: result.selection_fingerprint,
         output: result.output.display().to_string(),
+    }
+}
+
+fn integrity_token(value: PortableV2Integrity) -> String {
+    match value {
+        PortableV2Integrity::NotChecked => "not_checked".into(),
+        PortableV2Integrity::Verified => "verified".into(),
+        PortableV2Integrity::Failed => "failed".into(),
+    }
+}
+
+fn compatibility_token(value: PortableV2Compatibility) -> String {
+    match value {
+        PortableV2Compatibility::Supported => "supported".into(),
+        PortableV2Compatibility::UnsupportedFuture => "unsupported_future".into(),
+        PortableV2Compatibility::Failed => "failed".into(),
+    }
+}
+
+fn authenticity_token(value: PortableV2Authenticity) -> String {
+    match value {
+        PortableV2Authenticity::NotEvaluated => "not_evaluated".into(),
+        PortableV2Authenticity::Unsigned => "unsigned".into(),
+        PortableV2Authenticity::Verified => "verified".into(),
+        PortableV2Authenticity::Failed => "failed".into(),
+    }
+}
+
+fn signature_state_token(value: PortableV2OciSignatureState) -> String {
+    match value {
+        PortableV2OciSignatureState::Valid => "valid".into(),
+        PortableV2OciSignatureState::Invalid => "invalid".into(),
+        PortableV2OciSignatureState::Absent => "absent".into(),
+        PortableV2OciSignatureState::PolicyMismatched => "policy_mismatched".into(),
     }
 }
 
@@ -240,13 +276,9 @@ fn verify_report_output(report: graphforge_api::PortableVerifyResult) -> Portabl
         component_count: BigInt::from(report.component_count),
         entry_count: BigInt::from(report.entry_count),
         payload_bytes: BigInt::from(report.payload_bytes),
-        integrity: format!("{:?}", report.integrity).to_lowercase(),
-        compatibility: format!("{:?}", report.compatibility)
-            .replace("UnsupportedFuture", "unsupported_future")
-            .to_lowercase(),
-        authenticity: format!("{:?}", report.authenticity)
-            .replace("NotEvaluated", "not_evaluated")
-            .to_lowercase(),
+        integrity: integrity_token(report.integrity),
+        compatibility: compatibility_token(report.compatibility),
+        authenticity: authenticity_token(report.authenticity),
         transport_digest: report.transport_digest,
     }
 }
@@ -527,7 +559,7 @@ impl Task for ExportPortableTask {
             .engine
             .read()
             .map_err(|_| napi::Error::from_reason("GraphForge lock poisoned"))?;
-        Ok(graph.export_portable_v2(&self.request, Some(self.cancellation.flag())))
+        Ok(graph.export_portable_v2(&self.request, Some(self.cancellation.flag()), |_| {}))
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -679,7 +711,7 @@ impl Task for PullOciTask {
                 reference: oci_reference_output(receipt.reference),
                 destination: receipt.destination.display().to_string(),
                 report: verify_report_output(receipt.report),
-                signature_state: format!("{:?}", receipt.signature_state).to_lowercase(),
+                signature_state: signature_state_token(receipt.signature_state),
             })
             .map_err(|error| to_portable_deferred_err(env, &error))
     }
