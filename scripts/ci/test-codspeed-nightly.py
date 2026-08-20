@@ -17,6 +17,7 @@ assert triggers["schedule"] == [{"cron": "17 7 * * *"}]
 
 jobs = workflow["jobs"]
 assert workflow["permissions"]["actions"] == "read"
+assert workflow["permissions"]["contents"] == "read"
 nightly = jobs["nightly"]
 assert nightly["outputs"]["sha"] == "${{ steps.main.outputs.sha }}"
 assert nightly["outputs"]["should-run"] == "${{ steps.decision.outputs.should-run }}"
@@ -42,6 +43,7 @@ for job_name in ("benchmarks", "m6-walltime"):
     assert checkout["with"]["ref"] == "${{ needs.nightly.outputs.sha }}"
 
 memory = jobs["m6-memory-fallback"]
+assert memory["needs"] == "nightly"
 assert memory["if"] == (
     "github.event_name == 'workflow_dispatch' && needs.nightly.outputs.should-run == 'true'"
 )
