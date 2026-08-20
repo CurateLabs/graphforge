@@ -26,7 +26,7 @@ datafusion-catalog = "54"
 fs4 = "1.1"
 futures = { workspace = true }
 parquet = { workspace = true }
-sysinfo = { version = "0.37.2", default-features = false, features = ["disk"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["disk"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

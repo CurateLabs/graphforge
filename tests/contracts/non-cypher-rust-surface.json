@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "b63fefd89490c3a262ec6e869af5d97dddf7db51039b53981e68eb3c3aa2d4a7",
+  "public_method_digest": "268d0832e1fa2bc823e1aa6a0f7a5129c29f4b0b23886a6fc2927616671a3b73",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -852,6 +852,19 @@
         {
           "path": "crates/graphforge-api/src/generation_diff.rs",
           "symbol": "corrupt_and_incompatible_generations_are_typed_reload_required"
+        }
+      ]
+    },
+    "portable-v2-facade": {
+      "ids": [
+        "GraphForge.export_portable_v2",
+        "GraphForge.preview_portable_v2_graph_subset",
+        "GraphForge.preview_portable_v2_selection"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/portable.rs",
+          "symbol": "public_v2_export_preview_and_verify_agree_on_package_digest"
         }
       ]
     }
