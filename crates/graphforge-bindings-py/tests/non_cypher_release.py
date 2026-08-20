@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parents[3]
 RUST_MANIFEST = ROOT / "tests/contracts/non-cypher-rust-surface.json"
 RUST_GATE = ROOT / "scripts/ci/non-cypher-surface-gate.py"
 PYO3_SOURCE = ROOT / "crates/graphforge-bindings-py/src/lib.rs"
-EXPECTED_RUST_DIGEST = "b63fefd89490c3a262ec6e869af5d97dddf7db51039b53981e68eb3c3aa2d4a7"
-EXPECTED_RELEASE_DIGEST = "01f642d893eeb78b9493363d6c4ac5eea6744e0a970b60a9e6a456fe9892a886"
+EXPECTED_RUST_DIGEST = "268d0832e1fa2bc823e1aa6a0f7a5129c29f4b0b23886a6fc2927616671a3b73"
+EXPECTED_RELEASE_DIGEST = "9ca796af78a3ea51e4c0d404e9f74e3eb1cdd49a0b862dc15838cd9ada037877"
 
 PYTHON_ONLY_METHODS = frozenset(
     {
@@ -118,6 +118,7 @@ EVIDENCE = {
     },
     "streaming-errors-maintenance": {
         "smoke.py": ["check_execute_stream", "check_lifecycle", "check_parse_error_span"],
+        "result_sink_stream.py": ["check_result_sink_stream"],
     },
     "transaction-maintenance": {
         "transaction_parity.py": [
@@ -131,10 +132,13 @@ EVIDENCE = {
         "non_cypher_release.py": ["check_native_artifact_and_no_fallback"],
     },
     "resumable-import": {
-        "non_cypher_release.py": ["check_lifecycle_checkpoint_errors_and_reopen"],
+        "import_session_lifecycle.py": ["check_import_session_lifecycle"],
     },
     "semantic-generation-diff": {
         "generation_diff.py": ["check_generation_diff"],
+    },
+    "portable-v2-facade": {
+        "portable_v2_parity.py": ["check_portable_v2_parity"],
     },
 }
 
@@ -214,6 +218,7 @@ def _python_methods() -> set[str]:
         "PyResolvedBeliefProjection": "ResolvedBeliefProjection",
         "PyNodeHandle": "NodeHandle",
         "PyEdgeHandle": "EdgeHandle",
+        "PyGraphImportSession": "GraphImportSession",
     }
     found: set[str] = set()
     for rust_receiver, public_receiver in receiver_names.items():
@@ -243,7 +248,7 @@ def _classification_report() -> dict[str, object]:
         for group in manifest["method_evidence_groups"].values()
         for method_id in group["ids"]
     }
-    assert len(release_methods) == 207
+    assert len(release_methods) == 210
     assert _digest(release_methods) == EXPECTED_RELEASE_DIGEST
     assert set(EVIDENCE) == set(manifest["method_evidence_groups"])
 
@@ -283,7 +288,19 @@ def _classification_report() -> dict[str, object]:
             not_invoked = sorted(set(symbols) - {"main"} - invoked)
             assert not not_invoked, f"{group} evidence is not run by {filename}/main: {not_invoked}"
 
-    aliases = {"GraphForge.new": "GraphForge.__init__", "crate.version": "crate.version"}
+    aliases = {
+        "GraphForge.new": "GraphForge.__init__",
+        "crate.version": "crate.version",
+        "crate.verify_portable_v2": "GraphForge.verify_portable_v2",
+        "crate.publish_portable_v2_oci": "GraphForge.publish_portable_v2_oci",
+        "crate.pull_portable_v2_oci": "GraphForge.pull_portable_v2_oci",
+        "GraphForge.execute_to_parquet_stream_with_params": (
+            "GraphForge.execute_to_parquet_stream"
+        ),
+        "GraphForge.execute_to_arrow_ipc_stream_with_params": (
+            "GraphForge.execute_to_arrow_ipc_stream"
+        ),
+    }
     classifications: dict[str, dict[str, str]] = {}
     for rust_id in sorted(rust_methods):
         python_id = aliases.get(rust_id, rust_id)

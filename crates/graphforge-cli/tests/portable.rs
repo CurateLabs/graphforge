@@ -1,13 +1,19 @@
 //! Same-binary integration coverage for portable project interchange.
 
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-fn gf(project: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gf"))
+fn gf_bin() -> std::path::PathBuf {
+    // Bazel/cargo may provide a relative binary path; canonicalize before changing cwd.
+    fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
+}
+
+fn gf(project: &Path, args: &[&str]) -> Output {
+    Command::new(gf_bin())
         .arg("--project")
         .arg(project)
         .args(args)
@@ -15,10 +21,21 @@ fn gf(project: &std::path::Path, args: &[&str]) -> Output {
         .expect("run same-build gf binary")
 }
 
-fn gf_repo(repository: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gf"))
+fn gf_repo(repository: &Path, args: &[&str]) -> Output {
+    Command::new(gf_bin())
         .arg("--project-dir")
         .arg(repository)
+        .args(args)
+        .output()
+        .expect("run same-build gf binary")
+}
+
+fn gf_cwd(cwd: &Path, args: &[&str]) -> Output {
+    // Poison GF_REPOSITORY so accidental discovery fails deterministically.
+    let decoy = cwd.join("no-such-gf-repository");
+    Command::new(gf_bin())
+        .current_dir(cwd)
+        .env("GF_REPOSITORY", &decoy)
         .args(args)
         .output()
         .expect("run same-build gf binary")
@@ -185,4 +202,114 @@ fn initialized_repository_can_import_into_its_pristine_state() {
         "import failed: {}",
         String::from_utf8_lossy(&imported.stderr)
     );
+}
+
+#[test]
+fn portable_verify_skips_repository_discovery() {
+    let outside = TempDir::new().expect("outside repository");
+    let missing = outside.path().join("missing.gfpb");
+    let output = gf_cwd(
+        outside.path(),
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            missing.to_str().unwrap(),
+        ],
+    );
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_ascii_lowercase().contains("repository"),
+        "verify must not require repository discovery: {stderr}"
+    );
+    assert!(
+        !stderr.contains("GF_REPOSITORY"),
+        "verify must not fail as repository lookup: {stderr}"
+    );
+}
+
+#[test]
+fn portable_v2_export_verify_and_import_round_trip() {
+    let root = TempDir::new().expect("temp root");
+    let source_project = root.path().join("source");
+    fs::create_dir(&source_project).expect("source project");
+    let bundle = root.path().join("complete.gfpb");
+
+    let exported = json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "portable",
+            "export",
+            "--current",
+            "--format",
+            "bundle",
+            "--profile",
+            "complete",
+            "--output",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["representation"], "bundle");
+    let package_digest = exported["package_digest"].as_str().unwrap().to_owned();
+    assert!(package_digest.starts_with("sha256:"));
+
+    let verified = json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(verified["package_digest"], package_digest);
+
+    let destination = root.path().join("destination");
+    let imported = json(&gf(
+        &destination,
+        &[
+            "--json",
+            "portable",
+            "import",
+            "--input",
+            bundle.to_str().unwrap(),
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000744",
+        ],
+    ));
+    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["package_digest"], package_digest);
+    assert_eq!(imported["idempotent_replay"], false);
+
+    let listed = gf(&destination, &["checkpoint", "list"]);
+    assert!(
+        listed.status.success(),
+        "reopen failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+
+    // Verify is repository-independent: it must not require --project or a discovered repo.
+    let outside = TempDir::new().expect("outside repository");
+    let verified_outside = json(&gf_cwd(
+        outside.path(),
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(verified_outside["package_digest"], package_digest);
 }
