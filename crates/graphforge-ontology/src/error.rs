@@ -121,6 +121,10 @@ pub enum OntologyError {
         /// The version required by the current ontology.
         to: String,
     },
+
+    /// Multi-ontology inventory composition failed with typed diagnostics.
+    #[error(transparent)]
+    Composition(#[from] crate::composition::CompositionError),
 }
 
 #[cfg(test)]
