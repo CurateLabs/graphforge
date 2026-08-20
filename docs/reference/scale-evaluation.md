@@ -400,10 +400,12 @@ tuples in memory: it spills sorted runs and k-way merges, so peak resident
 edges are independent of total edge count. Every attempted rung reconciles
 `raw_attempts == live_unique_edges + self_loops_rejected + duplicates_rejected`,
 and the ladder stops at the **first** envelope (RSS / disk / time) violation
-rather than making an unsupported SCALE-26 claim. Host envelope is 128 GiB RSS /
-1 TiB NVMe / 24 h. Still **not** Official-track and **not** TEPS, and it does
-**not** certify one billion live edges (that is #745). SCALE-10 is CI; larger
-rungs are `make bench-g500-ladder` only.
+rather than making an unsupported SCALE-26 claim. Declared Linux cloud SKU
+capacity is 128 GiB RSS / 1 TiB NVMe with a provisional **4 h** wall-clock
+fail-safe (#745; not a laptop SLA). Still **not** Official-track and **not**
+TEPS, and it does **not** certify one billion live edges (that is #745).
+SCALE-10 is CI; larger rungs are provisioned cloud / `make bench-g500-ladder`
+only.
 
 ---
 
