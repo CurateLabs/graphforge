@@ -134,10 +134,12 @@ round trip without implicit adoption. Unknown required M9 features fail
 semantic identity. Export/import is bounded, streaming, cancellable, and
 atomic.
 
-This issue does **not** freeze where those records live in portable v2. #835 is
-the authority for proving they fit the existing authenticated versioned
-compatibility/schema component. If they cannot fit without changing v2's
-closed contract, portable v3 is required; #841 MUST NOT invent an ad hoc kind.
+Portable encoding is decided by [ADR 0022](../../adr/0022-portable-v2-multi-ontology-compatibility.md)
+(#835): records live in the authenticated compatibility component
+`graphforge-ontology-composition` with media type
+`application/vnd.graphforge.ontology-composition+json` and required capability
+`ontology-composition@1`. #841 MUST consume that contract and MUST NOT invent a
+new portable component kind.
 
 ## Worked composition and failures
 

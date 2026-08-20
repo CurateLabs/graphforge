@@ -36,9 +36,10 @@ behavior without reimplementing it.
 
 The normative types, state transitions, errors, limits, and examples are in the
 [multi-ontology contract](../book/architecture/composable-multi-ontology.md).
-That contract deliberately freezes portable semantic requirements but not a
-portable-v2 encoding. #835 must decide whether the existing authenticated
-compatibility/schema mechanism can represent them before #841 commits bytes.
+Portable representation is frozen by [ADR 0022](0022-portable-v2-multi-ontology-compatibility.md)
+(#835 closed): M9 uses the existing authenticated portable-v2 compatibility
+component `graphforge-ontology-composition` and does not invent an ad hoc kind
+or require portable v3.
 
 ## Rejected alternatives
 
