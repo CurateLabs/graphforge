@@ -124,13 +124,14 @@ deployments remain serialized to GitHub Pages.
 Builds the divan benchmark targets with `cargo codspeed` and measures them
 under CodSpeed's CPU simulation instrument on pull requests to `main`, pushes
 to `main`, and manual dispatch. It reports performance deltas against the base
-commit as evidence; it is **not** part of the required `CI Gate` aggregate, and
-its Cargo build stays a diagnostic path next to authoritative Bazel
-compilation. A sole `lex[simple_match]` Performance Analysis failure on a
-non-cypher PR is a known short-bench noise pattern — see triage in
+commit as evidence. It is not part of the `CI Gate` aggregate, but its external
+check must still be resolved for the PR to reach the required `CLEAN` state.
+Its Cargo build stays a diagnostic path next to authoritative Bazel
+compilation. Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
-M6 pure kernels use simulation; durable open/recovery/commit/GC/compaction use
-the declared Blacksmith 4-vCPU Ubuntu 24.04 walltime runner. Weekly/manual runs
+M6 pure kernels use simulation on the ordinary pinned CI runner; durable
+open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
+`codspeed-macro` ARM64 runner. Weekly/manual runs
 also retain exact-SHA replay and compaction peak-RSS artifacts while CodSpeed
 memory mode is unavailable for this project.
 
