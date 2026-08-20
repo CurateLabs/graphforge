@@ -419,6 +419,7 @@ impl GraphForge {
                 .iter()
                 .map(|uuid| *uuid.as_bytes())
                 .collect(),
+            ..Default::default()
         };
         let materialized = graphforge_storage::materialize_graph_projection(
             &self.dir,
