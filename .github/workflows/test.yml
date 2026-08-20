@@ -74,6 +74,9 @@ jobs:
       - name: Test changed-path classifier
         run: scripts/ci/test-classify-changes.sh
 
+      - name: Test CodSpeed Macro path classifier
+        run: python3 scripts/ci/test-classify-codspeed-macro.py
+
       - name: Test Repository Policy suite classifier
         run: scripts/ci/test-classify-policy-suites.sh
 
