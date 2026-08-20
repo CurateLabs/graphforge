@@ -695,7 +695,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.package_digest, bundle_export.package_digest);
-        graph
+        let subset_error = graph
             .preview_portable_v2_graph_subset(&PortableV2SubsetPreviewRequest {
                 selection: PortableSelection::Current,
                 request: graphforge_storage::PortableV2SubsetRequest {
@@ -705,7 +705,17 @@ mod tests {
                 },
                 limits,
             })
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(
+            subset_error.code,
+            graphforge_storage::PortableV2ErrorCode::Incompatible
+        );
+        assert!(
+            subset_error
+                .to_string()
+                .contains("pinned generation has no graph tree"),
+            "empty projects must fail closed before subset planning: {subset_error}"
+        );
     }
 
     #[test]
