@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "fdae85acac2ee4d1f4e7edf0c67cf03c01eebc56a3116366e308046cf0ea4c68",
+  "public_method_digest": "6d6b337134141d0c8e5034a8d174930106006df863a8c78197810b1c9f6670a5",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -51,6 +51,7 @@
       "GraphForge.resource_policy": "introspection",
       "GraphForge.export_portable": "designed-only",
       "GraphForge.import_portable": "designed-only",
+      "GraphForge.import_portable_v2": "designed-only",
       "GraphForge.preview_revert_to_checkpoint": "designed-only",
       "GraphForge.show_checkpoint": "designed-only",
       "RepositoryContext.discover": "introspection",

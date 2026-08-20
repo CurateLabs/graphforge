@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 const MANIFEST_PATH: &str = "data/graphforge-project.json";
-const RUNTIME_MAP_PATH: &str =
+pub(crate) const RUNTIME_MAP_PATH: &str =
     "data/components/compatibility/graphforge-runtime-map/runtime-generation.json";
 const BAGIT: &[u8] = b"BagIt-Version: 1.0\nTag-File-Character-Encoding: UTF-8\n";
 const BAG_INFO: &[u8] = b"Bag-Software-Agent: GraphForge portable-v2\nBagging-Date: 1970-01-01\n";
@@ -134,7 +134,9 @@ pub struct PortableV2Error {
 }
 
 impl PortableV2Error {
-    pub(crate) fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
+    /// Construct a sanitized package-level failure without a host path or payload value.
+    #[must_use]
+    pub fn new(code: PortableV2ErrorCode, detail: &'static str) -> Self {
         Self {
             code,
             entry: None,
@@ -214,35 +216,35 @@ struct ManifestFile {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeGenerationMap {
-    contract: String,
-    capabilities: Vec<RuntimeCapability>,
-    participants: Vec<RuntimeParticipant>,
-    graph_tree: Option<RuntimeGraphTree>,
+pub(crate) struct RuntimeGenerationMap {
+    pub(crate) contract: String,
+    pub(crate) capabilities: Vec<RuntimeCapability>,
+    pub(crate) participants: Vec<RuntimeParticipant>,
+    pub(crate) graph_tree: Option<RuntimeGraphTree>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeCapability {
-    capability_id: String,
-    capability_version: u32,
+pub(crate) struct RuntimeCapability {
+    pub(crate) capability_id: String,
+    pub(crate) capability_version: u32,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeParticipant {
-    participant_id: String,
-    capability_id: String,
-    capability_version: u32,
-    record_family_id: String,
-    record_version: u32,
-    encoding: String,
-    schema_fingerprint: String,
-    row_count: u64,
+pub(crate) struct RuntimeParticipant {
+    pub(crate) participant_id: String,
+    pub(crate) capability_id: String,
+    pub(crate) capability_version: u32,
+    pub(crate) record_family_id: String,
+    pub(crate) record_version: u32,
+    pub(crate) encoding: String,
+    pub(crate) schema_fingerprint: String,
+    pub(crate) row_count: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RuntimeGraphTree {
-    component_id: String,
-    inventory_participant_id: String,
+pub(crate) struct RuntimeGraphTree {
+    pub(crate) component_id: String,
+    pub(crate) inventory_participant_id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1493,7 +1495,9 @@ fn validate_runtime_map_contents(
     Ok(())
 }
 
-fn decode_runtime_map(bytes: &[u8]) -> Result<(Value, RuntimeGenerationMap), PortableV2Error> {
+pub(crate) fn decode_runtime_map(
+    bytes: &[u8],
+) -> Result<(Value, RuntimeGenerationMap), PortableV2Error> {
     let value = UniqueValue::deserialize(&mut serde_json::Deserializer::from_slice(bytes))
         .map_err(|_| {
             PortableV2Error::at(
@@ -2144,6 +2148,7 @@ impl<'de> Visitor<'de> for UniqueVisitor {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+    use uuid::Uuid;
 
     fn package() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
@@ -2240,6 +2245,25 @@ mod tests {
         assert_eq!(structure.integrity, PortableV2Integrity::NotChecked);
         assert_eq!(full.entry_count, 6);
         assert!(full.transport_digest.is_some());
+    }
+
+    #[test]
+    fn complete_import_refuses_selective_package_without_target_mutation() {
+        let root = package();
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("project");
+        let error = crate::import_complete_portable_v2(
+            root.path(),
+            &target,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &[],
+            PortableV2Limits::default(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+        assert!(!target.exists());
     }
 
     #[test]

@@ -680,6 +680,64 @@ mod tests {
         canonical_rows(&batches)
     }
 
+    fn assert_public_stream_schema(
+        stream: &GraphChangeStream,
+        change_kind: &str,
+        source: CommittedGenerationIdentity,
+        target: CommittedGenerationIdentity,
+        edge: bool,
+    ) {
+        let reader = StreamReader::try_new(Cursor::new(&stream.ipc), None).unwrap();
+        let schema = reader.schema();
+        let metadata = schema.metadata();
+        assert_eq!(
+            metadata.get("graphforge.contract").map(String::as_str),
+            Some("semantic-generation-diff/1")
+        );
+        assert_eq!(
+            metadata.get("graphforge.change_kind").map(String::as_str),
+            Some(change_kind)
+        );
+        assert_eq!(
+            metadata.get("graphforge.source_generation_uuid"),
+            Some(&source.generation_uuid.to_string())
+        );
+        assert_eq!(
+            metadata.get("graphforge.source_manifest_sha256"),
+            Some(&hex(&source.manifest_sha256))
+        );
+        assert_eq!(
+            metadata.get("graphforge.target_generation_uuid"),
+            Some(&target.generation_uuid.to_string())
+        );
+        assert_eq!(
+            metadata.get("graphforge.target_manifest_sha256"),
+            Some(&hex(&target.manifest_sha256))
+        );
+        let record_uuid = schema.field_with_name("record_uuid").unwrap();
+        assert_eq!(record_uuid.data_type(), &DataType::FixedSizeBinary(16));
+        assert!(!record_uuid.is_nullable());
+        let changed = schema.field_with_name("changed_properties").unwrap();
+        assert!(!changed.is_nullable());
+        assert_eq!(
+            changed.data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
+        );
+        if edge {
+            for name in ["source_uuid", "target_uuid"] {
+                let field = schema.field_with_name(name).unwrap();
+                assert_eq!(field.data_type(), &DataType::FixedSizeBinary(16));
+                assert!(!field.is_nullable());
+            }
+            let relation = schema.field_with_name("relationship_type").unwrap();
+            assert_eq!(relation.data_type(), &DataType::Utf8);
+            assert!(relation.is_nullable());
+        } else {
+            assert!(schema.field_with_name("labels").is_ok());
+        }
+        assert!(schema.field_with_name("properties").is_ok());
+    }
+
     fn pinned_graph(graph: &GraphForge, identity: CommittedGenerationIdentity) -> GraphForge {
         let generation = graphforge_storage::resolve_verified_generation(
             graph.resolved_generation.container_root(),
@@ -850,6 +908,115 @@ mod tests {
         );
         assert!(diff.modified_node_properties.get(&added.uuid).is_none());
         assert_ne!(diff.checkpoint_binding, [0; 32]);
+        for (stream, kind, edge) in [
+            (&diff.added_nodes, "added", false),
+            (&diff.removed_nodes, "removed", false),
+            (&diff.modified_nodes, "modified", false),
+            (&diff.added_edges, "added", true),
+            (&diff.removed_edges, "removed", true),
+            (&diff.modified_edges, "modified", true),
+        ] {
+            assert_public_stream_schema(stream, kind, source, target, edge);
+        }
+    }
+
+    #[test]
+    fn generation_ladder_and_direct_range_reconstruct_the_exact_target() {
+        let graph = GraphForge::new(None).unwrap();
+        let first = graph
+            .add_node(
+                "Person",
+                &HashMap::from([("name".into(), PropValue::Str("Ada".into()))]),
+            )
+            .unwrap();
+        let source = identity(&graph);
+        let second = graph
+            .add_node(
+                "Person",
+                &HashMap::from([("name".into(), PropValue::Str("Grace".into()))]),
+            )
+            .unwrap();
+        graph
+            .add_edge(&first, "KNOWS", &second, &HashMap::new())
+            .unwrap();
+        let middle = identity(&graph);
+        graph.execute("MATCH (n) SET n.active = true").unwrap();
+        let target = identity(&graph);
+
+        let ready = |from, to| {
+            let GenerationDiffDisposition::Ready(diff) = graph
+                .diff_committed_generations(&request(from, to))
+                .unwrap()
+            else {
+                panic!("retained generation ladder must be diffable")
+            };
+            diff
+        };
+        let source_graph = pinned_graph(&graph, source);
+        let target_graph = pinned_graph(&graph, target);
+        let expected_nodes = canonical_rows(
+            &target_graph
+                .execute_read_only(node_query())
+                .unwrap()
+                .batches,
+        );
+        let expected_edges = canonical_rows(
+            &target_graph
+                .execute_read_only(edge_query())
+                .unwrap()
+                .batches,
+        );
+        let initial_nodes = canonical_rows(
+            &source_graph
+                .execute_read_only(node_query())
+                .unwrap()
+                .batches,
+        );
+        let initial_edges = canonical_rows(
+            &source_graph
+                .execute_read_only(edge_query())
+                .unwrap()
+                .batches,
+        );
+
+        let mut ladder_nodes = initial_nodes.clone();
+        let mut ladder_edges = initial_edges.clone();
+        for diff in [ready(source, middle), ready(middle, target)] {
+            apply_streams(
+                &mut ladder_nodes,
+                &diff.removed_nodes,
+                &diff.added_nodes,
+                &diff.modified_nodes,
+            );
+            apply_streams(
+                &mut ladder_edges,
+                &diff.removed_edges,
+                &diff.added_edges,
+                &diff.modified_edges,
+            );
+        }
+        assert_eq!(ladder_nodes, expected_nodes);
+        assert_eq!(ladder_edges, expected_edges);
+
+        let direct = ready(source, target);
+        let mut direct_nodes = initial_nodes;
+        let mut direct_edges = initial_edges;
+        apply_streams(
+            &mut direct_nodes,
+            &direct.removed_nodes,
+            &direct.added_nodes,
+            &direct.modified_nodes,
+        );
+        apply_streams(
+            &mut direct_edges,
+            &direct.removed_edges,
+            &direct.added_edges,
+            &direct.modified_edges,
+        );
+        assert_eq!(direct_nodes, expected_nodes);
+        assert_eq!(direct_edges, expected_edges);
+        assert_eq!(direct.source, source);
+        assert_eq!(direct.target, target);
     }
 
     #[test]

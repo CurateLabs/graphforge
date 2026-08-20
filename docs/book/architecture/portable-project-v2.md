@@ -247,3 +247,24 @@ have distinct transport digests.
 
 Portable v1 remains available through `export_portable_project`. It is a
 separate explicit contract and is never emitted with v2 markers.
+
+## Complete-package importer
+
+`import_complete_portable_v2` accepts either local representation and invokes
+the shared full verifier before admitting the destination. Authenticated
+component entries are streamed into a transaction-owned materialization tree,
+then streamed again into one private generation with their declared lengths and
+digests rechecked. The configured copy buffer and bounded verifier indexes—not
+package payload size—bound memory. Publication uses the normal generation
+journal, fsync, validation, and atomic `CURRENT` transition, followed by a clean
+public reopen.
+
+The default operation accepts only the `complete` package class and only a new,
+empty, or pristine initialized destination. Existing project state is never
+overwritten or merged. Ontology-only, settings-only/component-selective, and
+graph-subset packages require explicit class-specific consumers; complete
+import returns a typed incompatibility without admitting the destination.
+Cancellation and corruption remove the private materialization, while a crash
+inside generation publication is handled by the normal project recovery and
+transaction-idempotency protocol. Portable v1 import remains a separate,
+explicit compatibility API.

@@ -123,6 +123,7 @@ pub use project_retention::{
 
 pub mod project_portable;
 pub mod project_portable_v2_export;
+pub mod project_portable_v2_import;
 pub use project_portable::{
     PortableExportReceipt, PortableImportReceipt, PortableProjectLimits, encode_portable_project,
     export_portable_project, import_portable_project, import_portable_project_file,
@@ -131,6 +132,10 @@ pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
     plan_complete_portable_v2, plan_selected_portable_v2,
+};
+pub use project_portable_v2_import::{
+    PortableV2ImportPhase, PortableV2ImportProgress, PortableV2ImportReceipt,
+    import_complete_portable_v2, import_complete_portable_v2_with_progress,
 };
 
 pub mod project_portable_v2;
