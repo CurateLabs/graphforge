@@ -139,6 +139,8 @@ def validate_config(seed: int, histories: int, ops: int) -> None:
     benchmark = contract.get("benchmark_evidence")
     if not isinstance(benchmark, dict) or benchmark.get("walltime_bench") != "m6_storage_io":
         raise GateError("certification must bind the #782 walltime fixture")
+    if benchmark.get("walltime_host") != "codspeed-macro-arm64":
+        raise GateError("certification walltime evidence must use CodSpeed Macro ARM64")
     claims = contract.get("forbidden_positive_claims")
     if not isinstance(claims, list) or not claims:
         raise GateError("forbidden_positive_claims are required")

@@ -2,9 +2,9 @@ name: CodSpeed
 
 # Continuous performance measurement for the Rust surface. Benchmarks are
 # divan targets built through `cargo codspeed` and measured with CodSpeed's
-# CPU simulation instrument, so results are hardware-agnostic and comparable
-# across runs. Cargo builds here are diagnostics-only: Bazel remains the
-# authoritative compile/test surface (see .github/workflows/README.md).
+# CPU simulation instrument for pure kernels and CodSpeed Macro Runners for
+# durable I/O walltime. Cargo builds here are diagnostics-only: Bazel remains
+# the authoritative compile/test surface (see .github/workflows/README.md).
 on:
   push:
     branches: ["main"]
@@ -58,8 +58,10 @@ jobs:
           run: cargo codspeed run
 
   m6-walltime:
-    name: M6 Durable Walltime (Blacksmith 4 vCPU Ubuntu 24.04)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    name: M6 Durable Walltime (CodSpeed Macro ARM64)
+    # Walltime comparisons require CodSpeed's isolated bare-metal runner.
+    # Shared hosted runners are intentionally not a fallback.
+    runs-on: codspeed-macro
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
