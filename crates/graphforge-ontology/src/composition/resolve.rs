@@ -33,7 +33,7 @@ impl CompiledComposition {
     /// fail with a sorted, bounded candidate list.
     pub fn resolve(
         &self,
-        request: ResolveRequest<'_>,
+        request: &ResolveRequest<'_>,
     ) -> Result<ResolutionOutcome, CompositionError> {
         let dlimit = DiagnosticLimit {
             max_candidates: request.max_candidates.max(1),
@@ -129,11 +129,13 @@ impl CompiledComposition {
     }
 
     /// Look up the compiled module retaining source authority for `id`.
+    #[must_use]
     pub fn module(&self, id: &OntologyModuleId) -> Option<&super::compile::CompiledModule> {
         self.modules.iter().find(|m| &m.id == id)
     }
 
     /// Effective activation mode for a module subject (exact override or default).
+    #[must_use]
     pub fn effective_module_mode(
         &self,
         module: &OntologyModuleId,
@@ -142,7 +144,6 @@ impl CompiledComposition {
         self.activation
             .iter()
             .find(|r| r.scope == super::identity::ActivationScope::Module && r.subject == subject)
-            .map(|r| r.mode)
-            .unwrap_or(self.profile_default)
+            .map_or(self.profile_default, |r| r.mode)
     }
 }

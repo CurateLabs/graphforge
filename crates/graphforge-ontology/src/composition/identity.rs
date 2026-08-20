@@ -24,6 +24,7 @@ pub struct OntologyModuleId {
 
 impl OntologyModuleId {
     /// Lexicographic sort key: UTF-8 bytes of `(ontology_id, authored_version, canonical_digest)`.
+    #[must_use]
     pub fn sort_key(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (
             self.ontology_id.as_bytes().to_vec(),
@@ -33,6 +34,7 @@ impl OntologyModuleId {
     }
 
     /// Compact display form used in activation subjects and candidate lists.
+    #[must_use]
     pub fn display_ref(&self) -> String {
         format!(
             "{}@{}#{}",
@@ -41,6 +43,7 @@ impl OntologyModuleId {
     }
 
     /// Short `local_name:Person`-style candidate label for ambiguity receipts.
+    #[must_use]
     pub fn short_name(&self) -> &str {
         self.ontology_id
             .rsplit('/')
@@ -62,6 +65,7 @@ pub struct BridgeSetId {
 
 impl BridgeSetId {
     /// Lexicographic sort key over identity fields.
+    #[must_use]
     pub fn sort_key(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (
             self.bridge_id.as_bytes().to_vec(),
@@ -89,6 +93,7 @@ pub enum SymbolKind {
 
 impl SymbolKind {
     /// Stable wire token.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Entity => "entity",
@@ -113,6 +118,7 @@ pub struct QualifiedSymbol {
 
 impl QualifiedSymbol {
     /// Stable display form `short:kind:local` / fixture-style `genealogy:entity:Person`.
+    #[must_use]
     pub fn display(&self) -> String {
         format!(
             "{}:{}:{}",
@@ -123,6 +129,7 @@ impl QualifiedSymbol {
     }
 
     /// Ambiguity candidate label `short:local` matching the contract fixture oracle.
+    #[must_use]
     pub fn ambiguity_candidate(&self) -> String {
         format!("{}:{}", self.module.short_name(), self.local_id)
     }
@@ -142,6 +149,7 @@ pub enum ActivationMode {
 
 impl ActivationMode {
     /// Stable wire token.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exploratory => "exploratory",
@@ -163,6 +171,7 @@ pub enum ActivationScope {
 
 impl ActivationScope {
     /// Stable wire token.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Module => "module",
@@ -184,6 +193,7 @@ pub struct ActivationRecord {
 
 impl ActivationRecord {
     /// Sort key: UTF-8 bytes of `(scope, subject, mode)`.
+    #[must_use]
     pub fn sort_key(&self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         (
             self.scope.as_str().as_bytes().to_vec(),

@@ -142,124 +142,10 @@ pub fn compile_inventory(
     let limits = request.limits;
     let dlimit = limits.diagnostic_limit();
     check_cancelled(request.cancelled, dlimit)?;
+    check_inventory_size(request.modules.len(), request.bridges.len(), limits, dlimit)?;
 
-    if request.modules.len() > limits.modules {
-        return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-            DiagnosticCode::ResourceModules,
-            format!(
-                "module count {} exceeds limit {}",
-                request.modules.len(),
-                limits.modules
-            ),
-            vec![format!("count={}", request.modules.len())],
-            dlimit,
-        )));
-    }
-    if request.bridges.len() > limits.bridges {
-        return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-            DiagnosticCode::ResourceBridges,
-            format!(
-                "bridge count {} exceeds limit {}",
-                request.bridges.len(),
-                limits.bridges
-            ),
-            vec![format!("count={}", request.bridges.len())],
-            dlimit,
-        )));
-    }
-
-    let mut by_id: HashMap<OntologyModuleId, &AuthoredModule> = HashMap::new();
-    for module in request.modules {
-        validate_module_identity(&module.id, dlimit)?;
-        for dep in &module.dependencies {
-            validate_module_identity(dep, dlimit)?;
-        }
-        check_cancelled(request.cancelled, dlimit)?;
-
-        if let Err(errors) = OntologyValidator::validate(&module.doc) {
-            return Err(CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InventoryMalformed,
-                format!(
-                    "module failed independent validation ({} error(s))",
-                    errors.len()
-                ),
-                &module.id,
-                dlimit,
-            )));
-        }
-
-        let computed = module_document_digest(&module.doc).map_err(|e| {
-            CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InterchangeIntegrity,
-                format!("failed to digest module document: {e}"),
-                &module.id,
-                dlimit,
-            ))
-        })?;
-        if !digests_equal(&computed, &module.id.canonical_digest) {
-            return Err(CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InterchangeIntegrity,
-                "declared canonical_digest does not match module document",
-                &module.id,
-                dlimit,
-            )));
-        }
-
-        if !module.allow_projected_identity {
-            if module.doc.ontology_id != module.id.ontology_id {
-                return Err(CompositionError::one(CompositionDiagnostic::for_module(
-                    DiagnosticCode::CollisionMetadata,
-                    "document ontology_id does not match module identity ontology_id",
-                    &module.id,
-                    dlimit,
-                )));
-            }
-            if module.doc.version != module.id.authored_version {
-                return Err(CompositionError::one(CompositionDiagnostic::for_module(
-                    DiagnosticCode::CollisionMetadata,
-                    "document version does not match module identity authored_version",
-                    &module.id,
-                    dlimit,
-                )));
-            }
-        }
-
-        if let Some(prior) = by_id.insert(module.id.clone(), module) {
-            if prior.id.canonical_digest != module.id.canonical_digest {
-                return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                    DiagnosticCode::InventoryDuplicate,
-                    "duplicate module identity with conflicting digests",
-                    vec![module.id.display_ref(), prior.id.display_ref()],
-                    dlimit,
-                )));
-            }
-            return Err(CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InventoryDuplicate,
-                "duplicate module identity in inventory",
-                &module.id,
-                dlimit,
-            )));
-        }
-    }
-
-    for bridge in request.bridges {
-        validate_bridge_identity(bridge, dlimit)?;
-    }
-    let mut bridge_seen = HashSet::new();
-    for bridge in request.bridges {
-        if !bridge_seen.insert(bridge.clone()) {
-            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                DiagnosticCode::InventoryDuplicate,
-                "duplicate bridge identity in inventory",
-                vec![format!(
-                    "{}@{}#{}",
-                    bridge.bridge_id, bridge.authored_version, bridge.canonical_digest
-                )],
-                dlimit,
-            )));
-        }
-    }
-
+    let by_id = admit_modules(request.modules, request.cancelled, dlimit)?;
+    admit_bridges(request.bridges, dlimit)?;
     check_cancelled(request.cancelled, dlimit)?;
 
     // Closure over all inventory roots (every registered module is a root).
@@ -267,90 +153,17 @@ pub fn compile_inventory(
     let (closure_ids, _edge_count) =
         compute_closure(&roots, &by_id, limits, request.cancelled, dlimit)?;
 
-    let mut compiled_modules = Vec::with_capacity(closure_ids.len());
-    let mut unqualified_index: HashMap<(SymbolKind, String), Vec<OntologyModuleId>> =
-        HashMap::new();
-    let mut qualified_index: HashMap<(String, SymbolKind, String), QualifiedSymbol> =
-        HashMap::new();
-    let mut symbol_count = 0usize;
-
-    for id in &closure_ids {
-        check_cancelled(request.cancelled, dlimit)?;
-        let authored = by_id.get(id).ok_or_else(|| {
-            CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InventoryNotFound,
-                "closure references a module absent from the inventory",
-                id,
-                dlimit,
-            ))
-        })?;
-
-        let runtime = OntologyCompiler::compile(&authored.doc).map_err(|e| {
-            CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::InventoryMalformed,
-                format!("failed to compile module runtime tables: {e}"),
-                id,
-                dlimit,
-            ))
-        })?;
-
-        let symbols = extract_symbols(id, &authored.doc);
-        symbol_count = symbol_count.saturating_add(symbols.len());
-        if symbol_count > limits.symbols {
-            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                DiagnosticCode::ResourceSymbols,
-                format!("symbol count exceeds limit {}", limits.symbols),
-                vec![format!("count={symbol_count}")],
-                dlimit,
-            )));
-        }
-
-        for symbol in &symbols {
-            let key = (symbol.kind, symbol.local_id.clone());
-            unqualified_index.entry(key).or_default().push(id.clone());
-
-            let qkey = (id.display_ref(), symbol.kind, symbol.local_id.clone());
-            if qualified_index.contains_key(&qkey) {
-                return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
-                    DiagnosticCode::CollisionQualifiedDuplicate,
-                    format!(
-                        "duplicate qualified symbol {}:{} in module",
-                        symbol.kind.as_str(),
-                        symbol.local_id
-                    ),
-                    vec![symbol.display()],
-                    dlimit,
-                )));
-            }
-            qualified_index.insert(qkey, symbol.clone());
-        }
-
-        let mut deps = authored.dependencies.clone();
-        deps.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        deps.dedup();
-
-        compiled_modules.push(CompiledModule {
-            id: id.clone(),
-            dependencies: deps,
-            doc: authored.doc.clone(),
-            runtime,
-            symbols,
-        });
-    }
-
-    for candidates in unqualified_index.values_mut() {
-        candidates.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        candidates.dedup();
-    }
+    let (compiled_modules, (unqualified_index, qualified_index)) =
+        materialize_modules(&closure_ids, &by_id, limits, request.cancelled, dlimit)?;
 
     let mut bridges = request.bridges.to_vec();
-    bridges.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    bridges.sort_by_key(BridgeSetId::sort_key);
 
     let mut activation = request.activation.to_vec();
     for record in &activation {
         require_nfc(&record.subject, "activation.subject", dlimit)?;
     }
-    activation.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    activation.sort_by_key(ActivationRecord::sort_key);
 
     let fingerprint = composition_fingerprint(&closure_ids, &bridges, &activation)?;
 
@@ -427,6 +240,261 @@ pub fn compile_legacy_single_ontology(
     })
 }
 
+fn check_inventory_size(
+    module_count: usize,
+    bridge_count: usize,
+    limits: CompositionLimits,
+    dlimit: DiagnosticLimit,
+) -> Result<(), CompositionError> {
+    if module_count > limits.modules {
+        return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::ResourceModules,
+            format!(
+                "module count {module_count} exceeds limit {}",
+                limits.modules
+            ),
+            vec![format!("count={module_count}")],
+            dlimit,
+        )));
+    }
+    if bridge_count > limits.bridges {
+        return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::ResourceBridges,
+            format!(
+                "bridge count {bridge_count} exceeds limit {}",
+                limits.bridges
+            ),
+            vec![format!("count={bridge_count}")],
+            dlimit,
+        )));
+    }
+    Ok(())
+}
+
+fn admit_modules<'a>(
+    modules: &'a [AuthoredModule],
+    cancelled: Option<&AtomicBool>,
+    dlimit: DiagnosticLimit,
+) -> Result<HashMap<OntologyModuleId, &'a AuthoredModule>, CompositionError> {
+    let mut by_id: HashMap<OntologyModuleId, &AuthoredModule> = HashMap::new();
+    for module in modules {
+        validate_module_identity(&module.id, dlimit)?;
+        for dep in &module.dependencies {
+            validate_module_identity(dep, dlimit)?;
+        }
+        check_cancelled(cancelled, dlimit)?;
+        admit_one_module(module, dlimit)?;
+        if let Some(prior) = by_id.insert(module.id.clone(), module) {
+            return Err(duplicate_module_error(&prior.id, &module.id, dlimit));
+        }
+    }
+    Ok(by_id)
+}
+
+fn admit_one_module(
+    module: &AuthoredModule,
+    dlimit: DiagnosticLimit,
+) -> Result<(), CompositionError> {
+    if let Err(errors) = OntologyValidator::validate(&module.doc) {
+        return Err(CompositionError::one(CompositionDiagnostic::for_module(
+            DiagnosticCode::InventoryMalformed,
+            format!(
+                "module failed independent validation ({} error(s))",
+                errors.len()
+            ),
+            &module.id,
+            dlimit,
+        )));
+    }
+
+    let computed = module_document_digest(&module.doc).map_err(|e| {
+        CompositionError::one(CompositionDiagnostic::for_module(
+            DiagnosticCode::InterchangeIntegrity,
+            format!("failed to digest module document: {e}"),
+            &module.id,
+            dlimit,
+        ))
+    })?;
+    if !digests_equal(&computed, &module.id.canonical_digest) {
+        return Err(CompositionError::one(CompositionDiagnostic::for_module(
+            DiagnosticCode::InterchangeIntegrity,
+            "declared canonical_digest does not match module document",
+            &module.id,
+            dlimit,
+        )));
+    }
+
+    if !module.allow_projected_identity {
+        if module.doc.ontology_id != module.id.ontology_id {
+            return Err(CompositionError::one(CompositionDiagnostic::for_module(
+                DiagnosticCode::CollisionMetadata,
+                "document ontology_id does not match module identity ontology_id",
+                &module.id,
+                dlimit,
+            )));
+        }
+        if module.doc.version != module.id.authored_version {
+            return Err(CompositionError::one(CompositionDiagnostic::for_module(
+                DiagnosticCode::CollisionMetadata,
+                "document version does not match module identity authored_version",
+                &module.id,
+                dlimit,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn duplicate_module_error(
+    prior: &OntologyModuleId,
+    module: &OntologyModuleId,
+    dlimit: DiagnosticLimit,
+) -> CompositionError {
+    if prior.canonical_digest != module.canonical_digest {
+        return CompositionError::one(CompositionDiagnostic::with_subjects(
+            DiagnosticCode::InventoryDuplicate,
+            "duplicate module identity with conflicting digests",
+            vec![module.display_ref(), prior.display_ref()],
+            dlimit,
+        ));
+    }
+    CompositionError::one(CompositionDiagnostic::for_module(
+        DiagnosticCode::InventoryDuplicate,
+        "duplicate module identity in inventory",
+        module,
+        dlimit,
+    ))
+}
+
+fn admit_bridges(bridges: &[BridgeSetId], dlimit: DiagnosticLimit) -> Result<(), CompositionError> {
+    for bridge in bridges {
+        validate_bridge_identity(bridge, dlimit)?;
+    }
+    let mut bridge_seen = HashSet::new();
+    for bridge in bridges {
+        if !bridge_seen.insert(bridge.clone()) {
+            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::InventoryDuplicate,
+                "duplicate bridge identity in inventory",
+                vec![format!(
+                    "{}@{}#{}",
+                    bridge.bridge_id, bridge.authored_version, bridge.canonical_digest
+                )],
+                dlimit,
+            )));
+        }
+    }
+    Ok(())
+}
+
+type SymbolIndexes = (
+    HashMap<(SymbolKind, String), Vec<OntologyModuleId>>,
+    HashMap<(String, SymbolKind, String), QualifiedSymbol>,
+);
+
+fn materialize_modules(
+    closure_ids: &[OntologyModuleId],
+    by_id: &HashMap<OntologyModuleId, &AuthoredModule>,
+    limits: CompositionLimits,
+    cancelled: Option<&AtomicBool>,
+    dlimit: DiagnosticLimit,
+) -> Result<(Vec<CompiledModule>, SymbolIndexes), CompositionError> {
+    let mut compiled_modules = Vec::with_capacity(closure_ids.len());
+    let mut unqualified_index: HashMap<(SymbolKind, String), Vec<OntologyModuleId>> =
+        HashMap::new();
+    let mut qualified_index: HashMap<(String, SymbolKind, String), QualifiedSymbol> =
+        HashMap::new();
+    let mut symbol_count = 0usize;
+
+    for id in closure_ids {
+        check_cancelled(cancelled, dlimit)?;
+        let authored = by_id.get(id).ok_or_else(|| {
+            CompositionError::one(CompositionDiagnostic::for_module(
+                DiagnosticCode::InventoryNotFound,
+                "closure references a module absent from the inventory",
+                id,
+                dlimit,
+            ))
+        })?;
+
+        let runtime = OntologyCompiler::compile(&authored.doc).map_err(|e| {
+            CompositionError::one(CompositionDiagnostic::for_module(
+                DiagnosticCode::InventoryMalformed,
+                format!("failed to compile module runtime tables: {e}"),
+                id,
+                dlimit,
+            ))
+        })?;
+
+        let symbols = extract_symbols(id, &authored.doc);
+        symbol_count = symbol_count.saturating_add(symbols.len());
+        if symbol_count > limits.symbols {
+            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::ResourceSymbols,
+                format!("symbol count exceeds limit {}", limits.symbols),
+                vec![format!("count={symbol_count}")],
+                dlimit,
+            )));
+        }
+
+        index_module_symbols(
+            id,
+            &symbols,
+            &mut unqualified_index,
+            &mut qualified_index,
+            dlimit,
+        )?;
+
+        let mut deps = authored.dependencies.clone();
+        deps.sort_by_key(OntologyModuleId::sort_key);
+        deps.dedup();
+
+        compiled_modules.push(CompiledModule {
+            id: id.clone(),
+            dependencies: deps,
+            doc: authored.doc.clone(),
+            runtime,
+            symbols,
+        });
+    }
+
+    for candidates in unqualified_index.values_mut() {
+        candidates.sort_by_key(OntologyModuleId::sort_key);
+        candidates.dedup();
+    }
+
+    Ok((compiled_modules, (unqualified_index, qualified_index)))
+}
+
+fn index_module_symbols(
+    id: &OntologyModuleId,
+    symbols: &[QualifiedSymbol],
+    unqualified_index: &mut HashMap<(SymbolKind, String), Vec<OntologyModuleId>>,
+    qualified_index: &mut HashMap<(String, SymbolKind, String), QualifiedSymbol>,
+    dlimit: DiagnosticLimit,
+) -> Result<(), CompositionError> {
+    for symbol in symbols {
+        let key = (symbol.kind, symbol.local_id.clone());
+        unqualified_index.entry(key).or_default().push(id.clone());
+
+        let qkey = (id.display_ref(), symbol.kind, symbol.local_id.clone());
+        if qualified_index.contains_key(&qkey) {
+            return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
+                DiagnosticCode::CollisionQualifiedDuplicate,
+                format!(
+                    "duplicate qualified symbol {}:{} in module",
+                    symbol.kind.as_str(),
+                    symbol.local_id
+                ),
+                vec![symbol.display()],
+                dlimit,
+            )));
+        }
+        qualified_index.insert(qkey, symbol.clone());
+    }
+    Ok(())
+}
+
 fn composition_fingerprint(
     modules: &[OntologyModuleId],
     bridges: &[BridgeSetId],
@@ -435,11 +503,11 @@ fn composition_fingerprint(
     let dlimit = DiagnosticLimit::default();
 
     let mut modules_sorted = modules.to_vec();
-    modules_sorted.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    modules_sorted.sort_by_key(OntologyModuleId::sort_key);
     let mut bridges_sorted = bridges.to_vec();
-    bridges_sorted.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    bridges_sorted.sort_by_key(BridgeSetId::sort_key);
     let mut activation_sorted = activation.to_vec();
-    activation_sorted.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    activation_sorted.sort_by_key(ActivationRecord::sort_key);
 
     let mut module_values = Vec::with_capacity(modules_sorted.len());
     for m in &modules_sorted {
@@ -496,35 +564,26 @@ fn composition_fingerprint(
     })
 }
 
-fn compute_closure(
-    roots: &[OntologyModuleId],
-    by_id: &HashMap<OntologyModuleId, &AuthoredModule>,
+struct ClosureWalk<'a> {
+    by_id: &'a HashMap<OntologyModuleId, &'a AuthoredModule>,
     limits: CompositionLimits,
-    cancelled: Option<&AtomicBool>,
+    cancelled: Option<&'a AtomicBool>,
     dlimit: DiagnosticLimit,
-) -> Result<(Vec<OntologyModuleId>, usize), CompositionError> {
-    let mut visiting = HashSet::new();
-    let mut visited = HashSet::new();
-    let mut edge_count = 0usize;
-    let mut stack_path: Vec<OntologyModuleId> = Vec::new();
+    visiting: HashSet<OntologyModuleId>,
+    visited: HashSet<OntologyModuleId>,
+    edge_count: usize,
+    stack_path: Vec<OntologyModuleId>,
+}
 
-    fn dfs(
-        id: &OntologyModuleId,
-        by_id: &HashMap<OntologyModuleId, &AuthoredModule>,
-        limits: CompositionLimits,
-        cancelled: Option<&AtomicBool>,
-        dlimit: DiagnosticLimit,
-        visiting: &mut HashSet<OntologyModuleId>,
-        visited: &mut HashSet<OntologyModuleId>,
-        edge_count: &mut usize,
-        stack_path: &mut Vec<OntologyModuleId>,
-    ) -> Result<(), CompositionError> {
-        check_cancelled(cancelled, dlimit)?;
-        if visited.contains(id) {
+impl ClosureWalk<'_> {
+    fn visit(&mut self, id: &OntologyModuleId) -> Result<(), CompositionError> {
+        check_cancelled(self.cancelled, self.dlimit)?;
+        if self.visited.contains(id) {
             return Ok(());
         }
-        if !visiting.insert(id.clone()) {
-            let mut subjects: Vec<String> = stack_path
+        if !self.visiting.insert(id.clone()) {
+            let mut subjects: Vec<String> = self
+                .stack_path
                 .iter()
                 .map(OntologyModuleId::display_ref)
                 .collect();
@@ -533,31 +592,36 @@ fn compute_closure(
                 DiagnosticCode::DependencyCycle,
                 "module dependency cycle is forbidden",
                 subjects,
-                dlimit,
+                self.dlimit,
             )));
         }
-        stack_path.push(id.clone());
+        self.stack_path.push(id.clone());
 
-        let module = by_id.get(id).ok_or_else(|| {
-            CompositionError::one(CompositionDiagnostic::for_module(
-                DiagnosticCode::DependencyMissing,
-                "required module dependency is missing from the inventory",
-                id,
-                dlimit,
-            ))
-        })?;
+        let dependencies = self
+            .by_id
+            .get(id)
+            .ok_or_else(|| {
+                CompositionError::one(CompositionDiagnostic::for_module(
+                    DiagnosticCode::DependencyMissing,
+                    "required module dependency is missing from the inventory",
+                    id,
+                    self.dlimit,
+                ))
+            })?
+            .dependencies
+            .clone();
 
-        for dep in &module.dependencies {
-            *edge_count = edge_count.saturating_add(1);
-            if *edge_count > limits.dependency_edges {
+        for dep in &dependencies {
+            self.edge_count = self.edge_count.saturating_add(1);
+            if self.edge_count > self.limits.dependency_edges {
                 return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
                     DiagnosticCode::ResourceDiagnostics,
                     format!(
                         "dependency edge count exceeds limit {}",
-                        limits.dependency_edges
+                        self.limits.dependency_edges
                     ),
-                    vec![format!("count={edge_count}")],
-                    dlimit,
+                    vec![format!("count={}", self.edge_count)],
+                    self.dlimit,
                 )));
             }
             if dep == id {
@@ -565,53 +629,61 @@ fn compute_closure(
                     DiagnosticCode::DependencyCycle,
                     "module lists itself as a dependency",
                     id,
-                    dlimit,
+                    self.dlimit,
                 )));
             }
-            if !by_id.contains_key(dep) {
+            if !self.by_id.contains_key(dep) {
                 return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
                     DiagnosticCode::DependencyMissing,
                     "required exact dependency is not present in the inventory",
                     vec![id.display_ref(), dep.display_ref()],
-                    dlimit,
+                    self.dlimit,
                 )));
             }
-            dfs(
-                dep, by_id, limits, cancelled, dlimit, visiting, visited, edge_count, stack_path,
-            )?;
+            self.visit(dep)?;
         }
 
-        visiting.remove(id);
-        stack_path.pop();
-        visited.insert(id.clone());
+        self.visiting.remove(id);
+        self.stack_path.pop();
+        self.visited.insert(id.clone());
         Ok(())
     }
+}
+
+fn compute_closure(
+    roots: &[OntologyModuleId],
+    by_id: &HashMap<OntologyModuleId, &AuthoredModule>,
+    limits: CompositionLimits,
+    cancelled: Option<&AtomicBool>,
+    dlimit: DiagnosticLimit,
+) -> Result<(Vec<OntologyModuleId>, usize), CompositionError> {
+    let mut walk = ClosureWalk {
+        by_id,
+        limits,
+        cancelled,
+        dlimit,
+        visiting: HashSet::new(),
+        visited: HashSet::new(),
+        edge_count: 0,
+        stack_path: Vec::new(),
+    };
 
     for root in roots {
-        dfs(
-            root,
-            by_id,
-            limits,
-            cancelled,
-            dlimit,
-            &mut visiting,
-            &mut visited,
-            &mut edge_count,
-            &mut stack_path,
-        )?;
+        walk.visit(root)?;
     }
 
-    if visited.len() > limits.modules {
+    if walk.visited.len() > limits.modules {
         return Err(CompositionError::one(CompositionDiagnostic::with_subjects(
             DiagnosticCode::ResourceModules,
             format!("closure module count exceeds limit {}", limits.modules),
-            vec![format!("count={}", visited.len())],
+            vec![format!("count={}", walk.visited.len())],
             dlimit,
         )));
     }
 
-    let mut ordered: Vec<OntologyModuleId> = visited.into_iter().collect();
-    ordered.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    let edge_count = walk.edge_count;
+    let mut ordered: Vec<OntologyModuleId> = walk.visited.into_iter().collect();
+    ordered.sort_by_key(OntologyModuleId::sort_key);
     Ok((ordered, edge_count))
 }
 

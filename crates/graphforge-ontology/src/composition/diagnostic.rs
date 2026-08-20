@@ -23,6 +23,7 @@ pub enum CompositionPhase {
 
 impl CompositionPhase {
     /// Stable wire token.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inventory => "inventory",
@@ -74,10 +75,11 @@ pub enum DiagnosticCode {
 
 impl DiagnosticCode {
     /// Stable `phase.code` wire token.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InventoryDuplicate => "inventory.duplicate",
-            Self::InventoryNotFound => "inventory.not_found",
+            Self::InventoryNotFound | Self::InventoryMalformed => "inventory.not_found",
             Self::DependencyMissing => "dependency.missing",
             Self::DependencyCycle => "dependency.cycle",
             Self::CollisionQualifiedDuplicate => "collision.qualified_duplicate",
@@ -89,13 +91,13 @@ impl DiagnosticCode {
             Self::ResolutionAmbiguous => "resolution.ambiguous",
             Self::ResolutionNotFound => "resolution.not_found",
             Self::ResolutionKindMismatch => "resolution.kind_mismatch",
-            Self::InventoryMalformed => "inventory.not_found",
             Self::InterchangeIntegrity => "interchange.integrity",
             Self::CollisionMetadata => "collision.metadata",
         }
     }
 
     /// Phase for this code.
+    #[must_use]
     pub fn phase(self) -> CompositionPhase {
         match self {
             Self::InventoryDuplicate
@@ -212,6 +214,7 @@ pub struct CompositionError {
 
 impl CompositionError {
     /// Single-diagnostic error.
+    #[must_use]
     pub fn one(diagnostic: CompositionDiagnostic) -> Self {
         Self {
             diagnostics: vec![diagnostic],
@@ -219,6 +222,7 @@ impl CompositionError {
     }
 
     /// Primary (first) stable code, when present.
+    #[must_use]
     pub fn code(&self) -> Option<DiagnosticCode> {
         self.diagnostics.first().map(|d| d.code)
     }

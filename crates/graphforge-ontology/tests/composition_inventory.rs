@@ -150,7 +150,7 @@ fn qualified_resolution_succeeds_and_unqualified_ambiguity_fails() {
     .unwrap();
 
     let qualified = composition
-        .resolve(ResolveRequest {
+        .resolve(&ResolveRequest {
             module: Some(&genealogy.id),
             kind: SymbolKind::Entity,
             local_id: "Person",
@@ -161,7 +161,7 @@ fn qualified_resolution_succeeds_and_unqualified_ambiguity_fails() {
     assert!(!qualified.via_unqualified);
 
     let err = composition
-        .resolve(ResolveRequest {
+        .resolve(&ResolveRequest {
             module: None,
             kind: SymbolKind::Entity,
             local_id: "Person",
@@ -199,7 +199,7 @@ fn unique_unqualified_resolution_succeeds() {
     })
     .unwrap();
     let outcome = composition
-        .resolve(ResolveRequest {
+        .resolve(&ResolveRequest {
             module: None,
             kind: SymbolKind::Entity,
             local_id: "Study",
@@ -398,7 +398,7 @@ fn legacy_single_ontology_projection_preserves_behavior() {
     assert_eq!(legacy.modules.len(), 1);
     assert_eq!(legacy.modules[0].id.ontology_id, "core");
     let outcome = legacy
-        .resolve(ResolveRequest {
+        .resolve(&ResolveRequest {
             module: None,
             kind: SymbolKind::Entity,
             local_id: "Person",
