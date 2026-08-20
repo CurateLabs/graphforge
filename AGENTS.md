@@ -104,3 +104,50 @@ Claims require authoritative evidence appropriate to the claim:
 - for release publication claims, the SHA-bound evidence required by the release process.
 
 Do not invent SHA-citation rituals for ordinary issue close. Explicit maintainer instructions override this file.
+
+## Cursor Cloud specific instructions
+
+Environment layer split: the Cloud Agent snapshot already contains the system
+toolchains (Rust via `rust-toolchain.toml`, Python 3.12, Node, `pnpm`), plus
+`uv` and `bazelisk` installed into `/usr/local/cargo/bin` (on `PATH`), and warm
+Cargo/`target/` + built native bindings. The startup update script only
+refreshes project dependencies:
+
+```bash
+uv sync --all-extras --inexact
+pnpm install
+```
+
+Standard lint/test/build/run commands are in the `Makefile` and `package.json`;
+prefer those. Non-obvious caveats for this environment:
+
+- **`uv sync` prunes the native wheel.** Plain `uv sync --all-extras` (what
+  `make install` runs) uninstalls the maturin-built `graphforge` package. Use
+  `uv sync --all-extras --inexact` to preserve it, or rebuild afterwards. The
+  editable rebuild is instant when `target/` is warm.
+- **Rebuild native bindings after changing Rust.** The update script does not
+  build. After pulling Rust changes, rebuild before Python/Node tests:
+  `uv run maturin develop --release -m crates/graphforge-bindings-py/Cargo.toml`
+  (Python) and `pnpm --filter @curatelabs/graphforge build` (Node `*.node`).
+- **Durable disk-backed projects cannot run on this VM.** GraphForge's native
+  filesystem admission only accepts an `ext4`/`xfs`/`btrfs` volume **at the
+  process root**, but Cloud Agent VMs are rooted on `overlay` (with `/tmp` also
+  overlay). So `GraphForge(path)`, `gf --project <dir> ...`, and any durable
+  write fail with `GF_UNSUPPORTED_FILESYSTEM` (`cause=filesystem_class_unproven`).
+  A loopback `ext4` submount does **not** help: the strict cross-volume check
+  rejects crossing the mount boundary (`cause=ancestor_cross_volume`), and a
+  chroot rooted on the ext4 fails the `sysinfo` device probe
+  (`cause=device_identity_unknown`). Treat these as an environment limitation,
+  not a code bug.
+- **In-memory works fully.** `GraphForge()` (no path) runs the real engine
+  (Cypher parse → IR → rel → exec → Arrow) entirely in memory and is the way to
+  exercise/demonstrate core functionality here.
+- **Test impact.** In-memory suites pass (e.g. `cargo test -p graphforge-cypher`,
+  `node --test crates/graphforge-bindings-node/tests/smoke.test.mjs`,
+  `uv run pytest tests/unit` → 103 passed / 3 failed, the 3 being durable-project
+  tests hitting the constraint above). `node --test` over the full binding suite
+  hangs on `provider-workflow.test.mjs` because a failed durable test leaves its
+  in-process mock-server `Worker` open; the root cause is the same filesystem
+  constraint, so run it in isolation with `--test-timeout` if needed.
+- **Bazel authority.** `bazelisk` is on `PATH` (Bazel 9.2.0 pinned by
+  `.bazelversion`); `make bazel-test` / `make pre-push-fast` work.
