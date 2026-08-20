@@ -145,6 +145,7 @@ Authoritative machine-readable map: `tools/bazel/parity/migration_target_map.jso
 | `graphforge-ontology` | `graphforge_ontology` | `lib` | `crates/graphforge-ontology/src/lib.rs` | `//crates/graphforge-ontology:graphforge_ontology` | `mapped` | #10; unit tests `//crates/graphforge-ontology:graphforge_ontology_test` |
 | `graphforge-ontology` | `integration` | `integration-test` | `crates/graphforge-ontology/tests/integration.rs` | `//crates/graphforge-ontology:integration` | `mapped` | #8 |
 | `graphforge-ontology` | `composition_inventory` | `integration-test` | `crates/graphforge-ontology/tests/composition_inventory.rs` | `//crates/graphforge-ontology:composition_inventory` | `mapped` | #836 |
+| `graphforge-ontology` | `inventory_crud` | `integration-test` | `crates/graphforge-ontology/tests/inventory_crud.rs` | `//crates/graphforge-ontology:inventory_crud` | `mapped` | #837 |
 | `graphforge-plan` | `graphforge_plan` | `lib` | `crates/graphforge-plan/src/lib.rs` | `//crates/graphforge-plan:graphforge_plan` | `mapped` | #10; unit tests `//crates/graphforge-plan:graphforge_plan_test` |
 | `graphforge-provenance` | `graphforge_provenance` | `lib` | `crates/graphforge-provenance/src/lib.rs` | `//crates/graphforge-provenance:graphforge_provenance` | `mapped` | #10; unit tests `//crates/graphforge-provenance:graphforge_provenance_test` |
 | `graphforge-rel` | `graphforge_rel` | `lib` | `crates/graphforge-rel/src/lib.rs` | `//crates/graphforge-rel:graphforge_rel` | `mapped` | #10; unit tests `//crates/graphforge-rel:graphforge_rel_test` |
