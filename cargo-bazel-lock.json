@@ -1,5 +1,5 @@
 {
-  "checksum": "d95c605f3013146097898d5e18d4997403c1bb75f3ac55ed55466bdd70067a8b",
+  "checksum": "8344f5bca6430dd3440251bab3df0639e6adacd122c7b8972cbb06e7680705f9",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -13463,6 +13463,10 @@
             {
               "id": "thiserror 2.0.20",
               "target": "thiserror"
+            },
+            {
+              "id": "unicode-normalization 0.1.25",
+              "target": "unicode_normalization"
             }
           ],
           "selects": {}
