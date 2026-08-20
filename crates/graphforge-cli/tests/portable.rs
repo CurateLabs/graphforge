@@ -186,3 +186,69 @@ fn initialized_repository_can_import_into_its_pristine_state() {
         String::from_utf8_lossy(&imported.stderr)
     );
 }
+
+#[test]
+fn portable_v2_export_verify_and_import_round_trip() {
+    let root = TempDir::new().expect("temp root");
+    let source_project = root.path().join("source");
+    fs::create_dir(&source_project).expect("source project");
+    let bundle = root.path().join("complete.gfpb");
+
+    let exported = json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "portable",
+            "export",
+            "--current",
+            "--format",
+            "bundle",
+            "--profile",
+            "complete",
+            "--output",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(exported["contract"], "graphforge-portable-export/2");
+    assert_eq!(exported["representation"], "bundle");
+    let package_digest = exported["package_digest"].as_str().unwrap().to_owned();
+    assert!(package_digest.starts_with("sha256:"));
+
+    let verified = json(&gf(
+        &source_project,
+        &[
+            "--json",
+            "portable",
+            "verify",
+            "--mode",
+            "full",
+            "--input",
+            bundle.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(verified["package_digest"], package_digest);
+
+    let destination = root.path().join("destination");
+    let imported = json(&gf(
+        &destination,
+        &[
+            "--json",
+            "portable",
+            "import",
+            "--input",
+            bundle.to_str().unwrap(),
+            "--idempotency-key",
+            "00000000-0000-0000-0000-000000000744",
+        ],
+    ));
+    assert_eq!(imported["contract"], "graphforge-portable-import/2");
+    assert_eq!(imported["package_digest"], package_digest);
+    assert_eq!(imported["idempotent_replay"], false);
+
+    let listed = gf(&destination, &["checkpoint", "list"]);
+    assert!(
+        listed.status.success(),
+        "reopen failed: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+}
