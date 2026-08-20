@@ -8,6 +8,9 @@ pub const MODULE_DIGEST_DOMAIN: &[u8] = b"graphforge-ontology-module/1\0";
 /// Domain separation prefix for composition fingerprints (ADR 0023).
 pub const COMPOSITION_DOMAIN: &[u8] = b"graphforge-ontology-composition/1\0";
 
+/// Domain separation prefix for bridge-set document digests (#838).
+pub const BRIDGE_DIGEST_DOMAIN: &[u8] = b"graphforge-ontology-bridge/1\0";
+
 /// Hex-encoded SHA-256 digest length.
 pub const DIGEST_HEX_LEN: usize = 64;
 
@@ -71,6 +74,15 @@ impl BridgeSetId {
             self.bridge_id.as_bytes().to_vec(),
             self.authored_version.as_bytes().to_vec(),
             self.canonical_digest.as_bytes().to_vec(),
+        )
+    }
+
+    /// Compact display form used in subjects and candidate lists.
+    #[must_use]
+    pub fn display_ref(&self) -> String {
+        format!(
+            "{}@{}#{}",
+            self.bridge_id, self.authored_version, self.canonical_digest
         )
     }
 }

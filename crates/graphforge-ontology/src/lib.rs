@@ -4,8 +4,10 @@
 //!
 //! - phase-10 ontology load/compile/persist/migrate ✓
 //! - M9 #836 — deterministic inventory composition (`composition` module) ✓
+//! - M9 #838 — provenance-bearing bridge sets (`bridge` module) ✓
 #![forbid(unsafe_code)]
 
+pub mod bridge;
 pub mod compiler;
 pub mod composition;
 pub mod error;
@@ -19,12 +21,19 @@ pub mod schemas;
 pub mod spatial;
 pub mod validator;
 
+pub use bridge::{
+    BridgeAssertion, BridgeDeletePreview, BridgeDocument, BridgeExportFormat,
+    BridgeImportFormatHint, BridgeInspect, BridgeInventory, BridgeLifecycleStatus, BridgeListEntry,
+    BridgeMutationReceipt, BridgePredicate, BridgeProvenance, BridgeSelector, BridgeSnapshot,
+    BridgeUpdatePreview, MappingConfidence, MappingMethod, ModuleSymbolTable, SharedSurfaceHint,
+    validate_bridge_document,
+};
 pub use compiler::{OntologyCompiler, OntologyRuntime, PropertyOwnerKind};
 pub use composition::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompiledComposition, CompiledModule, CompositionDiagnostic, CompositionError,
     CompositionLimits, DiagnosticCode, InventoryCompileRequest, OntologyModuleId, QualifiedSymbol,
-    ResolutionOutcome, ResolveRequest, SymbolKind, compile_inventory,
+    ResolutionOutcome, ResolveRequest, SymbolKind, bridge_document_digest, compile_inventory,
     compile_legacy_single_ontology, module_document_digest,
 };
 pub use error::{OntologyError, OntologyValidationError, ValidationErrorKind};

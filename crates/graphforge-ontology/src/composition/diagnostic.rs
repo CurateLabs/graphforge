@@ -13,6 +13,8 @@ pub enum CompositionPhase {
     Dependency,
     /// Qualified symbol collisions across modules.
     Collision,
+    /// Bridge-set endpoint / conflict / provenance problems.
+    Bridge,
     /// Resource / limit exhaustion.
     Resource,
     /// Lifecycle cancellation.
@@ -29,6 +31,7 @@ impl CompositionPhase {
             Self::Inventory => "inventory",
             Self::Dependency => "dependency",
             Self::Collision => "collision",
+            Self::Bridge => "bridge",
             Self::Resource => "resource",
             Self::Lifecycle => "lifecycle",
             Self::Resolution => "resolution",
@@ -71,6 +74,18 @@ pub enum DiagnosticCode {
     InterchangeIntegrity,
     /// Identifier is not NFC-normalized or digest is malformed.
     CollisionMetadata,
+    /// Preview/adopt/update/delete against a stale inventory generation.
+    InventoryGenerationConflict,
+    /// Module or bridge still referenced by dependants / activation / bridges.
+    DependencyInUse,
+    /// Lifecycle state machine rejects the requested transition.
+    LifecycleInvalidTransition,
+    /// Bridge assertion endpoint is absent from the known module inventory.
+    BridgeEndpointMissing,
+    /// Bridge assertions contradict each other (minimal attributable set).
+    BridgeContradiction,
+    /// Authoritative mapping lacks required provenance.
+    BridgeProvenanceMissing,
 }
 
 impl DiagnosticCode {
@@ -80,14 +95,20 @@ impl DiagnosticCode {
         match self {
             Self::InventoryDuplicate => "inventory.duplicate",
             Self::InventoryNotFound | Self::InventoryMalformed => "inventory.not_found",
+            Self::InventoryGenerationConflict => "inventory.generation_conflict",
             Self::DependencyMissing => "dependency.missing",
             Self::DependencyCycle => "dependency.cycle",
+            Self::DependencyInUse => "dependency.in_use",
             Self::CollisionQualifiedDuplicate => "collision.qualified_duplicate",
+            Self::BridgeEndpointMissing => "bridge.endpoint_missing",
+            Self::BridgeContradiction => "bridge.contradiction",
+            Self::BridgeProvenanceMissing => "bridge.provenance_missing",
             Self::ResourceModules => "resource.modules",
             Self::ResourceBridges => "resource.bridges",
             Self::ResourceSymbols => "resource.symbols",
             Self::ResourceDiagnostics => "resource.diagnostics",
             Self::LifecycleCancelled => "lifecycle.cancelled",
+            Self::LifecycleInvalidTransition => "lifecycle.invalid_transition",
             Self::ResolutionAmbiguous => "resolution.ambiguous",
             Self::ResolutionNotFound => "resolution.not_found",
             Self::ResolutionKindMismatch => "resolution.kind_mismatch",
@@ -103,15 +124,23 @@ impl DiagnosticCode {
             Self::InventoryDuplicate
             | Self::InventoryNotFound
             | Self::InventoryMalformed
+            | Self::InventoryGenerationConflict
             | Self::InterchangeIntegrity
             | Self::CollisionMetadata => CompositionPhase::Inventory,
-            Self::DependencyMissing | Self::DependencyCycle => CompositionPhase::Dependency,
+            Self::DependencyMissing | Self::DependencyCycle | Self::DependencyInUse => {
+                CompositionPhase::Dependency
+            }
             Self::CollisionQualifiedDuplicate => CompositionPhase::Collision,
+            Self::BridgeEndpointMissing
+            | Self::BridgeContradiction
+            | Self::BridgeProvenanceMissing => CompositionPhase::Bridge,
             Self::ResourceModules
             | Self::ResourceBridges
             | Self::ResourceSymbols
             | Self::ResourceDiagnostics => CompositionPhase::Resource,
-            Self::LifecycleCancelled => CompositionPhase::Lifecycle,
+            Self::LifecycleCancelled | Self::LifecycleInvalidTransition => {
+                CompositionPhase::Lifecycle
+            }
             Self::ResolutionAmbiguous | Self::ResolutionNotFound | Self::ResolutionKindMismatch => {
                 CompositionPhase::Resolution
             }
