@@ -1,5 +1,5 @@
 {
-  "checksum": "6edd5e9a17c49ff1baaf9208971a90d892b41375b000bfdfc6af14461f243c35",
+  "checksum": "115b96cc2f71a9518e66a493357c5a36fabfa8911d60c734b577612bd5a8ceb8",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -4732,7 +4732,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ]
@@ -6888,7 +6888,7 @@
               "target": "url"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             },
             {
@@ -7246,7 +7246,7 @@
               "target": "tokio"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -8429,7 +8429,7 @@
               "target": "sha2"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -10630,7 +10630,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ]
@@ -12629,7 +12629,7 @@
               "target": "tokio"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -12739,7 +12739,7 @@
               "target": "arrow"
             },
             {
-              "id": "napi 3.12.0",
+              "id": "napi 3.12.1",
               "target": "napi"
             },
             {
@@ -12747,7 +12747,7 @@
               "target": "serde_json"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -12763,7 +12763,7 @@
         "proc_macro_deps": {
           "common": [
             {
-              "id": "napi-derive 3.6.2",
+              "id": "napi-derive 3.6.3",
               "target": "napi_derive"
             }
           ],
@@ -12784,7 +12784,7 @@
         "deps": {
           "common": [
             {
-              "id": "napi-build 2.4.0",
+              "id": "napi-build 2.4.1",
               "target": "napi_build"
             }
           ],
@@ -12827,7 +12827,7 @@
               "target": "serde_json"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -12897,7 +12897,7 @@
               "target": "serde_json"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -12986,7 +12986,7 @@
               "target": "thiserror"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -13394,7 +13394,7 @@
               "target": "unicode_normalization"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -13574,7 +13574,7 @@
               "target": "thiserror"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -13833,7 +13833,7 @@
               "target": "ureq"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -17973,14 +17973,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "napi 3.12.0": {
+    "napi 3.12.1": {
       "name": "napi",
-      "version": "3.12.0",
+      "version": "3.12.1",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi/3.12.0/download",
-          "sha256": "6f71d6bc097c4a6eb853c3f24991ab8c9f50f57d1f719e305175541482217e36"
+          "url": "https://static.crates.io/crates/napi/3.12.1/download",
+          "sha256": "459197f1592f4c3dbbf9c1b13f5a4599a343e4ef66b96bc340e2a518b36a6662"
         }
       },
       "targets": [
@@ -18075,7 +18075,14 @@
               "target": "tokio"
             }
           ],
-          "selects": {}
+          "selects": {
+            "cfg(unix)": [
+              {
+                "id": "libc 0.2.189",
+                "target": "libc"
+              }
+            ]
+          }
         },
         "extra_deps": {
           "common": [
@@ -18084,7 +18091,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.12.0"
+        "version": "3.12.1"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -18099,7 +18106,7 @@
         "deps": {
           "common": [
             {
-              "id": "napi-build 2.4.0",
+              "id": "napi-build 2.4.1",
               "target": "napi_build"
             }
           ],
@@ -18112,14 +18119,14 @@
       ],
       "license_file": null
     },
-    "napi-build 2.4.0": {
+    "napi-build 2.4.1": {
       "name": "napi-build",
-      "version": "2.4.0",
+      "version": "2.4.1",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-build/2.4.0/download",
-          "sha256": "5282704fbe8d49b0cf8b08e3f33233416a528658f205c7e5ace63b582de0b11c"
+          "url": "https://static.crates.io/crates/napi-build/2.4.1/download",
+          "sha256": "60fdf9b392c50e7c4170fa633bd909490ed7835cea4c046776d1a4dd8d2ae0ab"
         }
       },
       "targets": [
@@ -18142,7 +18149,7 @@
           "**"
         ],
         "edition": "2021",
-        "version": "2.4.0"
+        "version": "2.4.1"
       },
       "license": "MIT",
       "license_ids": [
@@ -18150,14 +18157,14 @@
       ],
       "license_file": null
     },
-    "napi-derive 3.6.2": {
+    "napi-derive 3.6.3": {
       "name": "napi-derive",
-      "version": "3.6.2",
+      "version": "3.6.3",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-derive/3.6.2/download",
-          "sha256": "6d9002b2940f0184444754546e0fcd15182f56948e6f381968b019d549387c42"
+          "url": "https://static.crates.io/crates/napi-derive/3.6.3/download",
+          "sha256": "0fa55ea69990c90b888e9e77044410e304ce7f35de599dc6d0b5c1923d2e59af"
         }
       },
       "targets": [
@@ -18199,7 +18206,7 @@
               "target": "ctor"
             },
             {
-              "id": "napi-derive-backend 6.1.1",
+              "id": "napi-derive-backend 6.1.2",
               "target": "napi_derive_backend"
             },
             {
@@ -18218,7 +18225,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "3.6.2"
+        "version": "3.6.3"
       },
       "license": "MIT",
       "license_ids": [
@@ -18226,14 +18233,14 @@
       ],
       "license_file": null
     },
-    "napi-derive-backend 6.1.1": {
+    "napi-derive-backend 6.1.2": {
       "name": "napi-derive-backend",
-      "version": "6.1.1",
+      "version": "6.1.2",
       "package_url": "https://github.com/napi-rs/napi-rs",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/napi-derive-backend/6.1.1/download",
-          "sha256": "d60b5d773ad46c698c8cc2cd9fde0b283d39cbb7f71c04bee633c7bdba4423bd"
+          "url": "https://static.crates.io/crates/napi-derive-backend/6.1.2/download",
+          "sha256": "df4056ac7c18e4438ccf0edaed4340ca0d269278c8ec19284f7b23cb039fd0ae"
         }
       },
       "targets": [
@@ -18289,7 +18296,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "6.1.1"
+        "version": "6.1.2"
       },
       "license": "MIT",
       "license_ids": [
@@ -22958,7 +22965,7 @@
                 "alias": "libc_errno"
               },
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ],
@@ -25866,7 +25873,7 @@
               "target": "typetag"
             },
             {
-              "id": "uuid 1.24.0",
+              "id": "uuid 1.24.1",
               "target": "uuid"
             }
           ],
@@ -26494,13 +26501,13 @@
           "selects": {
             "aarch64-apple-darwin": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ],
             "aarch64-unknown-linux-gnu": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ],
@@ -26512,31 +26519,31 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ],
             "wasm32-wasip1": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ],
             "x86_64-pc-windows-msvc": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ],
             "x86_64-unknown-linux-gnu": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ],
             "x86_64-unknown-nixos-gnu": [
               {
-                "id": "getrandom 0.4.2",
+                "id": "getrandom 0.3.4",
                 "target": "getrandom"
               }
             ]
@@ -26592,7 +26599,7 @@
             ],
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ]
@@ -29259,14 +29266,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "uuid 1.24.0": {
+    "uuid 1.24.1": {
       "name": "uuid",
-      "version": "1.24.0",
+      "version": "1.24.1",
       "package_url": "https://github.com/uuid-rs/uuid",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/uuid/1.24.0/download",
-          "sha256": "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+          "url": "https://static.crates.io/crates/uuid/1.24.1/download",
+          "sha256": "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
         }
       },
       "targets": [
@@ -29359,7 +29366,7 @@
           }
         },
         "edition": "2021",
-        "version": "1.24.0"
+        "version": "1.24.1"
       },
       "license": "Apache-2.0 OR MIT",
       "license_ids": [
@@ -30555,7 +30562,7 @@
           "selects": {
             "cfg(windows)": [
               {
-                "id": "windows-sys 0.61.2",
+                "id": "windows-sys 0.59.0",
                 "target": "windows_sys"
               }
             ]
@@ -31496,6 +31503,7 @@
             "Win32_System",
             "Win32_System_Console",
             "Win32_System_IO",
+            "Win32_System_SystemInformation",
             "Win32_UI",
             "Win32_UI_Input",
             "Win32_UI_Input_KeyboardAndMouse",
@@ -31572,7 +31580,6 @@
             "Win32_System_IO",
             "Win32_System_Memory",
             "Win32_System_Pipes",
-            "Win32_System_SystemInformation",
             "Win32_System_SystemServices",
             "Win32_System_Threading",
             "Win32_System_WindowsProgramming",
@@ -34167,9 +34174,9 @@
     "futures 0.3.32",
     "libc 0.2.189",
     "named-lock 0.4.1",
-    "napi 3.12.0",
-    "napi-build 2.4.0",
-    "napi-derive 3.6.2",
+    "napi 3.12.1",
+    "napi-build 2.4.1",
+    "napi-derive 3.6.3",
     "parquet 58.3.0",
     "pyo3 0.28.3",
     "rayon 1.12.0",
@@ -34185,7 +34192,7 @@
     "tokio 1.53.1",
     "unicode-normalization 0.1.25",
     "ureq 3.4.0",
-    "uuid 1.24.0",
+    "uuid 1.24.1",
     "windows-sys 0.61.2"
   ],
   "direct_dev_deps": [

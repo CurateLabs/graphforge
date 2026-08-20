@@ -5123,7 +5123,7 @@ Used by:
 - unicode-segmentation 1.13.2
 - unicode-width 0.2.2
 - url 2.5.8
-- uuid 1.24.0
+- uuid 1.24.1
 - version_check 0.9.5
 - wasi 0.11.1+wasi-snapshot-preview1
 - wasip2 1.0.3+wasi-0.2.9
@@ -8478,10 +8478,10 @@ SOFTWARE.
 
 Used by:
 - libm 0.2.16
-- napi 3.12.0
-- napi-build 2.4.0
-- napi-derive 3.6.2
-- napi-derive-backend 6.1.1
+- napi 3.12.1
+- napi-build 2.4.1
+- napi-derive 3.6.3
+- napi-derive-backend 6.1.2
 - napi-sys 3.3.0
 - ownedbytes 0.9.0
 - tantivy-bitpacker 0.10.0
