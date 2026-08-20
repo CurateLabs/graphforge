@@ -172,6 +172,35 @@ positive, negative, and structural conformance vectors.
 
 ## Complete-package exporter
 
+### Selection planning
+
+`graphforge_storage::preview_portable_v2_selection` resolves a selection before
+any destination is created. Profiles are `Complete`, `OntologyOnly`,
+`DataComponents`, `Artifacts`, `Settings`, and `Custom`. Custom selectors use
+the pair `(capability_id, record_family_id)`; runtime catalog IDs, display names,
+and host paths are not accepted as identity. Graph data selection always means
+the whole committed graph component. Fine-grained row or subgraph selection is
+a separate contract.
+
+The preview lists included and excluded stable identities, inclusion reasons,
+row counts, exact committed participant byte estimates, required capabilities,
+redaction reason codes, package class, and a canonical SHA-256 selection
+fingerprint. It never includes setting values or source paths. Results are
+canonically ordered and bounded by the portable component and byte limits.
+Duplicate, missing, or ambiguous custom identities fail rather than guessing.
+
+Schema authority is added as visible required closure for ontology, graph, and
+artifact selections. Strict mode refuses that widening unless the caller
+selected the authority explicitly. Portable settings use a closed recursive
+JSON scan and fail closed on secret-bearing keys or absolute host paths; neither
+the preview nor its typed failure echoes the rejected value.
+
+`graphforge_storage::plan_selected_portable_v2` consumes that immutable preview
+for both expanded and bundle output. It filters the authenticated runtime map,
+participants, capabilities, and graph-tree placement to the same selected
+closure. The durable receipt repeats the selection fingerprint, so callers can
+prove that the reviewed preview is the plan the writer used.
+
 `graphforge_storage::plan_complete_portable_v2` resolves a current generation
 or checkpoint before planning and retains that generation's lease. The plan is
 a bounded index of portable paths, lengths, digests, and source identities; it
