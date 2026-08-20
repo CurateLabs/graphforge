@@ -160,6 +160,19 @@ pub use project_portable_v2_subset::{
     plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
 };
 
+pub mod project_portable_v2_oci;
+pub use project_portable_v2_oci::{
+    HttpOciRegistry, MemoryOciRegistry, OCI_ARTIFACT_TYPE, OCI_CONFIG_MEDIA_TYPE,
+    OCI_LAYER_MEDIA_TYPE, OCI_MANIFEST_MEDIA_TYPE, OCI_SIGNATURE_ARTIFACT_TYPE,
+    OCI_SIGNATURE_CONFIG_MEDIA_TYPE, PortableV2OciAuthenticityPolicy, PortableV2OciPhase,
+    PortableV2OciProgress, PortableV2OciPublishRequest, PortableV2OciPullReceipt,
+    PortableV2OciPullRequest, PortableV2OciReference, PortableV2OciRegistry,
+    PortableV2OciSignatureMaterial, PortableV2OciSignatureState,
+    evaluate_portable_v2_oci_signature_state, publish_portable_v2_oci,
+    publish_portable_v2_oci_with_progress, pull_portable_v2_oci,
+    pull_portable_v2_oci_with_progress,
+};
+
 pub mod workspace_participants;
 pub use workspace_participants::{
     GraphDirectedness, MAX_WORKSPACE_REPOSITORY_SNAPSHOT_BYTES,
