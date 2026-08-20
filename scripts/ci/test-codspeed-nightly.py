@@ -43,8 +43,7 @@ for job_name in ("benchmarks", "m6-walltime"):
 
 memory = jobs["m6-memory-fallback"]
 assert memory["if"] == (
-    "github.event_name == 'workflow_dispatch' && "
-    "needs.nightly.outputs.should-run == 'true'"
+    "github.event_name == 'workflow_dispatch' && needs.nightly.outputs.should-run == 'true'"
 )
 
 print("CodSpeed nightly-only policy verified")
