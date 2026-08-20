@@ -71,6 +71,12 @@ pub enum DiagnosticCode {
     InterchangeIntegrity,
     /// Identifier is not NFC-normalized or digest is malformed.
     CollisionMetadata,
+    /// Mutation preview/source generation does not match current authority.
+    InventoryGenerationConflict,
+    /// Module cannot be removed because dependants still reference it.
+    DependencyInUse,
+    /// Lifecycle transition is not allowed from the current status.
+    LifecycleInvalidTransition,
 }
 
 impl DiagnosticCode {
@@ -93,6 +99,9 @@ impl DiagnosticCode {
             Self::ResolutionKindMismatch => "resolution.kind_mismatch",
             Self::InterchangeIntegrity => "interchange.integrity",
             Self::CollisionMetadata => "collision.metadata",
+            Self::InventoryGenerationConflict => "inventory.generation_conflict",
+            Self::DependencyInUse => "dependency.in_use",
+            Self::LifecycleInvalidTransition => "lifecycle.invalid_transition",
         }
     }
 
@@ -104,14 +113,19 @@ impl DiagnosticCode {
             | Self::InventoryNotFound
             | Self::InventoryMalformed
             | Self::InterchangeIntegrity
-            | Self::CollisionMetadata => CompositionPhase::Inventory,
-            Self::DependencyMissing | Self::DependencyCycle => CompositionPhase::Dependency,
+            | Self::CollisionMetadata
+            | Self::InventoryGenerationConflict => CompositionPhase::Inventory,
+            Self::DependencyMissing | Self::DependencyCycle | Self::DependencyInUse => {
+                CompositionPhase::Dependency
+            }
             Self::CollisionQualifiedDuplicate => CompositionPhase::Collision,
             Self::ResourceModules
             | Self::ResourceBridges
             | Self::ResourceSymbols
             | Self::ResourceDiagnostics => CompositionPhase::Resource,
-            Self::LifecycleCancelled => CompositionPhase::Lifecycle,
+            Self::LifecycleCancelled | Self::LifecycleInvalidTransition => {
+                CompositionPhase::Lifecycle
+            }
             Self::ResolutionAmbiguous | Self::ResolutionNotFound | Self::ResolutionKindMismatch => {
                 CompositionPhase::Resolution
             }
