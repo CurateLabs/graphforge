@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     PortableV2Error, PortableV2ErrorCode, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
-    ResolvedProjectGeneration, project_portable_v2::canonical_json, verify_portable_v2,
+    PortableV2SelectionPlan, PortableV2SelectionProfile, PortableV2SelectionRequest,
+    ResolvedProjectGeneration, preview_portable_v2_selection, project_portable_v2::canonical_json,
+    verify_portable_v2,
 };
 
 type ExportError = PortableV2Error;
@@ -74,6 +76,8 @@ pub struct PortableV2ExportPlan {
     manifest: Vec<u8>,
     package_digest: [u8; 32],
     payload_bytes: u64,
+    selection_fingerprint: String,
+    package_class: PortableV2PackageClass,
 }
 impl std::fmt::Debug for PortableV2ExportPlan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -82,6 +86,7 @@ impl std::fmt::Debug for PortableV2ExportPlan {
             .field("entry_count", &self.files.len())
             .field("package_digest", &hex(self.package_digest))
             .field("payload_bytes", &self.payload_bytes)
+            .field("selection_fingerprint", &self.selection_fingerprint)
             .finish_non_exhaustive()
     }
 }
@@ -100,13 +105,15 @@ pub struct PortableV2ExportReceipt {
     pub payload_bytes: u64,
     /// Published representation.
     pub output: PortableV2Output,
+    /// Fingerprint of the immutable content-free selection preview used by the writer.
+    pub selection_fingerprint: String,
 }
 
 #[derive(Serialize)]
 struct Manifest<'a> {
     format: &'static str,
     package_digest: String,
-    package_class: &'static str,
+    package_class: &'a str,
     source_generation: Source,
     selection: Selection<'a>,
     components: &'a [Component],
@@ -179,15 +186,33 @@ struct RuntimeGraphTree {
 }
 
 /// Plan every canonical participant of one already-pinned generation.
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps one auditable sequence from pinned inventory through semantic identity"
-)]
 pub fn plan_complete_portable_v2(
     g: &ResolvedProjectGeneration,
     limits: PortableV2ExportLimits,
 ) -> Result<PortableV2ExportPlan, ExportError> {
+    let selection = preview_portable_v2_selection(
+        g,
+        &PortableV2SelectionRequest {
+            profile: PortableV2SelectionProfile::Complete,
+            strict: false,
+        },
+        limits,
+    )?;
+    plan_selected_portable_v2(g, &selection, limits)
+}
+
+/// Materialize one immutable selection preview into a representation-independent export plan.
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps one auditable sequence from immutable selection through semantic identity"
+)]
+pub fn plan_selected_portable_v2(
+    g: &ResolvedProjectGeneration,
+    selection: &PortableV2SelectionPlan,
+    limits: PortableV2ExportLimits,
+) -> Result<PortableV2ExportPlan, ExportError> {
     validate_limits(limits)?;
+    crate::project_portable_v2_selection::validate_selection_plan(g, selection)?;
     g.validate_complete_participant_inventory()?;
     let mut files = Vec::new();
     let mut components = Vec::new();
@@ -196,8 +221,14 @@ pub fn plan_complete_portable_v2(
     let mut graph_inventory_participant = None;
     let mut total = 0;
     for d in g.participant_descriptors()? {
+        if !selection.includes(&d.capability_id, &d.record_family_id) {
+            continue;
+        }
         let id = portable_participant_id(&d.capability_id, &d.record_family_id);
-        let kind = kind(&d.capability_id, &d.record_family_id);
+        let kind = crate::project_portable_v2_selection::component_kind(
+            &d.capability_id,
+            &d.record_family_id,
+        );
         let source = g.participant_path(&d.capability_id, &d.record_family_id)?;
         let path = format!(
             "data/components/{kind}/{id}/participant.{}",
@@ -234,7 +265,9 @@ pub fn plan_complete_portable_v2(
             files: vec![cf],
         });
     }
-    if let Some(inv) = g.graph_files_inventory()? {
+    if selection.include_graph_tree
+        && let Some(inv) = g.graph_files_inventory()?
+    {
         let id = "graph-tree".to_owned();
         let mut owned = Vec::new();
         for e in inv.files {
@@ -274,6 +307,11 @@ pub fn plan_complete_portable_v2(
         capabilities: g
             .capabilities()
             .into_iter()
+            .filter(|capability| {
+                selection
+                    .required_capabilities
+                    .contains(&capability.capability_id)
+            })
             .map(|capability| RuntimeCapability {
                 capability_id: capability.capability_id,
                 capability_version: capability.capability_version,
@@ -334,12 +372,21 @@ pub fn plan_complete_portable_v2(
     let draft = Manifest {
         format: "graphforge-project/2",
         package_digest: String::new(),
-        package_class: "complete",
+        package_class: &selection.package_class,
         source_generation: source(),
         selection: Selection {
             roots: &roots,
-            omissions: vec![],
-            redactions: vec![],
+            omissions: selection
+                .excluded
+                .iter()
+                .map(|entry| {
+                    portable_participant_id(
+                        &entry.identity.capability_id,
+                        &entry.identity.record_family_id,
+                    )
+                })
+                .collect(),
+            redactions: selection.redactions.clone(),
         },
         components: &components,
         requirements: Requirements {
@@ -362,12 +409,21 @@ pub fn plan_complete_portable_v2(
     let final_manifest = Manifest {
         format: "graphforge-project/2",
         package_digest: format!("sha256:{}", hex(package_digest)),
-        package_class: "complete",
+        package_class: &selection.package_class,
         source_generation: source(),
         selection: Selection {
             roots: &roots,
-            omissions: vec![],
-            redactions: vec![],
+            omissions: selection
+                .excluded
+                .iter()
+                .map(|entry| {
+                    portable_participant_id(
+                        &entry.identity.capability_id,
+                        &entry.identity.record_family_id,
+                    )
+                })
+                .collect(),
+            redactions: selection.redactions.clone(),
         },
         components: &components,
         requirements: Requirements {
@@ -390,6 +446,8 @@ pub fn plan_complete_portable_v2(
         manifest,
         package_digest,
         payload_bytes: total,
+        selection_fingerprint: selection.selection_fingerprint.clone(),
+        package_class: package_class(&selection.package_class)?,
     })
 }
 
@@ -439,7 +497,7 @@ pub fn export_complete_portable_v2(
     let verified = verify_portable_v2(&stage, PortableV2Mode::Full, limits, Some(cancelled))
         .inspect_err(|_| remove(&stage))?;
     let expected_transport = format!("sha256:{}", hex(digest));
-    if verified.package_class != PortableV2PackageClass::Complete
+    if verified.package_class != plan.package_class
         || verified.package_digest != format!("sha256:{}", hex(plan.package_digest))
     {
         remove(&stage);
@@ -471,7 +529,20 @@ pub fn export_complete_portable_v2(
             .map_err(|_| limit("verified entry count exceeds platform capacity"))?,
         payload_bytes: plan.payload_bytes,
         output,
+        selection_fingerprint: plan.selection_fingerprint.clone(),
     })
+}
+
+fn package_class(value: &str) -> Result<PortableV2PackageClass, ExportError> {
+    match value {
+        "complete" => Ok(PortableV2PackageClass::Complete),
+        "ontology-only" => Ok(PortableV2PackageClass::OntologyOnly),
+        "component-selective" => Ok(PortableV2PackageClass::ComponentSelective),
+        _ => Err(err(
+            "GF_INCOMPATIBLE",
+            "unsupported selection package class",
+        )),
+    }
 }
 
 fn expanded(
@@ -1101,17 +1172,6 @@ fn portable_participant_id(capability: &str, family: &str) -> String {
     digest.update(family.as_bytes());
     format!("{prefix}-{}", &hex(digest.finalize().into())[..12])
 }
-fn kind(c: &str, f: &str) -> &'static str {
-    if c == "graph" {
-        "graph-data"
-    } else if f.contains("ontology") {
-        "ontology"
-    } else if f.contains("schema") {
-        "schema"
-    } else {
-        "settings"
-    }
-}
 fn extension(e: &str) -> &str {
     match e {
         "json" => "json",
@@ -1284,6 +1344,177 @@ fn storage(e: impl std::fmt::Display) -> ExportError {
 mod tests {
     use super::*;
     use crate::open_or_initialize_project;
+
+    #[test]
+    fn selection_preview_is_stable_exact_and_consumed_by_export_plan() {
+        let project = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(project.path()).unwrap();
+        let limits = PortableV2ExportLimits::default();
+        let request = PortableV2SelectionRequest {
+            profile: PortableV2SelectionProfile::Settings,
+            strict: true,
+        };
+        let first = preview_portable_v2_selection(&generation, &request, limits).unwrap();
+        let second = preview_portable_v2_selection(&generation, &request, limits).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.package_class, "component-selective");
+        assert!(first.selection_fingerprint.starts_with("sha256:"));
+        assert!(first.included.iter().all(|entry| entry.kind == "settings"));
+
+        let plan = plan_selected_portable_v2(&generation, &first, limits).unwrap();
+        assert_eq!(plan.selection_fingerprint, first.selection_fingerprint);
+        assert_eq!(
+            plan.package_class,
+            PortableV2PackageClass::ComponentSelective
+        );
+        let out = tempfile::tempdir().unwrap();
+        let receipt = export_complete_portable_v2(
+            &plan,
+            out.path().join("settings.gfpb"),
+            PortableV2Output::Bundle,
+            limits,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(receipt.selection_fingerprint, first.selection_fingerprint);
+        let mut tampered = first.clone();
+        tampered.redactions.push("invented-after-preview".into());
+        let error = plan_selected_portable_v2(&generation, &tampered, limits).unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+
+        let exact = PortableV2SelectionRequest {
+            profile: PortableV2SelectionProfile::Custom(
+                first
+                    .included
+                    .iter()
+                    .map(|entry| entry.identity.clone())
+                    .collect(),
+            ),
+            strict: true,
+        };
+        let exact = preview_portable_v2_selection(&generation, &exact, limits).unwrap();
+        assert_eq!(
+            first
+                .included
+                .iter()
+                .map(|entry| &entry.identity)
+                .collect::<Vec<_>>(),
+            exact
+                .included
+                .iter()
+                .map(|entry| &entry.identity)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn selection_rejects_ambiguous_identity_and_resource_overflow() {
+        let project = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(project.path()).unwrap();
+        let limits = PortableV2ExportLimits::default();
+        let complete = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        let identity = complete.included[0].identity.clone();
+        let error = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Custom(vec![identity.clone(), identity]),
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+        let error = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            PortableV2ExportLimits {
+                max_components: 1,
+                ..limits
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+    }
+
+    #[test]
+    fn selection_rejects_secret_and_host_path_settings_without_leaking_values() {
+        for unsafe_settings in [
+            serde_json::json!({"api_token": "do-not-export"}),
+            serde_json::json!({"cache": {"directory": "/Users/example/private"}}),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let generation = open_or_initialize_project(project.path()).unwrap();
+            let path = generation
+                .participant_path(
+                    crate::WORKSPACE_CAPABILITY_ID,
+                    crate::WORKSPACE_CONFIGURATION_FAMILY,
+                )
+                .unwrap();
+            fs::write(path, serde_json::to_vec(&unsafe_settings).unwrap()).unwrap();
+            let error = preview_portable_v2_selection(
+                &generation,
+                &PortableV2SelectionRequest {
+                    profile: PortableV2SelectionProfile::Settings,
+                    strict: true,
+                },
+                PortableV2ExportLimits::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+            assert!(!error.to_string().contains("do-not-export"));
+            assert!(!error.to_string().contains("/Users/example"));
+        }
+    }
+
+    #[test]
+    fn built_in_profiles_select_only_their_canonical_component_classes() {
+        let project = tempfile::tempdir().unwrap();
+        let generation = open_or_initialize_project(project.path()).unwrap();
+        let limits = PortableV2ExportLimits::default();
+        for (profile, allowed) in [
+            (
+                PortableV2SelectionProfile::OntologyOnly,
+                &["ontology", "schema"][..],
+            ),
+            (
+                PortableV2SelectionProfile::DataComponents,
+                &["graph-data", "schema"][..],
+            ),
+            (
+                PortableV2SelectionProfile::Artifacts,
+                &["derived-artifact", "schema"][..],
+            ),
+            (PortableV2SelectionProfile::Settings, &["settings"][..]),
+        ] {
+            let plan = preview_portable_v2_selection(
+                &generation,
+                &PortableV2SelectionRequest {
+                    profile,
+                    strict: false,
+                },
+                limits,
+            )
+            .unwrap();
+            assert!(
+                plan.included
+                    .iter()
+                    .all(|entry| allowed.contains(&entry.kind.as_str()))
+            );
+            plan_selected_portable_v2(&generation, &plan, limits).unwrap();
+        }
+    }
 
     #[test]
     fn expanded_and_bundle_share_semantic_identity_and_are_deterministic() {

@@ -129,7 +129,7 @@ pub use project_portable::{
 pub use project_portable_v2_export::{
     PortableV2ExportLimits, PortableV2ExportPlan, PortableV2ExportProgress,
     PortableV2ExportReceipt, PortableV2Output, export_complete_portable_v2,
-    plan_complete_portable_v2,
+    plan_complete_portable_v2, plan_selected_portable_v2,
 };
 
 pub mod project_portable_v2;
@@ -138,6 +138,13 @@ pub use project_portable_v2::{
     PortableV2Integrity, PortableV2Limits, PortableV2Mode, PortableV2PackageClass,
     PortableV2Report, PortableV2Representation, materialize_verified_portable_v2,
     verify_portable_v2,
+};
+
+mod project_portable_v2_selection;
+pub use project_portable_v2_selection::{
+    PortableV2ParticipantId, PortableV2SelectionEntry, PortableV2SelectionPlan,
+    PortableV2SelectionProfile, PortableV2SelectionReason, PortableV2SelectionRequest,
+    preview_portable_v2_selection,
 };
 
 pub mod workspace_participants;
