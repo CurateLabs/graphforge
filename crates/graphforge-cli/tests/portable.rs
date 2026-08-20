@@ -6,8 +6,13 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+fn gf_bin() -> std::path::PathBuf {
+    // Bazel/cargo may provide a relative binary path; canonicalize before changing cwd.
+    fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
+}
+
 fn gf(project: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gf"))
+    Command::new(gf_bin())
         .arg("--project")
         .arg(project)
         .args(args)
@@ -16,7 +21,7 @@ fn gf(project: &std::path::Path, args: &[&str]) -> Output {
 }
 
 fn gf_repo(repository: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gf"))
+    Command::new(gf_bin())
         .arg("--project-dir")
         .arg(repository)
         .args(args)
@@ -191,7 +196,7 @@ fn initialized_repository_can_import_into_its_pristine_state() {
 fn portable_verify_skips_repository_discovery() {
     let outside = TempDir::new().expect("outside repository");
     let missing = outside.path().join("missing.gfpb");
-    let output = Command::new(env!("CARGO_BIN_EXE_gf"))
+    let output = Command::new(gf_bin())
         .current_dir(outside.path())
         .args([
             "--json",
@@ -283,7 +288,7 @@ fn portable_v2_export_verify_and_import_round_trip() {
 
     // Verify is repository-independent: it must not require --project or a discovered repo.
     let outside = TempDir::new().expect("outside repository");
-    let verified_outside = Command::new(env!("CARGO_BIN_EXE_gf"))
+    let verified_outside = Command::new(gf_bin())
         .current_dir(outside.path())
         .args([
             "--json",

@@ -54,7 +54,7 @@ def check_portable_v2_parity() -> None:
                 progress=object(),
             )
             raise AssertionError("expected non-callable progress to fail closed")
-        except Exception as error:  # noqa: BLE001 - binding surfaces ValidationError/TypeError
+        except Exception as error:
             assert "callable" in str(error).lower()
 
         verified = gf.GraphForge.verify_portable_v2(str(bundle), mode="full")
