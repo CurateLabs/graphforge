@@ -294,8 +294,12 @@ def _classification_report() -> dict[str, object]:
         "crate.verify_portable_v2": "GraphForge.verify_portable_v2",
         "crate.publish_portable_v2_oci": "GraphForge.publish_portable_v2_oci",
         "crate.pull_portable_v2_oci": "GraphForge.pull_portable_v2_oci",
-        "GraphForge.execute_to_parquet_stream_with_params": "GraphForge.execute_to_parquet_stream",
-        "GraphForge.execute_to_arrow_ipc_stream_with_params": "GraphForge.execute_to_arrow_ipc_stream",
+        "GraphForge.execute_to_parquet_stream_with_params": (
+            "GraphForge.execute_to_parquet_stream"
+        ),
+        "GraphForge.execute_to_arrow_ipc_stream_with_params": (
+            "GraphForge.execute_to_arrow_ipc_stream"
+        ),
     }
     classifications: dict[str, dict[str, str]] = {}
     for rust_id in sorted(rust_methods):
