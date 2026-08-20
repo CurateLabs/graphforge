@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 107,
+  "cargo_target_count": 108,
   "targets": [
     {
       "package": "graphforge-api",
@@ -922,6 +922,16 @@
       "bazel_label": "//crates/graphforge-ontology:integration",
       "exception_id": null,
       "notes": "#8"
+    },
+    {
+      "package": "graphforge-ontology",
+      "target": "composition_inventory",
+      "class": "integration-test",
+      "source": "crates/graphforge-ontology/tests/composition_inventory.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ontology:composition_inventory",
+      "exception_id": null,
+      "notes": "#836"
     },
     {
       "package": "graphforge-plan",
