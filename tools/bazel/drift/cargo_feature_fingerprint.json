@@ -1,6 +1,6 @@
 {
   "schema": "graphforge.cargo-feature-fingerprint.v1",
-  "sha256": "334130328e8a1445eed804faa41ae4dfcead52cc4c7805952ad3db8281e166c6",
+  "sha256": "be204b37c02a9087f84e342bfaac26409a76ad86299b6699229f6662845507bd",
   "entries": [
     {
       "name": "graphforge-api",
@@ -1824,7 +1824,7 @@
         },
         {
           "name": "sysinfo",
-          "req": "^0.37.2",
+          "req": "^0.39.6",
           "features": [
             "disk"
           ],
