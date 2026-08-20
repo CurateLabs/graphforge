@@ -121,19 +121,19 @@ deployments remain serialized to GitHub Pages.
 
 ### `codspeed.yml` — CodSpeed
 
-Builds the divan benchmark targets with `cargo codspeed` and measures them
-under CodSpeed's CPU simulation instrument on pull requests to `main`, pushes
-to `main`, and manual dispatch. It reports performance deltas against the base
-commit as evidence. It is not part of the `CI Gate` aggregate, but its external
-check must still be resolved for the PR to reach the required `CLEAN` state.
-Its Cargo build stays a diagnostic path next to authoritative Bazel
-compilation. Comparable-run and measurement-floor triage is documented in
+Runs once nightly against the exact latest `main` SHA, plus explicit manual
+dispatch. Pull requests and pushes do not trigger CodSpeed. The latest
+successful scheduled workflow SHA skips all nightly benchmark runners when
+`main` has not changed; missing or unsuccessful prior evidence fails closed to
+running the suite. Its Cargo
+build stays a diagnostic path next to authoritative Bazel compilation.
+Comparable-run and measurement-floor triage is documented in
 [`docs/development/benchmarking.md`](../../docs/development/benchmarking.md).
 M6 pure kernels use simulation on the ordinary pinned CI runner; durable
 open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
-`codspeed-macro` ARM64 runner. Weekly/manual runs
-also retain exact-SHA replay and compaction peak-RSS artifacts while CodSpeed
-memory mode is unavailable for this project.
+`codspeed-macro` ARM64 runner. Manual runs also retain exact-SHA replay and
+compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
+this project.
 
 ### `binding-release-candidate.yml`
 
