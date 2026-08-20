@@ -6,7 +6,8 @@ Hand-written to match the PyO3 surface in `crates/graphforge-bindings-py/src/lib
 use `pyarrow` (a hard dependency).
 """
 
-from typing import Any, Callable, Literal, overload
+from collections.abc import Callable
+from typing import Any, Literal, overload
 import uuid
 
 import pyarrow
