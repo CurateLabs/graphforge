@@ -6,6 +6,7 @@ Hand-written to match the PyO3 surface in `crates/graphforge-bindings-py/src/lib
 use `pyarrow` (a hard dependency).
 """
 
+from collections.abc import Callable
 from typing import Any, Literal, overload
 import uuid
 
@@ -280,6 +281,7 @@ class GraphForge:
         checkpoint: str | None = None,
         subset: dict[str, Any] | None = None,
         limits: dict[str, Any] | None = None,
+        progress: Callable[[dict[str, int]], object] | None = None,
         cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]: ...
     @staticmethod

@@ -1,6 +1,7 @@
 //! Same-binary integration coverage for portable project interchange.
 
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
@@ -11,7 +12,7 @@ fn gf_bin() -> std::path::PathBuf {
     fs::canonicalize(env!("CARGO_BIN_EXE_gf")).expect("resolve same-build gf binary")
 }
 
-fn gf(project: &std::path::Path, args: &[&str]) -> Output {
+fn gf(project: &Path, args: &[&str]) -> Output {
     Command::new(gf_bin())
         .arg("--project")
         .arg(project)
@@ -20,10 +21,21 @@ fn gf(project: &std::path::Path, args: &[&str]) -> Output {
         .expect("run same-build gf binary")
 }
 
-fn gf_repo(repository: &std::path::Path, args: &[&str]) -> Output {
+fn gf_repo(repository: &Path, args: &[&str]) -> Output {
     Command::new(gf_bin())
         .arg("--project-dir")
         .arg(repository)
+        .args(args)
+        .output()
+        .expect("run same-build gf binary")
+}
+
+fn gf_cwd(cwd: &Path, args: &[&str]) -> Output {
+    // Poison GF_REPOSITORY so accidental discovery fails deterministically.
+    let decoy = cwd.join("no-such-gf-repository");
+    Command::new(gf_bin())
+        .current_dir(cwd)
+        .env("GF_REPOSITORY", &decoy)
         .args(args)
         .output()
         .expect("run same-build gf binary")
@@ -196,9 +208,9 @@ fn initialized_repository_can_import_into_its_pristine_state() {
 fn portable_verify_skips_repository_discovery() {
     let outside = TempDir::new().expect("outside repository");
     let missing = outside.path().join("missing.gfpb");
-    let output = Command::new(gf_bin())
-        .current_dir(outside.path())
-        .args([
+    let output = gf_cwd(
+        outside.path(),
+        &[
             "--json",
             "portable",
             "verify",
@@ -206,9 +218,8 @@ fn portable_verify_skips_repository_discovery() {
             "full",
             "--input",
             missing.to_str().unwrap(),
-        ])
-        .output()
-        .expect("run verify outside repository");
+        ],
+    );
     assert_ne!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -288,9 +299,9 @@ fn portable_v2_export_verify_and_import_round_trip() {
 
     // Verify is repository-independent: it must not require --project or a discovered repo.
     let outside = TempDir::new().expect("outside repository");
-    let verified_outside = Command::new(gf_bin())
-        .current_dir(outside.path())
-        .args([
+    let verified_outside = json(&gf_cwd(
+        outside.path(),
+        &[
             "--json",
             "portable",
             "verify",
@@ -298,9 +309,7 @@ fn portable_v2_export_verify_and_import_round_trip() {
             "full",
             "--input",
             bundle.to_str().unwrap(),
-        ])
-        .output()
-        .expect("run verify outside repository");
-    let verified_outside = json(&verified_outside);
+        ],
+    ));
     assert_eq!(verified_outside["package_digest"], package_digest);
 }
