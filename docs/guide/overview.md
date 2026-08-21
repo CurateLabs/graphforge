@@ -13,6 +13,7 @@ trees.
 | [Quick Start](quickstart.md) | First graph in five minutes |
 | [Tutorial](tutorial.md) | Step-by-step walkthrough |
 | [VS Code extension](vscode-extension/) | Explore projects, run Cypher, and pair with coding agents inside your editor |
+| [Move projects with portable project v2](portable-projects.md) | Verify and move immutable projects locally, air-gapped, or through OCI |
 
 ## Everyday workflows
 
@@ -30,6 +31,10 @@ Build graphs programmatically using the Python API.
 
 ### [Analytics Integration](analytics-integration.md)
 Export graphs to NetworkX, igraph, and pandas for further analysis.
+
+### [Move projects with portable project v2](portable-projects.md)
+Preview, export, verify, import, selectively share, and promote immutable project
+packages without copying live storage state or committing graph data to Git.
 
 ### [Visualization examples](visualization.md)
 Comparable Plotly, Jaal, PyVis, Cytoscape.js, and Sigma.js paths over one shared
