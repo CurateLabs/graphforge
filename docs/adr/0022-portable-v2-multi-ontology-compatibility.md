@@ -22,18 +22,25 @@ component payloads, materializing staging, or mutating a project.
 
 The control document contract is `graphforge-ontology-composition/1`. It owns:
 
-- the canonically ordered ontology inventory and each module's stable ID,
-  exact version, canonical content digest, and dialect/profile;
-- canonically ordered bridge-set identities, versions, canonical digests, and
-  exact module endpoints;
-- the activation profile and its exact active module and bridge-set identities;
+- the canonically ordered ontology inventory and each module's globally unique
+  NFC URI, exact opaque NFC version, canonical content digest, and
+  dialect/profile;
+- canonically ordered bridge-set URI identities, opaque versions, canonical
+  digests, and the complete non-empty ordered source and target module sets;
+- the default activation profile and canonically ordered overrides whose
+  structured subjects retain URI, version, and digest without delimiter-based
+  aliases;
 - the composition digest over the preceding semantic fields; and
 - required and optional feature tokens.
 
 Its closed machine-readable shape is
-`docs/contracts/graphforge-ontology-composition-v1.schema.json`. Arrays MUST be
-in ascending UTF-8 identity order despite JSON Schema being unable to express
-order; the Rust decoder enforces order and uniqueness before semantic use.
+`docs/contracts/graphforge-ontology-composition-v1.schema.json`. URI and version
+strings MUST already be NFC. Versions are opaque authority values, not SemVer.
+Exact identities are closed objects (`id`, `version`, `content_digest`) so URI
+characters and version text cannot make a joined identity ambiguous. Arrays
+MUST be in ascending UTF-8 tuple order despite JSON Schema being unable to
+express order; the Rust decoder enforces normalization, order, uniqueness, and
+closure before semantic use.
 
 The manifest authenticates the control document's path, length, and digest and
 therefore includes it in `package_digest`. The composition digest is
@@ -102,8 +109,10 @@ by `PortableV2ErrorCode::UnsupportedFuture` and
   same exact ontology/bridge/schema composition closure as graph data.
 
 No profile may contain a dangling module endpoint, bridge endpoint, activation
-member, or composition input. Omissions are explicit stable portable participant
-IDs. Inventory order never selects authority or resolves ambiguity.
+member, or composition input. Every bridge retains all source and target module
+identities; neither endpoint set may be empty. Omissions are explicit stable
+portable participant IDs. Inventory order never selects authority or resolves
+ambiguity.
 
 ## Reader and failure matrix
 

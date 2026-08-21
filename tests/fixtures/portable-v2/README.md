@@ -21,7 +21,12 @@ canonical bytes/digests in every supported language before acceptance.
 
 `multi-ontology-vectors.json` and ADR 0022 define the M9 extension through the
 existing authenticated `compatibility` kind and a new required capability. The
-fixture freezes composition identity inputs/exclusions, closure for all four
+control vector deliberately uses URI identities, opaque non-SemVer versions,
+digest-qualified activation subjects, and a multi-source bridge so lossy
+identity projections cannot satisfy the contract. The dependency-free contract
+gate checks NFC-safe exact identity tuples, canonical order, uniqueness, and
+complete endpoint/activation closure. The fixture freezes composition identity
+inputs/exclusions, closure for all four
 package classes, older-reader behavior, typed negative results, and operational
 non-mutation invariants. It deliberately contains no runtime identity or TCK
 result in the composition identity.
