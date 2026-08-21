@@ -64,8 +64,6 @@ gf_rust_library(
         ["src/**/*.rs"],
         exclude = ["src/main.rs"],
     ),
-    # crate_universe currently omits this Cargo package rename from aliases().
-    crate_aliases = {"@crates//serde_yaml_ng-0.9.36": "serde_yaml"},
     deps = _CLI_DEPS + [":graphforge_cli_build_script"],
 )
 
