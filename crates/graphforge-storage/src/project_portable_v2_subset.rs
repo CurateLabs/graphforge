@@ -297,6 +297,7 @@ fn build_subset_component_selection(
         package_class: "graph-data-subset".into(),
         included,
         excluded,
+        projected: Vec::new(),
         redactions: redactions.iter().cloned().collect(),
         required_capabilities,
         estimated_payload_bytes: total,
@@ -481,6 +482,30 @@ mod tests {
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
+        let document = graphforge_ontology::OntologyDoc {
+            ontology_id: "https://graphforge.dev/ontology/subset".into(),
+            version: "v1".into(),
+            entity_types: vec![],
+            relation_types: vec![],
+            properties: vec![],
+            constraints: vec![],
+            migrations: vec![],
+        };
+        let legacy = crate::WorkspaceOntology {
+            contract_version: 1,
+            mode: crate::WorkspaceOntologyMode::Strict,
+            source_format: Some(crate::WorkspaceOntologySourceFormat::Json),
+            canonical_ontology_sha256: Some("b".repeat(64)),
+            canonical_ontology: Some(serde_json::to_value(document).unwrap()),
+        };
+        let composition = crate::WorkspaceOntologyComposition::virtual_legacy(&legacy)
+            .unwrap()
+            .unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
         let generation_uuid = Uuid::now_v7();
         let request = ProjectGenerationRequest {
             transaction_uuid: Uuid::now_v7(),
@@ -564,6 +589,7 @@ mod tests {
         assert_eq!(a.selection_fingerprint, preview.subset_fingerprint);
         let report =
             verify_portable_v2(&expanded, PortableV2Mode::Full, limits, Some(&cancelled)).unwrap();
+        assert!(report.ontology_composition.is_some());
         assert_eq!(
             report.package_class,
             crate::PortableV2PackageClass::GraphDataSubset

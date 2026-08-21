@@ -28,7 +28,10 @@ gf_rust_test(
     name = "graphforge_storage_test",
     crate = ":graphforge_storage",
     crate_features = ["test-failpoints"],
-    compile_data = ["//tests/fixtures/portable-v2:ontology-only.manifest.json"],
+    compile_data = [
+        "//tests/fixtures/portable-v2:multi-ontology-vectors.json",
+        "//tests/fixtures/portable-v2:ontology-only.manifest.json",
+    ],
     # Unit suite exercises filesystem/async paths; default "small" is too tight.
     size = "medium",
     deps = _STORAGE_DEPS,

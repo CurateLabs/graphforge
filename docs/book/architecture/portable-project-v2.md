@@ -167,6 +167,16 @@ portable-relative entry. The implementation retains the bounded semantic/tag
 records, entry index, and configured copy buffer; payloads stream incrementally
 even when the declared package exceeds 16 GiB.
 
+When `ontology-composition@1` is present, the verified report also exposes the
+authenticated exact module, bridge, activation, feature, and composition
+identities. Module documents remain ordinary `ontology` components and bridge
+documents remain ordinary `schema` components. The versioned
+`graphforge-ontology-composition` compatibility component authenticates their
+closure. It deliberately does not appear in the runtime generation map:
+verify, inspect, materialize, and import therefore cannot adopt or replace
+workspace ontology authority. A consumer must pass the verified identities to
+the explicit typed ontology lifecycle API to change authority.
+
 See the [fixture guide](../../../tests/fixtures/portable-v2/README.md) for the
 positive, negative, and structural conformance vectors.
 

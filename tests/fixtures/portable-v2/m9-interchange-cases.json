@@ -1,0 +1,29 @@
+{
+  "contract": "graphforge-portable-v2-m9-interchange-cases/1",
+  "representations": ["expanded", "bundle"],
+  "positive_package_classes": [
+    "complete",
+    "ontology-only",
+    "component-selective",
+    "graph-data-subset"
+  ],
+  "required_receipts": [
+    "package_digest",
+    "composition_digest",
+    "data_fingerprint",
+    "query_results"
+  ],
+  "negative_cases": [
+    {"name":"future-manifest-capability-before-payload","result":"unsupported_future"},
+    {"name":"future-composition-feature-before-semantic-payload","result":"unsupported_future"},
+    {"name":"module-semantic-digest-tamper","result":"digest_mismatch"},
+    {"name":"bridge-semantic-digest-tamper","result":"digest_mismatch"},
+    {"name":"semantic-descriptor-kind-path-media-mismatch","result":"incompatible"},
+    {"name":"semantic-payload-budget","result":"limit_exceeded"},
+    {"name":"cancelled-private-materialization","result":"cancelled"},
+    {"name":"durable-staging-replay","result":"idempotent_replay"},
+    {"name":"durable-staging-transaction-conflict","result":"transaction_conflict"},
+    {"name":"durable-staging-publication-failure","result":"old_or_absent"}
+  ],
+  "authority_invariant": "non-authoritative-staging-only"
+}
