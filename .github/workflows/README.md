@@ -98,6 +98,8 @@ Python, Gherkin, native binding, Pulumi, Terraform, or Bazel jobs. Pull-request
 native binding acceptance is Linux-only and uses Cargo's `dev` profile for
 maturin/napi assembly. Authoritative Rust compile/test is Bazel
 (`//:ci_rust_tests`) under `Bazel Bootstrap`.
+The non-required Cargo/Bazel parity and cache-observation diagnostics do not
+run on pull requests; they remain available for future maintenance CI.
 When Rust surfaces change, `Windows graphforge-storage Locks` runs the native
 project-root lock, exact filesystem primitive, NTFS admission, and real
 publication-kill/fault-oracle cross-checks on `blacksmith-4vcpu-windows-2025`.
@@ -134,6 +136,12 @@ open/recovery/commit/GC/compaction use CodSpeed's isolated bare-metal
 `codspeed-macro` ARM64 runner. Manual runs also retain exact-SHA replay and
 compaction peak-RSS artifacts while CodSpeed memory mode is unavailable for
 this project.
+
+### CodeRabbit
+
+CodeRabbit automatic review is disabled to preserve its limited quota. After
+the required `CI Gate` is green and a pull request is otherwise ready to merge,
+request the final review explicitly with `@coderabbitai review`.
 
 ### `binding-release-candidate.yml`
 

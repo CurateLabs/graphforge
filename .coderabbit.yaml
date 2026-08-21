@@ -15,7 +15,10 @@ reviews:
   collapse_walkthrough: false
 
   auto_review:
-    enabled: true
+    # Reviews consume a limited CodeRabbit quota. Request one manually only
+    # after the required CI Gate is green and the PR is otherwise ready to
+    # merge (for example, with `@coderabbitai review`).
+    enabled: false
     drafts: false
     base_branches:
       - main
