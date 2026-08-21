@@ -201,12 +201,17 @@ pub fn preview_portable_v2_selection(
         return Err(incompatible("selection matched no portable components"));
     }
 
-    let needs_schema = requested.iter().any(|identity| {
-        matches!(
-            component_kind(&identity.capability_id, &identity.record_family_id),
-            "ontology" | "graph-data" | "derived-artifact"
-        )
-    });
+    let exact_composition = matches!(
+        request.profile,
+        PortableV2SelectionProfile::OntologyComposition(_)
+    );
+    let needs_schema = !exact_composition
+        && requested.iter().any(|identity| {
+            matches!(
+                component_kind(&identity.capability_id, &identity.record_family_id),
+                "ontology" | "graph-data" | "derived-artifact"
+            )
+        });
     let schema = descriptors
         .iter()
         .filter(|descriptor| {
@@ -343,6 +348,10 @@ pub fn preview_portable_v2_selection(
     Ok(plan)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps exact identity validation and transitive module/bridge closure in one audit path"
+)]
 fn projected_composition_entries(
     generation: &ResolvedProjectGeneration,
     request: &PortableV2SelectionRequest,
@@ -381,6 +390,90 @@ fn projected_composition_entries(
         }
         _ => None,
     };
+    let module_identity = |module: &crate::WorkspaceCompositionModule| PortableV2ExactIdentity {
+        id: module.id.ontology_id.clone(),
+        version: module.id.authored_version.clone(),
+        content_digest: format!("sha256:{}", module.id.canonical_digest),
+    };
+    let bridge_identity = |bridge: &graphforge_ontology::BridgeDocument| {
+        let digest = graphforge_ontology::bridge_document_digest(bridge)
+            .map_err(|_| incompatible("composition bridge digest"))?;
+        Ok::<_, PortableV2Error>((
+            PortableV2ExactIdentity {
+                id: bridge.bridge_id.clone(),
+                version: bridge.authored_version.clone(),
+                content_digest: format!("sha256:{digest}"),
+            },
+            digest,
+        ))
+    };
+    let module_by_identity = composition
+        .modules
+        .iter()
+        .map(|module| (module_identity(module), module))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut bridge_by_identity = std::collections::BTreeMap::new();
+    for bridge in &composition.bridges {
+        let (identity, digest) = bridge_identity(bridge)?;
+        bridge_by_identity.insert(identity, (bridge, digest));
+    }
+    let mut closure = requested.clone().unwrap_or_else(|| {
+        module_by_identity
+            .keys()
+            .chain(bridge_by_identity.keys())
+            .cloned()
+            .collect()
+    });
+    if requested.as_ref().is_some_and(|roots| {
+        roots.iter().any(|identity| {
+            !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+        })
+    }) {
+        return Err(incompatible("projected ontology selector is absent"));
+    }
+    loop {
+        let before = closure.len();
+        for identity in closure.clone() {
+            if let Some(module) = module_by_identity.get(&identity) {
+                closure.extend(module.dependencies.iter().map(|dependency| {
+                    PortableV2ExactIdentity {
+                        id: dependency.ontology_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            } else if let Some((bridge, _)) = bridge_by_identity.get(&identity) {
+                closure.extend(
+                    bridge
+                        .source_modules
+                        .iter()
+                        .chain(&bridge.target_modules)
+                        .map(|module| PortableV2ExactIdentity {
+                            id: module.ontology_id.clone(),
+                            version: module.authored_version.clone(),
+                            content_digest: format!("sha256:{}", module.canonical_digest),
+                        }),
+                );
+                closure.extend(bridge.dependencies.iter().map(|dependency| {
+                    PortableV2ExactIdentity {
+                        id: dependency.bridge_id.clone(),
+                        version: dependency.authored_version.clone(),
+                        content_digest: format!("sha256:{}", dependency.canonical_digest),
+                    }
+                }));
+            }
+        }
+        if closure.len() == before {
+            break;
+        }
+    }
+    if closure.iter().any(|identity| {
+        !module_by_identity.contains_key(identity) && !bridge_by_identity.contains_key(identity)
+    }) {
+        return Err(incompatible(
+            "projected ontology dependency closure is missing",
+        ));
+    }
     let mut entries = Vec::new();
     for module in &composition.modules {
         let identity = PortableV2ExactIdentity {
@@ -388,6 +481,9 @@ fn projected_composition_entries(
             version: module.id.authored_version.clone(),
             content_digest: format!("sha256:{}", module.id.canonical_digest),
         };
+        if !closure.contains(&identity) {
+            continue;
+        }
         let payload = crate::project_portable_v2::canonical_json(
             &serde_json::to_value(&module.document)
                 .map_err(|_| incompatible("composition preview serialization"))?,
@@ -415,6 +511,9 @@ fn projected_composition_entries(
             version: bridge.authored_version.clone(),
             content_digest: format!("sha256:{digest}"),
         };
+        if !closure.contains(&identity) {
+            continue;
+        }
         let payload = crate::project_portable_v2::canonical_json(
             &serde_json::to_value(bridge)
                 .map_err(|_| incompatible("composition preview serialization"))?,
@@ -435,13 +534,6 @@ fn projected_composition_entries(
         });
     }
     entries.sort_by(|left, right| left.participant_id.cmp(&right.participant_id));
-    if let Some(requested) = requested
-        && requested
-            .iter()
-            .any(|identity| !entries.iter().any(|entry| &entry.identity == identity))
-    {
-        return Err(incompatible("projected ontology selector is absent"));
-    }
     Ok(entries)
 }
 

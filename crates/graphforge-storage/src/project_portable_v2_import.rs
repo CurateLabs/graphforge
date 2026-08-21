@@ -49,6 +49,70 @@ pub struct PortableV2StagedCompositionReceipt {
     pub workspace_composition_fingerprint: String,
 }
 
+/// Authenticated selective-package state passed to an explicit typed consumer.
+///
+/// Payloads remain in callback-scoped private staging and are removed before
+/// [`consume_selective_portable_v2`] returns. The ontology candidate is never
+/// installed as project authority implicitly.
+#[derive(Debug)]
+pub struct PortableV2SelectiveCandidate {
+    /// Full authenticated package report.
+    pub report: PortableV2Report,
+    /// Recompiled, non-authoritative ontology candidate when present.
+    pub ontology: Option<crate::WorkspacePortableOntologyStaging>,
+    /// Payload-free staged-composition receipt when present.
+    pub staged_composition: Option<PortableV2StagedCompositionReceipt>,
+}
+
+/// Verify and privately materialize a selective package for one typed consumer.
+///
+/// Complete packages must use [`import_complete_portable_v2`]. The callback is
+/// the only scope in which authenticated data paths are available; staging is
+/// deterministically removed on success or error and no project is mutated.
+pub fn consume_selective_portable_v2<T>(
+    source: impl AsRef<Path>,
+    limits: PortableV2Limits,
+    cancelled: Option<&AtomicBool>,
+    consume: impl FnOnce(&Path, &PortableV2SelectiveCandidate) -> Result<T, PortableV2Error>,
+) -> Result<T, PortableV2Error> {
+    let owner = tempfile::tempdir().map_err(|_| {
+        PortableV2Error::new(PortableV2ErrorCode::Io, "cannot create selective staging")
+    })?;
+    let stage = owner.path().join("materialized");
+    let report = materialize_verified_portable_v2(source.as_ref(), &stage, limits, cancelled)?;
+    if report.package_class == PortableV2PackageClass::Complete {
+        return Err(PortableV2Error::new(
+            PortableV2ErrorCode::Incompatible,
+            "complete package requires complete-project import",
+        ));
+    }
+    let (ontology, staged_composition) = if report.ontology_composition.is_some() {
+        let (candidate, receipt) = build_staged_composition(&stage, &report, limits)?;
+        let bytes = read_bounded_payload(
+            &candidate.source,
+            limits.max_manifest_bytes,
+            "selective staged composition",
+        )?;
+        (
+            Some(
+                crate::WorkspacePortableOntologyStaging::from_canonical_json(&bytes)
+                    .map_err(storage)?,
+            ),
+            Some(receipt),
+        )
+    } else {
+        (None, None)
+    };
+    consume(
+        &stage,
+        &PortableV2SelectiveCandidate {
+            report,
+            ontology,
+            staged_composition,
+        },
+    )
+}
+
 /// Reopen and validate the durable non-authoritative ontology candidate.
 ///
 /// This function never changes active ontology authority. It is the storage

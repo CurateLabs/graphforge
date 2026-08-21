@@ -7,6 +7,28 @@
     "component-selective",
     "graph-data-subset"
   ],
+  "positive_cases": [
+    {
+      "package_class": "complete",
+      "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003"],
+      "expected_data_fingerprint": "sha256:bbb672f255891facbe5850b261c02d8b771ffc370d64c6c4387b7689aeb754a4"
+    },
+    {
+      "package_class": "ontology-only",
+      "expected_query_rows": [],
+      "expected_data_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d"
+    },
+    {
+      "package_class": "component-selective",
+      "expected_query_rows": [],
+      "expected_data_fingerprint": "sha256:b0e3df4931dc2a3c11b43a8b4a753e85b65f4997432004e4fd4fe76b913a222d"
+    },
+    {
+      "package_class": "graph-data-subset",
+      "expected_query_rows": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+      "expected_data_fingerprint": "sha256:02b3d933c8fc1f7c934e370928830e31043adae4b13fc3ae00efd06a59490148"
+    }
+  ],
   "required_receipts": [
     "package_digest",
     "composition_digest",

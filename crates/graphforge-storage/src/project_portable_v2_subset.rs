@@ -637,4 +637,214 @@ mod tests {
         let error = preview_portable_v2_graph_subset(&generation, &unordered, limits).unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
     }
+
+    fn imported_node_query(root: &std::path::Path) -> Vec<String> {
+        let generation = resolve_project_generation(root).unwrap();
+        graph_tree_query(&generation.graph_tree_root())
+    }
+
+    fn graph_tree_query(root: &std::path::Path) -> Vec<String> {
+        use arrow::array::{Array as _, FixedSizeBinaryArray};
+        let mut rows = crate::catalog::read_nodes(root)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| {
+                let index = batch.schema().index_of("node_uuid").unwrap();
+                let values = batch
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .unwrap();
+                (0..values.len())
+                    .map(|row| {
+                        Uuid::from_slice(values.value(row))
+                            .unwrap()
+                            .hyphenated()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    }
+
+    fn query_fingerprint(rows: &[String]) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"graphforge-portable-v2-query-result/1\0");
+        digest.update(serde_json::to_vec(rows).unwrap());
+        format!("sha256:{}", hex(digest.finalize().into()))
+    }
+
+    #[test]
+    fn versioned_m9_positive_matrix_executes_both_representations() {
+        let ledger: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/portable-v2/m9-interchange-cases.json"
+        ))
+        .unwrap();
+        let (root, nodes, _edges) = publish_graph_project();
+        let generation = resolve_project_generation(root.path()).unwrap();
+        let limits = PortableV2Limits::default();
+        let complete = crate::preview_portable_v2_selection(
+            &generation,
+            &crate::PortableV2SelectionRequest {
+                profile: crate::PortableV2SelectionProfile::Complete,
+                strict: false,
+            },
+            limits,
+        )
+        .unwrap();
+        let exact = complete.projected[0].identity.clone();
+        let selected_nodes = [nodes[0], nodes[1]]
+            .map(|uuid| uuid.hyphenated().to_string())
+            .to_vec();
+        let subset = preview_portable_v2_graph_subset(
+            &generation,
+            &PortableV2SubsetRequest {
+                selector: PortableV2GraphSelector {
+                    node_uuids: selected_nodes,
+                    edge_uuids: vec![],
+                },
+                closure: PortableV2SubsetClosure::InducedEdges,
+                projection: PortableV2PropertyProjection::default(),
+            },
+            limits,
+        )
+        .unwrap();
+        let supported = generation
+            .capabilities()
+            .into_iter()
+            .map(|capability| ProjectCapability {
+                capability_id: capability.capability_id,
+                capability_version: capability.capability_version,
+            })
+            .collect::<Vec<_>>();
+
+        for case in ledger["positive_cases"].as_array().unwrap() {
+            let class = case["package_class"].as_str().unwrap();
+            let plan = match class {
+                "complete" => crate::plan_selected_portable_v2(&generation, &complete, limits),
+                "ontology-only" => {
+                    let selection = crate::preview_portable_v2_selection(
+                        &generation,
+                        &crate::PortableV2SelectionRequest {
+                            profile: crate::PortableV2SelectionProfile::OntologyOnly,
+                            strict: false,
+                        },
+                        limits,
+                    )
+                    .unwrap();
+                    crate::plan_selected_portable_v2(&generation, &selection, limits)
+                }
+                "component-selective" => {
+                    let selection = crate::preview_portable_v2_selection(
+                        &generation,
+                        &crate::PortableV2SelectionRequest {
+                            profile: crate::PortableV2SelectionProfile::OntologyComposition(vec![
+                                exact.clone(),
+                            ]),
+                            strict: true,
+                        },
+                        limits,
+                    )
+                    .unwrap();
+                    crate::plan_selected_portable_v2(&generation, &selection, limits)
+                }
+                "graph-data-subset" => plan_graph_subset_portable_v2(&generation, &subset, limits),
+                _ => panic!("unknown positive conformance class"),
+            }
+            .unwrap();
+            let outputs = tempfile::tempdir().unwrap();
+            let mut receipts = Vec::new();
+            let mut reports = Vec::new();
+            let mut query_rows = Vec::new();
+            for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+                let extension = if representation == PortableV2Output::Expanded {
+                    "gfproject"
+                } else {
+                    "gfpb"
+                };
+                let package = outputs.path().join(format!("{class}.{extension}"));
+                receipts.push(
+                    export_complete_portable_v2(
+                        &plan,
+                        &package,
+                        representation,
+                        limits,
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .unwrap(),
+                );
+                reports.push(
+                    verify_portable_v2(&package, PortableV2Mode::Full, limits, None).unwrap(),
+                );
+                match (class, representation) {
+                    ("complete", _) => {
+                        let imported = outputs.path().join(format!("{class}-{extension}-import"));
+                        crate::import_complete_portable_v2(
+                            &package,
+                            &imported,
+                            Uuid::new_v4(),
+                            Uuid::new_v4(),
+                            &supported,
+                            limits,
+                            None,
+                        )
+                        .unwrap();
+                        query_rows.push(imported_node_query(&imported));
+                    }
+                    ("ontology-only" | "component-selective" | "graph-data-subset", _) => {
+                        let rows = crate::consume_selective_portable_v2(
+                            &package,
+                            limits,
+                            None,
+                            |stage, candidate| {
+                                assert_eq!(
+                                    candidate.report.package_digest,
+                                    reports.last().unwrap().package_digest
+                                );
+                                assert!(candidate.ontology.is_some());
+                                assert!(candidate.staged_composition.is_some());
+                                Ok(if class == "graph-data-subset" {
+                                    graph_tree_query(
+                                        &stage.join("data/components/graph-data/graph-tree"),
+                                    )
+                                } else {
+                                    Vec::new()
+                                })
+                            },
+                        )
+                        .unwrap();
+                        query_rows.push(rows);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(receipts[0].package_digest, receipts[1].package_digest);
+            assert_eq!(reports[0].package_digest, reports[1].package_digest);
+            assert_eq!(
+                reports[0]
+                    .ontology_composition
+                    .as_ref()
+                    .map(|value| &value.composition_digest),
+                reports[1]
+                    .ontology_composition
+                    .as_ref()
+                    .map(|value| &value.composition_digest)
+            );
+            let expected_rows =
+                serde_json::from_value::<Vec<String>>(case["expected_query_rows"].clone()).unwrap();
+            assert!(query_rows.iter().all(|rows| rows == &query_rows[0]));
+            assert_eq!(query_rows[0], expected_rows, "{class}");
+            assert_eq!(
+                query_fingerprint(&query_rows[0]),
+                case["expected_data_fingerprint"].as_str().unwrap()
+            );
+            if class == "graph-data-subset" {
+                assert_eq!(receipts[0].selection_fingerprint, subset.subset_fingerprint);
+                assert_eq!(receipts[1].selection_fingerprint, subset.subset_fingerprint);
+            }
+        }
+    }
 }
