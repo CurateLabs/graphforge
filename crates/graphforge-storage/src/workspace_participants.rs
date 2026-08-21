@@ -1,11 +1,12 @@
 //! Canonical generation-managed workspace ontology and configuration records.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use graphforge_core::{GfError, OntologyMode, ProjectErrorCode};
 use graphforge_ontology::{
-    ActivationMode, ActivationRecord, AuthoredModule, BridgeDocument, BridgeSetId,
-    CompiledComposition, CompositionLimits, InventoryCompileRequest, OntologyDoc, OntologyModuleId,
+    ActivationMode, ActivationRecord, AuthoredModule, BridgeDocument, BridgeInventory,
+    BridgeSelector, BridgeSetId, CompiledComposition, CompositionLimits, DiagnosticLimit,
+    InventoryCompileRequest, ModuleSymbolTable, OntologyDoc, OntologyModuleId, SymbolKind,
     bridge_document_digest, compile_inventory, module_document_digest,
 };
 use serde::{Deserialize, Serialize};
@@ -371,6 +372,65 @@ impl WorkspaceOntologyComposition {
             cancelled: None,
         })
         .map_err(|_| corrupt("ontology composition does not compile"))?;
+        let module_tables = compiled
+            .modules
+            .iter()
+            .map(|module| ModuleSymbolTable {
+                id: module.id.clone(),
+                entities: module
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == SymbolKind::Entity)
+                    .map(|symbol| symbol.local_id.clone())
+                    .collect::<HashSet<_>>(),
+                relations: module
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == SymbolKind::Relation)
+                    .map(|symbol| symbol.local_id.clone())
+                    .collect::<HashSet<_>>(),
+                properties: module
+                    .symbols
+                    .iter()
+                    .filter(|symbol| symbol.kind == SymbolKind::Property)
+                    .map(|symbol| symbol.local_id.clone())
+                    .collect::<HashSet<_>>(),
+            })
+            .collect::<Vec<_>>();
+        let mut bridge_inventory =
+            BridgeInventory::new(self.profile_default, DiagnosticLimit::default());
+        for table in module_tables {
+            bridge_inventory.register_module(table);
+        }
+        let mut staged = Vec::with_capacity(self.bridges.len());
+        for (index, bridge) in self.bridges.iter().enumerate() {
+            let id = bridge_inventory
+                .create_register(bridge.clone(), format!("composition-bridge-{index}"))
+                .map_err(|_| corrupt("ontology composition bridge is invalid"))?;
+            staged.push((id, bridge.dependencies.clone()));
+        }
+        let mut remaining = staged;
+        let mut adopted = std::collections::BTreeSet::new();
+        while !remaining.is_empty() {
+            let Some(index) = remaining.iter().position(|(_, dependencies)| {
+                dependencies
+                    .iter()
+                    .all(|dependency| adopted.contains(&dependency.display_ref()))
+            }) else {
+                return Err(corrupt(
+                    "ontology composition bridge dependencies are unresolved or cyclic",
+                ));
+            };
+            let (id, _) = remaining.remove(index);
+            bridge_inventory
+                .adopt(
+                    &BridgeSelector::Exact(id.clone()),
+                    bridge_inventory.generation(),
+                    format!("composition-adopt-{}", id.display_ref()),
+                )
+                .map_err(|_| corrupt("ontology composition bridge lifecycle is invalid"))?;
+            adopted.insert(id.display_ref());
+        }
         if compiled.fingerprint != self.composition_fingerprint {
             return Err(corrupt("ontology composition fingerprint does not match"));
         }

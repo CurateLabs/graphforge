@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use graphforge_core::{GfError, OntologyMode};
 use graphforge_ontology::{
-    ActivationMode, CompositionLimits, OntologyCompiler, OntologyHandle, OntologyLoader,
-    compile_legacy_single_ontology,
+    ActivationMode, AuthoredModule, CompositionLimits, InventoryCompileRequest, OntologyCompiler,
+    OntologyHandle, OntologyLoader, OntologyModuleId, compile_inventory, module_document_digest,
 };
 use graphforge_storage::{
     GraphDirectedness, ProjectCapability, ProjectGenerationRequest, ProjectParticipant,
@@ -79,7 +79,7 @@ impl GraphForge {
         directedness: Option<GraphDirectedness>,
     ) -> Result<(), GfError> {
         let ontology = self.workspace_ontology()?;
-        let composition = self.workspace_ontology_composition()?;
+        let composition = self.persisted_workspace_ontology_composition()?;
         let mut configuration = current_configuration(self)?;
         configuration.graph_directedness = directedness;
         publish_workspace_records(
@@ -89,6 +89,8 @@ impl GraphForge {
             &ontology,
             &configuration,
             composition.as_ref(),
+            None,
+            None,
         )
     }
 
@@ -116,20 +118,38 @@ impl GraphForge {
             .map_err(|error| GfError::Ontology(format!("failed to load ontology: {error}")))?;
         let runtime = OntologyCompiler::compile(&document)
             .map_err(|error| GfError::Ontology(format!("failed to compile ontology: {error}")))?;
-        let compiled_composition =
-            compile_legacy_single_ontology(&document, false, CompositionLimits::default())
-                .map_err(|error| {
-                    GfError::Ontology(format!("failed to compile ontology composition: {error}"))
-                })?;
-        let mut composition = graphforge_storage::WorkspaceOntologyComposition::from_compiled(
+        let digest = module_document_digest(&document).map_err(|error| {
+            GfError::Ontology(format!("failed to digest ontology composition: {error}"))
+        })?;
+        let authored = AuthoredModule {
+            id: OntologyModuleId {
+                ontology_id: document.ontology_id.clone(),
+                authored_version: document.version.clone(),
+                canonical_digest: digest,
+            },
+            dependencies: Vec::new(),
+            doc: document.clone(),
+            allow_projected_identity: false,
+        };
+        let compiled_composition = compile_inventory(InventoryCompileRequest {
+            modules: std::slice::from_ref(&authored),
+            bridges: &[],
+            activation: &[],
+            profile_default: match requested_mode {
+                OntologyMode::Exploratory => ActivationMode::Exploratory,
+                OntologyMode::Advisory => ActivationMode::Advisory,
+                OntologyMode::Strict => ActivationMode::Strict,
+            },
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .map_err(|error| {
+            GfError::Ontology(format!("failed to compile ontology composition: {error}"))
+        })?;
+        let composition = graphforge_storage::WorkspaceOntologyComposition::from_compiled(
             &compiled_composition,
             Vec::new(),
         );
-        composition.profile_default = match requested_mode {
-            OntologyMode::Exploratory => ActivationMode::Exploratory,
-            OntologyMode::Advisory => ActivationMode::Advisory,
-            OntologyMode::Strict => ActivationMode::Strict,
-        };
         let canonical_ontology = serde_json::to_value(&document)
             .map_err(|error| GfError::Ontology(format!("failed to encode ontology: {error}")))?;
         let canonical_bytes = serde_json::to_vec(&canonical_ontology)
@@ -150,6 +170,8 @@ impl GraphForge {
             &record,
             &configuration,
             Some(&composition),
+            None,
+            None,
         )?;
         self.ontology = Some(OntologyHandle::new(runtime));
         self.ontology_document = Some(document);
@@ -189,6 +211,8 @@ impl GraphForge {
             &WorkspaceOntology::none(),
             &configuration,
             None,
+            None,
+            None,
         )?;
         self.ontology = None;
         self.ontology_document = None;
@@ -218,7 +242,12 @@ pub(crate) fn publish_workspace_records(
     ontology: &WorkspaceOntology,
     configuration: &WorkspaceConfiguration,
     composition: Option<&graphforge_storage::WorkspaceOntologyComposition>,
+    generation_uuid_override: Option<uuid::Uuid>,
+    cancellation: Option<&crate::CancellationToken>,
 ) -> Result<(), GfError> {
+    if let Some(token) = cancellation {
+        token.checkpoint()?;
+    }
     let root = graph.resolved_generation.container_root().to_path_buf();
     let parent = graphforge_storage::resolve_project_generation(&root)?;
     parent.validate_complete_participant_inventory()?;
@@ -231,6 +260,12 @@ pub(crate) fn publish_workspace_records(
             "project generation changed before ontology publication".into(),
         ));
     }
+    let carries_graph_tree = parent
+        .participant_snapshot(
+            graphforge_storage::GRAPH_CAPABILITY_ID,
+            graphforge_storage::GRAPH_FILES_FAMILY,
+        )?
+        .is_some();
     let mut participants = parent
         .participant_snapshots()?
         .into_iter()
@@ -260,7 +295,8 @@ pub(crate) fn publish_workspace_records(
         (&left.capability_id, &left.record_family_id)
             .cmp(&(&right.capability_id, &right.record_family_id))
     });
-    let generation_uuid = workspace_generation_uuid(operation_uuid, actor_uuid, &participants);
+    let generation_uuid = generation_uuid_override
+        .unwrap_or_else(|| workspace_generation_uuid(operation_uuid, actor_uuid, &participants));
     let request = ProjectGenerationRequest {
         transaction_uuid: operation_uuid,
         generation_uuid,
@@ -274,18 +310,33 @@ pub(crate) fn publish_workspace_records(
             .collect(),
         participants,
     };
-    let receipt = match graph.stage_project_generation(&request)? {
+    let receipt = match graphforge_storage::stage_project_generation_with_graph_tree_mode(
+        &root,
+        &request,
+        carries_graph_tree
+            .then(|| parent.graph_tree_root())
+            .as_deref(),
+        graph.lifecycle_mode,
+    )? {
         ProjectStageOutcome::AlreadyPublished(receipt) => receipt,
-        ProjectStageOutcome::Staged(staged) => staged
-            .validate(validate_workspace_record_inventory, |actual_parent, _| {
-                if actual_parent.generation_uuid() != expected_parent {
-                    return Err(GfError::Validation(
-                        "project generation changed before ontology publication".into(),
-                    ));
-                }
-                Ok(())
-            })?
-            .publish()?,
+        ProjectStageOutcome::Staged(staged) => {
+            if let Some(token) = cancellation {
+                token.checkpoint()?;
+            }
+            let validated =
+                staged.validate(validate_workspace_record_inventory, |actual_parent, _| {
+                    if actual_parent.generation_uuid() != expected_parent {
+                        return Err(GfError::Validation(
+                            "project generation changed before ontology publication".into(),
+                        ));
+                    }
+                    Ok(())
+                })?;
+            if let Some(token) = cancellation {
+                token.checkpoint()?;
+            }
+            validated.publish()?
+        }
     };
     *graph
         .current_generation_uuid

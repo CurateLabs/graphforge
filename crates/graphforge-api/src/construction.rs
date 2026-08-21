@@ -27,8 +27,17 @@ impl GraphForge {
         let mut properties = props.iter().collect::<Vec<_>>();
         properties.sort_unstable_by(|left, right| left.0.cmp(right.0));
 
-        let strict_owner = match (self.ontology_mode, self.ontology.as_ref()) {
-            (graphforge_core::OntologyMode::Strict, Some(ontology)) => ontology
+        let composition = self
+            .composition_binding
+            .lock()
+            .expect("composition binding lock poisoned")
+            .clone();
+        let strict_owner = match (
+            self.ontology_mode,
+            self.ontology.as_ref(),
+            composition.as_ref(),
+        ) {
+            (graphforge_core::OntologyMode::Strict, Some(ontology), None) => ontology
                 .entity_type_id(label)
                 .map(|owner| (ontology, owner)),
             _ => None,
@@ -51,6 +60,17 @@ impl GraphForge {
             {
                 return Err(validation(format!(
                     "property {name:?} is not declared for strict entity type {label:?}"
+                )));
+            }
+            if self.ontology_mode == graphforge_core::OntologyMode::Strict
+                && composition.as_ref().is_some_and(|authority| {
+                    !authority
+                        .declares_entity_property(label, name)
+                        .unwrap_or(false)
+                })
+            {
+                return Err(validation(format!(
+                    "property {name:?} is not declared for strict composed entity type {label:?}"
                 )));
             }
             let parameter = format!("gf_add_node_{index}");

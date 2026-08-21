@@ -131,6 +131,29 @@ pub struct CompositionBindingContext {
 }
 
 impl CompositionBindingContext {
+    /// Whether the resolved entity authority declares `property` on that owner.
+    pub fn declares_entity_property(
+        &self,
+        entity: &str,
+        property: &str,
+    ) -> Result<bool, BindingDiagnostic> {
+        let (binding, _) = self.resolve(SymbolKind::Entity, entity)?;
+        let SymbolBinding::Qualified(symbol) = binding else {
+            return Ok(false);
+        };
+        Ok(self
+            .composition
+            .modules
+            .iter()
+            .find(|module| module.id == symbol.module)
+            .is_some_and(|module| {
+                module
+                    .doc
+                    .properties
+                    .iter()
+                    .any(|item| item.owner == symbol.local_id && item.name == property)
+            }))
+    }
     /// Construct from compiled module authority and adopted bridge documents.
     #[must_use]
     pub fn new(
