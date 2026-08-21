@@ -34,9 +34,9 @@ pub use compiler::{OntologyCompiler, OntologyRuntime, PropertyOwnerKind};
 pub use composition::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeSetId,
     CompiledComposition, CompiledModule, CompositionDiagnostic, CompositionError,
-    CompositionLimits, DiagnosticCode, InventoryCompileRequest, OntologyModuleId, QualifiedSymbol,
-    ResolutionOutcome, ResolveRequest, SymbolKind, bridge_document_digest, compile_inventory,
-    compile_legacy_single_ontology, module_document_digest,
+    CompositionLimits, DiagnosticCode, DiagnosticLimit, InventoryCompileRequest, OntologyModuleId,
+    QualifiedSymbol, ResolutionOutcome, ResolveRequest, SymbolKind, bridge_document_digest,
+    compile_inventory, compile_legacy_single_ontology, module_document_digest,
 };
 pub use error::{OntologyError, OntologyValidationError, ValidationErrorKind};
 pub use graphforge_core::{PropId, TypeId};

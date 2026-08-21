@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "a1a0f16a771df5e159130b7b7c41961d3c3bf0dc499f692ce20d1d3b4ce38ae2",
+  "public_method_digest": "726aacf015d8db337cbd9282a43de81bd82f32202d4f1d2f2666b9c34ca2ad09",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -179,6 +179,27 @@
         {
           "path": "crates/graphforge-api/src/ontology_lifecycle.rs",
           "symbol": "filesystem_failure_preserves_destination_and_cleans_temporary_file"
+        }
+      ]
+    },
+    "composition-lifecycle": {
+      "ids": [
+        "GraphForge.preview_ontology_composition_change",
+        "GraphForge.publish_ontology_composition_change",
+        "GraphForge.workspace_ontology_composition"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+          "symbol": "publish_reopen_retry_and_rollback_preserve_exact_authority"
+        },
+        {
+          "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+          "symbol": "stale_cancelled_and_conflicting_replay_leave_generation_unchanged"
+        },
+        {
+          "path": "crates/graphforge-api/src/ontology_composition_lifecycle.rs",
+          "symbol": "replace_and_remove_are_safe_only_without_retained_semantic_data"
         }
       ]
     },

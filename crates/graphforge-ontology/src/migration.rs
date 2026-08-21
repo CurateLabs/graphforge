@@ -12,8 +12,8 @@ use crate::ontology::{EntityTypeDef, MigrationDef, OntologyDoc, PropertyDef, Pro
 
 /// The semantic operation performed by a single migration step.
 ///
-/// Unknown / unsupported transform strings are preserved as [`TransformKind::Unknown`]
-/// and silently skipped during [`MigrationEngine::apply`].
+/// Unknown / unsupported transform strings are preserved as [`TransformKind::Unknown`].
+/// Authority-changing callers must reject them before applying a plan.
 #[allow(missing_docs)] // variant fields are self-documenting
 #[derive(Debug, Clone)]
 pub enum TransformKind {
@@ -38,7 +38,7 @@ pub enum TransformKind {
     AddType { name: String },
     /// Remove an entity type and cascade-remove its properties and relations.
     RemoveType { name: String },
-    /// An unrecognised transform — silently skipped.
+    /// An unrecognised transform that cannot be applied safely.
     Unknown { raw: String },
 }
 
@@ -220,27 +220,7 @@ impl MigrationEngine {
         mut doc: OntologyDoc,
         steps: &[MigrationStep],
     ) -> Result<OntologyRuntime, OntologyError> {
-        // Validate that steps are contiguous and start from doc.version.
-        if let Some(first) = steps.first() {
-            if doc.version != first.from_version {
-                return Err(OntologyError::NoMigrationPath {
-                    from: doc.version.clone(),
-                    to: steps
-                        .last()
-                        .map_or("", |s| s.to_version.as_str())
-                        .to_owned(),
-                });
-            }
-            for window in steps.windows(2) {
-                if window[0].to_version != window[1].from_version {
-                    return Err(OntologyError::NoMigrationPath {
-                        from: window[0].to_version.clone(),
-                        to: window[1].from_version.clone(),
-                    });
-                }
-            }
-        }
-
+        validate_step_chain(&doc, steps)?;
         for step in steps {
             apply_step(&mut doc, &step.transform_kind);
         }
@@ -249,6 +229,54 @@ impl MigrationEngine {
         }
         OntologyCompiler::compile(&doc)
     }
+
+    /// Apply a migration plan and return the exact transformed source document.
+    ///
+    /// Unlike the legacy runtime-only path, this fails closed for unknown
+    /// transforms so lifecycle publication can compare the migrated schema to
+    /// the requested immutable authority before committing it.
+    pub fn apply_document(
+        mut doc: OntologyDoc,
+        steps: &[MigrationStep],
+    ) -> Result<OntologyDoc, OntologyError> {
+        validate_step_chain(&doc, steps)?;
+
+        for step in steps {
+            if let TransformKind::Unknown { raw } = &step.transform_kind {
+                return Err(OntologyError::SchemaMismatch {
+                    message: format!("unsupported migration transform `{raw}`"),
+                });
+            }
+            apply_step(&mut doc, &step.transform_kind);
+        }
+        if let Some(last) = steps.last() {
+            doc.version.clone_from(&last.to_version);
+        }
+        Ok(doc)
+    }
+}
+
+fn validate_step_chain(doc: &OntologyDoc, steps: &[MigrationStep]) -> Result<(), OntologyError> {
+    if let Some(first) = steps.first() {
+        if doc.version != first.from_version {
+            return Err(OntologyError::NoMigrationPath {
+                from: doc.version.clone(),
+                to: steps
+                    .last()
+                    .map_or("", |step| step.to_version.as_str())
+                    .to_owned(),
+            });
+        }
+        for window in steps.windows(2) {
+            if window[0].to_version != window[1].from_version {
+                return Err(OntologyError::NoMigrationPath {
+                    from: window[0].to_version.clone(),
+                    to: window[1].from_version.clone(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

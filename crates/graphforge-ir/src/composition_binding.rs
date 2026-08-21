@@ -131,6 +131,46 @@ pub struct CompositionBindingContext {
 }
 
 impl CompositionBindingContext {
+    /// Whether the resolved entity authority declares `property` on that owner.
+    pub fn declares_entity_property(
+        &self,
+        entity: &str,
+        property: &str,
+    ) -> Result<bool, BindingDiagnostic> {
+        let (binding, _) = self.resolve(SymbolKind::Entity, entity)?;
+        let SymbolBinding::Qualified(symbol) = binding else {
+            return Ok(false);
+        };
+        let Some(module) = self
+            .composition
+            .modules
+            .iter()
+            .find(|module| module.id == symbol.module)
+        else {
+            return Ok(false);
+        };
+        let mut owner = Some(symbol.local_id.as_str());
+        for _ in 0..=module.doc.entity_types.len() {
+            let Some(current) = owner else {
+                return Ok(false);
+            };
+            if module
+                .doc
+                .properties
+                .iter()
+                .any(|item| item.owner == current && item.name == property)
+            {
+                return Ok(true);
+            }
+            owner = module
+                .doc
+                .entity_types
+                .iter()
+                .find(|entity| entity.name == current)
+                .and_then(|entity| entity.parent.as_deref());
+        }
+        Ok(false)
+    }
     /// Construct from compiled module authority and adopted bridge documents.
     #[must_use]
     pub fn new(
@@ -350,9 +390,25 @@ impl CompositionBindingContext {
         else {
             return self.require_endpoint(property);
         };
-        if module.doc.properties.iter().any(|candidate| {
-            format!("{}:{}", candidate.owner, candidate.name) == property.local_id
-                && candidate.owner == owner_local
+        let declared_owner = module.doc.properties.iter().find_map(|candidate| {
+            (format!("{}:{}", candidate.owner, candidate.name) == property.local_id)
+                .then_some(candidate.owner.as_str())
+        });
+        if declared_owner.is_some_and(|declared| {
+            let mut current = Some(owner_local);
+            for _ in 0..=module.doc.entity_types.len() {
+                let Some(value) = current else { return false };
+                if value == declared {
+                    return true;
+                }
+                current = module
+                    .doc
+                    .entity_types
+                    .iter()
+                    .find(|entity| entity.name == value)
+                    .and_then(|entity| entity.parent.as_deref());
+            }
+            false
         }) {
             return Ok(());
         }
@@ -384,29 +440,49 @@ impl CompositionBindingContext {
         let SymbolBinding::Qualified(owner_symbol) = owner_binding else {
             return self.resolve(SymbolKind::Property, property);
         };
-        let local_id = format!("{}:{property}", owner_symbol.local_id);
-        let outcome = self
+        let module = self
             .composition
-            .resolve(&ResolveRequest {
+            .modules
+            .iter()
+            .find(|module| module.id == owner_symbol.module);
+        let mut owner_name = Some(owner_symbol.local_id.as_str());
+        let mut outcome = None;
+        for _ in 0..=module.map_or(0, |module| module.doc.entity_types.len()) {
+            let Some(current) = owner_name else { break };
+            let local_id = format!("{current}:{property}");
+            if let Ok(resolved) = self.composition.resolve(&ResolveRequest {
                 module: Some(&owner_symbol.module),
                 kind: SymbolKind::Property,
                 local_id: &local_id,
                 max_candidates: self.limits.candidates.max(1),
-            })
-            .map_err(|_| BindingDiagnostic {
-                code: BindingDiagnosticCode::WrongOwnerProperty,
-                subject: format!("{owner}.{property}"),
-                candidates: self
-                    .composition
-                    .modules
-                    .iter()
-                    .flat_map(|module| module.doc.properties.iter())
-                    .filter(|candidate| candidate.name == property)
-                    .map(|candidate| candidate.owner.clone())
-                    .take(self.limits.candidates.max(1))
-                    .collect(),
-                remediation: "use the property only on an owner that declares it".to_owned(),
-            })?;
+            }) {
+                outcome = Some(resolved);
+                break;
+            }
+            owner_name = module
+                .and_then(|module| {
+                    module
+                        .doc
+                        .entity_types
+                        .iter()
+                        .find(|entity| entity.name == current)
+                })
+                .and_then(|entity| entity.parent.as_deref());
+        }
+        let outcome = outcome.ok_or_else(|| BindingDiagnostic {
+            code: BindingDiagnosticCode::WrongOwnerProperty,
+            subject: format!("{owner}.{property}"),
+            candidates: self
+                .composition
+                .modules
+                .iter()
+                .flat_map(|module| module.doc.properties.iter())
+                .filter(|candidate| candidate.name == property)
+                .map(|candidate| candidate.owner.clone())
+                .take(self.limits.candidates.max(1))
+                .collect(),
+            remediation: "use the property only on an owner that declares it".to_owned(),
+        })?;
         receipt.decisions.push(BindingDecision::Qualified {
             symbol: outcome.symbol.clone(),
         });

@@ -38,6 +38,23 @@ fn install_composition_authority(forge: &GraphForge, context: &CompositionBindin
             bytes: snapshot.bytes,
         })
         .collect::<Vec<_>>();
+    let configuration = participants
+        .iter_mut()
+        .find(|participant| {
+            participant.capability_id == graphforge_storage::WORKSPACE_CAPABILITY_ID
+                && participant.record_family_id
+                    == graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY
+        })
+        .unwrap();
+    let mut record =
+        graphforge_storage::WorkspaceConfiguration::from_canonical_json(&configuration.bytes)
+            .unwrap();
+    record.ontology_mode = match context.composition().profile_default {
+        ActivationMode::Exploratory => graphforge_storage::WorkspaceOntologyMode::None,
+        ActivationMode::Advisory => graphforge_storage::WorkspaceOntologyMode::Advisory,
+        ActivationMode::Strict => graphforge_storage::WorkspaceOntologyMode::Strict,
+    };
+    configuration.bytes = record.to_canonical_json().unwrap();
     participants.push(
         graphforge_storage::WorkspaceOntologyComposition::from_compiled(
             context.composition(),

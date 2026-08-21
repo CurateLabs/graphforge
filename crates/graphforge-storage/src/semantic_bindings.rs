@@ -83,6 +83,18 @@ pub struct LegacySemanticProjection {
 }
 
 impl SemanticStorageBindings {
+    /// Whether one exact generation binding has retained physical rows or
+    /// non-null property values in the pinned materialized graph.
+    ///
+    /// # Errors
+    /// Fails closed for malformed, oversized, or unreadable Parquet authority.
+    pub fn binding_has_retained_data(
+        binding: &SemanticStorageBinding,
+        graph_root: &Path,
+    ) -> Result<bool, GfError> {
+        binding_has_retained_data(binding, graph_root)
+    }
+
     /// Inspect a legacy single-module layout without mutation. Multi-module or
     /// unqualified layouts that cannot prove one owner fail closed.
     #[allow(clippy::too_many_lines)] // one bounded scan keeps projection evidence co-located
@@ -687,7 +699,11 @@ impl SemanticStorageBindings {
                     != Some(&self.composition_fingerprint)
             {
                 return Err(corrupt(&format!(
-                    "semantic route metadata does not match binding for {relative}"
+                    "semantic route metadata does not match binding for {relative}: expected route {} and composition {}, found route {:?} and composition {:?}",
+                    binding.route,
+                    self.composition_fingerprint,
+                    schema.metadata().get(SEMANTIC_ROUTE_METADATA_KEY),
+                    schema.metadata().get(SEMANTIC_COMPOSITION_METADATA_KEY),
                 )));
             }
             let join_key = match binding.route_kind {

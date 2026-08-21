@@ -1962,10 +1962,14 @@ impl GraphWriter {
             // `build_property_columns` keeps one source of truth for the
             // first-seen ordering and type-coercion rules across flushes.
             let existing = read_props_through(staged, &node_props_path(&self.dir, &stem))?;
+            let existing_metadata = existing
+                .first()
+                .map(|batch| batch.schema().metadata().clone());
             let mut rows = decode_property_rows(&existing)?;
             rows.extend(new_rows);
             let (schema, cols) = build_property_columns(&stem, &rows)?;
             let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
             stage_property_file(
                 staged,
                 &self.dir,
@@ -1988,6 +1992,9 @@ impl GraphWriter {
         let buffered: Vec<(String, Vec<EdgePropRow>)> = self.edge_properties.drain().collect();
         for (stem, new_rows) in buffered {
             let existing = read_props_through(staged, &edge_props_path(&self.dir, &stem))?;
+            let existing_metadata = existing
+                .first()
+                .map(|batch| batch.schema().metadata().clone());
             let mut rows = decode_edge_property_rows(&existing)?;
             rows.extend(new_rows);
             let (schema, cols) = build_property_columns_keyed(
@@ -1997,6 +2004,7 @@ impl GraphWriter {
                 &rows,
             )?;
             let schema = self.authenticated_route_schema(Arc::new(schema), &stem);
+            let schema = preserve_semantic_route_metadata(schema, existing_metadata.as_ref());
             stage_property_file(
                 staged,
                 &self.dir,
@@ -2027,6 +2035,27 @@ impl GraphWriter {
             _ => schema,
         }
     }
+}
+
+fn preserve_semantic_route_metadata(
+    schema: SchemaRef,
+    existing: Option<&HashMap<String, String>>,
+) -> SchemaRef {
+    let Some(existing) = existing else {
+        return schema;
+    };
+    let mut metadata = schema.metadata().clone();
+    for key in [
+        crate::SEMANTIC_ROUTE_METADATA_KEY,
+        crate::SEMANTIC_COMPOSITION_METADATA_KEY,
+    ] {
+        if !metadata.contains_key(key)
+            && let Some(value) = existing.get(key)
+        {
+            metadata.insert(key.to_owned(), value.clone());
+        }
+    }
+    Arc::new(Schema::new_with_metadata(schema.fields().clone(), metadata))
 }
 
 // ---------------------------------------------------------------------------
@@ -3654,9 +3683,12 @@ pub fn stage_set_node_properties(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let existing = read_props_through(staged, &node_props_path(dir, stem))?;
+    let metadata = existing
+        .first()
+        .map(|batch| batch.schema().metadata().clone());
     let rows = decode_property_rows(&existing)?;
     let (rows, touched) = apply_property_updates(rows, updates);
-    stage_node_property_file(staged, dir, stem, &rows)?;
+    stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
 
@@ -3673,9 +3705,12 @@ pub fn stage_remove_node_properties(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let existing = read_props_through(staged, &node_props_path(dir, stem))?;
+    let metadata = existing
+        .first()
+        .map(|batch| batch.schema().metadata().clone());
     let rows = decode_property_rows(&existing)?;
     let (rows, touched) = apply_property_removals(rows, removals);
-    stage_node_property_file(staged, dir, stem, &rows)?;
+    stage_node_property_file(staged, dir, stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
 
@@ -3694,9 +3729,12 @@ pub fn stage_set_edge_properties(
     updates: &HashMap<[u8; 16], HashMap<String, IrLiteral>>,
 ) -> Result<u64, GfError> {
     let existing = read_props_through(staged, &edge_props_path(dir, rel_stem))?;
+    let metadata = existing
+        .first()
+        .map(|batch| batch.schema().metadata().clone());
     let rows = decode_edge_property_rows(&existing)?;
     let (rows, touched) = apply_property_updates(rows, updates);
-    stage_edge_property_file(staged, dir, rel_stem, &rows)?;
+    stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
 
@@ -3714,9 +3752,12 @@ pub fn stage_remove_edge_properties(
     removals: &HashMap<[u8; 16], HashSet<String>>,
 ) -> Result<u64, GfError> {
     let existing = read_props_through(staged, &edge_props_path(dir, rel_stem))?;
+    let metadata = existing
+        .first()
+        .map(|batch| batch.schema().metadata().clone());
     let rows = decode_edge_property_rows(&existing)?;
     let (rows, touched) = apply_property_removals(rows, removals);
-    stage_edge_property_file(staged, dir, rel_stem, &rows)?;
+    stage_edge_property_file(staged, dir, rel_stem, &rows, metadata.as_ref())?;
     Ok(touched)
 }
 
@@ -3798,12 +3839,21 @@ fn stage_node_property_file(
     dir: &Path,
     stem: &str,
     rows: &[PropRow],
+    metadata: Option<&HashMap<String, String>>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
     let (schema, cols) = build_property_columns(stem, rows)?;
-    stage_property_file(staged, dir, "properties", stem, schema, cols)
+    let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
+    stage_property_file(
+        staged,
+        dir,
+        "properties",
+        stem,
+        schema.as_ref().clone(),
+        cols,
+    )
 }
 
 /// Edge analogue of [`stage_node_property_file`] (key `edge_uuid`, file routed
@@ -3813,13 +3863,22 @@ fn stage_edge_property_file(
     dir: &Path,
     stem: &str,
     rows: &[EdgePropRow],
+    metadata: Option<&HashMap<String, String>>,
 ) -> Result<(), GfError> {
     if rows.is_empty() {
         return Ok(());
     }
     let (schema, cols) =
         build_property_columns_keyed(EDGE_PROPERTY_UUID_FIELD, "graphforge.rel_type", stem, rows)?;
-    stage_property_file(staged, dir, "edge_properties", stem, schema, cols)
+    let schema = preserve_semantic_route_metadata(Arc::new(schema), metadata);
+    stage_property_file(
+        staged,
+        dir,
+        "edge_properties",
+        stem,
+        schema.as_ref().clone(),
+        cols,
+    )
 }
 
 /// Stage a rebuilt property file under `<dir>/<subdir>/<stem>.parquet` (the

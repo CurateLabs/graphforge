@@ -86,7 +86,13 @@ mod maintenance;
 #[cfg(test)]
 mod multi_process_publication_tests;
 mod node_selector;
+mod ontology_composition_lifecycle;
 mod ontology_lifecycle;
+pub use ontology_composition_lifecycle::{
+    CompositionChangeDiagnostic, CompositionChangePreview, CompositionChangeReceipt,
+    CompositionChangeRequest, CompositionDataDisposition, CompositionPortableCompatibility,
+    CompositionPortableReceipt,
+};
 mod paging;
 mod portable;
 mod provenance;
@@ -704,12 +710,12 @@ impl GraphForge {
         if semantic_storage_bindings.is_none()
             && let Some(context) = &default_composition_context
         {
-            if context.composition().modules.len() == 1 {
+            if context.composition().modules.len() == 1 && ontology_document.is_none() {
                 graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
                     context.composition(),
                     &dir,
                 )?;
-            } else {
+            } else if context.composition().modules.len() != 1 {
                 graphforge_storage::require_atomic_legacy_migration(&dir)?;
             }
         }
@@ -734,6 +740,11 @@ impl GraphForge {
                     ),
                 )),
                 (None, Some(_)) => unreachable!("semantic composition validated above"),
+                (Some(context), None)
+                    if context.composition().modules.len() == 1 && ontology_document.is_some() =>
+                {
+                    None
+                }
                 (context, None) => context,
             };
         if read_only {
@@ -3905,12 +3916,38 @@ fn load_workspace_ontology(
     let configuration = graphforge_storage::WorkspaceConfiguration::from_canonical_json(
         &configuration_snapshot.bytes,
     )?;
-    if ontology_record.mode != configuration.ontology_mode {
+    let composition = generation
+        .participant_snapshot(
+            graphforge_storage::WORKSPACE_CAPABILITY_ID,
+            graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
+        )?
+        .map(|snapshot| {
+            graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)
+        })
+        .transpose()?;
+    if let Some(composition) = &composition {
+        let composition_mode = match composition.profile_default {
+            graphforge_ontology::ActivationMode::Exploratory => {
+                graphforge_storage::WorkspaceOntologyMode::None
+            }
+            graphforge_ontology::ActivationMode::Advisory => {
+                graphforge_storage::WorkspaceOntologyMode::Advisory
+            }
+            graphforge_ontology::ActivationMode::Strict => {
+                graphforge_storage::WorkspaceOntologyMode::Strict
+            }
+        };
+        if composition_mode != configuration.ontology_mode {
+            return Err(GfError::Validation(
+                "workspace composition and configuration modes disagree".into(),
+            ));
+        }
+    } else if ontology_record.mode != configuration.ontology_mode {
         return Err(GfError::Validation(
             "workspace ontology and configuration modes disagree".into(),
         ));
     }
-    let mode = ontology_record.mode.execution_mode();
+    let mode = configuration.ontology_mode.execution_mode();
     let document = ontology_record
         .canonical_ontology
         .map(|document| {

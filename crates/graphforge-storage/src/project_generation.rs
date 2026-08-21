@@ -251,6 +251,13 @@ impl ResolvedProjectGeneration {
             .and_then(|value| Uuid::parse_str(value).ok())
     }
 
+    /// UUID of the transaction that authored this committed generation.
+    #[must_use]
+    pub fn transaction_uuid(&self) -> Uuid {
+        Uuid::parse_str(&self.manifest.transaction_uuid)
+            .expect("resolved project generation has a validated transaction UUID")
+    }
+
     /// Resolve a requested participant path without accepting caller path
     /// components or parsing any participant bytes.
     ///
