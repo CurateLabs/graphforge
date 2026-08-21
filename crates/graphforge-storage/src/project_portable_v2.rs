@@ -508,6 +508,10 @@ fn preflight_expanded(root: &Path, limits: PortableV2Limits) -> Result<(), Porta
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "keeps bounded header census and admission ordering in one pre-mutation audit path"
+)]
 fn preflight_bundle(
     path: &Path,
     limits: PortableV2Limits,
@@ -518,6 +522,9 @@ fn preflight_bundle(
     let mut pending_pax = None;
     let mut admitted_manifest = None;
     let mut pending_composition: Option<Vec<u8>> = None;
+    let mut admitted_composition = false;
+    let mut entries = 0_u64;
+    let mut total = 0_u64;
     loop {
         check_cancel(cancelled)?;
         let mut header = [0_u8; 512];
@@ -529,6 +536,24 @@ fn preflight_bundle(
         }
         let size = parse_octal(&header[124..136])?;
         let raw_path = header_path(&header)?;
+        entries = entries.checked_add(1).ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle entry count")
+        })?;
+        if entries > limits.max_entries {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "bundle entry count",
+            ));
+        }
+        total = total.checked_add(size).ok_or_else(|| {
+            PortableV2Error::new(PortableV2ErrorCode::LimitExceeded, "bundle total bytes")
+        })?;
+        if total > limits.max_total_bytes {
+            return Err(PortableV2Error::new(
+                PortableV2ErrorCode::LimitExceeded,
+                "bundle total bytes",
+            ));
+        }
         if header[156] == b'x' {
             let bytes = read_unhashed_payload(&mut input, size, limits.max_path_bytes + 32)?;
             pending_pax = Some(parse_pax(std::str::from_utf8(&bytes).map_err(|_| {
@@ -552,18 +577,18 @@ fn preflight_bundle(
                     .iter()
                     .any(|capability| capability == "ontology-composition@1");
                 if !needs_composition {
-                    return Ok(());
+                    admitted_manifest = Some(admitted);
+                    continue;
                 }
                 admitted_manifest = Some(admitted);
                 if let Some(control) = pending_composition.take() {
                     admit_composition_features(&control)?;
-                    return Ok(());
+                    admitted_composition = true;
                 }
+            } else if admitted_manifest.is_some() {
+                admit_composition_features(&bytes)?;
+                admitted_composition = true;
             } else {
-                if admitted_manifest.is_some() {
-                    admit_composition_features(&bytes)?;
-                    return Ok(());
-                }
                 // Canonical bundles sort paths, so the composition control can
                 // precede the root manifest. Retain only this bounded control;
                 // no component payload is read before both admission documents
@@ -580,15 +605,27 @@ fn preflight_bundle(
             })?;
         }
     }
-    Err(PortableV2Error::at(
-        PortableV2ErrorCode::InvalidStructure,
-        if admitted_manifest.is_some() {
-            ONTOLOGY_COMPOSITION_PATH
-        } else {
-            MANIFEST_PATH
-        },
-        "required preflight control is missing",
-    ))
+    let Some(manifest) = admitted_manifest else {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            MANIFEST_PATH,
+            "required preflight control is missing",
+        ));
+    };
+    if manifest
+        .requirements
+        .capabilities
+        .iter()
+        .any(|capability| capability == "ontology-composition@1")
+        && !admitted_composition
+    {
+        return Err(PortableV2Error::at(
+            PortableV2ErrorCode::InvalidStructure,
+            ONTOLOGY_COMPOSITION_PATH,
+            "required preflight control is missing",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_materialized_ontology_composition(
@@ -3392,6 +3429,43 @@ mod tests {
         out.extend_from_slice(payload);
         out.resize(out.len() + ((512 - payload.len() % 512) % 512), 0);
         out
+    }
+
+    #[test]
+    fn bundle_preflight_bounds_header_scan_before_admission() {
+        let parent = tempfile::tempdir().unwrap();
+        let count_bundle = parent.path().join("count.gfpb");
+        let mut bytes = Vec::new();
+        for index in 0..3 {
+            bytes.extend(tar_entry(&format!("data/payload-{index}"), b"x"));
+        }
+        bytes.extend([0_u8; 1024]);
+        fs::write(&count_bundle, bytes).unwrap();
+        let error = preflight_bundle(
+            &count_bundle,
+            PortableV2Limits {
+                max_entries: 2,
+                ..PortableV2Limits::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
+
+        let bytes_bundle = parent.path().join("bytes.gfpb");
+        let mut bytes = tar_entry("data/payload", b"xx");
+        bytes.extend([0_u8; 1024]);
+        fs::write(&bytes_bundle, bytes).unwrap();
+        let error = preflight_bundle(
+            &bytes_bundle,
+            PortableV2Limits {
+                max_total_bytes: 1,
+                ..PortableV2Limits::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, PortableV2ErrorCode::LimitExceeded);
     }
 
     #[test]

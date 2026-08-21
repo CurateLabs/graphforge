@@ -170,7 +170,8 @@ pub mod project_portable_v2_subset;
 pub use project_portable_v2_subset::{
     PortableV2GraphSelector, PortableV2GraphSubsetMeta, PortableV2PropertyProjection,
     PortableV2SubsetClosure, PortableV2SubsetPlan, PortableV2SubsetRequest,
-    plan_graph_subset_portable_v2, preview_portable_v2_graph_subset,
+    plan_graph_subset_portable_v2, portable_v2_graph_data_fingerprint,
+    preview_portable_v2_graph_subset,
 };
 
 pub mod project_portable_v2_oci;

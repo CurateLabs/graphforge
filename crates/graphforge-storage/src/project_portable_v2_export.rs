@@ -2150,6 +2150,154 @@ mod tests {
         (project, generation)
     }
 
+    fn graph_generation_with_transitive_bridge_chain() -> (
+        tempfile::TempDir,
+        ResolvedProjectGeneration,
+        PortableV2ExactIdentity,
+        String,
+    ) {
+        use graphforge_ontology::{
+            ActivationMode, AuthoredModule, BridgeAssertion, BridgeDocument, BridgePredicate,
+            BridgeProvenance, BridgeSetId, CompositionLimits, EntityTypeDef,
+            InventoryCompileRequest, MappingMethod, OntologyDoc, OntologyModuleId, QualifiedSymbol,
+            SymbolKind, bridge_document_digest, compile_inventory, module_document_digest,
+        };
+        let module = |name: &str, dependencies: Vec<OntologyModuleId>| {
+            let document = OntologyDoc {
+                ontology_id: format!("https://graphforge.dev/ontology/{name}"),
+                version: "v1".into(),
+                entity_types: vec![EntityTypeDef {
+                    name: "Person".into(),
+                    r#abstract: false,
+                    parent: None,
+                }],
+                relation_types: vec![],
+                properties: vec![],
+                constraints: vec![],
+                migrations: vec![],
+            };
+            AuthoredModule {
+                id: OntologyModuleId {
+                    ontology_id: document.ontology_id.clone(),
+                    authored_version: document.version.clone(),
+                    canonical_digest: module_document_digest(&document).unwrap(),
+                },
+                dependencies,
+                doc: document,
+                allow_projected_identity: false,
+            }
+        };
+        let base = module("base", vec![]);
+        let source = module("source-chain", vec![base.id.clone()]);
+        let target = module("target-chain", vec![]);
+        let unrelated = module("unrelated", vec![]);
+        let assertion = |from: &AuthoredModule, to: &AuthoredModule| BridgeAssertion {
+            source: QualifiedSymbol {
+                module: from.id.clone(),
+                kind: SymbolKind::Entity,
+                local_id: "Person".into(),
+            },
+            target: QualifiedSymbol {
+                module: to.id.clone(),
+                kind: SymbolKind::Entity,
+                local_id: "Person".into(),
+            },
+            predicate: BridgePredicate::Equivalent,
+            directional: false,
+            provenance: BridgeProvenance {
+                method: MappingMethod::Authored,
+                confidence: None,
+                justification: "transitive portable closure fixture".into(),
+                evidence_refs: vec![],
+            },
+            valid_from: None,
+            valid_to: None,
+        };
+        let bridge_a = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/a".into(),
+            authored_version: "v1".into(),
+            source_modules: vec![base.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: vec![],
+            shared_surfaces: vec![],
+            assertions: vec![assertion(&base, &target)],
+            enforcement: Some(ActivationMode::Advisory),
+        };
+        let bridge_a_id = BridgeSetId {
+            bridge_id: bridge_a.bridge_id.clone(),
+            authored_version: bridge_a.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge_a).unwrap(),
+        };
+        let bridge_b = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/b".into(),
+            authored_version: "v1".into(),
+            source_modules: vec![source.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: vec![bridge_a_id.clone()],
+            shared_surfaces: vec![],
+            assertions: vec![assertion(&source, &target)],
+            enforcement: Some(ActivationMode::Strict),
+        };
+        let bridge_b_id = BridgeSetId {
+            bridge_id: bridge_b.bridge_id.clone(),
+            authored_version: bridge_b.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge_b).unwrap(),
+        };
+        let modules = [base, source, target, unrelated];
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &modules,
+            bridges: &[bridge_a_id, bridge_b_id.clone()],
+            activation: &[],
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        let composition =
+            crate::WorkspaceOntologyComposition::from_compiled(&compiled, vec![bridge_a, bridge_b]);
+        let root_identity = exact_identity(
+            &bridge_b_id.bridge_id,
+            &bridge_b_id.authored_version,
+            &bridge_b_id.canonical_digest,
+        );
+        let unrelated_digest = modules[3].id.canonical_digest.clone();
+        let project = tempfile::tempdir().unwrap();
+        open_or_initialize_project(project.path()).unwrap();
+        let mut participants = crate::empty_workspace_participants().unwrap();
+        participants.push(composition.to_project_participant().unwrap());
+        participants.sort_by(|left, right| {
+            (&left.capability_id, &left.record_family_id)
+                .cmp(&(&right.capability_id, &right.record_family_id))
+        });
+        let request = crate::ProjectGenerationRequest {
+            transaction_uuid: Uuid::new_v4(),
+            generation_uuid: Uuid::new_v4(),
+            capabilities: vec![
+                crate::ProjectCapability {
+                    capability_id: "graph".into(),
+                    capability_version: 1,
+                },
+                crate::ProjectCapability {
+                    capability_id: "workspace".into(),
+                    capability_version: 1,
+                },
+            ],
+            participants,
+        };
+        let crate::ProjectStageOutcome::Staged(staged) =
+            crate::stage_project_generation(project.path(), &request).unwrap()
+        else {
+            panic!("fresh transitive composition replayed");
+        };
+        staged
+            .validate(|_| Ok(()), |_, _| Ok(()))
+            .unwrap()
+            .publish()
+            .unwrap();
+        let generation = crate::resolve_project_generation(project.path()).unwrap();
+        (project, generation, root_identity, unrelated_digest)
+    }
+
     fn resign_test_manifest(plan: &mut PortableV2ExportPlan) {
         let mut manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
         manifest.as_object_mut().unwrap().remove("package_digest");
@@ -2719,6 +2867,111 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, PortableV2ErrorCode::Incompatible);
+    }
+
+    #[test]
+    fn transitive_module_and_bridge_closure_is_exact_in_both_forms() {
+        let (_project, generation, root_bridge, unrelated_digest) =
+            graph_generation_with_transitive_bridge_chain();
+        let limits = PortableV2ExportLimits::default();
+        let selection = preview_portable_v2_selection(
+            &generation,
+            &PortableV2SelectionRequest {
+                profile: PortableV2SelectionProfile::OntologyComposition(vec![root_bridge.clone()]),
+                strict: true,
+            },
+            limits,
+        )
+        .unwrap();
+        assert_eq!(selection.projected.len(), 5);
+        assert_eq!(
+            selection
+                .projected
+                .iter()
+                .filter(|entry| entry.reason == crate::PortableV2SelectionReason::Requested)
+                .count(),
+            1
+        );
+        assert!(
+            selection
+                .projected
+                .iter()
+                .any(|entry| entry.identity == root_bridge)
+        );
+        assert!(
+            !selection
+                .projected
+                .iter()
+                .any(|entry| entry.identity.content_digest.ends_with(&unrelated_digest))
+        );
+
+        let plan = plan_selected_portable_v2(&generation, &selection, limits).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&plan.manifest).unwrap();
+        let components = manifest["components"].as_array().unwrap();
+        assert_eq!(
+            components
+                .iter()
+                .filter(|component| matches!(
+                    component["kind"].as_str(),
+                    Some("ontology" | "schema")
+                ))
+                .count(),
+            5
+        );
+        assert!(
+            !serde_json::to_string(&manifest)
+                .unwrap()
+                .contains(&unrelated_digest)
+        );
+        let control_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == crate::project_portable_v2::ONTOLOGY_COMPOSITION_PATH)
+            .unwrap();
+        let PlannedSource::Control(control_bytes) = &control_file.source else {
+            panic!("composition must be inline")
+        };
+        let control: PortableV2OntologyComposition = serde_json::from_slice(control_bytes).unwrap();
+        assert_eq!(control.modules.len(), 3);
+        assert_eq!(control.bridge_sets.len(), 2);
+        assert!(
+            !control
+                .modules
+                .iter()
+                .any(|module| module.content_digest.ends_with(&unrelated_digest))
+        );
+
+        let output = tempfile::tempdir().unwrap();
+        let mut reports = Vec::new();
+        for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
+            let path = output
+                .path()
+                .join(if representation == PortableV2Output::Expanded {
+                    "chain.gfproject"
+                } else {
+                    "chain.gfpb"
+                });
+            export_complete_portable_v2(
+                &plan,
+                &path,
+                representation,
+                limits,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap();
+            reports.push(verify_portable_v2(&path, PortableV2Mode::Full, limits, None).unwrap());
+        }
+        assert_eq!(reports[0].package_digest, reports[1].package_digest);
+        assert_eq!(
+            reports[0].ontology_composition,
+            reports[1].ontology_composition
+        );
+        assert_eq!(reports[0].ontology_composition_entries.len(), 5);
+        assert_eq!(
+            reports[0].ontology_composition_entries,
+            reports[1].ontology_composition_entries
+        );
     }
 
     #[test]

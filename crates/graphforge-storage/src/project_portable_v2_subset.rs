@@ -1,6 +1,7 @@
 //! Deterministic portable-v2 graph-data-subset planning (#786).
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -89,6 +90,23 @@ pub struct PortableV2SubsetPlan {
     pub(crate) projection: GraphProjectionSelection,
 }
 
+/// Fingerprint canonical logical graph data decoded from the actual Parquet
+/// topology, edge, property, edge-property, and runtime-catalog tables.
+pub fn portable_v2_graph_data_fingerprint(
+    graph_root: &Path,
+    limits: PortableV2Limits,
+) -> Result<String, PortableV2Error> {
+    let (inventory, _) = capture_graph_files(graph_root).map_err(storage)?;
+    if inventory.file_count > limits.max_entries
+        || inventory.total_byte_length > limits.max_total_bytes
+    {
+        return Err(limit("graph data fingerprint exceeds configured limit"));
+    }
+    let digest = crate::graph_projection::portable_graph_data_fingerprint(graph_root)
+        .map_err(|_| incompatible("canonical graph data fingerprint"))?;
+    Ok(format!("sha256:{}", hex(digest)))
+}
+
 /// Resolve one bounded deterministic graph-data subset without writing a package.
 pub fn preview_portable_v2_graph_subset(
     generation: &ResolvedProjectGeneration,
@@ -174,7 +192,7 @@ pub fn preview_portable_v2_graph_subset(
         selected_node_count: summary.node_uuids.len() as u64,
         selected_edge_count: summary.edge_uuids.len() as u64,
         endpoint_node_count: summary.endpoint_node_uuids.len() as u64,
-        result_fingerprint: format!("sha256:{}", hex(summary.graph_content_fingerprint)),
+        result_fingerprint: portable_v2_graph_data_fingerprint(staging.path(), limits)?,
         subset_fingerprint: String::new(),
         projection,
     };
@@ -204,7 +222,7 @@ pub fn plan_graph_subset_portable_v2(
     .map_err(|error| map_projection(&error))?;
     if summary.node_uuids.len() as u64 != plan.selected_node_count
         || summary.edge_uuids.len() as u64 != plan.selected_edge_count
-        || format!("sha256:{}", hex(summary.graph_content_fingerprint)) != plan.result_fingerprint
+        || portable_v2_graph_data_fingerprint(staging.path(), limits)? != plan.result_fingerprint
     {
         return Err(PortableV2Error::new(
             PortableV2ErrorCode::ConcurrentMutation,
@@ -430,7 +448,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
-    use graphforge_core::{OntologyMode, TypeId};
+    use graphforge_core::OntologyMode;
     use graphforge_ir::IrLiteral;
     use uuid::Uuid;
 
@@ -457,10 +475,15 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let nodes = [uuid(1), uuid(2), uuid(3)];
         let edges = [uuid(11), uuid(12)];
+        let mut runtime_catalog = graphforge_ir::RuntimeCatalog::new();
+        let person = graphforge_ir::runtime_entity_type_id(runtime_catalog.intern_label("Person"));
+        runtime_catalog.intern_relation_type("KNOWS");
+        runtime_catalog.intern_property("value", Some("Person"));
+        runtime_catalog.intern_property("secret", Some("Person"));
         let mut writer =
             GraphWriter::open_at(workspace.path(), OntologyMode::Exploratory, TS).unwrap();
         for (index, node) in nodes.iter().enumerate() {
-            writer.create_node(*node, TypeId(1)).unwrap();
+            writer.create_node(*node, person).unwrap();
             writer
                 .set_properties(
                     node,
@@ -479,6 +502,11 @@ mod tests {
             .create_edge(edges[1], "KNOWS", &nodes[1], &nodes[2])
             .unwrap();
         writer.flush().unwrap();
+        crate::graph_projection::write_parquet(
+            &workspace.path().join("topology/runtime_catalog.parquet"),
+            &runtime_catalog.to_record_batch(),
+        )
+        .unwrap();
         let (_, files) = capture_graph_files(workspace.path()).unwrap();
         let mut participants = empty_workspace_participants().unwrap();
         participants.insert(0, files);
@@ -758,6 +786,7 @@ mod tests {
             let mut receipts = Vec::new();
             let mut reports = Vec::new();
             let mut query_rows = Vec::new();
+            let mut data_fingerprints = Vec::new();
             for representation in [PortableV2Output::Expanded, PortableV2Output::Bundle] {
                 let extension = if representation == PortableV2Output::Expanded {
                     "gfproject"
@@ -793,6 +822,14 @@ mod tests {
                         )
                         .unwrap();
                         query_rows.push(imported_node_query(&imported));
+                        let imported_generation = resolve_project_generation(&imported).unwrap();
+                        data_fingerprints.push(Some(
+                            portable_v2_graph_data_fingerprint(
+                                &imported_generation.graph_tree_root(),
+                                limits,
+                            )
+                            .unwrap(),
+                        ));
                     }
                     ("ontology-only" | "component-selective" | "graph-data-subset", _) => {
                         let rows = crate::consume_selective_portable_v2(
@@ -807,16 +844,19 @@ mod tests {
                                 assert!(candidate.ontology.is_some());
                                 assert!(candidate.staged_composition.is_some());
                                 Ok(if class == "graph-data-subset" {
-                                    graph_tree_query(
-                                        &stage.join("data/components/graph-data/graph-tree"),
+                                    let graph = stage.join("data/components/graph-data/graph-tree");
+                                    (
+                                        graph_tree_query(&graph),
+                                        Some(portable_v2_graph_data_fingerprint(&graph, limits)?),
                                     )
                                 } else {
-                                    Vec::new()
+                                    (Vec::new(), None)
                                 })
                             },
                         )
                         .unwrap();
-                        query_rows.push(rows);
+                        query_rows.push(rows.0);
+                        data_fingerprints.push(rows.1);
                     }
                     _ => {}
                 }
@@ -839,9 +879,23 @@ mod tests {
             assert_eq!(query_rows[0], expected_rows, "{class}");
             assert_eq!(
                 query_fingerprint(&query_rows[0]),
-                case["expected_data_fingerprint"].as_str().unwrap()
+                case["expected_query_fingerprint"].as_str().unwrap()
+            );
+            assert!(
+                data_fingerprints
+                    .iter()
+                    .all(|fingerprint| fingerprint == &data_fingerprints[0])
+            );
+            assert_eq!(
+                data_fingerprints[0].as_deref(),
+                case["expected_data_fingerprint"].as_str(),
+                "{class} canonical graph data"
             );
             if class == "graph-data-subset" {
+                assert_eq!(
+                    data_fingerprints[0].as_deref(),
+                    Some(subset.result_fingerprint.as_str())
+                );
                 assert_eq!(receipts[0].selection_fingerprint, subset.subset_fingerprint);
                 assert_eq!(receipts[1].selection_fingerprint, subset.subset_fingerprint);
             }

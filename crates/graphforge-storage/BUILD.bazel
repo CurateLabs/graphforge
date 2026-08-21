@@ -30,6 +30,7 @@ gf_rust_test(
     crate_features = ["test-failpoints"],
     compile_data = [
         "//tests/fixtures/portable-v2:multi-ontology-vectors.json",
+        "//tests/fixtures/portable-v2:m9-interchange-cases.json",
         "//tests/fixtures/portable-v2:ontology-only.manifest.json",
     ],
     # Unit suite exercises filesystem/async paths; default "small" is too tight.
