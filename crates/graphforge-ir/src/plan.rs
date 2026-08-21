@@ -555,6 +555,8 @@ mod tests {
             dialect: "openCypher".into(),
             ontology_version: Some(OntologyVersion::from("v1")),
             ontology_mode: OntologyMode::Advisory,
+            composition_fingerprint: None,
+            binding_receipts: vec![],
             feature_flags: vec![],
             ops: vec![
                 GraphOp::NodeScan {
@@ -607,6 +609,8 @@ mod tests {
             dialect: "openCypher".into(),
             ontology_version: None,
             ontology_mode: OntologyMode::Exploratory,
+            composition_fingerprint: None,
+            binding_receipts: vec![],
             feature_flags: vec![],
             ops: vec![
                 GraphOp::NodeScan {

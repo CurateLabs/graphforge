@@ -217,7 +217,9 @@ impl CompositionBindingContext {
                     },
                 ))
             }
-            Err(error) => self.resolve_via_bridge_or_policy(kind, local_id, module.as_ref(), error),
+            Err(error) => {
+                self.resolve_via_bridge_or_policy(kind, local_id, module.as_ref(), &error)
+            }
         }
     }
 
@@ -420,12 +422,13 @@ impl CompositionBindingContext {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_via_bridge_or_policy(
         &self,
         kind: SymbolKind,
         local_id: &str,
         qualified_module: Option<&OntologyModuleId>,
-        error: graphforge_ontology::CompositionError,
+        error: &graphforge_ontology::CompositionError,
     ) -> Result<(SymbolBinding, BindingExplainReceipt), BindingDiagnostic> {
         if error
             .diagnostics

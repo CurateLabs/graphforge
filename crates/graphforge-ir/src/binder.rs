@@ -4487,7 +4487,7 @@ impl Binder {
                     }
                 }
                 Err(diagnostic) => {
-                    Self::push_composition_error(diagnostic, span, s);
+                    Self::push_composition_error(&diagnostic, span, s);
                     TypeId(u32::MAX)
                 }
             };
@@ -4535,7 +4535,7 @@ impl Binder {
                     }
                 }
                 Err(diagnostic) => {
-                    Self::push_composition_error(diagnostic, span, s);
+                    Self::push_composition_error(&diagnostic, span, s);
                     TypeId(u32::MAX)
                 }
             };
@@ -4585,7 +4585,7 @@ impl Binder {
             return PropId(self.catalog.lock().unwrap().intern_property(name, None).0);
         }
         if let Some(composition) = &self.composition {
-            let owned = match &owner {
+            let scoped_owner = match &owner {
                 BoundPropertyOwner::Entity(Some(owner)) => {
                     Some((graphforge_ontology::SymbolKind::Entity, owner.as_str()))
                 }
@@ -4596,7 +4596,7 @@ impl Binder {
                 | BoundPropertyOwner::Relationship(None)
                 | BoundPropertyOwner::Value => None,
             };
-            let resolution = owned.map_or_else(
+            let resolution = scoped_owner.map_or_else(
                 || composition.resolve(graphforge_ontology::SymbolKind::Property, name),
                 |(kind, owner)| composition.resolve_owned_property(kind, owner, name),
             );
@@ -4617,7 +4617,7 @@ impl Binder {
                     }
                 }
                 Err(diagnostic) => {
-                    Self::push_composition_error(diagnostic, span, s);
+                    Self::push_composition_error(&diagnostic, span, s);
                     PropId(u32::MAX)
                 }
             };
@@ -4639,7 +4639,7 @@ impl Binder {
     }
 
     fn push_composition_error(
-        diagnostic: crate::BindingDiagnostic,
+        diagnostic: &crate::BindingDiagnostic,
         span: Span,
         s: &mut BinderState,
     ) {

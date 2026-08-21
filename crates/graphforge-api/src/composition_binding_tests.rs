@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use graphforge_ir::{
-    BindingDecision, BindingDiagnosticCode, CompositionBindingContext, CompositionBindingLimits,
+    Binder, BindingDecision, BindingDiagnosticCode, CompositionBindingContext,
+    CompositionBindingLimits, RuntimeCatalog,
 };
 use graphforge_ontology::{
     ActivationMode, ActivationRecord, ActivationScope, AuthoredModule, BridgeAssertion,
@@ -12,6 +13,7 @@ use graphforge_ontology::{
 };
 
 use super::GraphForge;
+use graphforge_core::OntologyMode;
 
 fn module(name: &str, entities: &[&str]) -> AuthoredModule {
     let doc = OntologyDoc {
@@ -59,6 +61,17 @@ fn composed_fixture(
     QualifiedSymbol,
     QualifiedSymbol,
 ) {
+    composed_fixture_with_predicates(default, &[BridgePredicate::Equivalent])
+}
+
+fn composed_fixture_with_predicates(
+    default: ActivationMode,
+    predicates: &[BridgePredicate],
+) -> (
+    Arc<CompositionBindingContext>,
+    QualifiedSymbol,
+    QualifiedSymbol,
+) {
     let research = module("research", &["Person", "Study"]);
     let genealogy = module("genealogy", &["Person"]);
     let source = QualifiedSymbol {
@@ -71,34 +84,41 @@ fn composed_fixture(
         kind: SymbolKind::Entity,
         local_id: "Person".to_owned(),
     };
-    let bridge = BridgeDocument {
-        bridge_id: "https://graphforge.dev/bridge/person".to_owned(),
-        authored_version: "1.0.0".to_owned(),
-        source_modules: vec![research.id.clone()],
-        target_modules: vec![genealogy.id.clone()],
-        dependencies: vec![],
-        shared_surfaces: vec![],
-        assertions: vec![BridgeAssertion {
-            source: source.clone(),
-            target: target.clone(),
-            predicate: BridgePredicate::Equivalent,
-            directional: false,
-            provenance: BridgeProvenance {
-                method: MappingMethod::Authored,
-                confidence: None,
-                justification: "the same governed person concept".to_owned(),
-                evidence_refs: vec![],
-            },
-            valid_from: None,
-            valid_to: None,
-        }],
-        enforcement: Some(ActivationMode::Strict),
-    };
-    let bridge_id = BridgeSetId {
-        bridge_id: bridge.bridge_id.clone(),
-        authored_version: bridge.authored_version.clone(),
-        canonical_digest: bridge_document_digest(&bridge).expect("bridge digest"),
-    };
+    let bridges = predicates
+        .iter()
+        .enumerate()
+        .map(|(index, predicate)| BridgeDocument {
+            bridge_id: format!("https://graphforge.dev/bridge/person-{index}"),
+            authored_version: "1.0.0".to_owned(),
+            source_modules: vec![research.id.clone()],
+            target_modules: vec![genealogy.id.clone()],
+            dependencies: vec![],
+            shared_surfaces: vec![],
+            assertions: vec![BridgeAssertion {
+                source: source.clone(),
+                target: target.clone(),
+                predicate: *predicate,
+                directional: !predicate.is_symmetric(),
+                provenance: BridgeProvenance {
+                    method: MappingMethod::Authored,
+                    confidence: None,
+                    justification: "governed person mapping".to_owned(),
+                    evidence_refs: vec![],
+                },
+                valid_from: None,
+                valid_to: None,
+            }],
+            enforcement: Some(ActivationMode::Strict),
+        })
+        .collect::<Vec<_>>();
+    let bridge_ids = bridges
+        .iter()
+        .map(|bridge| BridgeSetId {
+            bridge_id: bridge.bridge_id.clone(),
+            authored_version: bridge.authored_version.clone(),
+            canonical_digest: bridge_document_digest(bridge).expect("bridge digest"),
+        })
+        .collect::<Vec<_>>();
     let activation = vec![ActivationRecord {
         scope: ActivationScope::Module,
         subject: research.id.display_ref(),
@@ -106,7 +126,7 @@ fn composed_fixture(
     }];
     let composition = compile_inventory(InventoryCompileRequest {
         modules: &[research, genealogy],
-        bridges: &[bridge_id],
+        bridges: &bridge_ids,
         activation: &activation,
         profile_default: default,
         limits: CompositionLimits::default(),
@@ -116,7 +136,7 @@ fn composed_fixture(
     (
         Arc::new(CompositionBindingContext::new(
             Arc::new(composition),
-            vec![bridge],
+            bridges,
             CompositionBindingLimits::default(),
         )),
         source,
@@ -135,6 +155,29 @@ fn facade_executes_qualified_and_unique_composed_queries() {
     forge
         .execute_with_composition("MATCH (n:Study) RETURN n", context)
         .expect("unique shorthand execution");
+}
+
+#[test]
+fn graph_plan_carries_exact_composition_identity_and_receipts() {
+    let (context, _, _) = composed_fixture(ActivationMode::Strict);
+    let ast = graphforge_cypher::parse("MATCH (n:`research:Person`) RETURN n").expect("parse");
+    let plan = Binder::new(
+        None,
+        Arc::new(Mutex::new(RuntimeCatalog::new())),
+        OntologyMode::Exploratory,
+    )
+    .with_composition(context.clone())
+    .bind(&ast)
+    .expect("bind");
+    assert_eq!(
+        plan.composition_fingerprint.as_deref(),
+        Some(context.fingerprint())
+    );
+    assert_eq!(plan.binding_receipts.len(), 1);
+    assert_eq!(
+        plan.binding_receipts[0].composition_fingerprint,
+        context.fingerprint()
+    );
 }
 
 #[test]
@@ -170,7 +213,7 @@ fn bridge_selection_and_explain_are_exact_bounded_and_repeatable() {
     assert!(matches!(
         first.decisions.as_slice(),
         [BindingDecision::Bridge { bridge_id, predicate, .. }]
-            if bridge_id == "https://graphforge.dev/bridge/person"
+            if bridge_id == "https://graphforge.dev/bridge/person-0"
                 && predicate == "equivalent"
     ));
     assert_eq!(
@@ -187,6 +230,19 @@ fn bridge_selection_and_explain_are_exact_bounded_and_repeatable() {
         context.select_bridge(&invalid, &target).unwrap_err().code,
         BindingDiagnosticCode::UnknownSymbol
     );
+}
+
+#[test]
+fn conflicting_bridge_paths_are_rejected_with_bounded_candidates() {
+    let (context, source, target) = composed_fixture_with_predicates(
+        ActivationMode::Exploratory,
+        &[BridgePredicate::Equivalent, BridgePredicate::Related],
+    );
+    let error = context
+        .select_bridge(&source, &target)
+        .expect_err("conflicting predicates");
+    assert_eq!(error.code, BindingDiagnosticCode::ConflictingBridgePaths);
+    assert_eq!(error.candidates, ["equivalent", "related"]);
 }
 
 #[test]
