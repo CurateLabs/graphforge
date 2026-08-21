@@ -1070,6 +1070,23 @@ fn logical_records(
             }
             continue;
         }
+        if descriptor.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
+            && descriptor.record_family_id == graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY
+        {
+            let bindings = graphforge_storage::semantic_storage_bindings(generation)?
+                .ok_or_else(|| schema_mismatch("semantic binding participant disappeared"))?;
+            let bytes = bindings.to_canonical_json()?;
+            let identity: [u8; 32] = Sha256::digest(b"graph:semantic_bindings").into();
+            let fingerprint: [u8; 32] = Sha256::digest(bytes).into();
+            out.insert(
+                (domain.into(), descriptor.record_family_id.clone(), identity),
+                LogicalRecord {
+                    record_uuid: None,
+                    fingerprint,
+                },
+            );
+            continue;
+        }
         if descriptor.capability_id == graphforge_storage::WORKSPACE_CAPABILITY_ID {
             if descriptor.record_family_id == "restoration_transition" {
                 // Revert validation treats this canonical, storage-owned row as

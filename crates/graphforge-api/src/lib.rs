@@ -91,6 +91,7 @@ mod ontology_lifecycle;
 pub use ontology_composition_lifecycle::{
     CompositionChangeDiagnostic, CompositionChangePreview, CompositionChangeReceipt,
     CompositionChangeRequest, CompositionDataDisposition, CompositionPortableCompatibility,
+    CompositionPortableReceipt,
 };
 mod paging;
 mod portable;
@@ -419,8 +420,6 @@ pub struct GraphForge {
     ontology: Option<OntologyHandle>,
     /// Source document backing the live, session-scoped compiled ontology.
     ontology_document: Option<OntologyDoc>,
-    /// Generation-bound composed binding authority used by normal execution.
-    composition_binding: Arc<Mutex<Option<Arc<CompositionBindingContext>>>>,
     /// Shared runtime catalog (grown by the binder during `execute`).
     runtime_catalog: Arc<Mutex<RuntimeCatalog>>,
     /// Exact generation-bound qualified storage authority, when adopted.
@@ -565,7 +564,6 @@ impl GraphForge {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
-        let composition_binding = load_composition_binding(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, false)?;
         Ok(Self {
@@ -606,7 +604,6 @@ impl GraphForge {
             tempdir: Some(Arc::new(tmp)),
             ontology,
             ontology_document,
-            composition_binding: Arc::new(Mutex::new(composition_binding)),
             runtime_catalog: Arc::new(Mutex::new(RuntimeCatalog::new())),
             semantic_storage_bindings: Arc::new(Mutex::new(None)),
             default_composition_context: Arc::new(Mutex::new(None)),
@@ -703,7 +700,6 @@ impl GraphForge {
         let generation_uuid = resolved_generation.generation_uuid();
         let (ontology_mode, ontology, ontology_document) =
             load_workspace_ontology(&resolved_generation)?;
-        let composition_binding = load_composition_binding(&resolved_generation)?;
         let (dir, workspace, graph_open_evidence) =
             hydrate_graph_workspace(&resolved_generation, read_only)?;
 
@@ -714,12 +710,12 @@ impl GraphForge {
         if semantic_storage_bindings.is_none()
             && let Some(context) = &default_composition_context
         {
-            if context.composition().modules.len() == 1 {
+            if context.composition().modules.len() == 1 && ontology_document.is_none() {
                 graphforge_storage::SemanticStorageBindings::project_legacy_unambiguous(
                     context.composition(),
                     &dir,
                 )?;
-            } else {
+            } else if context.composition().modules.len() != 1 {
                 graphforge_storage::require_atomic_legacy_migration(&dir)?;
             }
         }
@@ -744,6 +740,11 @@ impl GraphForge {
                     ),
                 )),
                 (None, Some(_)) => unreachable!("semantic composition validated above"),
+                (Some(context), None)
+                    if context.composition().modules.len() == 1 && ontology_document.is_some() =>
+                {
+                    None
+                }
                 (context, None) => context,
             };
         if read_only {
@@ -801,7 +802,6 @@ impl GraphForge {
             tempdir: None,
             ontology,
             ontology_document,
-            composition_binding: Arc::new(Mutex::new(composition_binding)),
             runtime_catalog: Arc::new(Mutex::new(runtime_catalog)),
             semantic_storage_bindings: Arc::new(Mutex::new(semantic_storage_bindings)),
             default_composition_context: Arc::new(Mutex::new(default_composition_context)),
@@ -3875,26 +3875,6 @@ pub(crate) fn rematerialize_graph_workspace(
         graph_snapshot::hydrate(&snapshot.bytes, target)?;
     }
     Ok(())
-}
-
-fn load_composition_binding(
-    generation: &ResolvedProjectGeneration,
-) -> Result<Option<Arc<CompositionBindingContext>>, GfError> {
-    let Some(snapshot) = generation.participant_snapshot(
-        graphforge_storage::WORKSPACE_CAPABILITY_ID,
-        graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY,
-    )?
-    else {
-        return Ok(None);
-    };
-    let authority =
-        graphforge_storage::WorkspaceOntologyComposition::from_canonical_json(&snapshot.bytes)?;
-    let compiled = authority.compile()?;
-    Ok(Some(Arc::new(CompositionBindingContext::new(
-        Arc::new(compiled),
-        authority.bridges,
-        CompositionBindingLimits::default(),
-    ))))
 }
 
 fn load_workspace_ontology(

@@ -28,7 +28,7 @@ impl GraphForge {
         properties.sort_unstable_by(|left, right| left.0.cmp(right.0));
 
         let composition = self
-            .composition_binding
+            .default_composition_context
             .lock()
             .expect("composition binding lock poisoned")
             .clone();

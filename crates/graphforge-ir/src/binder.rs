@@ -4643,6 +4643,17 @@ impl Binder {
         span: Span,
         s: &mut BinderState,
     ) {
+        if diagnostic.code == BindingDiagnosticCode::WrongOwnerProperty
+            && let Some((owner, property)) = diagnostic.subject.split_once('.')
+            && !owner.contains(':')
+        {
+            s.errors.push(BindError::new(
+                BindErrorKind::UnknownProperty,
+                span,
+                format!("property `{property}` is not declared for entity `{owner}`"),
+            ));
+            return;
+        }
         let kind = match diagnostic.code {
             BindingDiagnosticCode::AmbiguousSymbol => BindErrorKind::AmbiguousComposedSymbol,
             BindingDiagnosticCode::UnknownSymbol => BindErrorKind::UnknownLabel,

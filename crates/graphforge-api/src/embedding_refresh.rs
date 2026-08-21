@@ -265,7 +265,6 @@ impl GraphForge {
             tempdir: self.tempdir.clone(),
             ontology: self.ontology.clone(),
             ontology_document: self.ontology_document.clone(),
-            composition_binding: Arc::clone(&self.composition_binding),
             runtime_catalog: Arc::clone(&self.runtime_catalog),
             semantic_storage_bindings: Arc::clone(&self.semantic_storage_bindings),
             default_composition_context: Arc::clone(&self.default_composition_context),

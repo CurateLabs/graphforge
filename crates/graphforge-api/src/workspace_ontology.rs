@@ -91,6 +91,7 @@ impl GraphForge {
             composition.as_ref(),
             None,
             None,
+            None,
         )
     }
 
@@ -172,6 +173,7 @@ impl GraphForge {
             Some(&composition),
             None,
             None,
+            None,
         )?;
         self.ontology = Some(OntologyHandle::new(runtime));
         self.ontology_document = Some(document);
@@ -213,7 +215,16 @@ impl GraphForge {
             None,
             None,
             None,
+            None,
         )?;
+        *self
+            .default_composition_context
+            .lock()
+            .expect("default composition context lock poisoned") = None;
+        *self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned") = None;
         self.ontology = None;
         self.ontology_document = None;
         self.ontology_mode = OntologyMode::Exploratory;
@@ -235,6 +246,7 @@ fn current_configuration(graph: &GraphForge) -> Result<WorkspaceConfiguration, G
     WorkspaceConfiguration::from_canonical_json(&snapshot.bytes)
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // complete participant transaction
 pub(crate) fn publish_workspace_records(
     graph: &mut GraphForge,
     operation_uuid: uuid::Uuid,
@@ -242,6 +254,7 @@ pub(crate) fn publish_workspace_records(
     ontology: &WorkspaceOntology,
     configuration: &WorkspaceConfiguration,
     composition: Option<&graphforge_storage::WorkspaceOntologyComposition>,
+    semantic_bindings: Option<&graphforge_storage::SemanticStorageBindings>,
     generation_uuid_override: Option<uuid::Uuid>,
     cancellation: Option<&crate::CancellationToken>,
 ) -> Result<(), GfError> {
@@ -276,7 +289,11 @@ pub(crate) fn publish_workspace_records(
                     graphforge_storage::WORKSPACE_ONTOLOGY_FAMILY
                         | graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY
                         | graphforge_storage::WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY
-                ))
+                )
+                || semantic_bindings.is_some()
+                    && snapshot.capability_id == graphforge_storage::GRAPH_CAPABILITY_ID
+                    && snapshot.record_family_id
+                        == graphforge_storage::GRAPH_SEMANTIC_BINDINGS_FAMILY)
         })
         .map(snapshot_to_participant)
         .collect::<Result<Vec<_>, _>>()?;
@@ -286,6 +303,9 @@ pub(crate) fn publish_workspace_records(
     ));
     if let Some(composition) = composition {
         participants.push(composition.to_project_participant()?);
+    }
+    if let Some(bindings) = semantic_bindings {
+        participants.push(bindings.to_project_participant()?);
     }
     participants.push(workspace_participant(
         graphforge_storage::WORKSPACE_CONFIGURATION_FAMILY,

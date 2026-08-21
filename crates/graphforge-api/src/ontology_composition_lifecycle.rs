@@ -1,9 +1,6 @@
 //! Atomic project-generation lifecycle for ontology composition authority.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-
-use arrow::array::{Array, ListArray, UInt32Array};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use graphforge_core::{GfError, ProjectErrorCode};
 use graphforge_ontology::{
@@ -13,7 +10,6 @@ use graphforge_storage::{
     WORKSPACE_CAPABILITY_ID, WORKSPACE_ONTOLOGY_COMPOSITION_FAMILY, WorkspaceOntologyComposition,
     WorkspaceOntologyMode,
 };
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -70,7 +66,7 @@ pub struct CompositionChangePreview {
     /// Identity-sorted affected bridges.
     pub affected_bridges: Vec<String>,
     /// Portable-v2 disposition until #841 adds authenticated package support.
-    pub portable_compatibility: CompositionPortableCompatibility,
+    pub portable_compatibility: CompositionPortableReceipt,
     /// Bounded diagnostics; empty means publishable.
     pub diagnostics: Vec<CompositionChangeDiagnostic>,
 }
@@ -82,6 +78,27 @@ pub enum CompositionPortableCompatibility {
     /// Canonical authority is representable, while current package readers
     /// deliberately fail closed on the required `ontology-composition@1` token.
     RepresentableReaderUnsupported,
+    /// Candidate cannot be represented under the bounded semantic profile.
+    Unrepresentable,
+}
+
+/// Pure ADR-0022 representability evidence; this does not construct or admit a package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositionPortableReceipt {
+    /// Current reader disposition until #841 implements the authenticated codec.
+    pub disposition: CompositionPortableCompatibility,
+    /// Exact required feature token.
+    pub required_feature: String,
+    /// Exact transitive dependency selection rule.
+    pub dependency_rule: String,
+    /// Candidate composition identity.
+    pub composition_fingerprint: String,
+    /// Canonical participant payload bytes.
+    pub canonical_bytes: u64,
+    /// Canonically ordered module identities.
+    pub modules: Vec<String>,
+    /// Canonically ordered bridge identities.
+    pub bridges: Vec<String>,
 }
 
 /// Durable publication receipt.
@@ -151,7 +168,17 @@ impl GraphForge {
         if let Some(token) = cancellation {
             token.checkpoint()?;
         }
-        let candidate_bytes = request.candidate.to_canonical_json()?;
+        // Preview must remain capable of returning bounded diagnostics for an
+        // invalid candidate; the validated canonical encoder intentionally
+        // rejects such records before a receipt could otherwise be formed.
+        let mut candidate_bytes = serde_json::to_vec(&request.candidate)
+            .map_err(|_| GfError::Validation("candidate composition cannot be encoded".into()))?;
+        candidate_bytes.push(b'\n');
+        if candidate_bytes.len() > 16 * 1024 * 1024 {
+            return Err(GfError::Validation(
+                "candidate composition exceeds preview byte limit".into(),
+            ));
+        }
         let (runtime_symbols, catalog_drift) = runtime_symbols(self, cancellation)?;
         let mut diagnostics = Vec::new();
         if compiled.is_none() {
@@ -168,6 +195,71 @@ impl GraphForge {
                 remediation: "reopen the exact current generation before composition preflight"
                     .into(),
             });
+        }
+        if let Some(compiled) = &compiled {
+            let current_bindings = self
+                .semantic_storage_bindings
+                .lock()
+                .expect("semantic storage binding lock poisoned")
+                .clone();
+            if let Err(error) = graphforge_storage::SemanticStorageBindings::project_with_graph_scan(
+                compiled,
+                current_bindings.as_ref(),
+                &self.dir,
+            ) {
+                let retained = compiled
+                    .modules
+                    .iter()
+                    .flat_map(|module| module.symbols.iter().cloned())
+                    .collect::<HashSet<_>>();
+                let removed = current_bindings
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|bindings| bindings.bindings.iter())
+                    .filter(|binding| !retained.contains(&binding.symbol))
+                    .map(|binding| {
+                        graphforge_storage::SemanticStorageBindings::binding_has_retained_data(
+                            binding, &self.dir,
+                        )
+                        .map(|has_data| has_data.then_some(binding))
+                    })
+                    .collect::<Result<Vec<Option<_>>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .take(64usize.saturating_sub(diagnostics.len()))
+                    .collect::<Vec<_>>();
+                if removed.is_empty() {
+                    diagnostics.push(CompositionChangeDiagnostic {
+                        code: "stored_semantic_data_incompatible".into(),
+                        subject: request.candidate.composition_fingerprint.clone(),
+                        remediation: error.to_string(),
+                    });
+                } else {
+                    for binding in removed {
+                        let owner = binding.owner.as_ref().map_or_else(
+                            || "none".into(),
+                            |owner| {
+                                format!(
+                                    "{}:{}:{}",
+                                    owner.module.display_ref(),
+                                    owner.kind.as_str(),
+                                    owner.local_id
+                                )
+                            },
+                        );
+                        diagnostics.push(CompositionChangeDiagnostic {
+                            code: "stored_semantic_data_incompatible".into(),
+                            subject: format!(
+                                "{}:{}:{} owner={owner}",
+                                binding.symbol.module.display_ref(),
+                                binding.symbol.kind.as_str(),
+                                binding.symbol.local_id
+                            ),
+                            remediation: error.to_string(),
+                        });
+                    }
+                }
+            }
         }
         diagnostics.extend(migration_diagnostics(
             existing.as_ref(),
@@ -261,6 +353,25 @@ impl GraphForge {
             .filter(|identity| old_bridges.get(*identity) != new_bridges.get(*identity))
             .cloned()
             .collect::<BTreeSet<_>>();
+        let portable_compatibility = match portable_receipt(&request.candidate, &candidate_bytes) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                diagnostics.push(CompositionChangeDiagnostic {
+                    code: "portable_composition_unrepresentable".into(),
+                    subject: request.candidate.composition_fingerprint.clone(),
+                    remediation: error.to_string(),
+                });
+                CompositionPortableReceipt {
+                    disposition: CompositionPortableCompatibility::Unrepresentable,
+                    required_feature: "ontology-composition@1".into(),
+                    dependency_rule: "required-transitive-closure/1".into(),
+                    composition_fingerprint: request.candidate.composition_fingerprint.clone(),
+                    canonical_bytes: u64::try_from(candidate_bytes.len()).unwrap_or(u64::MAX),
+                    modules: Vec::new(),
+                    bridges: Vec::new(),
+                }
+            }
+        };
         diagnostics
             .sort_by(|left, right| (&left.code, &left.subject).cmp(&(&right.code, &right.subject)));
         diagnostics.truncate(64);
@@ -271,16 +382,16 @@ impl GraphForge {
                 || request.candidate.composition_fingerprint.clone(),
                 |value| value.fingerprint.clone(),
             ),
-            candidate_sha256: hex(&Sha256::digest(candidate_bytes)),
+            candidate_sha256: hex(&Sha256::digest(&candidate_bytes)),
             affected_modules: affected_modules.into_iter().collect(),
             affected_bridges: affected_bridges.into_iter().collect(),
-            portable_compatibility:
-                CompositionPortableCompatibility::RepresentableReaderUnsupported,
+            portable_compatibility,
             diagnostics,
         })
     }
 
     /// Revalidate and atomically publish one complete composition replacement.
+    #[allow(clippy::too_many_lines)] // replay, preflight, atomic publish, and live swap are one transaction
     pub fn publish_ontology_composition_change(
         &mut self,
         request: &CompositionChangeRequest,
@@ -350,10 +461,28 @@ impl GraphForge {
             ActivationMode::Advisory => WorkspaceOntologyMode::Advisory,
             ActivationMode::Strict => WorkspaceOntologyMode::Strict,
         };
+        let compiled_candidate = request.candidate.compile()?;
+        let previous_bindings = self
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned")
+            .clone();
+        let published_bindings =
+            graphforge_storage::SemanticStorageBindings::project_with_graph_scan(
+                &compiled_candidate,
+                previous_bindings.as_ref(),
+                &self.dir,
+            )?;
         let published_binding = graphforge_ir::CompositionBindingContext::new(
-            std::sync::Arc::new(request.candidate.compile()?),
+            std::sync::Arc::new(compiled_candidate),
             request.candidate.bridges.clone(),
             graphforge_ir::CompositionBindingLimits::default(),
+        )
+        .with_generation_storage_ids(
+            published_bindings
+                .bindings
+                .iter()
+                .map(|binding| (binding.symbol.clone(), binding.storage_id)),
         );
         crate::workspace_ontology::publish_workspace_records(
             self,
@@ -362,11 +491,16 @@ impl GraphForge {
             &ontology,
             &configuration,
             Some(&request.candidate),
+            Some(&published_bindings),
             Some(expected_generation_uuid),
             cancellation,
         )?;
         *self
-            .composition_binding
+            .semantic_storage_bindings
+            .lock()
+            .expect("semantic storage binding lock poisoned") = Some(published_bindings);
+        *self
+            .default_composition_context
             .lock()
             .expect("composition binding lock poisoned") =
             Some(std::sync::Arc::new(published_binding));
@@ -495,14 +629,14 @@ fn migration_diagnostics(
                             ),
                         });
                     }
-                    if let Some(subject) = migration_runtime_subject(&step.transform_kind) {
-                        if runtime_symbols.contains(&subject) {
-                            diagnostics.push(CompositionChangeDiagnostic {
-                                code: "migration_requires_data_rewrite".into(),
-                                subject,
-                                remediation: "publish a migration that stages and validates the affected graph/catalog data".into(),
-                            });
-                        }
+                    if let Some(subject) = migration_runtime_subject(&step.transform_kind)
+                        && runtime_symbols.contains(&subject)
+                    {
+                        diagnostics.push(CompositionChangeDiagnostic {
+                            code: "migration_requires_data_rewrite".into(),
+                            subject,
+                            remediation: "publish a migration that stages and validates the affected graph/catalog data".into(),
+                        });
                     }
                 }
                 if !steps
@@ -624,7 +758,13 @@ fn runtime_symbols(
                 .map(|(_, name)| format!("{}:{name}", SymbolKind::Property.as_str())),
         )
         .collect::<BTreeSet<_>>();
-    let symbols = pinned_data_symbols(&current.graph_tree_root(), &persisted, cancellation)?;
+    if let Some(token) = cancellation {
+        token.checkpoint()?;
+    }
+    // Tagged runtime observations are governed by the pinned RuntimeCatalog.
+    // Ontology-owned persisted data is validated separately through the exact
+    // generation semantic binding authority and its bounded graph scan.
+    let symbols = catalog_symbols.clone();
     let live_symbols = live
         .entity_types()
         .into_iter()
@@ -645,91 +785,60 @@ fn runtime_symbols(
     ))
 }
 
-fn pinned_data_symbols(
-    root: &std::path::Path,
-    catalog: &graphforge_ir::RuntimeCatalog,
-    cancellation: Option<&CancellationToken>,
-) -> Result<BTreeSet<String>, GfError> {
-    let mut symbols = BTreeSet::new();
-    let scan = |path: &std::path::Path| -> Result<Vec<arrow::record_batch::RecordBatch>, GfError> {
-        if !path.is_file() {
-            return Ok(Vec::new());
-        }
-        let reader = ParquetRecordBatchReaderBuilder::try_new(
-            File::open(path).map_err(|e| GfError::Storage(e.to_string()))?,
-        )
-        .map_err(|e| GfError::Storage(e.to_string()))?
-        .with_batch_size(1024)
-        .build()
-        .map_err(|e| GfError::Storage(e.to_string()))?;
-        let mut batches = Vec::new();
-        for batch in reader {
-            if let Some(token) = cancellation {
-                token.checkpoint()?;
-            }
-            batches.push(batch.map_err(|e| GfError::Storage(e.to_string()))?);
-        }
-        Ok(batches)
-    };
-    for batch in scan(&root.join("topology/nodes.parquet"))? {
-        let lists = batch
-            .column_by_name("type_ids")
-            .and_then(|v| v.as_any().downcast_ref::<ListArray>())
-            .ok_or_else(|| GfError::Validation("nodes type_ids schema drift".into()))?;
-        for row in 0..lists.len() {
-            let values = lists.value(row);
-            let ids = values
-                .as_any()
-                .downcast_ref::<UInt32Array>()
-                .ok_or_else(|| GfError::Validation("nodes type_ids value drift".into()))?;
-            for id in ids.values() {
-                let name = catalog
-                    .entity_type_name(graphforge_ir::RuntimeTypeId(*id))
-                    .ok_or_else(|| {
-                        GfError::Validation("node type id missing from pinned catalog".into())
-                    })?;
-                symbols.insert(format!("entity:{name}"));
-            }
-        }
+fn portable_receipt(
+    candidate: &WorkspaceOntologyComposition,
+    canonical_bytes: &[u8],
+) -> Result<CompositionPortableReceipt, GfError> {
+    let limits = graphforge_storage::PortableV2Limits::default();
+    let component_count = candidate
+        .modules
+        .len()
+        .checked_add(candidate.bridges.len())
+        .ok_or_else(|| GfError::Validation("portable composition count overflows".into()))?;
+    let byte_count = u64::try_from(canonical_bytes.len())
+        .map_err(|_| GfError::Validation("portable composition bytes overflow".into()))?;
+    if u64::try_from(component_count).unwrap_or(u64::MAX) > limits.max_components
+        || byte_count > limits.max_entry_bytes
+        || byte_count > limits.max_manifest_bytes
+        || byte_count > limits.max_total_bytes
+    {
+        return Err(GfError::Validation(
+            "ontology composition is not representable within portable-v2 limits".into(),
+        ));
     }
-    for (directory, kind) in [
-        ("properties", "property"),
-        ("edge_properties", "property"),
-        ("topology/edges", "relation"),
-    ] {
-        let path = root.join(directory);
-        if !path.is_dir() {
-            continue;
-        }
-        let mut entries = fs::read_dir(path)
-            .map_err(|e| GfError::Storage(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| GfError::Storage(e.to_string()))?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let path = entry.path();
-            let stem = path
-                .file_stem()
-                .and_then(|v| v.to_str())
-                .unwrap_or_default()
-                .to_owned();
-            if stem.starts_with('_') {
-                continue;
-            }
-            for batch in scan(&path)? {
-                if batch.num_rows() > 0 {
-                    if kind == "relation" {
-                        symbols.insert(format!("relation:{stem}"));
-                    } else {
-                        for field in batch.schema().fields().iter().skip(1) {
-                            symbols.insert(format!("property:{}", field.name()));
-                        }
-                    }
-                }
-            }
-        }
+    let mut modules = candidate
+        .modules
+        .iter()
+        .map(|module| module.id.display_ref())
+        .collect::<Vec<_>>();
+    modules.sort();
+    modules.dedup();
+    if modules.len() != candidate.modules.len() {
+        return Err(GfError::Validation(
+            "portable composition module identities are not unique".into(),
+        ));
     }
-    Ok(symbols)
+    let mut bridges = candidate
+        .bridges
+        .iter()
+        .map(|bridge| format!("{}@{}", bridge.bridge_id, bridge.authored_version))
+        .collect::<Vec<_>>();
+    bridges.sort();
+    bridges.dedup();
+    if bridges.len() != candidate.bridges.len() {
+        return Err(GfError::Validation(
+            "portable composition bridge identities are not unique".into(),
+        ));
+    }
+    Ok(CompositionPortableReceipt {
+        disposition: CompositionPortableCompatibility::RepresentableReaderUnsupported,
+        required_feature: "ontology-composition@1".into(),
+        dependency_rule: "required-transitive-closure/1".into(),
+        composition_fingerprint: candidate.composition_fingerprint.clone(),
+        canonical_bytes: byte_count,
+        modules,
+        bridges,
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -745,8 +854,11 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use graphforge_ontology::{
-        AuthoredModule, CompositionLimits, EntityTypeDef, InventoryCompileRequest, MigrationDef,
-        OntologyDoc, OntologyModuleId, compile_inventory, module_document_digest,
+        ActivationRecord, ActivationScope, AuthoredModule, BridgeAssertion, BridgeDocument,
+        BridgePredicate, BridgeProvenance, BridgeSetId, CompositionLimits, EntityTypeDef,
+        InventoryCompileRequest, MappingMethod, MigrationDef, OntologyDoc, OntologyModuleId,
+        QualifiedSymbol, SymbolKind, bridge_document_digest, compile_inventory,
+        module_document_digest,
     };
 
     use super::*;
@@ -758,8 +870,18 @@ mod tests {
         entity_names: &[&str],
         migrations: Vec<MigrationDef>,
     ) -> WorkspaceOntologyComposition {
+        composition_named("acme", version, mode, entity_names, migrations)
+    }
+
+    fn composition_named(
+        ontology_id: &str,
+        version: &str,
+        mode: ActivationMode,
+        entity_names: &[&str],
+        migrations: Vec<MigrationDef>,
+    ) -> WorkspaceOntologyComposition {
         let document = OntologyDoc {
-            ontology_id: "acme".into(),
+            ontology_id: ontology_id.into(),
             version: version.into(),
             entity_types: entity_names
                 .iter()
@@ -803,6 +925,84 @@ mod tests {
         }
     }
 
+    fn bridged_composition() -> WorkspaceOntologyComposition {
+        let module = |ontology_id: &str| {
+            let document = OntologyDoc {
+                ontology_id: ontology_id.into(),
+                version: "1".into(),
+                entity_types: vec![EntityTypeDef {
+                    name: "Person".into(),
+                    r#abstract: false,
+                    parent: None,
+                }],
+                relation_types: Vec::new(),
+                properties: Vec::new(),
+                constraints: Vec::new(),
+                migrations: Vec::new(),
+            };
+            AuthoredModule {
+                id: OntologyModuleId {
+                    ontology_id: ontology_id.into(),
+                    authored_version: "1".into(),
+                    canonical_digest: module_document_digest(&document).unwrap(),
+                },
+                dependencies: Vec::new(),
+                doc: document,
+                allow_projected_identity: false,
+            }
+        };
+        let source = module("source");
+        let target = module("target");
+        let qualified = |module: &AuthoredModule| QualifiedSymbol {
+            module: module.id.clone(),
+            kind: SymbolKind::Entity,
+            local_id: "Person".into(),
+        };
+        let bridge = BridgeDocument {
+            bridge_id: "https://graphforge.dev/bridge/person".into(),
+            authored_version: "1".into(),
+            source_modules: vec![source.id.clone()],
+            target_modules: vec![target.id.clone()],
+            dependencies: Vec::new(),
+            shared_surfaces: Vec::new(),
+            assertions: vec![BridgeAssertion {
+                source: qualified(&source),
+                target: qualified(&target),
+                predicate: BridgePredicate::Equivalent,
+                directional: false,
+                provenance: BridgeProvenance {
+                    method: MappingMethod::Authored,
+                    confidence: None,
+                    justification: "governed identity".into(),
+                    evidence_refs: Vec::new(),
+                },
+                valid_from: None,
+                valid_to: None,
+            }],
+            enforcement: Some(ActivationMode::Strict),
+        };
+        let bridge_id = BridgeSetId {
+            bridge_id: bridge.bridge_id.clone(),
+            authored_version: bridge.authored_version.clone(),
+            canonical_digest: bridge_document_digest(&bridge).unwrap(),
+        };
+        let activation = vec![ActivationRecord {
+            scope: ActivationScope::Module,
+            subject: source.id.display_ref(),
+            mode: ActivationMode::Advisory,
+        }];
+        let compiled = compile_inventory(InventoryCompileRequest {
+            modules: &[source, target],
+            bridges: &[bridge_id],
+            activation: &activation,
+            profile_default: ActivationMode::Strict,
+            limits: CompositionLimits::default(),
+            cancelled: None,
+        })
+        .unwrap();
+        WorkspaceOntologyComposition::from_compiled(&compiled, vec![bridge])
+    }
+
     fn request(
         graph: &GraphForge,
         seed: u128,
@@ -833,6 +1033,15 @@ mod tests {
         let first_preview = graph
             .preview_ontology_composition_change(&first, None)
             .unwrap();
+        assert_eq!(
+            first_preview.portable_compatibility.required_feature,
+            "ontology-composition@1"
+        );
+        assert_eq!(
+            first_preview.portable_compatibility.dependency_rule,
+            "required-transitive-closure/1"
+        );
+        assert_eq!(first_preview.portable_compatibility.modules.len(), 1);
         let first_receipt = graph
             .publish_ontology_composition_change(&first, &first_preview, None)
             .unwrap();
@@ -950,6 +1159,298 @@ mod tests {
                 .is_err()
         );
         assert_eq!(*graph.current_generation_uuid.lock().unwrap(), published);
+    }
+
+    #[test]
+    fn scoped_activation_reopens_and_bridge_invalidation_cannot_publish() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().to_str().unwrap();
+        let mut graph = GraphForge::new(Some(path)).unwrap();
+        let initial = request(&graph, 8411, bridged_composition());
+        let preview = graph
+            .preview_ontology_composition_change(&initial, None)
+            .unwrap();
+        assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+        graph
+            .publish_ontology_composition_change(&initial, &preview, None)
+            .unwrap();
+        let published = *graph.current_generation_uuid.lock().unwrap();
+        drop(graph);
+
+        let mut reopened = GraphForge::new(Some(path)).unwrap();
+        let authority = reopened.workspace_ontology_composition().unwrap().unwrap();
+        assert_eq!(authority.activation.len(), 1);
+        assert_eq!(authority.activation[0].mode, ActivationMode::Advisory);
+        reopened
+            .execute("MATCH (n:`source:Person`) RETURN n")
+            .expect("reopened scoped authority must drive normal execution");
+
+        let mut invalid = authority;
+        invalid
+            .modules
+            .retain(|module| module.document.ontology_id != "target");
+        let invalid_request = request(&reopened, 8412, invalid);
+        let invalid_preview = reopened
+            .preview_ontology_composition_change(&invalid_request, None)
+            .unwrap();
+        assert!(
+            invalid_preview
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "candidate_composition_invalid" })
+        );
+        assert!(
+            reopened
+                .publish_ontology_composition_change(&invalid_request, &invalid_preview, None)
+                .is_err()
+        );
+        assert_eq!(*reopened.current_generation_uuid.lock().unwrap(), published);
+    }
+
+    #[test]
+    fn intervening_generation_and_interrupted_pointer_leave_authority_old_or_complete() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().to_str().unwrap();
+        let mut graph = GraphForge::new(Some(path)).unwrap();
+        let initial = request(
+            &graph,
+            8413,
+            composition("1", ActivationMode::Strict, &["Person"], Vec::new()),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&initial, None)
+            .unwrap();
+        graph
+            .publish_ontology_composition_change(&initial, &preview, None)
+            .unwrap();
+        let retained = graph.workspace_ontology_composition().unwrap().unwrap();
+
+        let stale = request(
+            &graph,
+            8414,
+            composition(
+                "2",
+                ActivationMode::Strict,
+                &["Person", "Company"],
+                Vec::new(),
+            ),
+        );
+        let stale_preview = graph
+            .preview_ontology_composition_change(&stale, None)
+            .unwrap();
+        graph.set_graph_directedness(&context(8415), None).unwrap();
+        let intervening = *graph.current_generation_uuid.lock().unwrap();
+        assert!(
+            graph
+                .publish_ontology_composition_change(&stale, &stale_preview, None)
+                .is_err()
+        );
+        assert_eq!(*graph.current_generation_uuid.lock().unwrap(), intervening);
+        assert_eq!(
+            graph.workspace_ontology_composition().unwrap(),
+            Some(retained.clone())
+        );
+        drop(graph);
+
+        let reopened = GraphForge::new(Some(path)).unwrap();
+        assert_eq!(
+            *reopened.current_generation_uuid.lock().unwrap(),
+            intervening
+        );
+        assert_eq!(
+            reopened.workspace_ontology_composition().unwrap(),
+            Some(retained)
+        );
+        reopened.execute("MATCH (n:Person) RETURN n").unwrap();
+    }
+
+    #[test]
+    fn composition_publication_failpoint_child() {
+        let Ok(root) = std::env::var("GRAPHFORGE_COMPOSITION_FAILPOINT_ROOT") else {
+            return;
+        };
+        let mut graph = GraphForge::new(Some(&root)).unwrap();
+        let upgrade = request(
+            &graph,
+            8417,
+            composition(
+                "2",
+                ActivationMode::Strict,
+                &["Person", "Company"],
+                vec![MigrationDef {
+                    from_version: "1".into(),
+                    to_version: "2".into(),
+                    transform_kind: "add_type:Company".into(),
+                    script_ref: None,
+                    checksum: None,
+                }],
+            ),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&upgrade, None)
+            .unwrap();
+        graph
+            .publish_ontology_composition_change(&upgrade, &preview, None)
+            .expect("configured composition publication failpoint did not terminate");
+    }
+
+    #[test]
+    fn interrupted_real_publication_reopens_old_or_complete_authority() {
+        for (failpoint, expected_version) in [
+            ("project.before_current_replace", "1"),
+            ("project.after_current_replace", "2"),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let path = project.path().to_str().unwrap();
+            let mut graph = GraphForge::new(Some(path)).unwrap();
+            let initial = request(
+                &graph,
+                8416,
+                composition("1", ActivationMode::Strict, &["Person"], Vec::new()),
+            );
+            let preview = graph
+                .preview_ontology_composition_change(&initial, None)
+                .unwrap();
+            graph
+                .publish_ontology_composition_change(&initial, &preview, None)
+                .unwrap();
+            drop(graph);
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ontology_composition_lifecycle::tests::composition_publication_failpoint_child",
+                    "--nocapture",
+                ])
+                .env("GRAPHFORGE_COMPOSITION_FAILPOINT_ROOT", path)
+                .env("GRAPHFORGE_PROJECT_FAILPOINTS", "graphforge-internal-subprocess-v1")
+                .env("GRAPHFORGE_PROJECT_FAILPOINT", failpoint)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{failpoint}");
+            let reopened = GraphForge::new(Some(path)).unwrap();
+            let authority = reopened.workspace_ontology_composition().unwrap().unwrap();
+            assert_eq!(
+                authority.modules[0].document.version, expected_version,
+                "{failpoint}"
+            );
+            reopened.execute("MATCH (n:Person) RETURN n").unwrap();
+            if expected_version == "2" {
+                reopened.execute("MATCH (n:Company) RETURN n").unwrap();
+            } else {
+                assert!(reopened.execute("MATCH (n:Company) RETURN n").is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn replace_and_remove_are_safe_only_without_retained_semantic_data() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().to_str().unwrap();
+        let mut graph = GraphForge::new(Some(path)).unwrap();
+        let initial = request(
+            &graph,
+            8430,
+            composition("1", ActivationMode::Strict, &["Person"], Vec::new()),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&initial, None)
+            .unwrap();
+        graph
+            .publish_ontology_composition_change(&initial, &preview, None)
+            .unwrap();
+
+        let replacement = request(
+            &graph,
+            8431,
+            composition_named(
+                "replacement",
+                "1",
+                ActivationMode::Strict,
+                &["Company"],
+                Vec::new(),
+            ),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&replacement, None)
+            .unwrap();
+        assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+        graph
+            .publish_ontology_composition_change(&replacement, &preview, None)
+            .unwrap();
+
+        let removal = request(
+            &graph,
+            8432,
+            composition("1", ActivationMode::Strict, &[], Vec::new()),
+        );
+        let preview = graph
+            .preview_ontology_composition_change(&removal, None)
+            .unwrap();
+        assert!(preview.diagnostics.is_empty(), "{:?}", preview.diagnostics);
+        graph
+            .publish_ontology_composition_change(&removal, &preview, None)
+            .unwrap();
+        drop(graph);
+        assert!(
+            GraphForge::new(Some(path))
+                .unwrap()
+                .workspace_ontology_composition()
+                .unwrap()
+                .unwrap()
+                .modules[0]
+                .document
+                .entity_types
+                .is_empty()
+        );
+
+        let mut populated = GraphForge::new(None).unwrap();
+        let initial = request(
+            &populated,
+            8433,
+            composition(
+                "1",
+                ActivationMode::Strict,
+                &["Person", "UnusedCompany"],
+                Vec::new(),
+            ),
+        );
+        let preview = populated
+            .preview_ontology_composition_change(&initial, None)
+            .unwrap();
+        populated
+            .publish_ontology_composition_change(&initial, &preview, None)
+            .unwrap();
+        populated.execute("CREATE (n:Person)").unwrap();
+        let before = *populated.current_generation_uuid.lock().unwrap();
+        let removal = request(
+            &populated,
+            8434,
+            composition("1", ActivationMode::Strict, &[], Vec::new()),
+        );
+        let preview = populated
+            .preview_ontology_composition_change(&removal, None)
+            .unwrap();
+        assert!(
+            preview
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "stored_semantic_data_incompatible")
+        );
+        let incompatible = preview
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "stored_semantic_data_incompatible")
+            .map(|diagnostic| diagnostic.subject.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(incompatible.len(), 1, "{incompatible:?}");
+        assert!(incompatible[0].contains(":entity:Person"));
+        assert!(!incompatible[0].contains("UnusedCompany"));
+        assert!(
+            populated
+                .publish_ontology_composition_change(&removal, &preview, None)
+                .is_err()
+        );
+        assert_eq!(*populated.current_generation_uuid.lock().unwrap(), before);
     }
 
     #[test]
