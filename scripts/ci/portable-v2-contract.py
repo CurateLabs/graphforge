@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import NoReturn
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "tests/fixtures/portable-v2"
@@ -14,6 +16,8 @@ SCHEMA = ROOT / "docs/contracts/graphforge-project-v2.schema.json"
 COMPOSITION_SCHEMA = ROOT / "docs/contracts/graphforge-ontology-composition-v1.schema.json"
 DOMAIN = b"graphforge-project/2\0"
 COMPOSITION_DOMAIN = b"graphforge-ontology-composition/1\0"
+URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:\S+$")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def fail(message: str) -> NoReturn:
@@ -51,6 +55,109 @@ def load_json(path: Path) -> object:
 def canonical(value: object) -> bytes:
     reject_surrogates(value)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+
+
+def exact_identity(value: object, label: str) -> tuple[str, str, str]:
+    require(isinstance(value, dict), f"{label} identity object")
+    require(set(value) == {"id", "version", "content_digest"}, f"{label} identity fields")
+    identifier, version, digest = value["id"], value["version"], value["content_digest"]
+    require(isinstance(identifier, str) and URI.fullmatch(identifier), f"{label} URI")
+    require(identifier == unicodedata.normalize("NFC", identifier), f"{label} URI NFC")
+    require(
+        isinstance(version, str)
+        and 0 < len(version.encode()) <= 256
+        and version == unicodedata.normalize("NFC", version)
+        and not any(ord(char) < 32 or ord(char) == 127 for char in version),
+        f"{label} opaque version",
+    )
+    require(isinstance(digest, str) and DIGEST.fullmatch(digest), f"{label} digest")
+    return identifier, version, digest
+
+
+def composition_with_digest(value: dict[str, object]) -> dict[str, object]:
+    result = json.loads(json.dumps(value))
+    result.pop("composition_digest", None)
+    digest = hashlib.sha256(COMPOSITION_DOMAIN + canonical(result)).hexdigest()
+    result["composition_digest"] = f"sha256:{digest}"
+    return result
+
+
+def validate_composition_control(composition: object) -> None:
+    require(isinstance(composition, dict), "M9 composition object")
+    require(
+        set(composition)
+        == {
+            "contract",
+            "activation_profile",
+            "modules",
+            "bridge_sets",
+            "required_features",
+            "optional_features",
+            "composition_digest",
+        },
+        "M9 composition fields",
+    )
+    require(composition["contract"] == "graphforge-ontology-composition/1", "M9 contract")
+    semantic = dict(composition)
+    expected_digest = semantic.pop("composition_digest")
+    actual_digest = "sha256:" + hashlib.sha256(COMPOSITION_DOMAIN + canonical(semantic)).hexdigest()
+    require(actual_digest == expected_digest, "M9 composition digest")
+    modules = composition["modules"]
+    bridges = composition["bridge_sets"]
+    require(isinstance(modules, list) and len(modules) <= 10000, "M9 module bound")
+    require(isinstance(bridges, list) and len(bridges) <= 10000, "M9 bridge bound")
+    module_ids = [
+        exact_identity(
+            {
+                "id": item["ontology_id"],
+                "version": item["version"],
+                "content_digest": item["content_digest"],
+            },
+            "module",
+        )
+        for item in modules
+    ]
+    bridge_ids = [
+        exact_identity(
+            {
+                "id": item["bridge_id"],
+                "version": item["version"],
+                "content_digest": item["content_digest"],
+            },
+            "bridge",
+        )
+        for item in bridges
+    ]
+    require(module_ids == sorted(set(module_ids)), "M9 module identity order")
+    require(bridge_ids == sorted(set(bridge_ids)), "M9 bridge identity order")
+    active = composition["activation_profile"]
+    require(set(active) == {"profile_default", "overrides"}, "activation fields")
+    require(active["profile_default"] in {"exploratory", "advisory", "strict"}, "profile")
+    overrides = [
+        (item["scope"], exact_identity(item["subject"], "activation"), item["mode"])
+        for item in active["overrides"]
+    ]
+    require(overrides == sorted(set(overrides)), "activation order")
+    for scope, subject, mode in overrides:
+        require(scope in {"module", "bridge"}, "activation scope")
+        require(mode in {"exploratory", "advisory", "strict"}, "activation mode")
+        require(subject in (module_ids if scope == "module" else bridge_ids), "activation closure")
+    for bridge in bridges:
+        for endpoint in ("source_modules", "target_modules"):
+            identities = [exact_identity(item, f"bridge {endpoint}") for item in bridge[endpoint]]
+            require(identities == sorted(set(identities)), f"bridge {endpoint} order")
+            require(identities and set(identities) <= set(module_ids), f"bridge {endpoint} closure")
+    for feature_set in ("required_features", "optional_features"):
+        values = composition[feature_set]
+        require(values == sorted(set(values)), f"M9 {feature_set} order")
+
+
+def require_invalid_control(value: dict[str, object], label: str) -> None:
+    try:
+        validate_composition_control(composition_with_digest(value))
+    except (KeyError, SystemExit, TypeError):
+        return
+    fail(f"{label} control mutation was accepted")
 
 
 def octal(value: int, width: int) -> bytes:
@@ -251,32 +358,8 @@ def main() -> None:
         ),
         "composition schema id",
     )
-    composition = dict(multi["composition"])
-    expected_composition = composition.pop("composition_digest")
-    actual_composition = (
-        "sha256:" + hashlib.sha256(COMPOSITION_DOMAIN + canonical(composition)).hexdigest()
-    )
-    require(actual_composition == expected_composition, "M9 composition digest")
-    module_ids = [f"{item['module_id']}@{item['version']}" for item in composition["modules"]]
-    bridge_ids = [
-        f"{item['bridge_set_id']}@{item['version']}" for item in composition["bridge_sets"]
-    ]
-    require(module_ids == sorted(set(module_ids)), "M9 module identity order")
-    require(bridge_ids == sorted(set(bridge_ids)), "M9 bridge identity order")
-    active = composition["activation_profile"]
-    require(active["active_modules"] == sorted(set(active["active_modules"])), "active modules")
-    require(
-        active["active_bridge_sets"] == sorted(set(active["active_bridge_sets"])),
-        "active bridge sets",
-    )
-    require(set(active["active_modules"]) <= set(module_ids), "active module closure")
-    require(set(active["active_bridge_sets"]) <= set(bridge_ids), "active bridge closure")
-    for bridge in composition["bridge_sets"]:
-        require(bridge["source_module"] in module_ids, "bridge source closure")
-        require(bridge["target_module"] in module_ids, "bridge target closure")
-    for feature_set in ("required_features", "optional_features"):
-        values = composition[feature_set]
-        require(values == sorted(set(values)), f"M9 {feature_set} order")
+    composition = multi["composition"]
+    validate_composition_control(composition)
     forbidden = {
         "runtime_catalog_ids",
         "host_paths",
@@ -290,6 +373,47 @@ def main() -> None:
     require(set(multi["package_classes"]) == classes, "M9 closure classes")
     require(multi["representations"] == ["expanded", "bundle"], "M9 representations")
     require(all(not vector["mutation"] for vector in multi["negative_vectors"]), "M9 mutation")
+    negative_names = {vector["name"] for vector in multi["negative_vectors"]}
+    require(
+        {
+            "non-nfc-uri-or-version",
+            "malformed-uri",
+            "malformed-digest-qualified-identity",
+            "duplicate-or-unsorted-endpoint",
+            "dangling-module-or-bridge",
+        }
+        <= negative_names,
+        "M9 exact identity negative vectors",
+    )
+    malformed_uri = json.loads(json.dumps(composition))
+    malformed_uri["modules"][0]["ontology_id"] = "not a URI"
+    require_invalid_control(malformed_uri, "malformed URI")
+    non_nfc = json.loads(json.dumps(composition))
+    non_nfc["modules"][0]["version"] = "cafe\u0301"
+    require_invalid_control(non_nfc, "non-NFC version")
+    malformed_digest = json.loads(json.dumps(composition))
+    malformed_digest["activation_profile"]["overrides"][0]["subject"]["content_digest"] = (
+        "sha256:ABC"
+    )
+    require_invalid_control(malformed_digest, "malformed activation digest")
+    empty_endpoint = json.loads(json.dumps(composition))
+    empty_endpoint["bridge_sets"][0]["source_modules"] = []
+    require_invalid_control(empty_endpoint, "empty bridge endpoint")
+    duplicate_endpoint = json.loads(json.dumps(composition))
+    duplicate_endpoint["bridge_sets"][0]["source_modules"].append(
+        duplicate_endpoint["bridge_sets"][0]["source_modules"][0]
+    )
+    require_invalid_control(duplicate_endpoint, "duplicate bridge endpoint")
+    unsorted_endpoint = json.loads(json.dumps(composition))
+    unsorted_endpoint["bridge_sets"][0]["source_modules"].reverse()
+    require_invalid_control(unsorted_endpoint, "unsorted bridge endpoint")
+    dangling_endpoint = json.loads(json.dumps(composition))
+    dangling_endpoint["bridge_sets"][0]["target_modules"][0] = {
+        "id": "urn:graphforge:ontology:missing",
+        "version": "1",
+        "content_digest": "sha256:" + "f" * 64,
+    }
+    require_invalid_control(dangling_endpoint, "dangling bridge endpoint")
     require(
         set(multi["older_v2_reader"].values()) == {"unsupported_future-before-payload"},
         "M9 older-reader behavior",

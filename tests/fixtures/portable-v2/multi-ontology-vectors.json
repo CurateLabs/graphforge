@@ -11,20 +11,23 @@
   "composition": {
     "contract": "graphforge-ontology-composition/1",
     "activation_profile": {
-      "profile_id": "research-default",
-      "active_modules": ["genealogy@2.1.0", "provenance@1.4.0"],
-      "active_bridge_sets": ["genealogy-provenance@1.0.0"]
+      "profile_default": "exploratory",
+      "overrides": [
+        {"scope":"bridge","subject":{"id":"https://graphforge.dev/bridge/research-provenance","version":"1","content_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444"},"mode":"advisory"},
+        {"scope":"module","subject":{"id":"https://graphforge.dev/ontology/genealogy","version":"release-2026.08","content_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},"mode":"strict"}
+      ]
     },
     "modules": [
-      {"module_id":"genealogy","version":"2.1.0","content_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","dialect":"graphforge-ontology","profile":"strict"},
-      {"module_id":"provenance","version":"1.4.0","content_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","dialect":"graphforge-ontology","profile":"advisory"}
+      {"ontology_id":"https://graphforge.dev/ontology/genealogy","version":"release-2026.08","content_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","dialect":"graphforge-ontology","profile":"strict"},
+      {"ontology_id":"https://graphforge.dev/ontology/provenance","version":"1","content_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","dialect":"graphforge-ontology","profile":"advisory"},
+      {"ontology_id":"urn:graphforge:ontology:research","version":"v1 beta","content_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","dialect":"graphforge-ontology","profile":"exploratory"}
     ],
     "bridge_sets": [
-      {"bridge_set_id":"genealogy-provenance","version":"1.0.0","content_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","source_module":"genealogy@2.1.0","target_module":"provenance@1.4.0"}
+      {"bridge_id":"https://graphforge.dev/bridge/research-provenance","version":"1","content_digest":"sha256:4444444444444444444444444444444444444444444444444444444444444444","source_modules":[{"id":"https://graphforge.dev/ontology/genealogy","version":"release-2026.08","content_digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"},{"id":"urn:graphforge:ontology:research","version":"v1 beta","content_digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333"}],"target_modules":[{"id":"https://graphforge.dev/ontology/provenance","version":"1","content_digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222"}]}
     ],
     "required_features": ["provenance-bridges@1", "qualified-symbols@1"],
     "optional_features": ["display-hints@1"],
-    "composition_digest": "sha256:ac9c0f89453317734f7869225d6fe095d1c6c497e7e543fc104b053cade728ac"
+    "composition_digest": "sha256:5c60015c9a58722e7779666b227c931cfbc47e420025896e9be530799613e832"
   },
   "identity_inputs": ["contract", "activation_profile", "modules", "bridge_sets", "required_features", "optional_features"],
   "identity_exclusions": ["runtime_catalog_ids", "host_paths", "parser_versions", "machine_configuration", "session_state", "credentials", "tck_results"],
@@ -42,6 +45,10 @@
     {"name":"malformed-control-json","outcome":"invalid_structure","mutation":false},
     {"name":"duplicate-control-member","outcome":"invalid_structure","mutation":false},
     {"name":"noncanonical-control","outcome":"incompatible","mutation":false},
+    {"name":"non-nfc-uri-or-version","outcome":"incompatible","mutation":false},
+    {"name":"malformed-uri","outcome":"incompatible","mutation":false},
+    {"name":"malformed-digest-qualified-identity","outcome":"incompatible","mutation":false},
+    {"name":"duplicate-or-unsorted-endpoint","outcome":"incompatible","mutation":false},
     {"name":"composition-digest-mismatch","outcome":"digest_mismatch","mutation":false},
     {"name":"component-digest-mismatch","outcome":"digest_mismatch","mutation":false},
     {"name":"dangling-module-or-bridge","outcome":"incompatible","mutation":false},
