@@ -596,7 +596,7 @@ impl GraphForge {
             BridgeImportFormatHint::Json => serde_json::from_str(text),
             BridgeImportFormatHint::Yaml => serde_yaml::from_str(text)
                 .map_err(|e| serde_json::Error::io(std::io::Error::other(e))),
-            BridgeImportFormatHint::Auto if text.trim_start().starts_with('{') => {
+            BridgeImportFormatHint::Auto if text.trim_start().starts_with(char::from(0x7b)) => {
                 serde_json::from_str(text)
             }
             BridgeImportFormatHint::Auto => serde_yaml::from_str(text)
@@ -2413,6 +2413,217 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn multi_ontology_public_facade_inventory_is_runtime_covered() {
+        let mut graph = GraphForge::new(None).unwrap();
+        let _authority = graph.ontology_authority_state().unwrap();
+        assert!(graph.ontology_modules().unwrap().is_empty());
+        assert!(
+            graph
+                .inspect_ontology_module(&ModuleSelector::OntologyId("urn:missing".into()))
+                .is_err()
+        );
+        assert!(
+            graph
+                .validate_ontology_module(&parity_document("base"))
+                .unwrap()
+                .valid
+        );
+        let base = graph
+            .create_ontology_module(parity_document("base"), Vec::new(), None)
+            .unwrap();
+        let dependent = graph
+            .import_ontology_module(
+                &serde_json::to_string(&parity_document("dependent")).unwrap(),
+                ImportFormatHint::Json,
+                vec![base.id.clone()],
+            )
+            .unwrap();
+        for (seed, candidate) in [(9_200, base.clone()), (9_201, dependent.clone())] {
+            graph
+                .adopt_ontology_module(
+                    &ModuleAdoptionRequest {
+                        authority: expectation(&graph, seed),
+                        candidate,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        graph
+            .inspect_ontology_module(&ModuleSelector::Exact(base.id.clone()))
+            .unwrap();
+        graph
+            .export_ontology_module(&ModuleSelector::Exact(base.id.clone()), ExportFormat::Json)
+            .unwrap();
+
+        let bridge_document = parity_bridge(&base.id, &dependent.id);
+        assert!(
+            graph
+                .validate_ontology_bridge(&bridge_document)
+                .unwrap()
+                .valid
+        );
+        let created_bridge = graph
+            .create_ontology_bridge(bridge_document.clone())
+            .unwrap();
+        let imported_bridge = graph
+            .import_ontology_bridge(
+                &serde_json::to_string(&bridge_document).unwrap(),
+                BridgeImportFormatHint::Json,
+            )
+            .unwrap();
+        assert_eq!(created_bridge.id, imported_bridge.id);
+        graph
+            .adopt_ontology_bridge(
+                &BridgeAdoptionRequest {
+                    authority: expectation(&graph, 9_202),
+                    candidate: imported_bridge,
+                },
+                None,
+            )
+            .unwrap();
+        let bridge_id = graph.ontology_bridges().unwrap()[0].id.clone();
+        graph
+            .inspect_ontology_bridge(&BridgeSelector::Exact(bridge_id.clone()))
+            .unwrap();
+        graph
+            .export_ontology_bridge(
+                &BridgeSelector::Exact(bridge_id.clone()),
+                BridgeExportFormat::Json,
+            )
+            .unwrap();
+        let mut bridge_update = bridge_document;
+        bridge_update.authored_version = "2.0.0".into();
+        graph
+            .preview_update_ontology_bridge(
+                &BridgeSelector::Exact(bridge_id.clone()),
+                &bridge_update,
+            )
+            .unwrap();
+        graph
+            .update_ontology_bridge(
+                &BridgeUpdateRequest {
+                    authority: expectation(&graph, 9_203),
+                    selector: BridgeSelector::Exact(bridge_id),
+                    document: bridge_update,
+                },
+                None,
+            )
+            .unwrap();
+        let updated_bridge = graph.ontology_bridges().unwrap()[0].id.clone();
+        assert!(
+            graph
+                .preview_delete_ontology_bridge(&BridgeSelector::Exact(updated_bridge.clone()))
+                .unwrap()
+                .safe
+        );
+        graph
+            .delete_ontology_bridge(
+                &BridgeDeleteRequest {
+                    authority: expectation(&graph, 9_204),
+                    selector: BridgeSelector::Exact(updated_bridge),
+                },
+                None,
+            )
+            .unwrap();
+
+        let (profile_default, activation) = graph.ontology_activation_profile().unwrap();
+        graph
+            .change_ontology_activation_profile(
+                &ActivationProfileChangeRequest {
+                    authority: expectation(&graph, 9_205),
+                    profile_default,
+                    activation,
+                },
+                None,
+            )
+            .unwrap();
+        let composition = graph.required_composition().unwrap();
+        graph.validate_ontology_composition(&composition).unwrap();
+        graph
+            .preflight_ontology_composition(
+                &CompositionChangeRequest {
+                    context: WriteContext {
+                        operation_uuid: OperationId(Uuid::from_u128(9_206)),
+                        actor_uuid: None,
+                    },
+                    expected_project_generation_uuid: graph
+                        .ontology_authority_state()
+                        .unwrap()
+                        .project_generation_uuid,
+                    expected_composition_fingerprint: graph
+                        .ontology_authority_state()
+                        .unwrap()
+                        .composition_fingerprint,
+                    candidate: composition,
+                    data_disposition: CompositionDataDisposition::RequireConforming,
+                },
+                None,
+            )
+            .unwrap();
+        graph
+            .explain_ontology_resolution(&ResolutionExplainRequest {
+                module: Some(base.id.clone()),
+                kind: SymbolKind::Entity,
+                local_id: "Person".into(),
+                max_candidates: 4,
+            })
+            .unwrap();
+        assert!(
+            graph
+                .portable_ontology_staging(graphforge_storage::PortableV2Limits::default())
+                .unwrap()
+                .is_none()
+        );
+        let authority = expectation(&graph, 9_207);
+        assert!(
+            graph
+                .adopt_portable_ontology_staging(
+                    &authority,
+                    graphforge_storage::PortableV2Limits::default(),
+                    None,
+                )
+                .is_err()
+        );
+
+        graph
+            .preview_update_ontology_module(
+                &ModuleSelector::Exact(dependent.id.clone()),
+                &parity_document("dependent_update"),
+                &[base.id.clone()],
+            )
+            .unwrap();
+        graph
+            .update_ontology_module(
+                &ModuleUpdateRequest {
+                    authority: expectation(&graph, 9_208),
+                    selector: ModuleSelector::Exact(dependent.id),
+                    document: parity_document("dependent_update"),
+                    dependencies: vec![base.id],
+                    enforcement: None,
+                },
+                None,
+            )
+            .unwrap();
+        let updated_module = graph.ontology_modules().unwrap()[1].id.clone();
+        assert!(
+            graph
+                .preview_delete_ontology_module(&ModuleSelector::Exact(updated_module.clone()))
+                .unwrap()
+                .safe
+        );
+        graph
+            .delete_ontology_module(
+                &ModuleDeleteRequest {
+                    authority: expectation(&graph, 9_209),
+                    selector: ModuleSelector::Exact(updated_module),
+                },
+                None,
+            )
+            .unwrap();
     }
 
     #[test]

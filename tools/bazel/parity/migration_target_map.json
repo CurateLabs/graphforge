@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 110,
+  "cargo_target_count": 111,
   "targets": [
     {
       "package": "graphforge-api",
@@ -652,6 +652,16 @@
       "bazel_label": "//crates/graphforge-cli:graphforge_cli",
       "exception_id": null,
       "notes": "#7/#8; unit `//crates/graphforge-cli:graphforge_cli_test`"
+    },
+    {
+      "package": "graphforge-cli",
+      "target": "multi_ontology",
+      "class": "integration-test",
+      "source": "crates/graphforge-cli/tests/multi_ontology.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-cli:multi_ontology",
+      "exception_id": null,
+      "notes": "#842"
     },
     {
       "package": "graphforge-cli",

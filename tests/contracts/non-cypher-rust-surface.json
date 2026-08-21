@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
   "scope": "Rust non-Cypher public release surface",
-  "public_method_digest": "726aacf015d8db337cbd9282a43de81bd82f32202d4f1d2f2666b9c34ca2ad09",
+  "public_method_digest": "945ee1c62666775b5371e469c6db18461de7e57bdbf0afe4d36e4fe9a8a3e3a8",
   "method_policy": {
     "receiver_defaults": {
       "GraphForge": "release-tested",
@@ -21,8 +21,9 @@
       "CancellationToken": "introspection",
       "FindExecutionResult": "introspection",
       "InvocationDescriptor": "introspection",
-      "InvocationError": "introspection",
-      "PageToken": "introspection",
+    "InvocationError": "introspection",
+    "MultiOntologyError": "introspection",
+    "PageToken": "introspection",
       "ProviderRerankedFindResult": "introspection",
       "RecordBatch": "introspection",
       "ResolvedBeliefProjection": "introspection",
@@ -102,6 +103,46 @@
     }
   },
   "method_evidence_groups": {
+    "multi-ontology-lifecycle": {
+      "ids": [
+        "GraphForge.adopt_ontology_bridge",
+        "GraphForge.adopt_ontology_module",
+        "GraphForge.adopt_portable_ontology_staging",
+        "GraphForge.change_ontology_activation_profile",
+        "GraphForge.create_ontology_bridge",
+        "GraphForge.create_ontology_module",
+        "GraphForge.delete_ontology_bridge",
+        "GraphForge.delete_ontology_module",
+        "GraphForge.explain_ontology_resolution",
+        "GraphForge.export_ontology_bridge",
+        "GraphForge.export_ontology_module",
+        "GraphForge.import_ontology_bridge",
+        "GraphForge.import_ontology_module",
+        "GraphForge.inspect_ontology_bridge",
+        "GraphForge.inspect_ontology_module",
+        "GraphForge.ontology_activation_profile",
+        "GraphForge.ontology_authority_state",
+        "GraphForge.ontology_bridges",
+        "GraphForge.ontology_modules",
+        "GraphForge.portable_ontology_staging",
+        "GraphForge.preflight_ontology_composition",
+        "GraphForge.preview_delete_ontology_bridge",
+        "GraphForge.preview_delete_ontology_module",
+        "GraphForge.preview_update_ontology_bridge",
+        "GraphForge.preview_update_ontology_module",
+        "GraphForge.update_ontology_bridge",
+        "GraphForge.update_ontology_module",
+        "GraphForge.validate_ontology_bridge",
+        "GraphForge.validate_ontology_composition",
+        "GraphForge.validate_ontology_module"
+      ],
+      "test_refs": [
+        {
+          "path": "crates/graphforge-api/src/multi_ontology.rs",
+          "symbol": "multi_ontology_public_facade_inventory_is_runtime_covered"
+        }
+      ]
+    },
     "infra-validation": {
       "ids": [
         "RepositoryContext.validate_infra_target"
