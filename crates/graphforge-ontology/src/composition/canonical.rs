@@ -3,7 +3,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::identity::MODULE_DIGEST_DOMAIN;
+use super::identity::{BRIDGE_DIGEST_DOMAIN, MODULE_DIGEST_DOMAIN};
 
 /// Serialize a JSON [`Value`] with object keys sorted (RFC 8785 subset used by GraphForge).
 pub fn canonical_json(value: &Value) -> Result<Vec<u8>, String> {
@@ -62,6 +62,12 @@ pub fn domain_digest(domain: &[u8], value: &Value) -> Result<String, String> {
 pub fn module_document_digest(doc: &impl serde::Serialize) -> Result<String, String> {
     let value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
     domain_digest(MODULE_DIGEST_DOMAIN, &value)
+}
+
+/// Digest a serde-serializable bridge-set document under the bridge domain.
+pub fn bridge_document_digest(doc: &impl serde::Serialize) -> Result<String, String> {
+    let value = serde_json::to_value(doc).map_err(|e| e.to_string())?;
+    domain_digest(BRIDGE_DIGEST_DOMAIN, &value)
 }
 
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {

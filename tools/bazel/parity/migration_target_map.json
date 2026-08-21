@@ -1,7 +1,7 @@
 {
   "schema": "graphforge.bazel-migration-target-map.v1",
   "issue": 6,
-  "cargo_target_count": 109,
+  "cargo_target_count": 110,
   "targets": [
     {
       "package": "graphforge-api",
@@ -932,6 +932,16 @@
       "bazel_label": "//crates/graphforge-ontology:composition_inventory",
       "exception_id": null,
       "notes": "#836"
+    },
+    {
+      "package": "graphforge-ontology",
+      "target": "bridge_sets",
+      "class": "integration-test",
+      "source": "crates/graphforge-ontology/tests/bridge_sets.rs",
+      "status": "mapped",
+      "bazel_label": "//crates/graphforge-ontology:bridge_sets",
+      "exception_id": null,
+      "notes": "#838"
     },
     {
       "package": "graphforge-ontology",
